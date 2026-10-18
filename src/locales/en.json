@@ -1,0 +1,215 @@
+{
+  "common": {
+    "retry": "Retry",
+    "cancel": "Cancel",
+    "save": "Save",
+    "delete": "Delete",
+    "close": "Close",
+    "loading": "Loading…",
+    "details": "Details",
+    "openLicense": "Open “License”",
+    "proHint": "Available in Pro — activate a license on the “License” screen",
+    "readOnly": "Read-only"
+  },
+  "errors": {
+    "generic": "{{message}}",
+    "diagnostics": {
+      "noFile": "No file selected for the archive",
+      "writeFailed": "Failed to write the diagnostics archive"
+    },
+    "app": {
+      "taskPanicked": "Background task failed: {{error}}"
+    },
+    "license": {
+      "malformed": "Invalid key: the key is corrupted",
+      "badSignature": "Invalid key: the key signature could not be verified — the key was not issued by us or was modified",
+      "unsupportedVersion": "Invalid key: a version {{version}} key requires a newer version of the app",
+      "managed": "The license is managed by your organization (corporate policy) and cannot be changed",
+      "empty": "Invalid key: the key is empty",
+      "keyExpired": "The key expired on {{date}}",
+      "proExpired": "Pro license expired on {{date}} — this feature requires Pro",
+      "proRequired": "This feature requires Pro — activate a license on the “License” screen"
+    },
+    "policy": {
+      "invalidBool": "{{key}}: invalid boolean {{value}}",
+      "invalidNumber": "{{key}}: invalid number {{value}}",
+      "invalidString": "{{key}}: invalid string “{{value}}”",
+      "invalidType": "{{key}}: invalid value of type {{kind}}",
+      "unreadable": "Policy cannot be read: {{reason}}",
+      "httpsRequired": "{{key}}: an https:// address is required — updates are not downloaded over http",
+      "badLanguage": "{{key}}: unknown language “{{value}}”"
+    },
+    "settings": {
+      "unknownLanguage": "Unknown language “{{code}}”",
+      "languageByPolicy": "The language is set by your organization"
+    },
+    "secrets": {
+      "keychain": "Cannot access the system secret store",
+      "readOnly": "OverlayStore is read-only"
+    },
+    "connections": {
+      "noId": "The connection has no ID",
+      "emptyName": "Connection name cannot be empty",
+      "notFound": "Connection {{id}} not found"
+    },
+    "storage": {
+      "writeFailed": "Failed to write {{path}}: {{error}}",
+      "newerSchema": "{{file}} was created by a newer version of the app (schemaVersion {{version}})",
+      "quarantineFailed": "File {{path}} is corrupted ({{parseError}}) and a backup copy could not be saved: {{renameError}}"
+    },
+    "io": "I/O error: {{error}}",
+    "json": "JSON error: {{error}}",
+    "internal": "Internal error",
+    "folders": {
+      "notFound": "Folder {{id}} not found",
+      "cycle": "A folder cannot be moved into itself or its subfolder",
+      "nameEmpty": "Enter a folder name",
+      "nameTooLong": "The folder name is longer than 100 characters",
+      "nameTaken": "A folder named “{{name}}” already exists here",
+      "notEmpty": "The folder is not empty: move or delete its connections and folders first"
+    },
+    "import": {
+      "notGlafiraFile": "This is not a Glafira connections file",
+      "incompatibleVersion": "The file was created by an incompatible version of Glafira — update the app",
+      "invalidJson": "The file is damaged or is not JSON: {{error}}",
+      "unsupportedConnection": "Not supported by this version of Glafira (update the app): {{error}}",
+      "duplicateId": "Duplicate connection id in the file"
+    }
+  },
+  "sidebar": {
+    "settings": "Settings",
+    "connections": "Connections",
+    "newConnection": "New connection",
+    "editConnection": "Edit connection",
+    "emptyHint": "Add your first connection. Local test bench: <code>docker compose -f dev/docker-compose.yml up -d</code>, server <code>localhost:5460</code>, user <code>glafira_diag</code>.",
+    "license": "License: {{tier}}",
+    "help": "Help",
+    "about": "About",
+    "filter": "Filter connections",
+    "folderToggle": "Expand or collapse {{name}}",
+    "noMatches": "Nothing found",
+    "newFolder": "New folder",
+    "menu": "More actions",
+    "folder": {
+      "newConnection": "New connection here",
+      "rename": "Rename",
+      "delete": "Delete",
+      "deleteConfirm": "Delete folder “{{name}}”?",
+      "namePlaceholder": "Folder name",
+      "export": "Export folder…",
+      "importHere": "Import here…"
+    },
+    "exportAll": "Export all…",
+    "import": "Import…"
+  },
+  "tabs": {
+    "settings": "Settings",
+    "license": "License",
+    "about": "About",
+    "help": "Help",
+    "connection": "Connection: {{name}}",
+    "newConnection": "New connection"
+  },
+  "settings": {
+    "title": "Settings",
+    "language": {
+      "section": "Language",
+      "label": "Interface language",
+      "system": "System default ({{name}})",
+      "systemUnknown": "System default",
+      "policy": "The language is set by your organization"
+    }
+  },
+  "layout": {
+    "closeTab": "Close tab",
+    "empty": "Select a connection on the left or add a new one."
+  },
+  "license": {
+    "title": "License",
+    "tier": "Plan",
+    "licensee": "Licensee",
+    "kind": "Type",
+    "kindPersonal": "personal",
+    "kindOrganization": "organization",
+    "expires": "Valid until",
+    "perpetual": "perpetual",
+    "expiringUnknown": "The license expires soon ({{date}}).",
+    "expiringToday": "The license expires today ({{date}}).",
+    "expiring_one": "The license expires in {{count}} day ({{date}}).",
+    "expiring_other": "The license expires in {{count}} days ({{date}}).",
+    "expired": "The license expired on {{date}}: Pro features are disabled, your data is kept.",
+    "managed": "The license is managed by your organization.",
+    "keyLabel": "License key",
+    "activate": "Activate",
+    "removeGroupAria": "Confirm key removal",
+    "removeQuestion": "Remove the key? Pro features will be disabled.",
+    "removeYes": "Yes, remove",
+    "removeKey": "Remove key",
+    "whatProGives": "What Pro includes",
+    "proProd": "Prod mode: create connections and switch them to prod (any change is confirmed by typing the connection name).",
+    "policyTitle": "Organization policy",
+    "policySource": "Source: {{source}}",
+    "notice": {
+      "expiringUnknown": "The Pro license expires soon.",
+      "expiringToday": "The Pro license expires today.",
+      "expiring_one": "The Pro license expires in {{count}} day.",
+      "expiring_other": "The Pro license expires in {{count}} days.",
+      "expired": "The Pro license expired on {{date}}: Pro features are disabled.",
+      "more": "Details",
+      "hideAria": "Dismiss notification"
+    }
+  },
+  "about": {
+    "summary": "Glafira for PostgreSQL is a desktop app for understanding what is going on with PostgreSQL and a Patroni cluster: which nodes are alive, who the leader is, how far replicas lag and how the databases are laid out. Pro adds prod connections.",
+    "version": "Version",
+    "build": "Build",
+    "system": "System",
+    "tier": "Plan",
+    "policy": "Organization policy",
+    "policySet": "set",
+    "policyNone": "none",
+    "policyError": "Organization policy: {{error}}",
+    "dataDir": "Data:",
+    "logDir": "Logs:",
+    "diagnostics": {
+      "title": "Diagnostics",
+      "hint": "An archive with logs, the version and connection profiles without passwords. Attach it to your support request — the app itself sends nothing.",
+      "collect": "Collect diagnostics",
+      "saved": "Archive saved: {{path}}"
+    }
+  },
+  "exchange": {
+    "exported": "Saved: connections {{connections}}, folders {{folders}}",
+    "imported": "Imported: added {{added}}, updated {{updated}}",
+    "passwordsNeeded_one": "Enter passwords for {{count}} connection",
+    "passwordsNeeded_other": "Enter passwords for {{count}} connections",
+    "import": {
+      "title": "Import connections",
+      "target": "Import into",
+      "updateExisting": "Update existing connections",
+      "summary": "Added: {{added}} · Updated: {{updated}} · Unchanged: {{unchanged}} · Skipped: {{skipped}}",
+      "groupAdded": "New",
+      "groupUpdated": "Will be updated",
+      "groupUnchanged": "Unchanged",
+      "groupSkipped": "Skipped",
+      "passwords_one": "Enter passwords for {{count}} connection after import",
+      "passwords_other": "Enter passwords for {{count}} connections after import",
+      "apply": "Import"
+    }
+  },
+  "help": {
+    "search": "Search the guide",
+    "noResults": "Nothing found",
+    "contents": "Contents",
+    "loadFailed": "Could not load the guide"
+  },
+  "menu": {
+    "help": "Help",
+    "guide": "Glafira Guide",
+    "about": "About Glafira",
+    "diagnostics": "Collect Diagnostics…"
+  },
+  "hints": {
+    "label": "Hint: {{name}}"
+  }
+}

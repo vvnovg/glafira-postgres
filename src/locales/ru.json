@@ -1,0 +1,223 @@
+{
+  "common": {
+    "retry": "Повторить",
+    "cancel": "Отмена",
+    "save": "Сохранить",
+    "delete": "Удалить",
+    "close": "Закрыть",
+    "loading": "Загрузка…",
+    "details": "Подробности",
+    "openLicense": "Открыть «Лицензия»",
+    "proHint": "Доступно в Pro — активируйте лицензию на экране «Лицензия»",
+    "readOnly": "Только чтение"
+  },
+  "errors": {
+    "generic": "{{message}}",
+    "diagnostics": {
+      "noFile": "Не выбран файл для архива",
+      "writeFailed": "Не удалось записать архив диагностики"
+    },
+    "app": {
+      "taskPanicked": "Фоновая задача завершилась аварийно: {{error}}"
+    },
+    "license": {
+      "malformed": "Ключ недействителен: ключ повреждён",
+      "badSignature": "Ключ недействителен: подпись ключа не подтверждена — ключ выдан не нами или изменён",
+      "unsupportedVersion": "Ключ недействителен: ключ версии {{version}} требует более новой версии приложения",
+      "managed": "Лицензия управляется вашей организацией (корпоративная политика) — изменить её нельзя",
+      "empty": "Ключ недействителен: пустой ключ",
+      "keyExpired": "Срок действия ключа истёк {{date}}",
+      "proExpired": "Срок лицензии Pro истёк {{date}} — функция доступна в Pro",
+      "proRequired": "Функция доступна в Pro — активируйте лицензию на экране «Лицензия»"
+    },
+    "policy": {
+      "invalidBool": "{{key}}: недопустимое логическое {{value}}",
+      "invalidNumber": "{{key}}: недопустимое число {{value}}",
+      "invalidString": "{{key}}: недопустимая строка «{{value}}»",
+      "invalidType": "{{key}}: недопустимое значение типа {{kind}}",
+      "unreadable": "Политика не читается: {{reason}}",
+      "httpsRequired": "{{key}}: нужен адрес https:// — обновления по http не загружаются",
+      "badLanguage": "{{key}}: неизвестный язык «{{value}}»"
+    },
+    "settings": {
+      "unknownLanguage": "Неизвестный язык «{{code}}»",
+      "languageByPolicy": "Язык задан вашей организацией"
+    },
+    "secrets": {
+      "keychain": "Ошибка доступа к системному хранилищу секретов",
+      "readOnly": "OverlayStore только для чтения"
+    },
+    "connections": {
+      "noId": "У подключения нет идентификатора",
+      "emptyName": "Имя подключения не может быть пустым",
+      "notFound": "Подключение {{id}} не найдено"
+    },
+    "storage": {
+      "writeFailed": "Не удалось записать {{path}}: {{error}}",
+      "newerSchema": "{{file}} создан более новой версией приложения (schemaVersion {{version}})",
+      "quarantineFailed": "Файл {{path}} повреждён ({{parseError}}), не удалось сохранить копию: {{renameError}}"
+    },
+    "io": "Ошибка ввода-вывода: {{error}}",
+    "json": "Ошибка JSON: {{error}}",
+    "internal": "Внутренняя ошибка",
+    "folders": {
+      "notFound": "Папка {{id}} не найдена",
+      "cycle": "Папку нельзя переместить в неё саму или во вложенную папку",
+      "nameEmpty": "Укажите имя папки",
+      "nameTooLong": "Имя папки длиннее 100 символов",
+      "nameTaken": "Папка «{{name}}» здесь уже есть",
+      "notEmpty": "Папка не пуста: сначала перенесите или удалите её подключения и папки"
+    },
+    "import": {
+      "notGlafiraFile": "Это не файл подключений Glafira",
+      "incompatibleVersion": "Файл создан в несовместимой версии Glafira — обновите приложение",
+      "invalidJson": "Файл повреждён или это не JSON: {{error}}",
+      "unsupportedConnection": "Не поддерживается этой версией Glafira (обновите приложение): {{error}}",
+      "duplicateId": "Повторяющийся id подключения в файле"
+    }
+  },
+  "sidebar": {
+    "settings": "Настройки",
+    "connections": "Подключения",
+    "newConnection": "Новое подключение",
+    "editConnection": "Изменить подключение",
+    "emptyHint": "Добавьте первое подключение. Локальный стенд: <code>docker compose -f dev/docker-compose.yml up -d</code>, сервер <code>localhost:5460</code>, пользователь <code>glafira_diag</code>.",
+    "license": "Лицензия: {{tier}}",
+    "help": "Справка",
+    "about": "О программе",
+    "filter": "Фильтр подключений",
+    "folderToggle": "Развернуть или свернуть {{name}}",
+    "noMatches": "Ничего не найдено",
+    "newFolder": "Новая папка",
+    "menu": "Ещё действия",
+    "folder": {
+      "newConnection": "Новое подключение здесь",
+      "rename": "Переименовать",
+      "delete": "Удалить",
+      "deleteConfirm": "Удалить папку «{{name}}»?",
+      "namePlaceholder": "Имя папки",
+      "export": "Экспортировать папку…",
+      "importHere": "Импортировать сюда…"
+    },
+    "exportAll": "Экспортировать всё…",
+    "import": "Импортировать…"
+  },
+  "tabs": {
+    "settings": "Настройки",
+    "license": "Лицензия",
+    "about": "О программе",
+    "help": "Справка",
+    "connection": "Подключение: {{name}}",
+    "newConnection": "Новое подключение"
+  },
+  "settings": {
+    "title": "Настройки",
+    "language": {
+      "section": "Язык",
+      "label": "Язык интерфейса",
+      "system": "Как в системе ({{name}})",
+      "systemUnknown": "Как в системе",
+      "policy": "Язык задан вашей организацией"
+    }
+  },
+  "layout": {
+    "closeTab": "Закрыть вкладку",
+    "empty": "Выберите подключение слева или добавьте новое."
+  },
+  "license": {
+    "title": "Лицензия",
+    "tier": "Тариф",
+    "licensee": "Владелец",
+    "kind": "Тип",
+    "kindPersonal": "личная",
+    "kindOrganization": "организации",
+    "expires": "Действует до",
+    "perpetual": "бессрочно",
+    "expiringUnknown": "Лицензия скоро истекает ({{date}}).",
+    "expiringToday": "Лицензия истекает сегодня ({{date}}).",
+    "expiring_one": "Лицензия истекает через {{count}} дн. ({{date}}).",
+    "expiring_few": "Лицензия истекает через {{count}} дн. ({{date}}).",
+    "expiring_many": "Лицензия истекает через {{count}} дн. ({{date}}).",
+    "expiring_other": "Лицензия истекает через {{count}} дн. ({{date}}).",
+    "expired": "Лицензия истекла {{date}}: функции Pro отключены, данные сохранены.",
+    "managed": "Лицензия управляется вашей организацией.",
+    "keyLabel": "Лицензионный ключ",
+    "activate": "Активировать",
+    "removeGroupAria": "Подтверждение удаления ключа",
+    "removeQuestion": "Удалить ключ? Функции Pro отключатся.",
+    "removeYes": "Да, удалить",
+    "removeKey": "Удалить ключ",
+    "whatProGives": "Что даёт Pro",
+    "proProd": "Режим prod: создание и перевод подключений в prod (с подтверждением именем подключения на любое изменение).",
+    "policyTitle": "Политика организации",
+    "policySource": "Источник: {{source}}",
+    "notice": {
+      "expiringUnknown": "Лицензия Pro скоро истекает.",
+      "expiringToday": "Лицензия Pro истекает сегодня.",
+      "expiring_one": "Лицензия Pro истекает через {{count}} дн.",
+      "expiring_few": "Лицензия Pro истекает через {{count}} дн.",
+      "expiring_many": "Лицензия Pro истекает через {{count}} дн.",
+      "expiring_other": "Лицензия Pro истекает через {{count}} дн.",
+      "expired": "Лицензия Pro истекла {{date}}: функции Pro отключены.",
+      "more": "Подробнее",
+      "hideAria": "Скрыть уведомление"
+    }
+  },
+  "about": {
+    "summary": "Glafira for PostgreSQL — настольное приложение, которое помогает разобраться, что происходит с PostgreSQL и кластером Patroni: какие узлы живы, кто лидер, насколько отстают реплики и как устроены базы. В Pro — prod-подключения.",
+    "version": "Версия",
+    "build": "Сборка",
+    "system": "Система",
+    "tier": "Тариф",
+    "policy": "Политика организации",
+    "policySet": "задана",
+    "policyNone": "нет",
+    "policyError": "Политика организации: {{error}}",
+    "dataDir": "Данные:",
+    "logDir": "Логи:",
+    "diagnostics": {
+      "title": "Диагностика",
+      "hint": "Архив с логами, версией и профилями подключений без паролей. Приложите его к обращению — само приложение ничего не отправляет.",
+      "collect": "Собрать диагностику",
+      "saved": "Архив сохранён: {{path}}"
+    }
+  },
+  "exchange": {
+    "exported": "Сохранено: подключений {{connections}}, папок {{folders}}",
+    "imported": "Импортировано: добавлено {{added}}, обновлено {{updated}}",
+    "passwordsNeeded_one": "Введите пароли для {{count}} подключения",
+    "passwordsNeeded_few": "Введите пароли для {{count}} подключений",
+    "passwordsNeeded_many": "Введите пароли для {{count}} подключений",
+    "passwordsNeeded_other": "Введите пароли для {{count}} подключения",
+    "import": {
+      "title": "Импорт подключений",
+      "target": "Куда импортировать",
+      "updateExisting": "Обновлять существующие подключения",
+      "summary": "Добавится: {{added}} · Обновится: {{updated}} · Без изменений: {{unchanged}} · Пропущено: {{skipped}}",
+      "groupAdded": "Новые",
+      "groupUpdated": "Обновятся",
+      "groupUnchanged": "Без изменений",
+      "groupSkipped": "Пропущены",
+      "passwords_one": "После импорта введите пароли для {{count}} подключения",
+      "passwords_few": "После импорта введите пароли для {{count}} подключений",
+      "passwords_many": "После импорта введите пароли для {{count}} подключений",
+      "passwords_other": "После импорта введите пароли для {{count}} подключения",
+      "apply": "Импортировать"
+    }
+  },
+  "help": {
+    "search": "Поиск по руководству",
+    "noResults": "Ничего не найдено",
+    "contents": "Содержание",
+    "loadFailed": "Не удалось загрузить руководство"
+  },
+  "menu": {
+    "help": "Справка",
+    "guide": "Руководство Glafira",
+    "about": "О программе",
+    "diagnostics": "Собрать диагностику…"
+  },
+  "hints": {
+    "label": "Подсказка: {{name}}"
+  }
+}
