@@ -1,0 +1,49 @@
+[package]
+name = "glafira-pg"
+version = "0.1.0"
+description = "Glafira for PostgreSQL — диагностика PostgreSQL и кластеров Patroni"
+authors = ["Glafira for PostgreSQL contributors"]
+edition = "2024"
+
+[lib]
+# Суффикс _lib нужен, чтобы имя библиотеки не совпало с именем бинаря (Windows, cargo#8519).
+name = "glafira_pg_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+time = { version = "0.3", features = ["formatting"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "macros", "sync", "io-util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry", "fmt"] }
+plist = "1"
+dirs = "7"
+sys-locale = "0.3"
+license-format = { git = "https://github.com/vvnovg/kafka-explorer", rev = "1d32d13d217c64ae1341da3002b88f079b834088" }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+
+[dev-dependencies]
+license-format = { git = "https://github.com/vvnovg/kafka-explorer", rev = "1d32d13d217c64ae1341da3002b88f079b834088", features = ["dev-keys"] }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
