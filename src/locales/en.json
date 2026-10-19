@@ -119,6 +119,7 @@
       "connectionFailed": "Could not connect to the server",
       "tcpFailed": "Could not reach {{host}}:{{port}}",
       "connectTimeout": "No answer from {{host}}:{{port}} within {{secs}} s",
+      "noAnswer": "The node did not answer within {{secs}} s",
       "tlsSetup": "Could not prepare TLS settings"
     },
     "tls": {

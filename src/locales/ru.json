@@ -119,6 +119,7 @@
       "connectionFailed": "Не удалось подключиться к серверу",
       "tcpFailed": "Не удалось связаться с {{host}}:{{port}}",
       "connectTimeout": "{{host}}:{{port}} не ответил за {{secs}} с",
+      "noAnswer": "Узел не ответил за {{secs}} с",
       "tlsSetup": "Не удалось подготовить параметры TLS"
     },
     "tls": {

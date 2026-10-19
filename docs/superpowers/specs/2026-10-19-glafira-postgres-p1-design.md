@@ -339,7 +339,8 @@ SELECT pg_is_in_recovery(),
   при `sync_state = 'sync'`.
 - На репликах: `pg_stat_wal_receiver.sender_host:sender_port` → `upstream` (совпал с узлом списка — имя узла,
   иначе как есть); `pg_wal_lsn_diff(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn())` — `lagBytes`, если primary
-  не дал значения; `now() - pg_last_xact_replay_timestamp()` → `replayDelayMs`.
+  не дал значения; `replayDelayMs` — 0, если реплика применила весь полученный WAL, иначе
+  `now() - pg_last_xact_replay_timestamp()`, не меньше 0.
 - Узел не ответил → `reachable = false`, `memberUnreachable`.
 
 **Узел по умолчанию** (`hostList`): `primary` — primary; `standby` — первая доступная реплика, нет — ошибка
