@@ -21,7 +21,7 @@ pub fn chain(e: &(dyn std::error::Error + 'static)) -> String {
 }
 
 /// Строка таблицы SQLSTATE → код и текст ошибки (§13 спеки). Чистая функция: проверяется без сервера.
-fn classify_sqlstate(code: &SqlState) -> (ErrorCode, LocalizedText) {
+pub(crate) fn classify_sqlstate(code: &SqlState) -> (ErrorCode, LocalizedText) {
     if *code == SqlState::INVALID_PASSWORD || *code == SqlState::INVALID_AUTHORIZATION_SPECIFICATION
     {
         (
