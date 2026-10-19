@@ -69,4 +69,22 @@ describe("workspace", () => {
     expect(s.activeId).toBe("help");
     expect(s.tabs[0]).toMatchObject({ kind: "help", chapter: "getting-started", anchor: "passwords" });
   });
+
+  it("вкладка обзора одна на подключение и получает выбранный узел", () => {
+    useWorkspace.setState({ tabs: [], activeId: null });
+    useWorkspace.getState().open({ kind: "overview", connectionId: "c" });
+    useWorkspace.getState().open({ kind: "overview", connectionId: "c", member: "pg-2" });
+    const { tabs, activeId } = useWorkspace.getState();
+    expect(tabs).toHaveLength(1);
+    expect(activeId).toBe("overview:c");
+    expect(tabs[0]).toMatchObject({ member: "pg-2" });
+  });
+
+  it("closeForConnection закрывает и вкладку обзора", () => {
+    const { open, closeForConnection } = useWorkspace.getState();
+    open({ kind: "overview", connectionId: "a" });
+    open({ kind: "overview", connectionId: "b" });
+    closeForConnection("a");
+    expect(useWorkspace.getState().tabs.map((t) => t.id)).toEqual(["overview:b"]);
+  });
 });

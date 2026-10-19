@@ -1,3 +1,10 @@
 {
-  "ru": ["test.nodeOk"]
+  "ru": [
+    "test.nodeOk",
+    "topology.role.leader",
+    "topology.role.primary",
+    "topology.role.quorumStandby",
+    "topology.role.syncStandby",
+    "topology.role.unknown"
+  ]
 }

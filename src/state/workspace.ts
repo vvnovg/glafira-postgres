@@ -3,6 +3,8 @@ import { create } from "zustand";
 export type TabSpec =
   /** folderId — папка нового подключения («Новое подключение здесь»). */
   | { kind: "connection-form"; connectionId: string | null; folderId?: string | null }
+  /** Обзор подключения; member — узел, выбранный в дереве (одна вкладка на подключение). */
+  | { kind: "overview"; connectionId: string; member?: string }
   | { kind: "license" }
   | { kind: "about" }
   /** Справка: глава и раздел руководства (F1, ссылки). */
@@ -15,6 +17,8 @@ export function tabId(spec: TabSpec): string {
   switch (spec.kind) {
     case "connection-form":
       return `connection-form:${spec.connectionId ?? "new"}`;
+    case "overview":
+      return `overview:${spec.connectionId}`;
     case "license":
       return "license";
     case "about":

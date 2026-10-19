@@ -14,6 +14,11 @@ describe("format", () => {
     expect(formatBytes(3 * 1024 * 1024)).toBe("3,0 MB");
   });
 
+  it("гигабайты и терабайты", () => {
+    expect(formatBytes(3 * 1024 ** 3)).toMatch(/^3[.,]0 GB$/);
+    expect(formatBytes(2 * 1024 ** 4)).toMatch(/^2[.,]0 TB$/);
+  });
+
   it("count: загрузка и недоступно", () => {
     expect(formatCount(undefined)).toBe("…");
     expect(formatCount(null)).toBe("—");

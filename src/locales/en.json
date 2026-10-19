@@ -177,7 +177,8 @@
     "about": "About",
     "help": "Help",
     "connection": "Connection: {{name}}",
-    "newConnection": "New connection"
+    "newConnection": "New connection",
+    "overview": "Overview: {{conn}}"
   },
   "settings": {
     "title": "Settings",
@@ -285,5 +286,16 @@
     "patroniOk": "{{members}} members, leader {{leader}}",
     "discoveryOk": "{{members}} nodes found",
     "nodeOk": "{{role}}, PostgreSQL {{version}}"
+  },
+  "topology": {
+    "role": {
+      "leader": "Leader",
+      "primary": "Primary",
+      "standbyLeader": "Standby leader",
+      "syncStandby": "Sync",
+      "quorumStandby": "Quorum",
+      "replica": "Replica",
+      "unknown": "—"
+    }
   }
 }

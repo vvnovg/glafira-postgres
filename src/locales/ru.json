@@ -177,7 +177,8 @@
     "about": "О программе",
     "help": "Справка",
     "connection": "Подключение: {{name}}",
-    "newConnection": "Новое подключение"
+    "newConnection": "Новое подключение",
+    "overview": "Обзор: {{conn}}"
   },
   "settings": {
     "title": "Настройки",
@@ -293,5 +294,16 @@
     "patroniOk": "Участников: {{members}}, лидер {{leader}}",
     "discoveryOk": "Найдено узлов: {{members}}",
     "nodeOk": "{{role}}, PostgreSQL {{version}}"
+  },
+  "topology": {
+    "role": {
+      "leader": "Leader",
+      "primary": "Primary",
+      "standbyLeader": "Лидер standby",
+      "syncStandby": "Sync",
+      "quorumStandby": "Quorum",
+      "replica": "Реплика",
+      "unknown": "—"
+    }
   }
 }

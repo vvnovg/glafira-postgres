@@ -17,8 +17,14 @@ const num = (n: number, digits = 0) =>
 
 export function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${num(n / 1024, 1)} KB`;
-  return `${num(n / (1024 * 1024), 1)} MB`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let v = n / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${num(v, 1)} ${units[i]}`;
 }
 
 /** undefined — ещё загружается, null — недоступно. */
