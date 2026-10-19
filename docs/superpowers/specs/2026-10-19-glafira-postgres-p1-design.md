@@ -362,7 +362,8 @@ SELECT pg_is_in_recovery(),
 двумя опросами: `leaderChanged { from, to }`, `memberAdded`, `memberRemoved`, `memberRoleChanged { from, to }`,
 `memberStateChanged { from, to }`, `memberUnreachable`, `memberReachable`, `timelineChanged { from, to }`,
 `pauseChanged { paused }`. Изменение топологии → событие Tauri `topology://changed`
-`{ connectionId, topology, newEvents }`.
+`{ connectionId, view, newEvents }`, где `view` — `TopologyView { state, topology, catalogMember, catalogFallback,
+error }` (то же, что возвращают `connect` и `get_topology`).
 
 ---
 
@@ -376,16 +377,19 @@ SELECT pg_is_in_recovery(),
 - **TLS:** `postgres-openssl` по `pg.sslMode` и `pg.tls`. При туннеле TCP-поток открывается к локальному порту,
   а TLS проверяется по исходному имени хоста: `Config::connect_raw(stream, TlsConnector::new(ssl, исходный_хост))`.
   `prefer` — попытка TLS, при отказе сервера — без TLS.
-- **Пулы:** `deadpool-postgres` на ключ (подключение, участник, БД): максимум 3 соединения, проверка соединения при
-  выдаче, закрытие после 5 мин простоя. Участник исчез из топологии → его пулы закрываются. `disconnect` → все пулы
-  и туннели закрываются.
+- **Пулы:** свой пул (`conn/pool.rs`, вместо `deadpool-postgres`: P1b нужен `connect_raw` к порту туннеля с
+  проверкой TLS по исходному имени) на ключ (подключение, участник, БД): максимум 3 соединения, проверка соединения
+  при выдаче, закрытие после 5 мин простоя. Участник исчез из топологии → его пулы закрываются. `disconnect` → все
+  пулы и туннели закрываются. Отказ во входе (`AUTH_FAILED`) пул запоминает: новых попыток входа нет, пока
+  подключение не откроют заново (сохранение профиля или секретов, импорт, «Подключиться»).
 - **Узел каталога:** у подключения в памяти — `catalogMember`: по умолчанию лидер / primary (для `hostList` — узел по
   умолчанию, §6.3). Контекстное меню «Читать каталог с узла…» выбирает участника. Выбранный участник пропал или
   недоступен → возврат к узлу по умолчанию и уведомление в дереве.
 
 **Состояние подключения** (событие `connection://state { connectionId, state, error }`):
 `disconnected` → `connecting` → `connected` | `degraded` (часть участников или Patroni API недоступна, туннель
-перезапускается) | `failed`. Подключение открывается при раскрытии узла дерева или открытии вкладки и закрывается
+перезапускается) | `failed`. Первое подключение сервера или списка узлов, где не ответил ни один узел, — `failed` с
+ошибкой первого узла, без фонового опроса. Подключение открывается при раскрытии узла дерева или открытии вкладки и закрывается
 командой «Отключиться» или при выходе.
 
 ---
@@ -425,7 +429,7 @@ SELECT pg_is_in_recovery(),
 |---|---|
 | Базы | `pg_database` (`NOT datistemplate AND datallowconn`), `pg_database_size` (нет права `CONNECT` → размер «—») |
 | Схемы и счётчики | `pg_namespace`, `pg_class` (`relkind` r, p, v, m, S, f), `pg_proc` (`prokind` f, p) |
-| Объекты | `pg_class` + `reltuples`, `pg_total_relation_size`; функции — `pg_proc` с сигнатурой `pg_get_function_identity_arguments` |
+| Объекты | `pg_class` + `reltuples`, `pg_total_relation_size`; у партиционированной таблицы размер в списке не считается (иначе блокировка каждой партиции), строки — сумма `reltuples` листьев по `pg_inherits`; функции — `pg_proc` с сигнатурой `pg_get_function_identity_arguments` |
 | Расширения | `pg_extension` + `pg_available_extensions` (есть ли обновление) |
 | Роли | `pg_roles`: атрибуты, `rolconnlimit`, `rolvaliduntil`, членство (`pg_auth_members`) |
 
@@ -508,7 +512,7 @@ CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 
 | Группа | Команды |
 |---|---|
-| Подключения | `list_connections`, `save_connection(profile, secrets)`, `delete_connection`, `parse_connection_string(text)`, `test_connection(profile, secrets, channel)`, `trust_ssh_host_key(connectionId \| profile, fingerprint)`, `connect(id) -> Topology`, `disconnect(id)` |
+| Подключения | `list_connections`, `save_connection(profile, secrets)`, `delete_connection`, `parse_connection_string(text)`, `test_connection(profile, secrets, channel)`, `trust_ssh_host_key(connectionId \| profile, fingerprint)`, `connect(id) -> TopologyView`, `disconnect(id)` |
 | Топология | `get_topology(id)`, `list_topology_events(id)`, `set_catalog_member(id, member \| null)`, `get_member_facts(id, member)` |
 | Каталог | `list_databases(id)`, `list_schemas(id, db)`, `list_objects(id, db, schema, kind, filter?, offset, limit)`, `list_partitions(id, db, schema, table)`, `get_table(id, db, schema, name)`, `get_view(id, db, schema, name)`, `get_function(id, db, oid)`, `get_sequence(id, db, schema, name)`, `list_extensions(id, db)`, `list_roles(id)` |
 | Папки | как в Glafira Kafka: `list_folders`, `create_folder`, `rename_folder`, `delete_folder`, `move_items`, `export_connections`, `preview_import`, `apply_import` |
