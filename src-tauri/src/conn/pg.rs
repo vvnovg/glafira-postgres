@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use openssl::ssl::SslConnector;
 use tokio::net::TcpStream;
+use tokio::task::AbortHandle;
 use tokio_postgres::{Client, NoTls};
 
 use crate::conn::profile::{ConnectionProfile, SslMode};
@@ -99,6 +100,13 @@ impl ConnectSpec {
 
     /// Новое соединение. Задача соединения запускается в текущем runtime tokio.
     pub async fn connect(&self) -> AppResult<Client> {
+        Ok(self.connect_with_handle().await?.0)
+    }
+
+    /// Новое соединение вместе с `AbortHandle` его задачи. Закрыть молчащее соединение можно только
+    /// так: tokio-postgres отправляет Terminate при drop клиента, лишь когда ждать ответов нечего,
+    /// а соединение с неотвеченным запросом после drop остаётся открытым.
+    pub async fn connect_with_handle(&self) -> AppResult<(Client, AbortHandle)> {
         let attempt = async {
             let stream = TcpStream::connect((self.tcp_host.as_str(), self.tcp_port))
                 .await
@@ -111,8 +119,7 @@ impl ConnectSpec {
                         .connect_raw(stream, NoTls)
                         .await
                         .map_err(|e| errors::from_pg(&e))?;
-                    spawn_connection(conn);
-                    Ok(client)
+                    Ok((client, spawn_connection(conn)))
                 }
                 Some(connector) => {
                     let mut ssl = connector.configure().map_err(errors::tls_setup)?;
@@ -124,8 +131,7 @@ impl ConnectSpec {
                         .connect_raw(stream, tls)
                         .await
                         .map_err(|e| errors::from_pg(&e))?;
-                    spawn_connection(conn);
-                    Ok(client)
+                    Ok((client, spawn_connection(conn)))
                 }
             }
         };
@@ -135,7 +141,7 @@ impl ConnectSpec {
     }
 }
 
-fn spawn_connection<F>(conn: F)
+fn spawn_connection<F>(conn: F) -> AbortHandle
 where
     F: std::future::Future<Output = Result<(), tokio_postgres::Error>> + Send + 'static,
 {
@@ -143,7 +149,8 @@ where
         if let Err(e) = conn.await {
             tracing::debug!("pg connection ended: {e}");
         }
-    });
+    })
+    .abort_handle()
 }
 
 #[cfg(test)]
@@ -341,5 +348,44 @@ mod tests {
         let e = spec.connect().await.unwrap_err();
         assert_eq!(e.code, ErrorCode::ConnectionFailed);
         assert_eq!(e.key, "errors.pg.tcpFailed");
+    }
+
+    /// Запрос ушёл на сервер, ответа нет: ответ ждёт соединение, а не тот, кто спрашивал.
+    async fn stall(client: &Client) {
+        tokio::time::timeout(Duration::from_millis(200), client.simple_query("SELECT 1"))
+            .await
+            .expect_err("сервер не отвечает");
+    }
+
+    /// tokio-postgres отправляет Terminate при drop клиента, только когда ответов не ждёт. Молчащее
+    /// соединение с неотвеченным запросом так не закрыть: нужен `AbortHandle` задачи соединения.
+    #[tokio::test]
+    async fn abort_handle_closes_a_connection_with_pending_response() {
+        let server = testutil::stalling_pg_server();
+        let spec = loopback_spec(server.port, "127.0.0.1", SslMode::Disable, None);
+
+        let (client, _abort) = spec.connect_with_handle().await.unwrap();
+        stall(&client).await;
+        drop(client);
+        assert!(
+            !server.wait_closed(1, Duration::from_millis(400)).await,
+            "drop клиента с неотвеченным запросом не закрывает сокет — ради этого нужен abort"
+        );
+
+        let (client, abort) = spec.connect_with_handle().await.unwrap();
+        stall(&client).await;
+        abort.abort();
+        assert!(server.wait_closed(1, Duration::from_secs(2)).await);
+        assert_eq!(server.accepted(), 2);
+        assert!(client.is_closed(), "клиент видит закрытое соединение");
+    }
+
+    #[tokio::test]
+    async fn connect_keeps_its_signature_and_works() {
+        let server = testutil::stalling_pg_server();
+        let spec = loopback_spec(server.port, "127.0.0.1", SslMode::Disable, None);
+        let client: Client = spec.connect().await.unwrap();
+        assert!(!client.is_closed());
+        assert_eq!(server.accepted(), 1);
     }
 }

@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::task::AbortHandle;
 use tokio_postgres::Client;
 
 use crate::conn::pg::ConnectSpec;
@@ -18,9 +19,24 @@ pub const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Соединение, простоявшее дольше, перед выдачей проверяется пустым запросом.
 const VALIDATE_AFTER: Duration = Duration::from_secs(30);
 
+/// Соединение вместе с задачей, которая его обслуживает. При drop задача прерывается: так закрывается
+/// и молчащее соединение (см. `ConnectSpec::connect_with_handle`), которое drop одного `Client` не
+/// закрыл бы. Здоровое простаивающее соединение закрывается так же — сокет, без сообщения Terminate;
+/// сервер видит конец потока между командами и закрывает сеанс без записи в журнал.
+struct PgConn {
+    client: Client,
+    abort: AbortHandle,
+}
+
+impl Drop for PgConn {
+    fn drop(&mut self) {
+        self.abort.abort();
+    }
+}
+
 pub struct PgPool {
     spec: ConnectSpec,
-    idle: Mutex<Vec<(Client, Instant)>>,
+    idle: Mutex<Vec<(PgConn, Instant)>>,
     permits: Arc<Semaphore>,
     /// Порог простоя, после которого соединение проверяется при выдаче (`VALIDATE_AFTER`, в тестах — меньше).
     validate_after: Duration,
@@ -49,22 +65,35 @@ fn reuse_decision(idle: Duration, validate_after: Duration) -> Reuse {
 
 /// Соединение из пула; при drop живое соединение возвращается в пул.
 pub struct PooledClient {
-    client: Option<Client>,
+    conn: Option<PgConn>,
     pool: Arc<PgPool>,
     _permit: OwnedSemaphorePermit,
+}
+
+impl PooledClient {
+    /// Соединение негодно (таймаут, обрыв, молчащий путь): прерывает его задачу и не возвращает в пул.
+    /// Обычного drop здесь мало — запрос без ответа не даёт tokio-postgres закрыть соединение.
+    pub fn discard(mut self) {
+        self.conn.take();
+    }
 }
 
 impl Deref for PooledClient {
     type Target = Client;
     fn deref(&self) -> &Client {
-        self.client.as_ref().expect("client is present until drop")
+        &self
+            .conn
+            .as_ref()
+            .expect("connection is present until drop")
+            .client
     }
 }
 
 impl Drop for PooledClient {
     fn drop(&mut self) {
-        if let Some(c) = self.client.take()
-            && !c.is_closed()
+        // Закрытое соединение здесь же и освобождается (с прерыванием уже завершённой задачи).
+        if let Some(c) = self.conn.take()
+            && !c.client.is_closed()
         {
             self.pool.idle.lock_safe().push((c, Instant::now()));
         }
@@ -100,42 +129,45 @@ impl PgPool {
             .acquire_owned()
             .await
             .map_err(|_| AppError::internal_with("connection pool is closed"))?;
-        while let Some((client, since)) = self.pop_idle() {
-            if client.is_closed() {
+        while let Some((conn, since)) = self.pop_idle() {
+            if conn.client.is_closed() {
                 continue;
             }
             match reuse_decision(since.elapsed(), self.validate_after) {
-                // Устаревшее и не прошедшее проверку соединение закрывается при drop `client`.
+                // Устаревшее и не прошедшее проверку соединение закрывается при drop `conn`.
                 Reuse::Discard => continue,
                 Reuse::AsIs => {}
                 // Проверка с таймаутом подключения: на молчащем пути (без RST и keepalive) пустой запрос
                 // иначе висит минутами, удерживая один из трёх permit. Ошибка и таймаут — соединение мёртво.
                 Reuse::Validate => {
-                    match tokio::time::timeout(self.spec.timeout, client.simple_query("")).await {
+                    match tokio::time::timeout(self.spec.timeout, conn.client.simple_query(""))
+                        .await
+                    {
                         Ok(Ok(_)) => {}
                         Ok(Err(_)) | Err(_) => continue,
                     }
                 }
             }
             return Ok(PooledClient {
-                client: Some(client),
+                conn: Some(conn),
                 pool: self.clone(),
                 _permit: permit,
             });
         }
-        let client = self.spec.connect().await?;
+        let (client, abort) = self.spec.connect_with_handle().await?;
         Ok(PooledClient {
-            client: Some(client),
+            conn: Some(PgConn { client, abort }),
             pool: self.clone(),
             _permit: permit,
         })
     }
 
-    fn pop_idle(&self) -> Option<(Client, Instant)> {
+    fn pop_idle(&self) -> Option<(PgConn, Instant)> {
         self.idle.lock_safe().pop()
     }
 
-    /// Закрывает соединения, простоявшие не меньше `max_idle`; возвращает, сколько закрыто.
+    /// Закрывает соединения, простоявшие не меньше `max_idle` (их задачи прерываются при drop);
+    /// возвращает, сколько закрыто.
     pub fn close_idle(&self, max_idle: Duration) -> usize {
         let mut idle = self.idle.lock_safe();
         let before = idle.len();
@@ -205,6 +237,7 @@ impl PoolRegistry {
 mod tests {
     use super::*;
     use crate::conn::profile::SslMode;
+    use crate::conn::testutil;
 
     fn spec() -> ConnectSpec {
         ConnectSpec {
@@ -292,5 +325,110 @@ mod tests {
     #[test]
     fn new_uses_default_validate_after() {
         assert_eq!(PgPool::new(spec()).validate_after, Duration::from_secs(30));
+    }
+
+    /// Спецификация для заглушки без ответов на запросы (`testutil::stalling_pg_server`).
+    fn stalling_spec(port: u16, timeout: Duration) -> ConnectSpec {
+        ConnectSpec {
+            tcp_host: "127.0.0.1".into(),
+            tcp_port: port,
+            timeout,
+            ..spec()
+        }
+    }
+
+    /// Запрос ушёл на сервер, ответа нет. Пул об этом не знает: соединение «живое».
+    async fn stall(c: &PooledClient) {
+        tokio::time::timeout(Duration::from_millis(200), c.simple_query("SELECT 1"))
+            .await
+            .expect_err("сервер не отвечает");
+    }
+
+    const WAIT: Duration = Duration::from_secs(2);
+
+    #[tokio::test]
+    async fn discard_aborts_the_connection_and_keeps_it_out_of_idle() {
+        let server = testutil::stalling_pg_server();
+        let pool = PgPool::new(stalling_spec(server.port, Duration::from_secs(1)));
+        let c = pool.get().await.unwrap();
+        stall(&c).await;
+        c.discard();
+        assert!(server.wait_closed(1, WAIT).await, "сокет закрыт");
+        assert_eq!(
+            pool.idle_count(),
+            0,
+            "негодное соединение не вернулось в пул"
+        );
+        // Permit освобождён: пул выдаёт новое соединение.
+        let again = tokio::time::timeout(WAIT, pool.get())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(server.accepted(), 2);
+        drop(again);
+        assert_eq!(
+            pool.idle_count(),
+            1,
+            "здоровое соединение возвращается в пул"
+        );
+    }
+
+    #[tokio::test]
+    async fn closing_idle_connections_aborts_their_tasks() {
+        let server = testutil::stalling_pg_server();
+        let pool = PgPool::new(stalling_spec(server.port, Duration::from_secs(1)));
+        let c = pool.get().await.unwrap();
+        stall(&c).await;
+        drop(c);
+        assert_eq!(pool.idle_count(), 1);
+        assert_eq!(pool.close_idle(Duration::ZERO), 1);
+        assert!(
+            server.wait_closed(1, WAIT).await,
+            "close_idle закрывает сокет"
+        );
+    }
+
+    #[tokio::test]
+    async fn eviction_aborts_idle_connections() {
+        let server = testutil::stalling_pg_server();
+        let registry = PoolRegistry::default();
+        let k = key("c", "m", "d");
+        let pool = registry.insert_if_absent(
+            k.clone(),
+            stalling_spec(server.port, Duration::from_secs(1)),
+        );
+        let c = pool.get().await.unwrap();
+        stall(&c).await;
+        drop(c);
+        drop(pool);
+        registry.evict(&k);
+        assert!(
+            server.wait_closed(1, WAIT).await,
+            "вытеснение пула закрывает сокет"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_validation_aborts_the_stalled_connection() {
+        let server = testutil::stalling_pg_server();
+        let pool = PgPool::with_validate_after(
+            stalling_spec(server.port, Duration::from_millis(300)),
+            Duration::ZERO,
+        );
+        let c = pool.get().await.unwrap();
+        stall(&c).await;
+        drop(c);
+        // Проверка при выдаче упирается в таймаут; сервер молчит и на новом соединении, но оно
+        // открывается: рукопожатие заглушка проходит.
+        let fresh = tokio::time::timeout(WAIT, pool.get())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            server.wait_closed(1, WAIT).await,
+            "проверенное и негодное соединение закрыто"
+        );
+        assert_eq!(server.accepted(), 2);
+        drop(fresh);
     }
 }

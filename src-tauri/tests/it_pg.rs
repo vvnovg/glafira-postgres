@@ -246,6 +246,51 @@ async fn stalled_idle_connection_is_dropped_by_validation_timeout() {
         0,
         "мёртвое соединение не вернулось в пул"
     );
+    assert!(
+        proxy.wait_closed(1, Duration::from_secs(2)).await,
+        "задача мёртвого соединения прервана: сокет закрыт"
+    );
     drop(b);
     assert_eq!(pool.idle_count(), 1);
+}
+
+/// `discard` прерывает задачу соединения, застрявшего на запросе без ответа: сокет закрывается,
+/// в пул соединение не возвращается. Обычный drop здесь вернул бы его в пул, а сокет остался бы
+/// открытым (tokio-postgres не отправляет Terminate, пока ждёт ответ).
+#[tokio::test]
+async fn discard_closes_a_stalled_connection() {
+    let Some(addr) = single() else { return };
+    let proxy = common::PausableProxy::start(&addr).await;
+    let mut s = spec(
+        &addr,
+        "postgres",
+        SslMode::Disable,
+        common::PG_PASSWORD_VALUE,
+    );
+    s.tcp_host = "127.0.0.1".into();
+    s.tcp_port = proxy.port();
+    let pool = PgPool::new(s);
+
+    let c = pool.get().await.unwrap();
+    pid(&c).await;
+    proxy.freeze_existing();
+    let stalled = tokio::time::timeout(Duration::from_millis(300), pid_query(&c)).await;
+    assert!(stalled.is_err(), "замороженный путь не отвечает");
+    assert_eq!(proxy.closed_connections(), 0);
+    c.discard();
+    assert!(
+        proxy.wait_closed(1, Duration::from_secs(2)).await,
+        "сокет закрыт после discard"
+    );
+    assert_eq!(pool.idle_count(), 0, "негодное соединение не в пуле");
+
+    // Новое соединение (путь после заморозки работает) выдаётся и отвечает.
+    let again = pool.get().await.unwrap();
+    assert!(pid(&again).await > 0);
+}
+
+async fn pid_query(
+    c: &tokio_postgres::Client,
+) -> Result<tokio_postgres::Row, tokio_postgres::Error> {
+    c.query_one("SELECT pg_backend_pid()", &[]).await
 }

@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use glafira_pg_lib::conn::profile::{
     ConnectionKind, ConnectionProfile, Environment, HostOverride, HostPort, PatroniSettings,
@@ -63,9 +63,12 @@ pub fn secrets_with_password(id: &str) -> Arc<MemoryStore> {
 /// TCP-прокси перед стендом, который умеет «заморозить» уже открытые соединения: байты перестают
 /// пересылаться в обе стороны, а сокеты остаются открытыми, без RST и FIN — как молчащий путь
 /// (оборванный NAT, пропавший туннель). Соединения, открытые после заморозки, работают как обычно.
+/// Замороженное соединение читает и выбрасывает байты, поэтому закрытие сокета клиентом заметно:
+/// его считает `closed_connections`.
 pub struct PausableProxy {
     port: u16,
     flags: Arc<Mutex<Vec<Arc<AtomicBool>>>>,
+    closed: Arc<AtomicUsize>,
     accept: JoinHandle<()>,
 }
 
@@ -75,9 +78,10 @@ impl PausableProxy {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind proxy");
         let port = listener.local_addr().expect("proxy addr").port();
         let flags: Arc<Mutex<Vec<Arc<AtomicBool>>>> = Arc::default();
+        let closed: Arc<AtomicUsize> = Arc::default();
         let upstream = upstream.to_string();
         let accept = tokio::spawn({
-            let flags = flags.clone();
+            let (flags, closed) = (flags.clone(), closed.clone());
             async move {
                 while let Ok((client, _)) = listener.accept().await {
                     let Ok(server) = TcpStream::connect(upstream.as_str()).await else {
@@ -87,14 +91,20 @@ impl PausableProxy {
                     flags.lock().unwrap().push(frozen.clone());
                     let (client_r, client_w) = client.into_split();
                     let (server_r, server_w) = server.into_split();
-                    tokio::spawn(pipe(client_r, server_w, frozen.clone()));
-                    tokio::spawn(pipe(server_r, client_w, frozen));
+                    tokio::spawn(pipe(
+                        client_r,
+                        server_w,
+                        frozen.clone(),
+                        Some(closed.clone()),
+                    ));
+                    tokio::spawn(pipe(server_r, client_w, frozen, None));
                 }
             }
         });
         Self {
             port,
             flags,
+            closed,
             accept,
         }
     }
@@ -109,6 +119,23 @@ impl PausableProxy {
             f.store(true, Ordering::SeqCst);
         }
     }
+
+    /// Сколько соединений клиент уже закрыл (замороженные тоже).
+    pub fn closed_connections(&self) -> usize {
+        self.closed.load(Ordering::SeqCst)
+    }
+
+    /// Ждёт, пока клиент закроет не меньше `n` соединений, но не дольше `limit`.
+    pub async fn wait_closed(&self, n: usize, limit: Duration) -> bool {
+        let deadline = Instant::now() + limit;
+        while self.closed_connections() < n {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        true
+    }
 }
 
 impl Drop for PausableProxy {
@@ -117,25 +144,32 @@ impl Drop for PausableProxy {
     }
 }
 
-/// Пересылка одного направления; замороженное соединение ничего не читает и не отдаёт дальше.
-/// Задачи замороженных соединений доживают до конца runtime теста.
-async fn pipe(mut from: OwnedReadHalf, mut to: OwnedWriteHalf, frozen: Arc<AtomicBool>) {
+/// Пересылка одного направления. Замороженное соединение читает и выбрасывает байты («чёрная
+/// дыра»): ничего не доходит ни до сервера, ни до клиента, но конец потока виден. `closed`
+/// (направление клиент → сервер) считает соединения, которые клиент закрыл.
+/// Задачи замороженных соединений доживают до закрытия сокетов клиентом или до конца runtime теста.
+async fn pipe(
+    mut from: OwnedReadHalf,
+    mut to: OwnedWriteHalf,
+    frozen: Arc<AtomicBool>,
+    closed: Option<Arc<AtomicUsize>>,
+) {
     let mut buf = [0u8; 8192];
     loop {
-        while frozen.load(Ordering::SeqCst) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
         let n = match from.read(&mut buf).await {
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
         // Заморозка могла наступить, пока ждали данные: они «теряются» вместе с путём.
-        while frozen.load(Ordering::SeqCst) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        if frozen.load(Ordering::SeqCst) {
+            continue;
         }
         if to.write_all(&buf[..n]).await.is_err() {
             break;
         }
+    }
+    if let Some(closed) = closed {
+        closed.fetch_add(1, Ordering::SeqCst);
     }
     let _ = to.shutdown().await;
 }
