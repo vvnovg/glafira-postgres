@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { api } from "../../../api/client";
 import type { ObjectItem, ObjectKind, ObjectPage } from "../../../api/types";
 import { formatBytes, formatCount } from "../../../lib/format";
+import { Glyph } from "../../common/Glyph";
 import { useDebouncedValue } from "../../../lib/useDebouncedValue";
 import { ErrorBanner } from "../../common/ErrorBanner";
 
@@ -100,6 +101,8 @@ function ObjectRow({
         )}
         {partitioned && <span className="muted">{t("sidebar.partitions", { count: item.partitions ?? 0 })}</span>}
         {item.totalBytes !== null && item.totalBytes > 0 && <span className="muted">{formatBytes(item.totalBytes)}</span>}
+        {/* Размер партиционированной таблицы в списке не считается: пришлось бы заблокировать каждую партицию. */}
+        {item.relkind === "p" && item.totalBytes === null && <Glyph className="muted" symbol="—" label={t("sidebar.partitionedSize")} />}
       </div>
       {open && <PartitionList connectionId={connectionId} db={db} schema={item.schema} table={item.name} openState={openState} />}
     </li>

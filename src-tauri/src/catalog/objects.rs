@@ -57,17 +57,27 @@ pub(crate) fn next_offset(offset: i64, got: usize, total: i64) -> Option<i64> {
 }
 
 /// Столбцы строки отношения; последний — `count(*) OVER ()` (общее число для страницы).
-/// У партиционированной таблицы (`p`) оценка строк — сумма `reltuples` по листьям дерева партиций
-/// (где статистика есть), размер — сумма `pg_total_relation_size` по всему дереву: у самой родительской
-/// таблицы своих файлов нет.
+///
+/// Партиционированная таблица (`p`): размер не считается (`NULL`, в дереве — «—»), оценка строк — сумма
+/// `reltuples` листьев по `pg_inherits` (рекурсивно, только каталог). `pg_partition_tree` здесь нельзя:
+/// он (`find_all_inheritors`) берёт `AccessShareLock` на каждую партицию до конца транзакции, и страница
+/// с несколькими родителями на тысячи партиций исчерпала бы общую таблицу блокировок (`out of shared
+/// memory` у других сеансов). Сумма `pg_total_relation_size` по партициям — те же тысячи открытий файлов на
+/// строку списка. Оценка по `relpages` — другая величина (без индексов и TOAST, 0 до первого VACUUM/ANALYZE)
+/// в одном столбце с точными размерами, поэтому размер родителя — «неизвестно». У обычной таблицы и
+/// материализованного представления размер точный: `pg_total_relation_size` снимает блокировку каждого
+/// отношения сразу после подсчёта (`relation_close`), они не копятся за запрос.
 const REL_COLUMNS: &str = "c.oid::bigint, c.relname::text, n.nspname::text, c.relkind::text, \
     CASE WHEN c.relkind = 'p' THEN (SELECT count(*) FROM pg_inherits i WHERE i.inhparent = c.oid) END, \
     CASE WHEN c.relkind = 'p' THEN \
-           (SELECT sum(l.reltuples::bigint) FROM pg_partition_tree(c.oid) t JOIN pg_class l ON l.oid = t.relid \
-            WHERE t.isleaf AND l.reltuples >= 0)::bigint \
+           (WITH RECURSIVE tree(relid) AS ( \
+                SELECT i.inhrelid FROM pg_inherits i WHERE i.inhparent = c.oid \
+                UNION ALL \
+                SELECT i.inhrelid FROM pg_inherits i JOIN tree t ON i.inhparent = t.relid) \
+            SELECT sum(l.reltuples::bigint) FROM tree t JOIN pg_class l ON l.oid = t.relid \
+            WHERE l.relkind <> 'p' AND l.reltuples >= 0)::bigint \
          WHEN c.relkind IN ('r', 'm') AND c.reltuples >= 0 THEN c.reltuples::bigint END, \
-    CASE WHEN c.relkind = 'p' THEN (SELECT sum(pg_total_relation_size(t.relid)) FROM pg_partition_tree(c.oid) t)::bigint \
-         WHEN c.relkind IN ('r', 'm') THEN pg_total_relation_size(c.oid) END, \
+    CASE WHEN c.relkind IN ('r', 'm') THEN pg_total_relation_size(c.oid) END, \
     count(*) OVER ()";
 
 /// `FROM … WHERE …` списка отношений схемы (`$1` — схема, `$2` — `relkind`, `$3` — шаблон `ILIKE`).

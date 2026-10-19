@@ -291,6 +291,7 @@
     "morePartitions": "Ещё партиции: {{where}}",
     "shown": "Показано {{shown}} из {{total}}",
     "sizeUnavailable": "Нет права CONNECT на базу",
+    "partitionedSize": "Размер партиционированной таблицы в списке не считается",
     "noLogin": "без входа",
     "superuser": "суперпользователь",
     "timeline": "TL {{timeline}}",

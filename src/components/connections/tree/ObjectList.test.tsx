@@ -119,6 +119,19 @@ describe("ObjectList", () => {
     await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
   });
 
+  it("размер партиционированной таблицы неизвестен — прочерк с пояснением, у обычной таблицы — размер", async () => {
+    vi.mocked(api.listObjects).mockResolvedValue({
+      total: 2,
+      nextOffset: null,
+      items: [item(1, { totalBytes: 8192 }), item(2, { name: "events", relkind: "p", partitions: 3, totalBytes: null })],
+    });
+    renderList(2);
+    expect(await screen.findByText("8,0 KB")).toBeInTheDocument();
+    const dash = screen.getByRole("img", { name: "Размер партиционированной таблицы в списке не считается" });
+    expect(dash).toHaveTextContent("—");
+    expect(screen.getAllByRole("img", { name: /Размер партиционированной/ })).toHaveLength(1);
+  });
+
   it("партиции: у партиционированной таблицы — счётчик и раскрытие, у обычной — нет", async () => {
     vi.mocked(api.listObjects).mockResolvedValue({
       total: 2,

@@ -289,6 +289,7 @@
     "morePartitions": "More partitions: {{where}}",
     "shown": "Showing {{shown}} of {{total}}",
     "sizeUnavailable": "No CONNECT privilege on the database",
+    "partitionedSize": "The size of a partitioned table is not computed in the list",
     "noLogin": "no login",
     "superuser": "superuser",
     "timeline": "TL {{timeline}}",

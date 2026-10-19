@@ -30,6 +30,46 @@ async fn client(addr: &str, db: &str) -> tokio_postgres::Client {
         .unwrap()
 }
 
+/// Блокировки отношений, которые держит сеанс `c` (без каталога `pg_catalog`).
+async fn held_locks(c: &tokio_postgres::Client) -> Vec<String> {
+    c.query(
+        "SELECT relation::regclass::text FROM pg_locks l JOIN pg_class r ON r.oid = l.relation \
+         WHERE l.pid = pg_backend_pid() AND l.locktype = 'relation' \
+           AND r.relnamespace <> 'pg_catalog'::regnamespace ORDER BY 1",
+        &[],
+    )
+    .await
+    .unwrap()
+    .iter()
+    .map(|r| r.get(0))
+    .collect()
+}
+
+/// Список таблиц не держит блокировок на партициях: `pg_partition_tree` (или любое открытие партиций) в
+/// запросе страницы копил бы `AccessShareLock` на каждую партицию до конца транзакции. Размеры обычных
+/// таблиц (`pg_total_relation_size`) снимают свою блокировку сразу.
+#[tokio::test]
+async fn object_list_takes_no_locks_on_partitions() {
+    for addr in addrs() {
+        let c = client(&addr, "orders").await;
+        c.batch_execute("BEGIN READ ONLY").await.unwrap();
+        let tables = objects::list(&c, "shop", ObjectKind::Tables, None, 0, 500)
+            .await
+            .unwrap();
+        assert!(tables.items.iter().any(|o| o.name == "events"), "{addr}");
+        let locks = held_locks(&c).await;
+        c.batch_execute("ROLLBACK").await.unwrap();
+        assert!(
+            !locks.iter().any(|l| l.contains("events_")),
+            "{addr}: блокировки партиций: {locks:?}"
+        );
+        assert!(
+            locks.is_empty(),
+            "{addr}: запрос списка оставил блокировки отношений: {locks:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn demo_schema_on_every_node() {
     for addr in addrs() {
@@ -91,10 +131,13 @@ async fn demo_schema_on_every_node() {
             (Some("p"), Some(2))
         );
         assert!(tables.items[0].est_rows.is_some_and(|n| n >= 100));
-        // У партиционированной таблицы размер — сумма по партициям, а не 0 (у родителя своих файлов нет).
+        // У партиционированной таблицы размер в списке не считается (для этого пришлось бы открыть каждую
+        // партицию), у обычных — точный.
+        assert_eq!(events.total_bytes, None, "{addr}: {events:?}");
         assert!(
-            events.total_bytes.is_some_and(|n| n > 0),
-            "{addr}: {events:?}"
+            tables.items[0].total_bytes.is_some_and(|n| n > 0),
+            "{addr}: {:?}",
+            tables.items[0]
         );
         assert!(events.est_rows.is_none_or(|n| n >= 0), "{addr}: {events:?}");
         let page = objects::list(&c, "shop", ObjectKind::Tables, None, 0, 2)
@@ -129,6 +172,10 @@ async fn demo_schema_on_every_node() {
         let parts = objects::partitions(&c, "shop", "events", 0, 500)
             .await
             .unwrap();
+        assert!(
+            parts.items.iter().all(|p| p.total_bytes.is_some()),
+            "{addr}: у партиций-листьев размер есть: {parts:?}"
+        );
         assert_eq!(
             parts
                 .items
