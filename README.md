@@ -9,7 +9,7 @@ PostgreSQL is a registered trademark of the PostgreSQL Community Association of 
 
 ## Что умеет (P1a)
 - Подключения трёх видов: сервер, список узлов (primary определяется автоматически, как multi-host JDBC), кластер Patroni (REST API).
-- Вставка строки подключения: JDBC, `postgresql://…`, `host=… port=…`; пароль из `~/.pgpass`, если не сохранён.
+- Вставка строки подключения: JDBC, `postgresql://…`, `host=… port=…`; пароль из `~/.pgpass` (права 0600: `chmod 0600 ~/.pgpass`, иначе файл игнорируется), если не сохранён.
 - Топология с ролями, лагом и таймлайном, опрос раз в 10 с, журнал событий (смена лидера, недоступные узлы, пауза).
 - Проверка подключения по шагам и чек-лист готовности к диагностике.
 - Дерево: папки → подключения → узлы / базы → схемы → таблицы, представления, функции, последовательности; роли, расширения.
@@ -18,7 +18,8 @@ PostgreSQL is a registered trademark of the PostgreSQL Community Association of 
 ## Требования
 - Rust stable (`rustup`), Xcode Command Line Tools (macOS)
 - Node 22+, pnpm
-- Доступ на чтение к `github.com/vvnovg/kafka-explorer` (крейт `license-format`)
+- Доступ на чтение к `github.com/vvnovg/kafka-explorer` (крейт `license-format`). Для CI нужен секрет репозитория
+  `KAFKA_EXPLORER_TOKEN` с таким доступом; в PR из форков и у dependabot секреты недоступны, поэтому `license-format` в них не скачать
 - Docker — для стенда и интеграционных тестов
 - Для сборки vendored OpenSSL — Perl и C-компилятор (macOS: Xcode Command Line Tools; Windows: Visual Studio Build Tools и Perl, например Strawberry Perl;
   Linux: пакеты Tauri из `.github/workflows/ci.yml`). cmake и NASM не нужны.
