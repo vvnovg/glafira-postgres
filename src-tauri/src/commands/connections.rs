@@ -146,6 +146,8 @@ pub fn save_connection_blocking(
         }
         return Err(e);
     }
+    // Профиль или секреты изменились: подключение переоткроется при следующем раскрытии.
+    st.runtimes.disconnect(&saved.id);
     Ok(saved)
 }
 
@@ -321,6 +323,25 @@ mod tests {
         p.read_only = true;
         let err = save_connection_blocking(&st, input(p, SecretsInput::default())).unwrap_err();
         assert_eq!(err.code, ErrorCode::ProRequired);
+    }
+
+    #[test]
+    fn saving_closes_the_open_connection() {
+        let (_d, st) = state_with(Arc::new(MemoryStore::default()));
+        let closed = Arc::new(crate::state::tests::Closed::default());
+        st.runtimes.set_sink(closed.clone());
+        save_connection_blocking(&st, input(sample_profile("a"), SecretsInput::default())).unwrap();
+        assert_eq!(*closed.0.lock().unwrap(), vec!["a".to_string()]);
+        // Неудачное сохранение подключение не трогает.
+        let (_d, st) = state_with(Arc::new(BrokenKeychain));
+        let closed = Arc::new(crate::state::tests::Closed::default());
+        st.runtimes.set_sink(closed.clone());
+        let secrets = SecretsInput {
+            pg_password: Some("pw".into()),
+            ..Default::default()
+        };
+        save_connection_blocking(&st, input(sample_profile("a"), secrets)).unwrap_err();
+        assert!(closed.0.lock().unwrap().is_empty());
     }
 
     #[test]

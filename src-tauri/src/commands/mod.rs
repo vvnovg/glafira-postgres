@@ -3,6 +3,7 @@ pub mod connections;
 pub mod folders;
 pub mod license;
 pub mod settings;
+pub mod topology;
 
 use crate::error::{AppResult, ErrorCode};
 

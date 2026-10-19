@@ -135,6 +135,11 @@
       "unauthorized": "API Patroni {{url}} отклонил учётные данные",
       "httpStatus": "API Patroni {{url}} ответил {{status}}",
       "noUrls": "Нет адресов API Patroni"
+    },
+    "topology": {
+      "notConnected": "Подключение не открыто",
+      "noNode": "Нет подходящего доступного узла",
+      "unknownMember": "Узла {{member}} нет в подключении"
     }
   },
   "sidebar": {

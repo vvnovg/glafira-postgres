@@ -135,6 +135,11 @@
       "unauthorized": "The Patroni API at {{url}} rejected the credentials",
       "httpStatus": "Patroni API at {{url}} answered {{status}}",
       "noUrls": "No Patroni API addresses"
+    },
+    "topology": {
+      "notConnected": "The connection is not open",
+      "noNode": "No suitable node is available",
+      "unknownMember": "Node {{member}} is not part of the connection"
     }
   },
   "sidebar": {

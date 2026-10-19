@@ -8,7 +8,7 @@ use tokio_postgres::Client;
 
 use crate::conn::errors::from_pg;
 use crate::conn::profile::{ConnectionKind, HostPort};
-use crate::error::{AppResult, ErrorCode};
+use crate::error::{AppError, AppResult, ErrorCode};
 use crate::topology::connector::NodeConnector;
 use crate::topology::model::{
     Member, Role, Topology, TopologyWarning, member_name, system_id_warning,
@@ -62,14 +62,19 @@ pub async fn collect(c: &Client) -> AppResult<NodeFacts> {
 pub async fn collect_with_timeout(c: &Client, limit: Duration) -> AppResult<NodeFacts> {
     match tokio::time::timeout(limit, collect_queries(c)).await {
         Ok(r) => r,
-        Err(_) => Err(app_err!(
-            ErrorCode::ConnectionFailed,
-            "errors.pg.noAnswer",
-            "The node did not answer within {{secs}} s",
-            // Округление вверх: предел меньше секунды не должен показываться как «0 с».
-            secs = limit.as_secs() + u64::from(limit.subsec_nanos() > 0)
-        )),
+        Err(_) => Err(no_answer(limit)),
     }
+}
+
+/// Узел принял соединение, но не ответил за `limit`.
+pub fn no_answer(limit: Duration) -> AppError {
+    app_err!(
+        ErrorCode::ConnectionFailed,
+        "errors.pg.noAnswer",
+        "The node did not answer within {{secs}} s",
+        // Округление вверх: предел меньше секунды не должен показываться как «0 с».
+        secs = limit.as_secs() + u64::from(limit.subsec_nanos() > 0)
+    )
 }
 
 async fn collect_queries(c: &Client) -> AppResult<NodeFacts> {

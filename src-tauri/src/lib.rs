@@ -35,6 +35,10 @@ pub fn run() {
             tracing::info!(managed = policy.status.managed, "policy");
             let st = AppState::new(&dir, Arc::new(KeyringStore::default()))?.with_policy(policy);
             tracing::info!(tier = ?st.license.status().tier, "license");
+            st.runtimes
+                .set_sink(Arc::new(crate::commands::topology::TauriSink(
+                    app.handle().clone(),
+                )));
             app.manage(st);
             Ok(())
         })
@@ -56,8 +60,20 @@ pub fn run() {
             commands::license::remove_license_key,
             commands::settings::get_language_settings,
             commands::settings::set_language,
+            commands::topology::connect,
+            commands::topology::disconnect,
+            commands::topology::get_topology,
+            commands::topology::list_topology_events,
+            commands::topology::set_catalog_member,
+            commands::topology::get_member_facts,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|_app, _event| {});
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event
+                && let Some(st) = app.try_state::<AppState>()
+            {
+                st.runtimes.shutdown();
+            }
+        });
 }

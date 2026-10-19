@@ -4,7 +4,7 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use glafira_pg_lib::conn::errors::from_pg;
+use glafira_pg_lib::conn::errors::{connection_suspect, from_pg};
 use glafira_pg_lib::conn::pg::ConnectSpec;
 use glafira_pg_lib::conn::pool::PgPool;
 use glafira_pg_lib::conn::profile::SslMode;
@@ -53,6 +53,10 @@ async fn session_is_read_only_with_timeouts() {
     assert!(
         from_pg(&err).details.unwrap().contains("25006"),
         "read-only транзакция"
+    );
+    assert!(
+        !connection_suspect(&err),
+        "ответ сервера соединение не портит"
     );
 }
 

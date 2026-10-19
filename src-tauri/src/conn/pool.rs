@@ -273,6 +273,18 @@ mod tests {
     }
 
     #[test]
+    fn existing_pool_keeps_its_spec() {
+        let r = PoolRegistry::default();
+        let first = r.insert_if_absent(key("c", "m", "d"), spec());
+        let mut other = spec();
+        other.host = "other".into();
+        let again = r.insert_if_absent(key("c", "m", "d"), other);
+        assert!(Arc::ptr_eq(&first, &again));
+        // Спецификация меняется только вытеснением пула (подключение закрыто, адрес узла сменился).
+        assert_eq!(again.spec().host, "h");
+    }
+
+    #[test]
     fn eviction_by_connection_and_member() {
         let r = PoolRegistry::default();
         // Слабые ссылки: после вытеснения пул никто не держит и он должен быть освобождён.

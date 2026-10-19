@@ -388,4 +388,22 @@ mod tests {
         assert!(!client.is_closed());
         assert_eq!(server.accepted(), 1);
     }
+
+    #[tokio::test]
+    async fn error_of_a_closed_connection_is_suspect() {
+        let server = testutil::stalling_pg_server();
+        let spec = loopback_spec(server.port, "127.0.0.1", SslMode::Disable, None);
+        let (client, abort) = spec.connect_with_handle().await.unwrap();
+        abort.abort();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !client.is_closed() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "соединение не закрылось"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let e = client.simple_query("SELECT 1").await.unwrap_err();
+        assert!(errors::connection_suspect(&e), "{e:?}");
+    }
 }

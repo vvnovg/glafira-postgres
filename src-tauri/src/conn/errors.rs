@@ -144,6 +144,13 @@ pub fn from_pg(e: &tokio_postgres::Error) -> AppError {
     classify_text(&chain(e), e.is_closed())
 }
 
+/// Можно ли доверять соединению после ошибки. Ответ сервера (`ErrorResponse`) соединение не портит;
+/// обрыв, ошибка ввода-вывода или протокола — портят: такое соединение закрывают
+/// (`PooledClient::discard`), а не возвращают в пул.
+pub fn connection_suspect(e: &tokio_postgres::Error) -> bool {
+    e.as_db_error().is_none()
+}
+
 pub fn tcp_error(e: &std::io::Error, host: &str, port: u16) -> AppError {
     app_err!(
         ErrorCode::ConnectionFailed,

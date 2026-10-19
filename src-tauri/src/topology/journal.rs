@@ -155,6 +155,13 @@ impl Journal {
         accepted
     }
 
+    /// Поднимает отметку таймлайна до `tl`, не создавая события: таймлайн, который опрос уже видел
+    /// (первый опрос подключения, любой удачный опрос), не должен потом стать «новым» из-за узла,
+    /// вернувшегося из недоступности. Меньшее значение и `None` отметку не меняют.
+    pub fn observe_timeline(&mut self, tl: Option<i64>) {
+        self.high_water = self.high_water.max(tl);
+    }
+
     /// Новые сверху.
     pub fn newest_first(&self) -> Vec<TopologyEvent> {
         self.events.iter().rev().cloned().collect()
@@ -319,6 +326,28 @@ mod tests {
         assert_eq!(j.extend(&[tl(3, 2, 3)]), vec![tl(3, 2, 3)]);
         let at: Vec<i64> = j.newest_first().iter().map(|e| e.at_ms).collect();
         assert_eq!(at, vec![3, 1]);
+    }
+
+    #[test]
+    fn observe_timeline_raises_the_mark_without_events() {
+        let tl = |at_ms, from, to| TopologyEvent {
+            at_ms,
+            event: EventKind::TimelineChanged { from, to },
+        };
+        let mut j = Journal::default();
+        j.observe_timeline(Some(2));
+        assert!(j.newest_first().is_empty(), "событие не создаётся");
+        // Узел с TL 2 уже был виден при подключении: когда он вернётся, 1→2 — не новость.
+        assert!(j.extend(&[tl(1, 1, 2)]).is_empty());
+        // None и меньшее значение отметку не опускают.
+        j.observe_timeline(None);
+        j.observe_timeline(Some(1));
+        assert!(j.extend(&[tl(2, 1, 2)]).is_empty());
+        assert_eq!(j.extend(&[tl(3, 2, 3)]), vec![tl(3, 2, 3)]);
+        // Рост таймлайна, замеченный без события (например, при опросе без `diff`), отметку поднимает.
+        j.observe_timeline(Some(5));
+        assert!(j.extend(&[tl(4, 3, 4)]).is_empty());
+        assert_eq!(j.extend(&[tl(5, 5, 6)]), vec![tl(5, 5, 6)]);
     }
 
     #[test]
