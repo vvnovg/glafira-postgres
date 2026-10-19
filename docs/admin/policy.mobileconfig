@@ -15,6 +15,7 @@
   </array>
   <key>PayloadDisplayName</key><string>Glafira for PostgreSQL policy</string>
   <key>PayloadIdentifier</key><string>io.github.vvnovg.glafira.postgres.profile</string>
+  <key>PayloadScope</key><string>System</string>
   <key>PayloadType</key><string>Configuration</string>
   <key>PayloadUUID</key><string>00000000-0000-0000-0000-000000000012</string>
   <key>PayloadVersion</key><integer>1</integer>
