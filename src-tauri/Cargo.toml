@@ -37,6 +37,8 @@ postgres-openssl = "0.5"
 openssl = { version = "0.10", features = ["vendored"] }
 rustls-native-certs = "0.8"
 license-format = { git = "https://github.com/vvnovg/kafka-explorer", rev = "1d32d13d217c64ae1341da3002b88f079b834088" }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+futures-util = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"

@@ -124,6 +124,16 @@
     "tls": {
       "readFailed": "Не удалось прочитать {{path}}",
       "badFile": "{{path}} — не сертификат или ключ, либо неверный пароль"
+    },
+    "patroni": {
+      "setup": "Не удалось подготовить клиент API Patroni",
+      "timeout": "API Patroni {{url}} не ответил за 5 с",
+      "tls": "Ошибка TLS при обращении к API Patroni {{url}}",
+      "unreachable": "API Patroni {{url}} недоступен",
+      "badJson": "API Patroni {{url}} вернул неожиданный ответ",
+      "unauthorized": "API Patroni {{url}} отклонил учётные данные",
+      "httpStatus": "API Patroni {{url}} ответил {{status}}",
+      "noUrls": "Нет адресов API Patroni"
     }
   },
   "sidebar": {

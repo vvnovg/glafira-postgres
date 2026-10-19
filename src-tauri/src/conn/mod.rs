@@ -7,7 +7,7 @@ pub mod pgpass;
 pub mod pool;
 pub mod profile;
 #[cfg(test)]
-mod testutil;
+pub(crate) mod testutil;
 pub mod tls;
 
 /// Блокирующая работа (keychain, файлы) вне async-потоков. Работает и в runtime Tauri, и в `#[tokio::test]`.

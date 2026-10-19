@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use glafira_pg_lib::conn::profile::{
-    ConnectionKind, ConnectionProfile, Environment, HostPort, PgSettings, PgTls, SslMode,
-    TargetServerType,
+    ConnectionKind, ConnectionProfile, Environment, HostOverride, HostPort, PatroniSettings,
+    PgSettings, PgTls, SslMode, TargetServerType,
 };
 use glafira_pg_lib::secrets::{MemoryStore, PG_PASSWORD, SecretStore, secret_key};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -138,4 +138,64 @@ async fn pipe(mut from: OwnedReadHalf, mut to: OwnedWriteHalf, frozen: Arc<Atomi
         }
     }
     let _ = to.shutdown().await;
+}
+
+/// Настройки кластера стенда: участники отдают внутренние имена patroniN — подменяем их на порты хоста.
+pub fn patroni_settings() -> Option<PatroniSettings> {
+    let urls = env("GPG_IT_PATRONI")?;
+    Some(PatroniSettings {
+        urls: urls.split(',').map(|u| u.trim().to_string()).collect(),
+        username: Some("patroni".into()),
+        tls: None,
+        host_overrides: (1..=3)
+            .map(|i| HostOverride {
+                member: format!("patroni{i}"),
+                host: Some("localhost".into()),
+                port: Some(5440 + i as u16),
+                api_url: Some(format!("http://localhost:801{i}")),
+            })
+            .collect(),
+    })
+}
+
+pub const PATRONI_PASSWORD_VALUE: &str = "patroni-secret";
+
+/// `docker …`; паника, если команда не удалась.
+pub fn docker(args: &[&str]) -> String {
+    let out = std::process::Command::new("docker")
+        .args(args)
+        .output()
+        .expect("docker");
+    assert!(
+        out.status.success(),
+        "docker {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Ждёт готовности стенда (`scripts/wait-stand.sh`): после остановок и переключений следующий тест
+/// должен видеть лидера и две потоковые реплики.
+pub fn wait_stand() {
+    let wait = concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/wait-stand.sh");
+    let out = std::process::Command::new(wait)
+        .output()
+        .expect("wait-stand.sh");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+pub fn patronictl(args: &[&str]) -> String {
+    let mut full = vec![
+        "exec",
+        "gp-patroni1",
+        "/opt/patroni/bin/patronictl",
+        "-c",
+        "/etc/patroni/patroni.yml",
+    ];
+    full.extend_from_slice(args);
+    docker(&full)
 }

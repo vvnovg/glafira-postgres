@@ -155,6 +155,15 @@ fn system_roots() -> &'static [X509] {
     })
 }
 
+/// Системные корни в DER — для клиентов, которым нельзя отдать «системное» хранилище целиком
+/// (reqwest без проверки имени узла).
+pub fn system_roots_der() -> Vec<Vec<u8>> {
+    system_roots()
+        .iter()
+        .filter_map(|c| c.to_der().ok())
+        .collect()
+}
+
 /// Содержимое CA-файла и его сертификаты; в файле должен быть хотя бы один сертификат.
 fn read_ca(path: &str) -> AppResult<(Vec<u8>, Vec<X509>)> {
     let data = read(path)?;

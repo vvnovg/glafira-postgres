@@ -124,6 +124,16 @@
     "tls": {
       "readFailed": "Cannot read {{path}}",
       "badFile": "{{path}} is not a valid certificate or key, or the password is wrong"
+    },
+    "patroni": {
+      "setup": "Could not prepare the Patroni API client",
+      "timeout": "Patroni API at {{url}} did not answer within 5 s",
+      "tls": "TLS error talking to the Patroni API at {{url}}",
+      "unreachable": "Patroni API at {{url}} is unreachable",
+      "badJson": "Patroni API at {{url}} returned an unexpected response",
+      "unauthorized": "The Patroni API at {{url}} rejected the credentials",
+      "httpStatus": "Patroni API at {{url}} answered {{status}}",
+      "noUrls": "No Patroni API addresses"
     }
   },
   "sidebar": {
