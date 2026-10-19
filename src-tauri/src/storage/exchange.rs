@@ -420,16 +420,11 @@ fn misses_files(p: &ConnectionProfile, file_exists: &dyn Fn(&str) -> bool) -> bo
     certificate_paths(p).any(|path| !file_exists(path))
 }
 
-/// Сетевой путь Windows (UNC и пространство имён устройств): `\\server\share\a.pem`, `//server/share/a.pem`,
-/// `\\?\…`. Путь из недоверенного файла не проверяется на диске: обращение к `\\server\…` — это исходящее
-/// SMB-соединение к адресу из файла (утечка NTLM-хеша, зависание на недоступном хосте).
-/// Правило одинаково на всех платформах: такой файл считается отсутствующим.
+/// Сетевой путь Windows (UNC и пространство имён устройств, `conn::profile::is_network_or_device_path`).
+/// Такие подключения файла `validate_profile` и так пропускает (`skipped`); проверка здесь — вторая линия:
+/// путь из недоверенного файла не проверяется на диске никогда, такой файл считается отсутствующим.
 pub(crate) fn is_unc_path(path: &str) -> bool {
-    let mut chars = path.trim_start().chars();
-    matches!(
-        (chars.next(), chars.next()),
-        (Some('/' | '\\'), Some('/' | '\\'))
-    )
+    crate::conn::profile::is_network_or_device_path(path)
 }
 
 /// Файл сертификата существует и лежит не на сетевом ресурсе.
@@ -1485,10 +1480,20 @@ mod tests {
         let mut b = conn_json("b", "B", None);
         b["pg"]["tls"] = serde_json::json!({"caPath": absent});
         let mut c = conn_json("c", "C", None);
-        // Абсолютный путь и на Unix, и на Windows (UNC).
+        // Абсолютный путь и на Unix, и на Windows (UNC): такое подключение файла пропускается целиком.
         c["pg"]["tls"] = serde_json::json!({"caPath": "//server/share/ca.pem"});
-        let parsed = parse_exchange(&file(vec![], vec![a, b, c])).unwrap();
-        assert_eq!(parsed.connections.len(), 3, "{:?}", parsed.skipped);
+        let mut parsed = parse_exchange(&file(vec![], vec![a, b, c])).unwrap();
+        assert_eq!(parsed.connections.len(), 2, "{:?}", parsed.skipped);
+        assert_eq!(parsed.skipped.len(), 1);
+        assert_eq!(parsed.skipped[0].name, "C");
+        assert_eq!(
+            parsed.skipped[0].reason.key,
+            "errors.connections.pathNetwork"
+        );
+        // Вторая линия: даже если сетевой путь дошёл до проверки файлов (профиль в обход разбора), диск не трогается.
+        let mut unc = in_folder("u", None);
+        unc.pg.tls.ca_path = Some("//server/share/ca.pem".into());
+        parsed.connections.push((unc, NeedsPassword::default()));
         let existing = existing_certificate_files(&parsed);
         assert_eq!(existing, HashSet::from([real.clone()]));
         // Набор готов заранее, планировщик по нему и работает: недостающие и сетевые пути — «не найдены».
@@ -1520,6 +1525,10 @@ mod tests {
         let mut a = conn_json("a", "A", None);
         a["pg"]["tls"] = serde_json::json!({"caPath": doubled});
         let parsed = parse_exchange(&file(vec![], vec![a])).unwrap();
+        assert!(
+            parsed.connections.is_empty(),
+            "сетевой путь — подключение пропущено"
+        );
         assert!(existing_certificate_files(&parsed).is_empty());
         assert!(!certificate_file_exists(&doubled));
         assert!(certificate_file_exists(&real.to_string_lossy()));

@@ -883,19 +883,40 @@ mod tests {
         }
     }
 
+    /// Сетевые пути и пути устройств к сертификатам (PG и Patroni API) из файла не импортируются: иначе
+    /// раскрытие подключения в дереве (даже без пароля) открыло бы SMB-соединение к адресу из файла.
     #[test]
-    fn network_certificate_paths_are_reported_missing() {
+    fn network_certificate_paths_are_not_imported() {
         let dir = tempfile::tempdir().unwrap();
         let st = AppState::new(dir.path(), Arc::new(MemoryStore::default())).unwrap();
-        let mut p = json_of(&sample_profile("a"));
-        // Абсолютный путь и на Unix, и на Windows (UNC); сервера по этому адресу нет.
-        p["pg"]["tls"] = serde_json::json!({"caPath": "//glafira-test.invalid/share/ca.pem"});
-        let path = write_exchange(dir.path(), vec![], vec![p]);
-        let preview = import_from_file(&st, &path, None, true, false).unwrap();
-        assert_eq!(preview.added.len(), 1);
-        assert_eq!(preview.warnings.len(), 1);
-        assert_eq!(preview.warnings[0].key, "warnings.import.missingFiles");
-        assert_eq!(preview.warnings[0].params["count"], "1");
+        st.connections.upsert(sample_profile("a")).unwrap();
+        // Абсолютные пути и на Unix, и на Windows; сервера по этим адресам нет.
+        let mut moved = json_of(&sample_profile("a"));
+        moved["pg"]["tls"] = serde_json::json!({"caPath": "//glafira-test.invalid/share/ca.pem"});
+        let mut fresh = json_of(&patroni_with_all_secrets("p", dir.path()));
+        fresh["patroni"]["tls"]["caPath"] = r"\\?\UNC\glafira-test.invalid\share\ca.pem".into();
+        let path = write_exchange(dir.path(), vec![], vec![moved, fresh]);
+        for apply in [false, true] {
+            let preview = import_from_file(&st, &path, None, true, apply).unwrap();
+            assert!(
+                preview.added.is_empty() && preview.updated.is_empty(),
+                "{preview:?}"
+            );
+            let reasons: Vec<_> = preview
+                .skipped
+                .iter()
+                .map(|s| s.reason.key.as_str())
+                .collect();
+            assert_eq!(
+                reasons,
+                [
+                    "errors.connections.pathNetwork",
+                    "errors.connections.pathNetwork"
+                ]
+            );
+        }
+        assert_eq!(st.connections.get("a").unwrap().pg.tls.ca_path, None);
+        assert!(st.connections.get("p").is_err());
     }
 
     #[test]

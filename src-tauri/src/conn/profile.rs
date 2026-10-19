@@ -282,7 +282,31 @@ fn invalid(text: crate::i18n::LocalizedText) -> AppError {
     AppError::localized(ErrorCode::InvalidInput, text)
 }
 
+/// Сетевой путь или путь пространства имён устройств Windows: `\\server\share\a.pem`, `//server/share/a.pem`,
+/// `\\?\…`, `\\.\…`, `\??\…` (разделители — любые). Такой файл не открывается никогда: обращение к
+/// `\\server\…` — это исходящее SMB-соединение к адресу из профиля (утечка NTLM-хеша пользователя, зависание на
+/// недоступном хосте), а профиль может прийти из чужого файла обмена. Правило одно на всех платформах; кому
+/// сертификаты нужны с общего ресурса, подключает его буквой диска или точкой монтирования.
+pub fn is_network_or_device_path(path: &str) -> bool {
+    let sep = |c: char| c == '/' || c == '\\';
+    let mut chars = path.trim_start().chars();
+    match (chars.next(), chars.next()) {
+        (Some(a), Some(b)) if sep(a) && sep(b) => true,
+        (Some(a), Some('?')) if sep(a) => {
+            matches!((chars.next(), chars.next()), (Some('?'), Some(c)) if sep(c))
+        }
+        _ => false,
+    }
+}
+
 fn validate_path(path: &str) -> AppResult<()> {
+    if is_network_or_device_path(path) {
+        return Err(invalid(ltext!(
+            "errors.connections.pathNetwork",
+            "Certificate and key files must be on this computer, not on a network share or a device path: {{path}}",
+            path = path
+        )));
+    }
     if Path::new(path).is_absolute() {
         Ok(())
     } else {
@@ -812,6 +836,108 @@ mod tests {
             key_path: None,
         });
         validate_profile(&pkcs).unwrap();
+    }
+
+    #[test]
+    fn network_and_device_paths_are_recognized() {
+        for path in [
+            r"\\server\share\ca.pem",
+            "//server/share/ca.pem",
+            r"\/server/share/ca.pem",
+            r"/\server\share\ca.pem",
+            "////server/share",
+            r"\\?\C:\certs\ca.pem",
+            r"\\?\UNC\server\share\ca.pem",
+            r"\\.\pipe\x",
+            r"\??\C:\certs\ca.pem",
+            r"\??\UNC\server\share\ca.pem",
+            "/??/C:/certs/ca.pem",
+            "  //server/share/ca.pem",
+        ] {
+            assert!(is_network_or_device_path(path), "{path}");
+        }
+        for path in [
+            "/certs/ca.pem",
+            "/",
+            "",
+            "ca.pem",
+            r"C:\certs\ca.pem",
+            "C://certs/ca.pem",
+            "/a//b/ca.pem",
+            "/?/ca.pem",
+            "/??x/ca.pem",
+            r"relative\dir\ca.pem",
+        ] {
+            assert!(!is_network_or_device_path(path), "{path}");
+        }
+    }
+
+    /// Все шесть путей к файлам сертификатов (PG и Patroni API: CA, сертификат, ключ): сохранение, проверка и
+    /// импорт проходят через `validate_profile`, поэтому сетевой путь не попадает в профиль ни одним из них.
+    #[test]
+    fn network_paths_are_rejected_in_every_certificate_field() {
+        let unc = r"\\attacker.invalid\x\ca.pem".to_string();
+        let pem = |cert: String, key: String| ClientCert {
+            format: CertFormat::Pem,
+            certificate_path: cert,
+            key_path: Some(key),
+        };
+        let api = |p: &mut ConnectionProfile, tls: ApiTls| {
+            *p = patroni(p.clone());
+            p.patroni.as_mut().unwrap().tls = Some(tls);
+        };
+        type Change<'a> = Box<dyn Fn(&mut ConnectionProfile) + 'a>;
+        let cases: Vec<Change> = vec![
+            Box::new(|p| p.pg.tls.ca_path = Some(unc.clone())),
+            Box::new(|p| p.pg.tls.client_cert = Some(pem(unc.clone(), abs("k.pem")))),
+            Box::new(|p| p.pg.tls.client_cert = Some(pem(abs("c.pem"), unc.clone()))),
+            Box::new(|p| {
+                api(
+                    p,
+                    ApiTls {
+                        ca_path: Some("//attacker.invalid/x/ca.pem".into()),
+                        verify_hostname: true,
+                        client_cert: None,
+                    },
+                )
+            }),
+            Box::new(|p| {
+                api(
+                    p,
+                    ApiTls {
+                        ca_path: None,
+                        verify_hostname: true,
+                        client_cert: Some(pem(
+                            r"\\?\UNC\attacker.invalid\x\c.pem".into(),
+                            abs("k.pem"),
+                        )),
+                    },
+                )
+            }),
+            Box::new(|p| {
+                api(
+                    p,
+                    ApiTls {
+                        ca_path: None,
+                        verify_hostname: true,
+                        client_cert: Some(pem(
+                            abs("c.pem"),
+                            r"\??\UNC\attacker.invalid\x\k.pem".into(),
+                        )),
+                    },
+                )
+            }),
+        ];
+        for (i, change) in cases.iter().enumerate() {
+            let mut p = sample_profile("a");
+            change(&mut p);
+            let err = validate_profile(&p).unwrap_err();
+            assert_eq!(
+                err.key, "errors.connections.pathNetwork",
+                "случай {i}: {p:?}"
+            );
+            assert_eq!(err.code, crate::error::ErrorCode::InvalidInput);
+        }
     }
 
     #[test]

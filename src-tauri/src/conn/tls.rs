@@ -14,7 +14,7 @@ use openssl::x509::X509;
 use openssl::x509::store::{X509Store, X509StoreBuilder};
 
 use crate::conn::errors::tls_setup;
-use crate::conn::profile::{CertFormat, ClientCert, SslMode};
+use crate::conn::profile::{CertFormat, ClientCert, SslMode, is_network_or_device_path};
 use crate::error::{AppError, AppResult, ErrorCode};
 
 pub struct Identity {
@@ -33,6 +33,16 @@ impl std::fmt::Debug for Identity {
 }
 
 fn read(path: &str) -> AppResult<Vec<u8>> {
+    // Профиль проверен при сохранении и импорте (`validate_profile`), но файл connections.json старой версии
+    // мог сохранить такой путь: сетевой ресурс не открывается и при подключении.
+    if is_network_or_device_path(path) {
+        return Err(app_err!(
+            ErrorCode::InvalidInput,
+            "errors.connections.pathNetwork",
+            "Certificate and key files must be on this computer, not on a network share or a device path: {{path}}",
+            path = path
+        ));
+    }
     std::fs::read(path).map_err(|e| {
         app_err!(
             ErrorCode::InvalidInput,
@@ -336,6 +346,40 @@ mod tests {
             load_identity(&cc, Some("nope")).unwrap_err().key,
             "errors.tls.badFile"
         );
+    }
+
+    #[test]
+    fn network_and_device_paths_are_never_opened() {
+        for path in [
+            r"\\glafira-test.invalid\share\ca.pem",
+            "//glafira-test.invalid/share/ca.pem",
+            r"\\?\UNC\glafira-test.invalid\share\ca.pem",
+            r"\\.\pipe\x",
+            r"\??\UNC\glafira-test.invalid\share\ca.pem",
+        ] {
+            let cc = ClientCert {
+                format: CertFormat::Pem,
+                certificate_path: path.into(),
+                key_path: Some(path.into()),
+            };
+            assert_eq!(
+                load_identity(&cc, None).unwrap_err().key,
+                "errors.connections.pathNetwork",
+                "{path}"
+            );
+            assert_eq!(
+                ca_pem_bundle(path).unwrap_err().key,
+                "errors.connections.pathNetwork",
+                "{path}"
+            );
+            assert_eq!(
+                pg_connector(SslMode::VerifyCa, Some(path), None, None)
+                    .unwrap_err()
+                    .key,
+                "errors.connections.pathNetwork",
+                "{path}"
+            );
+        }
     }
 
     #[test]
