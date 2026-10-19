@@ -1,0 +1,54 @@
+scope: demo
+namespace: /service/
+restapi:
+  listen: 0.0.0.0:8008
+  authentication:
+    username: patroni
+    password: patroni-secret
+etcd3:
+  hosts: etcd:2379
+bootstrap:
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 1048576
+    postgresql:
+      use_pg_rewind: true
+      use_slots: true
+      parameters:
+        wal_level: replica
+        hot_standby: "on"
+        max_wal_senders: 10
+        max_replication_slots: 10
+        wal_log_hints: "on"
+  initdb:
+    - encoding: UTF8
+    - data-checksums
+  pg_hba:
+    - local all all trust
+    - host replication replicator 0.0.0.0/0 scram-sha-256
+    - host all all 0.0.0.0/0 scram-sha-256
+  post_bootstrap: /etc/patroni/post_bootstrap.sh
+postgresql:
+  listen: 0.0.0.0:5432
+  data_dir: /var/lib/postgresql/patroni/data
+  bin_dir: /usr/lib/postgresql/17/bin
+  pgpass: /tmp/pgpass
+  authentication:
+    superuser:
+      username: postgres
+      password: postgres-secret
+    replication:
+      username: replicator
+      password: replicator-secret
+  parameters:
+    unix_socket_directories: /var/run/postgresql
+    shared_preload_libraries: pg_stat_statements
+    track_io_timing: "on"
+    track_activity_query_size: 4096
+tags:
+  nofailover: false
+  noloadbalance: false
+  clonefrom: false
+  nosync: false

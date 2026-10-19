@@ -1,0 +1,100 @@
+name: glafira-pg-dev
+
+x-patroni: &patroni
+  build:
+    context: .
+    dockerfile: patroni/Dockerfile
+  image: glafira-pg-dev/patroni:17
+  depends_on: [etcd]
+
+services:
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.17
+    container_name: gp-etcd
+    command:
+      - etcd
+      - --name=etcd
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd:2380
+      - --initial-cluster=etcd=http://etcd:2380
+
+  patroni1:
+    <<: *patroni
+    container_name: gp-patroni1
+    hostname: patroni1
+    environment:
+      PATRONI_NAME: patroni1
+      PATRONI_RESTAPI_CONNECT_ADDRESS: patroni1:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni1:5432
+    ports: ["5441:5432", "8011:8008"]
+
+  patroni2:
+    <<: *patroni
+    container_name: gp-patroni2
+    hostname: patroni2
+    environment:
+      PATRONI_NAME: patroni2
+      PATRONI_RESTAPI_CONNECT_ADDRESS: patroni2:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni2:5432
+    ports: ["5442:5432", "8012:8008"]
+
+  patroni3:
+    <<: *patroni
+    container_name: gp-patroni3
+    hostname: patroni3
+    environment:
+      PATRONI_NAME: patroni3
+      PATRONI_RESTAPI_CONNECT_ADDRESS: patroni3:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni3:5432
+    ports: ["5443:5432", "8013:8008"]
+
+  pg-primary:
+    image: postgres:16
+    container_name: gp-pg-primary
+    hostname: pg-primary
+    environment:
+      POSTGRES_PASSWORD: postgres-secret
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+      - -c
+      - hot_standby=on
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - track_io_timing=on
+    volumes:
+      - ./primary/10-replication.sh:/docker-entrypoint-initdb.d/10-replication.sh:ro
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/20-init.sql:ro
+    ports: ["5451:5432"]
+
+  pg-replica:
+    image: postgres:16
+    container_name: gp-pg-replica
+    hostname: pg-replica
+    depends_on: [pg-primary]
+    user: postgres
+    entrypoint: ["/bin/bash", "/replica-entrypoint.sh"]
+    environment:
+      PGDATA: /var/lib/postgresql/data
+      REPLICATION_PASSWORD: replicator-secret
+    volumes:
+      - ./replica/entrypoint.sh:/replica-entrypoint.sh:ro
+    ports: ["5452:5432"]
+
+  pg-single:
+    image: postgres:15
+    container_name: gp-pg-single
+    environment:
+      POSTGRES_PASSWORD: postgres-secret
+    volumes:
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/20-init.sql:ro
+    ports: ["5460:5432"]
