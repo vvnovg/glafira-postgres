@@ -261,6 +261,7 @@
     "overview": "Overview",
     "connect": "Connect",
     "disconnect": "Disconnect",
+    "reconnect": "Retry connection",
     "catalogDefault": "Catalog — from the default node",
     "catalogFrom": "Catalog — from node {{member}}",
     "catalogFallback": "The selected node is unavailable — the catalog is read from {{member}}",

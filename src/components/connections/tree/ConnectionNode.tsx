@@ -79,6 +79,18 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
           })),
         ]
       : []),
+    // Упавшее подключение можно и повторить, и закрыть (иначе повтор — только свернуть и раскрыть узел).
+    ...(view.state === "failed"
+      ? [
+          {
+            label: t("sidebar.reconnect"),
+            onSelect: () => {
+              setExpanded(true);
+              void connect();
+            },
+          },
+        ]
+      : []),
     ...(live || view.state === "failed"
       ? [
           {

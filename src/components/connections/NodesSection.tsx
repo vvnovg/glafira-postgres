@@ -2,7 +2,7 @@ import { useTranslation } from "react-i18next";
 import type { ConnectionKind, ConnectionProfile, HostOverride, HostPort, PatroniSettings, TargetServerType } from "../../api/types";
 import { Hint } from "../common/Hint";
 import { ClientCertRows, FieldGroup, PathRow, RowLabel, SecretRow } from "./fields";
-import { emptyPatroni, type SecretField } from "./profile";
+import { emptyPatroni, isValidPort, type SecretField } from "./profile";
 
 const TARGETS: TargetServerType[] = ["primary", "standby", "preferStandby", "any"];
 
@@ -31,7 +31,16 @@ export function NodesSection(props: {
         <label htmlFor={`${id}-host`}>{t("connections.form.host")}</label>
         <span className="path-field">
           <input id={`${id}-host`} value={h.host} onChange={(e) => setHosts([{ ...h, host: e.target.value }])} />
-          <input aria-label={t("connections.form.port")} type="number" min={1} max={65535} style={{ width: 90 }} value={h.port} onChange={(e) => setHosts([{ ...h, port: Number(e.target.value) }])} />
+          <input
+            aria-label={t("connections.form.port")}
+            type="number"
+            min={1}
+            max={65535}
+            style={{ width: 90 }}
+            aria-invalid={!isValidPort(h.port)}
+            value={h.port}
+            onChange={(e) => setHosts([{ ...h, port: Number(e.target.value) }])}
+          />
         </span>
       </>
     );
@@ -50,7 +59,16 @@ export function NodesSection(props: {
           {p.hosts.map((h, i) => (
             <span key={i} className="path-field">
               <input aria-label={t("connections.form.hostN", { n: i + 1 })} value={h.host} onChange={(e) => setHosts(p.hosts.map((x, j) => (j === i ? { ...x, host: e.target.value } : x)))} />
-              <input aria-label={t("connections.form.portN", { n: i + 1 })} type="number" min={1} max={65535} style={{ width: 90 }} value={h.port} onChange={(e) => setHosts(p.hosts.map((x, j) => (j === i ? { ...x, port: Number(e.target.value) } : x)))} />
+              <input
+                aria-label={t("connections.form.portN", { n: i + 1 })}
+                type="number"
+                min={1}
+                max={65535}
+                style={{ width: 90 }}
+                aria-invalid={!isValidPort(h.port)}
+                value={h.port}
+                onChange={(e) => setHosts(p.hosts.map((x, j) => (j === i ? { ...x, port: Number(e.target.value) } : x)))}
+              />
               <button type="button" className="icon" disabled={i === 0} aria-label={t("connections.form.moveUp", { n: i + 1 })} onClick={() => move(i, -1)}>↑</button>
               <button type="button" className="icon" disabled={i === p.hosts.length - 1} aria-label={t("connections.form.moveDown", { n: i + 1 })} onClick={() => move(i, 1)}>↓</button>
               <button type="button" className="icon" disabled={p.hosts.length === 1} aria-label={t("connections.form.removeHost", { n: i + 1 })} onClick={() => setHosts(p.hosts.filter((_, j) => j !== i))}>✕</button>
@@ -136,7 +154,16 @@ export function NodesSection(props: {
             <span key={i} className="path-field">
               <input aria-label={t("connections.form.overrideMember", { n: i + 1 })} placeholder="pg-1" value={o.member} onChange={(e) => setOverride(i, { member: e.target.value })} />
               <input aria-label={t("connections.form.overrideHost", { n: i + 1 })} placeholder="10.0.0.1" value={o.host ?? ""} onChange={(e) => setOverride(i, { host: e.target.value || null })} />
-              <input aria-label={t("connections.form.overridePort", { n: i + 1 })} type="number" style={{ width: 90 }} value={o.port ?? ""} onChange={(e) => setOverride(i, { port: e.target.value ? Number(e.target.value) : null })} />
+              <input
+                aria-label={t("connections.form.overridePort", { n: i + 1 })}
+                type="number"
+                min={1}
+                max={65535}
+                style={{ width: 90 }}
+                aria-invalid={o.port !== null && !isValidPort(o.port)}
+                value={o.port ?? ""}
+                onChange={(e) => setOverride(i, { port: e.target.value ? Number(e.target.value) : null })}
+              />
               <input aria-label={t("connections.form.overrideApi", { n: i + 1 })} placeholder="https://10.0.0.1:8008" value={o.apiUrl ?? ""} onChange={(e) => setOverride(i, { apiUrl: e.target.value || null })} />
               <button type="button" className="icon" aria-label={t("connections.form.removeOverride", { n: i + 1 })} onClick={() => setPatroni({ hostOverrides: pt.hostOverrides.filter((_, j) => j !== i) })}>✕</button>
             </span>

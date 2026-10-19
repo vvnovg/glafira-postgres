@@ -10,7 +10,7 @@ import { Hint } from "../common/Hint";
 import { ProLock } from "../common/ProLock";
 import { NodesSection, type PatroniSecrets } from "./NodesSection";
 import { PgSection, type PgSecrets } from "./PgSection";
-import { applyParsed, emptyKindMemo, emptySecret, type KindMemo, secretValue, switchKind, visibleProfile } from "./profile";
+import { applyParsed, emptyKindMemo, emptySecret, type KindMemo, portProblem, secretValue, switchKind, visibleProfile } from "./profile";
 import { TestPanel } from "./TestPanel";
 import { folderPaths } from "./tree/folderTree";
 
@@ -90,6 +90,11 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
 
   const onTest = async () => {
     if (testingRef.current) return; // повторный запуск, пока идёт проверка, не нужен
+    const bad = portProblem(current());
+    if (bad) {
+      setError(bad);
+      return;
+    }
     testingRef.current = true;
     setTesting(true);
     setError(null);
@@ -107,6 +112,8 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
 
   const onSave = () =>
     run(async () => {
+      const bad = portProblem(current());
+      if (bad) throw bad;
       const saved = await api.saveConnection(current(), secrets());
       // Смена папки — отдельная команда; её сбой не должен оставить кэш устаревшим: профиль уже сохранён.
       let moveError: unknown = null;
@@ -118,8 +125,12 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
         moveError = e;
       }
       await queryClient.invalidateQueries({ queryKey: ["connections"] });
-      // Сохранение закрывает открытое подключение (Rust): кэш его каталога больше не нужен.
-      queryClient.removeQueries({ predicate: (q) => q.queryKey[1] === saved.id });
+      // Правка оформления (имя, цвет, папка) открытое подключение не закрывает: Rust только обновляет в нём
+      // профиль, поэтому вид подключения и журнал перечитываются, а не удаляются (удаление оторвало бы
+      // наблюдателей дерева и обзора от кэша и свернуло бы раскрытый каталог). Если изменились настройки
+      // соединения или секреты, Rust закрывает подключение, и событие Disconnected само чистит каталог и факты.
+      void queryClient.invalidateQueries({ queryKey: ["topology", saved.id], exact: true });
+      void queryClient.invalidateQueries({ queryKey: ["topologyEvents", saved.id], exact: true });
       // Папка не сменилась: остаёмся на форме и показываем ошибку (повторное сохранение повторит перенос).
       if (moveError !== null) throw moveError;
       close(tabId);

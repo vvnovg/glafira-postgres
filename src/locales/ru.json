@@ -261,6 +261,7 @@
     "overview": "Обзор",
     "connect": "Подключиться",
     "disconnect": "Отключиться",
+    "reconnect": "Повторить подключение",
     "catalogDefault": "Каталог — с узла по умолчанию",
     "catalogFrom": "Каталог — с узла {{member}}",
     "catalogFallback": "Выбранный узел недоступен — каталог читается с {{member}}",

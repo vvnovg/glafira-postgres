@@ -11,6 +11,7 @@ import {
   type KindMemo,
   newProfile,
   parseDatabases,
+  portProblem,
   secretValue,
   switchKind,
   toPatroniFromHosts,
@@ -190,5 +191,26 @@ describe("модель формы", () => {
     expect(secretValue({ text: "", clear: false })).toBeNull();
     expect(secretValue({ text: "", clear: true })).toBe("");
     expect(secretValue({ text: "x", clear: false })).toBe("x");
+  });
+});
+
+describe("portProblem", () => {
+  const server = (port: number): ConnectionProfile => ({ ...newProfile(), hosts: [{ host: "h", port }] });
+  it.each([0, 65536, 1.5, Number.NaN, -1])("порт %s — ошибка с ключом словаря", (port) => {
+    expect(portProblem(server(port))).toMatchObject({ code: "INVALID_INPUT", key: "errors.connections.portInvalid" });
+  });
+  it.each([1, 5432, 65535])("порт %s — допустим", (port) => {
+    expect(portProblem(server(port))).toBeNull();
+  });
+  it("у Patroni проверяются подмены; null — порт не меняется", () => {
+    const p = (port: number | null): ConnectionProfile => ({
+      ...newProfile(),
+      kind: "patroni",
+      hosts: [],
+      patroni: { ...emptyPatroni(), hostOverrides: [{ member: "m", host: null, port, apiUrl: null }] },
+    });
+    expect(portProblem(p(null))).toBeNull();
+    expect(portProblem(p(6432))).toBeNull();
+    expect(portProblem(p(70000))).not.toBeNull();
   });
 });

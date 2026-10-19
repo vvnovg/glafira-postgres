@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppError, ConnectionFolder, ConnectionProfile, LicenseStatus, TestReport } from "../../api/types";
 import { useWorkspace } from "../../state/workspace";
+import { topologyView } from "../../test/fixtures";
 import { renderWithClient } from "../../test/render";
 import { emptyPatroni, newProfile } from "./profile";
 
@@ -447,7 +448,7 @@ describe("ConnectionForm", () => {
       await saveClick(user);
       expect(await screen.findByRole("alert")).toHaveTextContent("Cannot move the item");
       expect(invalidate).toHaveBeenCalledWith({ queryKey: ["connections"] });
-      expect(client.getQueryData(["catalog", "c1", "databases"])).toBeUndefined();
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ["topology", "c1"], exact: true });
       expect(client.getQueryData(["catalog", "other", "databases"])).toEqual([]);
       expect(useWorkspace.getState().tabs.map((x) => x.id)).toEqual(["connection-form:c1"]);
       // Кнопки снова доступны: повторное сохранение повторит перенос.
@@ -455,15 +456,51 @@ describe("ConnectionForm", () => {
     });
   });
 
-  it("успешное сохранение закрывает форму, открывает обзор и очищает кэш подключения", async () => {
+  it("успешное сохранение закрывает форму, открывает обзор и перечитывает вид подключения, не удаляя его кэш", async () => {
     const user = userEvent.setup();
     vi.mocked(api.saveConnection).mockResolvedValue(saved("c1"));
     const { client } = renderWithClient(<ConnectionForm initial={existing()} tabId="connection-form:c1" />);
+    const live = topologyView({ state: "connected" });
+    client.setQueryData(["topology", "c1"], live);
+    client.setQueryData(["topologyEvents", "c1"], []);
     client.setQueryData(["catalog", "c1", "databases"], []);
     useWorkspace.getState().open({ kind: "connection-form", connectionId: "c1" });
     await user.click(screen.getByRole("button", { name: "Сохранить" }));
     await waitFor(() => expect(useWorkspace.getState().tabs.map((x) => x.id)).toEqual(["overview:c1"]));
-    expect(client.getQueryData(["catalog", "c1", "databases"])).toBeUndefined();
+    // Правка оформления подключение не закрывает (Rust): вид и журнал помечены устаревшими, но остаются в кэше —
+    // дерево и обзор не теряют подключение и раскрытый каталог.
+    expect(client.getQueryData(["topology", "c1"])).toEqual(live);
+    expect(client.getQueryState(["topology", "c1"])!.isInvalidated).toBe(true);
+    expect(client.getQueryState(["topologyEvents", "c1"])!.isInvalidated).toBe(true);
+    expect(client.getQueryData(["catalog", "c1", "databases"])).toEqual([]);
+  });
+
+  it.each(["70000", "0", ""])("порт «%s» не уходит в Rust: ни сохранения, ни проверки, понятная ошибка", async (port) => {
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionForm initial={existing()} tabId="t" />);
+    const input = screen.getByRole("spinbutton", { name: "Порт" });
+    await user.clear(input);
+    if (port) await user.type(input, port);
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Порт — от 1 до 65535");
+    await user.click(screen.getByRole("button", { name: "Проверить" }));
+    expect(api.saveConnection).not.toHaveBeenCalled();
+    expect(api.testConnection).not.toHaveBeenCalled();
+  });
+
+  it("порт узла списка и подмена порта Patroni проверяются так же; пустая подмена — «не менять»", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.saveConnection).mockResolvedValue(saved("c1"));
+    const pt = { ...emptyPatroni(), hostOverrides: [{ member: "pg-1", host: null, port: 99999, apiUrl: null }] };
+    renderWithClient(<ConnectionForm initial={existing({ kind: "patroni", hosts: [], patroni: pt })} tabId="t" />);
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Порт — от 1 до 65535");
+    expect(api.saveConnection).not.toHaveBeenCalled();
+    await user.clear(screen.getByRole("spinbutton", { name: "Порт PostgreSQL 1" }));
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(api.saveConnection).toHaveBeenCalled());
+    expect(vi.mocked(api.saveConnection).mock.calls[0][0].patroni!.hostOverrides[0].port).toBeNull();
   });
 
   it("ошибка сохранения: баннер с причиной, форма остаётся открытой", async () => {

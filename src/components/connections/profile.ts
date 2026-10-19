@@ -1,4 +1,4 @@
-import type { CertFormat, ConnectionKind, ConnectionProfile, HostPort, ParsedConnection, PatroniSettings } from "../../api/types";
+import type { AppError, CertFormat, ConnectionKind, ConnectionProfile, HostPort, ParsedConnection, PatroniSettings } from "../../api/types";
 
 export function newProfile(): ConnectionProfile {
   return {
@@ -150,4 +150,19 @@ export const emptySecret: SecretField = { text: "", clear: false };
 export function secretValue(f: SecretField): string | null {
   if (f.clear) return "";
   return f.text ? f.text : null;
+}
+
+/** Порт TCP: целое от 1 до 65535 (`Number("")` — 0, слишком большое или дробное число Rust как u16 не примет). */
+export function isValidPort(port: number): boolean {
+  return Number.isInteger(port) && port >= 1 && port <= 65535;
+}
+
+/**
+ * Порты формы, которые нельзя отправить в Rust: узлы сервера и списка, подмены адресов Patroni (пустая подмена порта —
+ * «не менять», это null). Иначе вместо понятной ошибки пришёл бы сбой разбора аргументов команды.
+ */
+export function portProblem(p: ConnectionProfile): AppError | null {
+  const ports = p.kind === "patroni" ? (p.patroni?.hostOverrides ?? []).flatMap((o) => (o.port === null ? [] : [o.port])) : p.hosts.map((h) => h.port);
+  if (ports.every(isValidPort)) return null;
+  return { code: "INVALID_INPUT", key: "errors.connections.portInvalid", message: "Port must be from 1 to 65535", retryable: false };
 }

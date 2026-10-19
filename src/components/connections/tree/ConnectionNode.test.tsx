@@ -180,6 +180,30 @@ describe("ConnectionNode", () => {
     expect(await screen.findByRole("button", { name: /^Узлы/ })).toBeInTheDocument();
   });
 
+  it("меню упавшего подключения: повторить (раскрывает и подключает) и отключиться", async () => {
+    vi.mocked(api.getTopology).mockResolvedValue({
+      ...disconnectedView,
+      state: "failed",
+      error: { code: "AUTH_FAILED", message: "auth failed", retryable: false },
+    });
+    vi.mocked(api.connect).mockResolvedValue(topologyView());
+    const user = userEvent.setup();
+    renderNode();
+    await screen.findByRole("img", { name: "Не удалось подключиться" });
+    await user.click(screen.getByRole("button", { name: "Действия с подключением billing" }));
+    const menu = screen.getByRole("menu");
+    expect(within(menu).getAllByRole("menuitem").map((m) => m.textContent)).toEqual([
+      "Обзор",
+      "Изменить подключение",
+      "Повторить подключение",
+      "Отключиться",
+    ]);
+    await user.click(within(menu).getByRole("menuitem", { name: "Повторить подключение" }));
+    expect(api.connect).toHaveBeenCalledWith("c");
+    expect(screen.getByRole("button", { name: toggleName })).toHaveAttribute("aria-expanded", "true");
+    expect(await screen.findByRole("button", { name: /^Узлы/ })).toBeInTheDocument();
+  });
+
   it("ошибка отключения показывается, а не теряется", async () => {
     vi.mocked(api.getTopology).mockResolvedValue(topologyView());
     vi.mocked(api.disconnect).mockRejectedValue({ code: "INTERNAL", message: "boom", retryable: false });
