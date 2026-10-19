@@ -86,14 +86,24 @@ function leaders(members: Member[]): Member[] {
   return primaries.length > 0 ? primaries : members.filter((m) => m.role === "standbyLeader");
 }
 
-function FactsCells({ connectionId, m, live }: { connectionId: string; m: Member; live: boolean }) {
+/**
+ * Перечитывать ли факты узла по таймеру. Скрытая вкладка не опрашивает узлы. После отказа во входе (AUTH_FAILED)
+ * опрос останавливается: повтор каждые 10 с с неверным паролем блокирует учётную запись (LDAP, PAM, fail2ban).
+ * Rust и сам не входит повторно, пока подключение не откроют заново; закрытие подключения убирает и эти запросы.
+ */
+function factsRefetchInterval(active: boolean, error: unknown): number | false {
+  if (!active) return false;
+  return error != null && toAppError(error).code === "AUTH_FAILED" ? false : FACTS_REFRESH_MS;
+}
+
+function FactsCells({ connectionId, m, live, active }: { connectionId: string; m: Member; live: boolean; active: boolean }) {
   const { t } = useTranslation();
   const q = useQuery({
     queryKey: ["memberFacts", connectionId, m.name],
     queryFn: () => api.getMemberFacts(connectionId, m.name),
     // Подключение закрыто или упало — спрашивать узлы нечем, в таблице остаются последние известные участники.
     enabled: m.reachable && live,
-    refetchInterval: FACTS_REFRESH_MS,
+    refetchInterval: (query) => factsRefetchInterval(active, query.state.error),
   });
   const asking = m.reachable && live;
   if (!asking || !q.data) {
@@ -142,7 +152,19 @@ function FactsCells({ connectionId, m, live }: { connectionId: string; m: Member
 /** wrap — ячейка с длинным списком (теги) переносится по словам, остальные не ломаются. */
 type Column = { id: string; header: string; wrap?: boolean; cell: (m: Member) => ReactNode };
 
-function MembersTable({ connectionId, topo, live, selected }: { connectionId: string; topo: Topology; live: boolean; selected?: string }) {
+function MembersTable({
+  connectionId,
+  topo,
+  live,
+  active,
+  selected,
+}: {
+  connectionId: string;
+  topo: Topology;
+  live: boolean;
+  active: boolean;
+  selected?: string;
+}) {
   const { t } = useTranslation();
   const patroni = topo.kind === "patroni";
   // У одиночного сервера столбцы, которые у него бывают пустыми, не показываются: лаг, источник WAL и состояние появляются у standby.
@@ -236,7 +258,7 @@ function MembersTable({ connectionId, topo, live, selected }: { connectionId: st
                     {c.cell(m)}
                   </td>
                 ))}
-                <FactsCells connectionId={connectionId} m={m} live={live} />
+                <FactsCells connectionId={connectionId} m={m} live={live} active={active} />
               </tr>
             );
           })}
@@ -246,7 +268,8 @@ function MembersTable({ connectionId, topo, live, selected }: { connectionId: st
   );
 }
 
-export function Overview({ connectionId, member }: { connectionId: string; member?: string }) {
+/** active — вкладка видна; скрытая вкладка остаётся смонтированной, но узлы не опрашивает. */
+export function Overview({ connectionId, member, active = true }: { connectionId: string; member?: string; active?: boolean }) {
   const { t } = useTranslation();
   const qc = useQueryClient();
   const journalId = useId();
@@ -337,7 +360,7 @@ export function Overview({ connectionId, member }: { connectionId: string; membe
           ))}
         </div>
       )}
-      {topo && <MembersTable connectionId={connectionId} topo={topo} live={live} selected={member} />}
+      {topo && <MembersTable connectionId={connectionId} topo={topo} live={live} active={active} selected={member} />}
       {topo && (
         <section aria-labelledby={journalId}>
           <h3 id={journalId}>{t("overview.journal")}</h3>

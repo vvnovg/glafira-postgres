@@ -11,8 +11,9 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::AbortHandle;
 use tokio_postgres::Client;
 
+use crate::conn::errors::login_not_retried;
 use crate::conn::pg::ConnectSpec;
-use crate::error::{AppError, AppResult};
+use crate::error::{AppError, AppResult, ErrorCode};
 use crate::sync::MutexExt;
 
 pub const MAX_CONNECTIONS: usize = 3;
@@ -71,6 +72,11 @@ pub struct PgPool {
     validate_after: Duration,
     /// Срок штатного закрытия соединения (`PgConn::grace`).
     close_grace: Duration,
+    /// Сервер отверг вход (`AUTH_FAILED`): новых попыток входа пул больше не делает и сразу отдаёт эту
+    /// ошибку. Иначе фоновый опрос и обновление обзора раз в 10 с подбирали бы пароль заново — с LDAP, PAM
+    /// или fail2ban это блокирует учётную запись или адрес. Отметка живёт, пока жив пул: его вытесняют
+    /// переоткрытие подключения, сохранение профиля или секретов (`Runtimes::disconnect`) и смена адреса узла.
+    auth_failure: Mutex<Option<AppError>>,
 }
 
 /// Что делать с простаивающим соединением при выдаче.
@@ -153,6 +159,7 @@ impl PgPool {
             permits: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
             validate_after,
             close_grace,
+            auth_failure: Mutex::new(None),
         })
     }
 
@@ -165,8 +172,19 @@ impl PgPool {
         self.spec.host == host && self.spec.port == port
     }
 
-    /// Свободное соединение или новое; при занятых трёх — ждёт освобождения.
+    /// Отказ во входе, после которого пул новых соединений не открывает.
+    pub fn auth_failure(&self) -> Option<AppError> {
+        self.auth_failure.lock_safe().clone()
+    }
+
+    /// Свободное соединение или новое; при занятых трёх — ждёт освобождения. Если сервер уже отверг вход,
+    /// новое соединение не открывается (`auth_failure`); уже открытые, пока живы, выдаются как обычно.
     pub async fn get(self: &Arc<Self>) -> AppResult<PooledClient> {
+        if let Some(e) = self.auth_failure()
+            && self.idle_count() == 0
+        {
+            return Err(e);
+        }
         let permit = self
             .permits
             .clone()
@@ -202,7 +220,17 @@ impl PgPool {
                 _permit: permit,
             });
         }
-        let (client, abort) = self.spec.connect_with_handle().await?;
+        // Пока ждали места в пуле, вход мог отвергнуть параллельный запрос.
+        if let Some(e) = self.auth_failure() {
+            return Err(e);
+        }
+        let (client, abort) = self.spec.connect_with_handle().await.inspect_err(|e| {
+            if e.code == ErrorCode::AuthFailed {
+                self.auth_failure
+                    .lock_safe()
+                    .get_or_insert_with(|| login_not_retried(e));
+            }
+        })?;
         let conn = PgConn {
             client,
             abort,

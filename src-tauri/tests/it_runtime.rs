@@ -11,11 +11,12 @@ use std::time::{Duration, Instant};
 
 use glafira_pg_lib::commands::topology::{member_facts, member_facts_within};
 use glafira_pg_lib::conn::pool::{PoolKey, PoolRegistry};
-use glafira_pg_lib::conn::profile::{ConnectionKind, SslMode};
-use glafira_pg_lib::secrets::{PATRONI_PASSWORD, SecretStore, secret_key};
+use glafira_pg_lib::conn::profile::{ConnectionKind, HostPort, SslMode};
+use glafira_pg_lib::error::ErrorCode;
+use glafira_pg_lib::secrets::{PATRONI_PASSWORD, PG_PASSWORD, SecretStore, secret_key};
 use glafira_pg_lib::state::AppState;
 use glafira_pg_lib::topology::journal::EventKind;
-use glafira_pg_lib::topology::model::Role;
+use glafira_pg_lib::topology::model::{Role, member_name};
 use glafira_pg_lib::topology::runtime::{ConnState, LiveSource, Runtimes};
 
 /// Срок от возврата `patronictl switchover` до `LeaderChanged` в журнале.
@@ -170,8 +171,7 @@ fn single_state(id: &str, addr: &str) -> (tempfile::TempDir, AppState, String) {
     profile.pg.ssl_mode = SslMode::Disable;
     let dir = tempfile::tempdir().unwrap();
     let st = AppState::new(dir.path(), common::secrets_with_password(id)).unwrap();
-    let member =
-        glafira_pg_lib::topology::model::member_name(&profile.hosts[0].host, profile.hosts[0].port);
+    let member = member_name(&profile.hosts[0].host, profile.hosts[0].port);
     st.connections.upsert(profile).unwrap();
     (dir, st, member)
 }
@@ -291,4 +291,154 @@ async fn stalled_member_facts_close_the_connection() {
     let facts = member_facts(&st, "rt-stall", &member).await.unwrap();
     assert!(facts.connections >= 1);
     st.runtimes.disconnect("rt-stall");
+}
+
+/// Интервал фонового опроса в тестах неверного пароля: за пару секунд проходит много «10-секундных» циклов.
+const FAST_POLL: Duration = Duration::from_millis(150);
+
+fn fast_runtimes(secrets: Arc<dyn SecretStore>) -> (Arc<Runtimes>, Arc<PoolRegistry>) {
+    let pools = Arc::new(PoolRegistry::default());
+    let rt = Runtimes::with_interval(
+        Arc::new(LiveSource::new(secrets, pools.clone())),
+        pools.clone(),
+        FAST_POLL,
+    );
+    (rt, pools)
+}
+
+fn wrong_password(id: &str) -> Arc<common::CountingSecrets> {
+    let s = common::CountingSecrets::default();
+    s.inner
+        .set(&secret_key(id, PG_PASSWORD), "not-the-password")
+        .unwrap();
+    Arc::new(s)
+}
+
+/// Неверный пароль у сервера: первое подключение — `Failed` с ошибкой узла, фонового опроса нет, и за
+/// много интервалов опроса — ни одной новой попытки входа и ни одного чтения keychain.
+#[tokio::test]
+async fn wrong_password_fails_the_first_connect_and_is_never_retried() {
+    let Some(addr) = common::env("GPG_IT_SINGLE") else {
+        return;
+    };
+    let proxy = common::PausableProxy::start(&addr).await;
+    let mut profile = common::server_profile("rt-wrong", &format!("127.0.0.1:{}", proxy.port()));
+    profile.pg.ssl_mode = SslMode::Disable;
+    let secrets = wrong_password("rt-wrong");
+    let (rt, pools) = fast_runtimes(secrets.clone());
+
+    let e = rt.connect(profile).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::AuthFailed, "{e:?}");
+    assert_eq!(e.key, "errors.pg.authFailed", "{e:?}");
+    let view = rt.view("rt-wrong");
+    assert_eq!(view.state, ConnState::Failed);
+    assert!(view.topology.is_none() && view.catalog_member.is_none());
+    tokio::time::sleep(FAST_POLL * 10).await;
+    assert_eq!(proxy.accepted(), 1, "одна попытка входа");
+    assert_eq!(secrets.pg_password_reads(), 1, "keychain прочитан один раз");
+    assert_eq!(
+        rt.target("rt-wrong", None).unwrap_err().key,
+        "errors.topology.notConnected"
+    );
+    rt.shutdown();
+    drop(pools);
+}
+
+/// Список узлов, где один узел отвергает вход: подключение `degraded`, а фоновый опрос входит на этот узел
+/// один раз — дальше отдаёт запомненный отказ, не открывая соединений.
+#[tokio::test]
+async fn poller_does_not_retry_a_rejected_login() {
+    let Some(addr) = common::env("GPG_IT_SINGLE") else {
+        return;
+    };
+    let rejecting = common::RejectingPg::start().await;
+    let mut profile = common::server_profile("rt-mixed", &addr);
+    profile.kind = ConnectionKind::HostList;
+    profile.target_server_type = glafira_pg_lib::conn::profile::TargetServerType::Any;
+    profile.hosts.push(HostPort {
+        host: "127.0.0.1".into(),
+        port: rejecting.port(),
+    });
+    profile.pg.ssl_mode = SslMode::Disable;
+    let rejected = member_name("127.0.0.1", rejecting.port());
+    let (rt, _pools) = fast_runtimes(common::secrets_with_password("rt-mixed"));
+
+    let view = rt.connect(profile).await.unwrap();
+    assert_eq!(view.state, ConnState::Degraded);
+    let first = view.topology.unwrap();
+    let m = first.member(&rejected).unwrap();
+    assert!(!m.reachable);
+    assert_eq!(m.error.as_ref().unwrap().code, ErrorCode::AuthFailed);
+
+    tokio::time::sleep(FAST_POLL * 10).await;
+    assert_eq!(rejecting.accepted(), 1, "одна попытка входа за 10 опросов");
+    let v = rt.view("rt-mixed");
+    assert_eq!(v.state, ConnState::Degraded);
+    let t = v.topology.unwrap();
+    assert!(
+        t.members.iter().any(|m| m.reachable),
+        "живой узел опрашивается"
+    );
+    assert_eq!(
+        t.member(&rejected).unwrap().error.as_ref().unwrap().key,
+        "errors.pg.loginNotRetried",
+        "отказ запомнен"
+    );
+    // Переоткрытие подключения (как после сохранения пароля) пробует войти снова.
+    rt.disconnect("rt-mixed");
+    rt.shutdown();
+}
+
+/// Patroni отвечает (верный пароль API), а пароль PostgreSQL неверен: обзор, который раз в 10 с спрашивает
+/// сведения об узле, входит в PostgreSQL один раз, дальше получает запомненный отказ.
+#[tokio::test]
+async fn patroni_member_with_a_wrong_pg_password_is_not_logged_into_again() {
+    let Some(mut settings) = common::patroni_settings() else {
+        return;
+    };
+    let proxy = common::PausableProxy::start("localhost:5441").await;
+    let o = settings
+        .host_overrides
+        .iter_mut()
+        .find(|o| o.member == "patroni1")
+        .unwrap();
+    (o.host, o.port) = (Some("127.0.0.1".into()), Some(proxy.port()));
+    let mut profile = common::server_profile("rt-pw", "localhost:5441");
+    profile.kind = ConnectionKind::Patroni;
+    profile.hosts.clear();
+    profile.patroni = Some(settings);
+    profile.pg.ssl_mode = SslMode::Disable;
+    let secrets = wrong_password("rt-pw");
+    secrets
+        .inner
+        .set(
+            &secret_key("rt-pw", PATRONI_PASSWORD),
+            common::PATRONI_PASSWORD_VALUE,
+        )
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let st = AppState::new(dir.path(), secrets.clone()).unwrap();
+    st.connections.upsert(profile).unwrap();
+
+    let view = st
+        .runtimes
+        .connect(st.profile("rt-pw").unwrap())
+        .await
+        .unwrap();
+    assert!(
+        matches!(view.state, ConnState::Connected | ConnState::Degraded),
+        "{view:?}"
+    );
+    let first = member_facts(&st, "rt-pw", "patroni1").await.unwrap_err();
+    assert_eq!(
+        (first.code, first.key.as_str()),
+        (ErrorCode::AuthFailed, "errors.pg.authFailed")
+    );
+    for _ in 0..5 {
+        let e = member_facts(&st, "rt-pw", "patroni1").await.unwrap_err();
+        assert_eq!(e.key, "errors.pg.loginNotRetried", "{e:?}");
+    }
+    assert_eq!(proxy.accepted(), 1, "одна попытка входа");
+    assert_eq!(secrets.pg_password_reads(), 1, "keychain прочитан один раз");
+    st.runtimes.disconnect("rt-pw");
 }

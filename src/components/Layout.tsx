@@ -78,7 +78,7 @@ export function Layout() {
         {/* Неактивные вкладки скрыты, но не размонтированы — состояние форм сохраняется. */}
         {tabs.map((tab) => (
           <section key={tab.id} className="tab-content" hidden={tab.id !== activeId}>
-            <TabContent tab={tab} />
+            <TabContent tab={tab} active={tab.id === activeId} />
           </section>
         ))}
       </main>

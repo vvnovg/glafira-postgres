@@ -32,7 +32,8 @@ function LazyHelp({ tab }: { tab: Extract<Tab, { kind: "help" }> }) {
   );
 }
 
-export function TabContent({ tab }: { tab: Tab }) {
+/** active — вкладка сейчас видна (неактивные остаются смонтированными, но скрыты). */
+export function TabContent({ tab, active = true }: { tab: Tab; active?: boolean }) {
   switch (tab.kind) {
     case "about":
       return <AboutPanel />;
@@ -45,6 +46,6 @@ export function TabContent({ tab }: { tab: Tab }) {
     case "connection-form":
       return <ConnectionFormTab connectionId={tab.connectionId} folderId={tab.folderId ?? null} tabId={tab.id} />;
     case "overview":
-      return <Overview connectionId={tab.connectionId} member={tab.member} />;
+      return <Overview connectionId={tab.connectionId} member={tab.member} active={active} />;
   }
 }

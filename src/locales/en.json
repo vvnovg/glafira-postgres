@@ -108,6 +108,7 @@
     },
     "pg": {
       "authFailed": "Authentication failed: check the user, the password and pg_hba.conf",
+      "loginNotRetried": "Authentication failed; the login is not retried until the connection is reopened: check the user, the password and pg_hba.conf, then connect again",
       "databaseNotFound": "The database does not exist",
       "notAuthorized": "Not enough privileges for the query",
       "statementTimeout": "The query was interrupted by statement_timeout",

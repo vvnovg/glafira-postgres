@@ -69,6 +69,7 @@ pub struct PausableProxy {
     port: u16,
     flags: Arc<Mutex<Vec<Arc<AtomicBool>>>>,
     closed: Arc<AtomicUsize>,
+    accepted: Arc<AtomicUsize>,
     accept: JoinHandle<()>,
 }
 
@@ -79,11 +80,13 @@ impl PausableProxy {
         let port = listener.local_addr().expect("proxy addr").port();
         let flags: Arc<Mutex<Vec<Arc<AtomicBool>>>> = Arc::default();
         let closed: Arc<AtomicUsize> = Arc::default();
+        let accepted: Arc<AtomicUsize> = Arc::default();
         let upstream = upstream.to_string();
         let accept = tokio::spawn({
-            let (flags, closed) = (flags.clone(), closed.clone());
+            let (flags, closed, accepted) = (flags.clone(), closed.clone(), accepted.clone());
             async move {
                 while let Ok((client, _)) = listener.accept().await {
+                    accepted.fetch_add(1, Ordering::SeqCst);
                     let Ok(server) = TcpStream::connect(upstream.as_str()).await else {
                         continue;
                     };
@@ -105,12 +108,18 @@ impl PausableProxy {
             port,
             flags,
             closed,
+            accepted,
             accept,
         }
     }
 
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// Сколько TCP-соединений клиент открыл через прокси (попыток подключения).
+    pub fn accepted(&self) -> usize {
+        self.accepted.load(Ordering::SeqCst)
     }
 
     /// Замораживает все соединения, открытые к этому моменту; новые не затрагиваются.
@@ -172,6 +181,116 @@ async fn pipe(
         closed.fetch_add(1, Ordering::SeqCst);
     }
     let _ = to.shutdown().await;
+}
+
+/// «Сервер PostgreSQL», который отвергает любой вход: на `SSLRequest` отвечает `N`, на стартовое сообщение —
+/// `ErrorResponse` 28P01 (неверный пароль). По `accepted` видно, сколько попыток входа сделал клиент.
+pub struct RejectingPg {
+    port: u16,
+    accepted: Arc<AtomicUsize>,
+    accept: JoinHandle<()>,
+}
+
+impl RejectingPg {
+    pub async fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let accepted: Arc<AtomicUsize> = Arc::default();
+        let accept = tokio::spawn({
+            let accepted = accepted.clone();
+            async move {
+                while let Ok((tcp, _)) = listener.accept().await {
+                    accepted.fetch_add(1, Ordering::SeqCst);
+                    tokio::spawn(reject_login(tcp));
+                }
+            }
+        });
+        Self {
+            port,
+            accepted,
+            accept,
+        }
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn accepted(&self) -> usize {
+        self.accepted.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for RejectingPg {
+    fn drop(&mut self) {
+        self.accept.abort();
+    }
+}
+
+async fn reject_login(mut tcp: TcpStream) {
+    for _ in 0..2 {
+        let mut len = [0u8; 4];
+        if tcp.read_exact(&mut len).await.is_err() {
+            return;
+        }
+        let mut body = vec![0u8; (u32::from_be_bytes(len) as usize).saturating_sub(4)];
+        if tcp.read_exact(&mut body).await.is_err() {
+            return;
+        }
+        // SSLRequest (код 80877103) — без TLS; иначе это стартовое сообщение.
+        if body == 80_877_103u32.to_be_bytes() {
+            if tcp.write_all(b"N").await.is_err() {
+                return;
+            }
+            continue;
+        }
+        break;
+    }
+    let mut fields = Vec::new();
+    for (tag, value) in [
+        (b'S', "FATAL"),
+        (b'V', "FATAL"),
+        (b'C', "28P01"),
+        (b'M', "password authentication failed"),
+    ] {
+        fields.push(tag);
+        fields.extend_from_slice(value.as_bytes());
+        fields.push(0);
+    }
+    fields.push(0);
+    let mut msg = vec![b'E'];
+    msg.extend_from_slice(&((fields.len() + 4) as u32).to_be_bytes());
+    msg.extend_from_slice(&fields);
+    let _ = tcp.write_all(&msg).await;
+    let _ = tcp.shutdown().await;
+}
+
+/// Keychain в памяти, который считает чтения пароля PostgreSQL.
+#[derive(Default)]
+pub struct CountingSecrets {
+    pub inner: MemoryStore,
+    pg_password_reads: AtomicUsize,
+}
+
+impl CountingSecrets {
+    pub fn pg_password_reads(&self) -> usize {
+        self.pg_password_reads.load(Ordering::SeqCst)
+    }
+}
+
+impl SecretStore for CountingSecrets {
+    fn get(&self, key: &str) -> glafira_pg_lib::error::AppResult<Option<String>> {
+        if key.ends_with(PG_PASSWORD) {
+            self.pg_password_reads.fetch_add(1, Ordering::SeqCst);
+        }
+        self.inner.get(key)
+    }
+    fn set(&self, key: &str, value: &str) -> glafira_pg_lib::error::AppResult<()> {
+        self.inner.set(key, value)
+    }
+    fn delete(&self, key: &str) -> glafira_pg_lib::error::AppResult<()> {
+        self.inner.delete(key)
+    }
 }
 
 /// Настройки кластера стенда: участники отдают внутренние имена patroniN — подменяем их на порты хоста.

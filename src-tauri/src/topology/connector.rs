@@ -61,8 +61,10 @@ impl NodeConnector for AdhocConnector {
     }
 }
 
-/// Соединение из пула приложения; при AUTH/TLS-ошибке пул вытесняется — следующая попытка
-/// перечитает keychain и файлы сертификатов. Пул, открытый на другой адрес узла, заменяется.
+/// Соединение из пула приложения. При ошибке TLS пул вытесняется — следующая попытка перечитает файлы
+/// сертификатов. Отказ во входе пул запоминает и новых попыток входа не делает (`PgPool::auth_failure`):
+/// keychain не перечитывается, пароль не перебирается каждые 10 с. Пул, открытый на другой адрес узла,
+/// заменяется.
 pub async fn pooled_client(
     pools: &PoolRegistry,
     profile: &ConnectionProfile,
@@ -87,7 +89,7 @@ pub async fn pooled_client(
         }
     };
     pool.get().await.inspect_err(|e| {
-        if matches!(e.code, ErrorCode::AuthFailed | ErrorCode::TlsError) {
+        if e.code == ErrorCode::TlsError {
             pools.evict(&key);
         }
     })
@@ -158,7 +160,7 @@ mod tests {
     use super::*;
     use crate::conn::profile::{SslMode, sample_profile};
     use crate::conn::testutil;
-    use crate::secrets::MemoryStore;
+    use crate::secrets::{MemoryStore, SecretStore};
 
     const WAIT: Duration = Duration::from_secs(2);
     const LIMIT: Duration = Duration::from_millis(300);
@@ -213,20 +215,130 @@ mod tests {
         assert_eq!(pool.idle_count(), 0);
     }
 
+    /// Keychain, который считает чтения пароля PostgreSQL.
+    #[derive(Default)]
+    struct CountingSecrets {
+        inner: MemoryStore,
+        password_reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl SecretStore for CountingSecrets {
+        fn get(&self, key: &str) -> AppResult<Option<String>> {
+            if key.ends_with(crate::secrets::PG_PASSWORD) {
+                self.password_reads
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            self.inner.get(key)
+        }
+        fn set(&self, key: &str, value: &str) -> AppResult<()> {
+            self.inner.set(key, value)
+        }
+        fn delete(&self, key: &str) -> AppResult<()> {
+            self.inner.delete(key)
+        }
+    }
+
     #[tokio::test]
-    async fn auth_failure_evicts_the_pool() {
-        // Заглушка делает TLS-рукопожатие и отвечает ошибкой 28000.
+    async fn rejected_login_is_not_retried_until_the_pool_is_evicted() {
+        let server = testutil::auth_failing_pg_server();
+        let secrets = Arc::new(CountingSecrets::default());
+        let nodes = PooledConnector {
+            secrets: secrets.clone(),
+            ..pooled(SslMode::Disable)
+        };
+        let reads = || {
+            secrets
+                .password_reads
+                .load(std::sync::atomic::Ordering::SeqCst)
+        };
+        let first = nodes
+            .facts_within("m", "127.0.0.1", server.port, LIMIT)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (first.code, first.key.as_str()),
+            (ErrorCode::AuthFailed, "errors.pg.authFailed")
+        );
+        // Опрос раз в 10 с: ни новых попыток входа, ни чтений keychain — сразу запомненный отказ.
+        for _ in 0..5 {
+            let e = nodes
+                .facts_within("m", "127.0.0.1", server.port, LIMIT)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                (e.code, e.key.as_str()),
+                (ErrorCode::AuthFailed, "errors.pg.loginNotRetried")
+            );
+            assert!(e.details.as_deref().unwrap().contains("28P01"), "{e:?}");
+        }
+        assert_eq!(server.accepted(), 1, "одна попытка входа");
+        assert_eq!(reads(), 1, "keychain прочитан один раз");
+        assert_eq!(
+            nodes.pools.keys(),
+            vec![key("m")],
+            "пул с отметкой остаётся"
+        );
+
+        // Переоткрытие подключения (сохранение профиля или секретов) вытесняет пулы: вход пробуется снова.
+        nodes.pools.evict_connection("c");
+        nodes
+            .facts_within("m", "127.0.0.1", server.port, LIMIT)
+            .await
+            .unwrap_err();
+        assert_eq!(server.accepted(), 2);
+        assert_eq!(reads(), 2);
+
+        // Узел переехал на другой адрес — новый пул, новая попытка.
+        let moved = testutil::auth_failing_pg_server();
+        nodes
+            .facts_within("m", "127.0.0.1", moved.port, LIMIT)
+            .await
+            .unwrap_err();
+        assert_eq!((server.accepted(), moved.accepted()), (2, 1));
+    }
+
+    #[tokio::test]
+    async fn rejected_login_does_not_spoil_other_databases_or_members() {
+        let server = testutil::auth_failing_pg_server();
+        let nodes = pooled(SslMode::Disable);
+        nodes
+            .facts_within("m", "127.0.0.1", server.port, LIMIT)
+            .await
+            .unwrap_err();
+        // Отказ на одной БД (правило pg_hba.conf для конкретной базы) не запрещает вход в другие и на другие узлы.
+        for (member, db) in [("m", "other"), ("n", "postgres")] {
+            pooled_client(
+                &nodes.pools,
+                &nodes.profile,
+                nodes.secrets.clone(),
+                member,
+                "127.0.0.1",
+                server.port,
+                db,
+            )
+            .await
+            .err()
+            .unwrap();
+        }
+        assert_eq!(server.accepted(), 3);
+    }
+
+    #[tokio::test]
+    async fn tls_failure_evicts_the_pool() {
+        // CA не тот: проверка сертификата не проходит, пул вытесняется — файлы сертификатов перечитаются.
+        let dir = tempfile::tempdir().unwrap();
+        let other = testutil::make_ca("other");
+        let ca_path = dir.path().join("ca.pem");
+        std::fs::write(&ca_path, other.cert.to_pem().unwrap()).unwrap();
         let server = testutil::tls_server(&testutil::make_self_signed_server("localhost"));
-        let nodes = pooled(SslMode::Require);
+        let mut nodes = pooled(SslMode::VerifyCa);
+        nodes.profile.pg.tls.ca_path = Some(ca_path.to_string_lossy().into_owned());
         let e = nodes
             .facts_within("m", "127.0.0.1", server.port, LIMIT)
             .await
             .unwrap_err();
-        assert_eq!(e.code, ErrorCode::AuthFailed);
-        assert!(
-            nodes.pools.keys().is_empty(),
-            "пул вытеснен: пароль перечитается"
-        );
+        assert_eq!(e.code, ErrorCode::TlsError, "{e:?}");
+        assert!(nodes.pools.keys().is_empty(), "пул вытеснен");
     }
 
     #[tokio::test]

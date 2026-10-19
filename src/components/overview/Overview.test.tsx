@@ -552,6 +552,43 @@ describe("Overview: опрос фактов и устаревшие данные
     expect(callsFor("pg-1")).toBe(4);
   });
 
+  it("после отказа во входе (AUTH_FAILED) узел больше не опрашивается: повтор с неверным паролем блокирует учётную запись", async () => {
+    vi.mocked(api.getMemberFacts).mockRejectedValue({ code: "AUTH_FAILED", key: "errors.pg.authFailed", message: "auth failed", retryable: false });
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView({ topology: topology({ members: [member("pg-1", { role: "primary" }), member("pg-2")] }) }));
+    renderWithClient(<Overview connectionId="c" />);
+    await settle();
+    expect([callsFor("pg-1"), callsFor("pg-2")]).toEqual([1, 1]);
+    await tick(60_000);
+    expect([callsFor("pg-1"), callsFor("pg-2")]).toEqual([1, 1]);
+    // Причина видна у узла значком.
+    expect(screen.getAllByRole("img", { name: /Аутентификация не прошла/ })).toHaveLength(2);
+  });
+
+  it("другие сбои чтения фактов опрос не останавливают", async () => {
+    vi.mocked(api.getMemberFacts).mockRejectedValue({ code: "CONNECTION_FAILED", message: "gone", retryable: true });
+    vi.mocked(api.getTopology).mockResolvedValue(onePrimary());
+    renderWithClient(<Overview connectionId="c" />);
+    await settle();
+    await tick(20_000);
+    expect(callsFor("pg-1")).toBe(3);
+  });
+
+  it("скрытая вкладка узлы по таймеру не опрашивает, видимая — опрашивает снова", async () => {
+    vi.mocked(api.getTopology).mockResolvedValue(onePrimary());
+    const { rerender, client } = renderWithClient(<Overview connectionId="c" active={false} />);
+    await settle();
+    expect(callsFor("pg-1")).toBe(1);
+    await tick(60_000);
+    expect(callsFor("pg-1")).toBe(1);
+    rerender(
+      <QueryClientProvider client={client}>
+        <Overview connectionId="c" active />
+      </QueryClientProvider>,
+    );
+    await tick(10_000);
+    expect(callsFor("pg-1")).toBe(2);
+  });
+
   it("опрос останавливается, когда подключение закрыто или упало", async () => {
     vi.mocked(api.getTopology).mockResolvedValue(onePrimary());
     const { client } = renderWithClient(<Overview connectionId="c" />);

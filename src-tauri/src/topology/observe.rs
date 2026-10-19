@@ -35,7 +35,8 @@ pub async fn observe(
 pub fn default_member(profile: &ConnectionProfile, t: &Topology) -> Option<String> {
     let reachable = |m: &&Member| m.reachable;
     let pick = match profile.kind {
-        ConnectionKind::Server => t.members.first(),
+        // Недоступный сервер узлом каталога не показывается: дерево не должно предлагать «Базы данных» мёртвого узла.
+        ConnectionKind::Server => t.members.first().filter(reachable),
         ConnectionKind::Patroni => t
             .leader()
             .filter(reachable)
@@ -122,7 +123,13 @@ mod tests {
             "лидер недоступен — любой доступный"
         );
         let s = sample_profile("s");
-        let one = topo(vec![member("localhost:5432", Role::Replica)]);
+        let mut one = topo(vec![member("localhost:5432", Role::Replica)]);
         assert_eq!(default_member(&s, &one).as_deref(), Some("localhost:5432"));
+        one.members[0].reachable = false;
+        assert_eq!(
+            default_member(&s, &one),
+            None,
+            "недоступный сервер — не узел каталога"
+        );
     }
 }

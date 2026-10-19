@@ -195,6 +195,29 @@ impl Entry {
     }
 }
 
+/// Первое подключение к серверу или списку узлов, где не ответил ни один узел, — это отказ, а не «частично
+/// доступно» (спец. P1 §7: `degraded` — недоступна часть участников): ошибка — первого узла, опрос не
+/// запускается. Иначе неверный пароль или выключенный сервер давал бы живое подключение, которое каждые 10 с
+/// пробовало бы войти снова. У Patroni доступность участника — ответ REST API, и первое подключение без
+/// ответа `/cluster` и так ошибка (`discover`).
+fn first_connect_failure(profile: &ConnectionProfile, t: &Topology) -> Option<AppError> {
+    if profile.kind == ConnectionKind::Patroni || t.members.iter().any(|m| m.reachable) {
+        return None;
+    }
+    Some(
+        t.members
+            .iter()
+            .find_map(|m| m.error.clone())
+            .unwrap_or_else(|| {
+                app_err!(
+                    ErrorCode::NodeUnavailable,
+                    "errors.topology.noNode",
+                    "No suitable node is available"
+                )
+            }),
+    )
+}
+
 fn state_for(t: &Topology) -> ConnState {
     if t.is_degraded() {
         ConnState::Degraded
@@ -307,7 +330,12 @@ impl Runtimes {
             self.emit_state(&id, ConnState::Connecting, None);
             generation
         };
-        let result = self.source.observe(&profile, None).await;
+        let result = self.source.observe(&profile, None).await.and_then(|t| {
+            match first_connect_failure(&profile, &t) {
+                Some(err) => Err(err),
+                None => Ok(t),
+            }
+        });
         let mut entries = self.entries.lock_safe();
         // Подключение закрыто (или открыто заново), пока шёл опрос: результат устарел, событий не будет.
         let Some(e) = entries.get_mut(&id).filter(|e| e.generation == generation) else {
@@ -795,6 +823,118 @@ mod tests {
             rec.states.lock_safe().last(),
             Some(&ConnState::Disconnected)
         );
+    }
+
+    /// Узел, который не ответил: отказ во входе.
+    fn refused(name: &str) -> Member {
+        let mut m = member(name, Role::Unknown);
+        m.reachable = false;
+        m.state = None;
+        m.error = Some(app_err!(
+            ErrorCode::AuthFailed,
+            "errors.pg.authFailed",
+            "Authentication failed: check the user, the password and pg_hba.conf"
+        ));
+        m
+    }
+
+    fn hosts_topology(kind: ConnectionKind, members: Vec<Member>) -> Topology {
+        let mut t = topo(members);
+        t.kind = kind;
+        (t.scope, t.paused) = (None, None);
+        t.warnings = t
+            .members
+            .iter()
+            .filter(|m| !m.reachable)
+            .map(|m| TopologyWarning::MemberUnreachable {
+                name: m.name.clone(),
+            })
+            .collect();
+        t
+    }
+
+    fn profile_of(kind: ConnectionKind) -> ConnectionProfile {
+        let mut p = sample_profile("c");
+        p.kind = kind;
+        p
+    }
+
+    #[tokio::test]
+    async fn server_without_an_answer_fails_on_first_connect_and_is_not_polled() {
+        for kind in [ConnectionKind::Server, ConnectionKind::HostList] {
+            let mut down = vec![refused("a")];
+            if kind == ConnectionKind::HostList {
+                let mut tcp = refused("b");
+                tcp.error = Some(err());
+                down.push(tcp);
+            }
+            let (rt, src, rec, _) = setup(vec![Ok(hosts_topology(kind, down))]);
+            let e = rt.connect(profile_of(kind)).await.unwrap_err();
+            assert_eq!(
+                (e.code, e.key.as_str()),
+                (ErrorCode::AuthFailed, "errors.pg.authFailed"),
+                "{kind:?}: ошибка первого узла"
+            );
+            let v = rt.view("c");
+            assert_eq!(v.state, ConnState::Failed, "{kind:?}");
+            assert_eq!(
+                v.error.as_ref().map(|e| e.key.as_str()),
+                Some("errors.pg.authFailed")
+            );
+            assert!(
+                v.topology.is_none() && v.catalog_member.is_none(),
+                "{kind:?}"
+            );
+            // Опрос не запущен: за несколько интервалов (по 40 мс) ни одного нового опроса узлов.
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            assert_eq!(src.calls(), 1, "{kind:?}: узлы не опрашиваются снова");
+            assert_eq!(
+                *rec.states.lock_safe(),
+                [ConnState::Connecting, ConnState::Failed],
+                "{kind:?}"
+            );
+            assert!(rec.topologies.lock_safe().is_empty());
+            assert_eq!(
+                rt.target("c", None).unwrap_err().key,
+                "errors.topology.notConnected",
+                "{kind:?}: каталог и факты с упавшего подключения не читаются"
+            );
+            rt.shutdown();
+        }
+    }
+
+    #[tokio::test]
+    async fn some_reachable_member_keeps_the_connection_degraded_and_polled() {
+        let partly = hosts_topology(
+            ConnectionKind::HostList,
+            vec![member("a", Role::Primary), refused("b")],
+        );
+        let (rt, src, _rec, _) = setup(vec![Ok(partly)]);
+        let v = rt
+            .connect(profile_of(ConnectionKind::HostList))
+            .await
+            .unwrap();
+        assert_eq!(v.state, ConnState::Degraded);
+        assert_eq!(v.catalog_member.as_deref(), Some("a"));
+        eventually("опрос идёт", || src.calls() >= 3).await;
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn patroni_members_without_api_answers_keep_the_old_behaviour() {
+        // У Patroni доступность участника — ответ REST API; `/cluster` ответил, `/patroni` — нет.
+        let mut t = two("a");
+        for m in &mut t.members {
+            m.reachable = false;
+        }
+        t.warnings = vec![
+            TopologyWarning::MemberUnreachable { name: "a".into() },
+            TopologyWarning::MemberUnreachable { name: "b".into() },
+        ];
+        let (rt, _src, _rec, _) = manual(vec![Ok(t)]);
+        let v = rt.connect(patroni_profile()).await.unwrap();
+        assert_eq!(v.state, ConnState::Degraded);
+        rt.shutdown();
     }
 
     #[tokio::test]

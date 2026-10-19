@@ -130,12 +130,17 @@ pub fn silent_server() -> FakeServer {
 
 /// Сообщение `ErrorResponse` протокола PostgreSQL: FATAL, SQLSTATE 28000.
 fn error_response() -> Vec<u8> {
+    fatal("28000", "harness: TLS handshake completed")
+}
+
+/// `ErrorResponse` уровня FATAL с кодом `sqlstate` и текстом `message`.
+fn fatal(sqlstate: &str, message: &str) -> Vec<u8> {
     let mut fields = Vec::new();
     for (tag, value) in [
         (b'S', "FATAL"),
         (b'V', "FATAL"),
-        (b'C', "28000"),
-        (b'M', "harness: TLS handshake completed"),
+        (b'C', sqlstate),
+        (b'M', message),
     ] {
         fields.push(tag);
         fields.extend_from_slice(value.as_bytes());
@@ -242,6 +247,49 @@ impl Drop for StallingPg {
 }
 
 pub fn stalling_pg_server() -> StallingPg {
+    pg_server(serve_stalling)
+}
+
+/// «Сервер PostgreSQL», который отвергает любой вход: на `SSLRequest` отвечает `N`, на стартовое
+/// сообщение — `ErrorResponse` 28P01 (неверный пароль) и закрывает соединение. По `accepted` видно,
+/// сколько попыток входа сделал клиент.
+pub fn auth_failing_pg_server() -> StallingPg {
+    pg_server(|mut tcp, _| {
+        let _ = tcp.set_nonblocking(false);
+        if read_startup(&mut tcp) {
+            let _ = tcp.write_all(&fatal(
+                "28P01",
+                "password authentication failed for user \"u\"",
+            ));
+        }
+    })
+}
+
+/// Читает `SSLRequest` (отвечает `N`) и стартовое сообщение клиента; `false` — клиент ушёл раньше.
+fn read_startup(tcp: &mut TcpStream) -> bool {
+    for _ in 0..2 {
+        let mut len = [0u8; 4];
+        if tcp.read_exact(&mut len).is_err() {
+            return false;
+        }
+        let mut body = vec![0u8; (u32::from_be_bytes(len) as usize).saturating_sub(4)];
+        if tcp.read_exact(&mut body).is_err() {
+            return false;
+        }
+        // SSLRequest: код 80877103 — отказываем, клиент продолжит без TLS.
+        if body == 80_877_103u32.to_be_bytes() {
+            if tcp.write_all(b"N").is_err() {
+                return false;
+            }
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+/// Слушатель на loopback: каждое соединение обслуживает `serve` в своём потоке; счётчики — в `StallingPg`.
+fn pg_server(serve: fn(TcpStream, &AtomicUsize)) -> StallingPg {
     let (listener, port) = listen();
     listener.set_nonblocking(true).unwrap();
     let server = StallingPg {
@@ -264,7 +312,7 @@ pub fn stalling_pg_server() -> StallingPg {
                     accepted.fetch_add(1, Ordering::SeqCst);
                     let (closed, terminated) = (closed.clone(), terminated.clone());
                     std::thread::spawn(move || {
-                        serve_stalling(tcp, &terminated);
+                        serve(tcp, &terminated);
                         closed.fetch_add(1, Ordering::SeqCst);
                     });
                 }
@@ -280,23 +328,8 @@ fn serve_stalling(mut tcp: TcpStream, terminated: &AtomicUsize) {
     // Принятый сокет наследует неблокирующий режим слушателя (macOS, BSD).
     let _ = tcp.set_nonblocking(false);
     let _ = tcp.set_nodelay(true);
-    for _ in 0..2 {
-        let mut len = [0u8; 4];
-        if tcp.read_exact(&mut len).is_err() {
-            return;
-        }
-        let mut body = vec![0u8; (u32::from_be_bytes(len) as usize).saturating_sub(4)];
-        if tcp.read_exact(&mut body).is_err() {
-            return;
-        }
-        // SSLRequest: код 80877103 — отказываем, клиент продолжит без TLS.
-        if body == 80_877_103u32.to_be_bytes() {
-            if tcp.write_all(b"N").is_err() {
-                return;
-            }
-            continue;
-        }
-        break;
+    if !read_startup(&mut tcp) {
+        return;
     }
     let mut reply = Vec::new();
     reply.extend_from_slice(&[b'R', 0, 0, 0, 8, 0, 0, 0, 0]);

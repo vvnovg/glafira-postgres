@@ -174,6 +174,22 @@ pub fn connect_timeout(host: &str, port: u16, secs: u64) -> AppError {
     )
 }
 
+/// Отказ во входе, который пул запомнил: новых попыток входа не будет, пока подключение не откроют заново
+/// (`conn::pool::PgPool::auth_failure`). Подробности — от исходного отказа (ответ сервера).
+pub fn login_not_retried(original: &AppError) -> AppError {
+    app_err!(
+        ErrorCode::AuthFailed,
+        "errors.pg.loginNotRetried",
+        "Authentication failed; the login is not retried until the connection is reopened: check the user, the password and pg_hba.conf, then connect again"
+    )
+    .with_details(
+        original
+            .details
+            .clone()
+            .unwrap_or_else(|| original.message.clone()),
+    )
+}
+
 pub fn tls_setup(e: impl std::fmt::Display) -> AppError {
     app_err!(
         ErrorCode::TlsError,
