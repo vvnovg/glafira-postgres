@@ -101,7 +101,8 @@
       "incompatibleVersion": "The file was created by an incompatible version of Glafira — update the app",
       "invalidJson": "The file is damaged or is not JSON: {{error}}",
       "unsupportedConnection": "Not supported by this version of Glafira (update the app): {{error}}",
-      "duplicateId": "Duplicate connection id in the file"
+      "duplicateId": "Duplicate connection id in the file",
+      "secretInUrl": "The Patroni API address contains a user name or password: remove it from the address"
     },
     "pg": {
       "authFailed": "Authentication failed: check the user, the password and pg_hba.conf",
@@ -376,6 +377,14 @@
       "hint": "An archive with logs, the version and connection profiles without passwords. Attach it to your support request — the app itself sends nothing.",
       "collect": "Collect diagnostics",
       "saved": "Archive saved: {{path}}"
+    }
+  },
+  "warnings": {
+    "import": {
+      "prodReadOnly_one": "{{count}} prod connection will be read-only: changing prod connections requires Pro",
+      "prodReadOnly_other": "{{count}} prod connections will be read-only: changing prod connections requires Pro",
+      "missingFiles_one": "Certificate files of {{count}} connection are not found on this computer — check the paths",
+      "missingFiles_other": "Certificate files of {{count}} connections are not found on this computer — check the paths"
     }
   },
   "exchange": {

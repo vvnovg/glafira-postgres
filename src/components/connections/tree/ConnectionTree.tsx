@@ -12,9 +12,6 @@ import { FolderMenu, type FolderMenuItem } from "./FolderMenu";
 import { ImportDialog } from "./ImportDialog";
 import { buildTree, canMoveFolder, filterTree, type TreeNode } from "./folderTree";
 
-/** Экспорт и импорт подключений: команды вернёт Task 19, до неё пункты меню скрыты. */
-const EXCHANGE = false;
-
 const COLLAPSED_KEY = "glafira.tree.collapsed";
 /** Тип данных перетаскивания: сам элемент берётся из ref (в dragover браузер данные не отдаёт). */
 const DRAG_TYPE = "application/x-glafira-tree-item";
@@ -22,14 +19,14 @@ const DRAG_TYPE = "application/x-glafira-tree-item";
 const BEFORE_ZONE = 0.3;
 /** Фильтр диалогов сохранения и открытия файла экспорта. */
 const EXCHANGE_FILTERS = [{ name: "Glafira", extensions: ["json"] }];
-const EXCHANGE_SUFFIX = ".glafira-connections.json";
+const EXCHANGE_SUFFIX = ".glafira-postgres-connections.json";
 
 /** Имя файла экспорта по умолчанию: имя папки (без недопустимых в именах файлов символов) или дата. */
 function exportFileName(folder: ConnectionFolder | null): string {
   if (folder) return `${folder.name.replace(/[\\/:*?"<>|]/g, "_")}${EXCHANGE_SUFFIX}`;
   const d = new Date();
   const pad = (n: number) => String(n).padStart(2, "0");
-  return `glafira-connections-${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}${EXCHANGE_SUFFIX}`;
+  return `glafira-postgres-connections-${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}${EXCHANGE_SUFFIX}`;
 }
 
 function readCollapsed(): Set<string> {
@@ -252,12 +249,8 @@ export function ConnectionTree() {
 
   const headerMenuItems: FolderMenuItem[] = [
     { label: t("sidebar.newFolder"), onSelect: () => startCreate(null) },
-    ...(EXCHANGE
-      ? [
-          { label: t("sidebar.exportAll"), onSelect: () => void exportTree(null) },
-          { label: t("sidebar.import"), onSelect: () => void startImport(null) },
-        ]
-      : []),
+    { label: t("sidebar.exportAll"), onSelect: () => void exportTree(null) },
+    { label: t("sidebar.import"), onSelect: () => void startImport(null) },
   ];
 
   const folderMenuItems = (folder: ConnectionFolder): FolderMenuItem[] => [
@@ -277,12 +270,8 @@ export function ConnectionTree() {
         setDeleting(folder.id);
       },
     },
-    ...(EXCHANGE
-      ? [
-          { label: t("sidebar.folder.export"), onSelect: () => void exportTree(folder) },
-          { label: t("sidebar.folder.importHere"), onSelect: () => void startImport(folder.id) },
-        ]
-      : []),
+    { label: t("sidebar.folder.export"), onSelect: () => void exportTree(folder) },
+    { label: t("sidebar.folder.importHere"), onSelect: () => void startImport(folder.id) },
   ];
 
   // --- Перетаскивание ---

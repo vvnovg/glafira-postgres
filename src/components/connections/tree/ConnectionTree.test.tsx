@@ -229,7 +229,8 @@ describe("ConnectionTree", () => {
       "Новое подключение здесь",
       "Переименовать",
       "Удалить",
-      // «Экспортировать папку…» и «Импортировать сюда…» вернёт Task 19 (флаг EXCHANGE в ConnectionTree).
+      "Экспортировать папку…",
+      "Импортировать сюда…",
     ]);
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
@@ -491,7 +492,6 @@ describe("ConnectionTree", () => {
     fireEvent.blur(screen.getByRole("textbox", { name: "Имя папки" }));
     expect(screen.getByRole("textbox", { name: "Имя папки" })).toHaveValue("x");
   });
-  // Команды экспорта и импорта вернёт Task 19: пока пункты меню скрыты флагом EXCHANGE, тесты пропущены.
   describe("экспорт и импорт", () => {
     const EMPTY_PREVIEW = { added: [], updated: [], unchanged: [], skipped: [], warnings: [], needsPasswords: 0 };
 
@@ -503,7 +503,7 @@ describe("ConnectionTree", () => {
       return { user, menu: screen.getByRole("menu") };
     }
 
-    it.skip("«Экспортировать папку…» сохраняет папку и сообщает итог", async () => {
+    it("«Экспортировать папку…» сохраняет папку и сообщает итог", async () => {
       vi.mocked(save).mockResolvedValue("/tmp/a.json");
       vi.mocked(api.exportConnections).mockResolvedValue({ connections: 1, folders: 2 });
       renderWithClient(<ConnectionTree />);
@@ -511,25 +511,25 @@ describe("ConnectionTree", () => {
       const { user, menu } = await openFolderMenu("Проект А");
       await user.click(within(menu).getByRole("menuitem", { name: "Экспортировать папку…" }));
       expect(save).toHaveBeenCalledWith({
-        defaultPath: "Проект А.glafira-connections.json",
+        defaultPath: "Проект А.glafira-postgres-connections.json",
         filters: [{ name: "Glafira", extensions: ["json"] }],
       });
       expect(api.exportConnections).toHaveBeenCalledWith("/tmp/a.json", "a");
       expect(await screen.findByRole("status")).toHaveTextContent("Сохранено: подключений 1, папок 2");
     });
 
-    it.skip("«Экспортировать всё…» передаёт null и имя файла с датой", async () => {
+    it("«Экспортировать всё…» передаёт null и имя файла с датой", async () => {
       vi.mocked(save).mockResolvedValue("/tmp/all.json");
       vi.mocked(api.exportConnections).mockResolvedValue({ connections: 2, folders: 2 });
       renderWithClient(<ConnectionTree />);
       const { user, menu } = await openHeaderMenu();
       await user.click(within(menu).getByRole("menuitem", { name: "Экспортировать всё…" }));
       const arg = vi.mocked(save).mock.calls[0][0];
-      expect(arg?.defaultPath).toMatch(/^glafira-connections-\d{4}-\d{2}-\d{2}\.glafira-connections\.json$/);
+      expect(arg?.defaultPath).toMatch(/^glafira-postgres-connections-\d{4}-\d{2}-\d{2}\.glafira-postgres-connections\.json$/);
       expect(api.exportConnections).toHaveBeenCalledWith("/tmp/all.json", null);
     });
 
-    it.skip("отмена диалога сохранения ничего не вызывает", async () => {
+    it("отмена диалога сохранения ничего не вызывает", async () => {
       vi.mocked(save).mockResolvedValue(null);
       renderWithClient(<ConnectionTree />);
       await screen.findByText("kafka-ift");
@@ -540,7 +540,7 @@ describe("ConnectionTree", () => {
       expect(screen.queryByRole("status")).not.toBeInTheDocument();
     });
 
-    it.skip("ошибка экспорта показывается баннером", async () => {
+    it("ошибка экспорта показывается баннером", async () => {
       vi.mocked(save).mockResolvedValue("/tmp/a.json");
       vi.mocked(api.exportConnections).mockRejectedValue({ code: "INTERNAL", message: "disk full", retryable: false });
       renderWithClient(<ConnectionTree />);
@@ -549,7 +549,7 @@ describe("ConnectionTree", () => {
       expect(await screen.findByRole("alert")).toHaveTextContent("disk full");
     });
 
-    it.skip("«Импортировать сюда…» открывает диалог с этой папкой и сообщает итог", async () => {
+    it("«Импортировать сюда…» открывает диалог с этой папкой и сообщает итог", async () => {
       vi.mocked(openDialog).mockResolvedValue("/tmp/in.json");
       vi.mocked(api.previewImport).mockResolvedValue(EMPTY_PREVIEW);
       vi.mocked(api.applyImport).mockResolvedValue({
@@ -572,7 +572,7 @@ describe("ConnectionTree", () => {
       expect(status).toHaveTextContent("Введите пароли для 1 подключения");
     });
 
-    it.skip("«Импортировать…» в заголовке: отмена выбора файла не открывает диалог", async () => {
+    it("«Импортировать…» в заголовке: отмена выбора файла не открывает диалог", async () => {
       vi.mocked(openDialog).mockResolvedValue(null);
       renderWithClient(<ConnectionTree />);
       const { user, menu } = await openHeaderMenu();

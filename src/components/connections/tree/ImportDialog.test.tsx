@@ -43,7 +43,7 @@ const PREVIEW: ImportPreview = {
   needsPasswords: 3,
 };
 
-const PATH = "/tmp/in.glafira-connections.json";
+const PATH = "/tmp/in.glafira-postgres-connections.json";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -92,8 +92,7 @@ describe("ImportDialog", () => {
     expect(await screen.findByRole("combobox", { name: "Куда импортировать" })).toHaveValue("a");
   });
 
-  // Ключи warnings.import.* вернёт Task 19 вместе с командами импорта: без них перевод предупреждения недоступен.
-  it.skip("показывает предупреждения и строку о паролях", async () => {
+  it("показывает предупреждения и строку о паролях", async () => {
     renderDialog();
     expect(await screen.findByText(/2 prod-подключения будут только для чтения/)).toBeInTheDocument();
     expect(screen.getByText("После импорта введите пароли для 3 подключений")).toBeInTheDocument();

@@ -350,8 +350,6 @@ impl ConnectionStore {
     }
 
     /// Копия всех данных хранилища (для расчётов без записи, например предпросмотра импорта).
-    // Вызывается предпросмотром импорта (команды импорта вернутся позже).
-    #[allow(dead_code)]
     pub(crate) fn snapshot(&self) -> StoreData {
         self.cache.read_safe().clone()
     }
