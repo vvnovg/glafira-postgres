@@ -516,6 +516,50 @@
       "affects": "Advanced checks (indexes, bloat, waits) will be unavailable"
     }
   },
+  "overview": {
+    "paused": "Paused",
+    "scope": "scope: {{scope}}",
+    "head": "{{role}}: {{names}}",
+    "pendingRestart": "Restart pending",
+    "unreachable": "Node is unreachable: {{error}}",
+    "factsFailed": "Could not read node data: {{error}}",
+    "dcsSeen": "DCS: {{at}}",
+    "journal": "Event journal",
+    "journalEmpty": "No events yet: the journal is kept while the connection is open",
+    "minutes_one": "{{count}} minute",
+    "minutes_other": "{{count}} minutes",
+    "hours_one": "{{count}} hour",
+    "hours_other": "{{count}} hours",
+    "days_one": "{{count}} day",
+    "days_other": "{{count}} days",
+    "col": {
+      "name": "Node",
+      "role": "Role",
+      "state": "State",
+      "address": "Address",
+      "timeline": "Timeline",
+      "lag": "Lag",
+      "replay": "Replay delay",
+      "upstream": "WAL source",
+      "tags": "Tags",
+      "versions": "Versions",
+      "uptime": "Uptime",
+      "connections": "Connections",
+      "databases": "Databases"
+    },
+    "event": {
+      "leaderChanged": "Leader changed: {{from}} → {{to}}",
+      "memberAdded": "Node {{name}} added",
+      "memberRemoved": "Node {{name}} left the cluster",
+      "memberRoleChanged": "{{name}}: role {{from}} → {{to}}",
+      "memberStateChanged": "{{name}}: state {{from}} → {{to}}",
+      "memberUnreachable": "Node {{name}} is unreachable",
+      "memberReachable": "Node {{name}} is reachable again",
+      "timelineChanged": "Timeline {{from}} → {{to}}",
+      "paused": "The cluster was paused",
+      "resumed": "The pause was lifted"
+    }
+  },
   "hints": {
     "label": "Hint: {{name}}",
     "connections": {

@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import type { Tab } from "../state/workspace";
 import { AboutPanel } from "./about/AboutPanel";
 import { ConnectionFormTab } from "./connections/ConnectionFormTab";
+import { Overview } from "./overview/Overview";
 import { SettingsPanel } from "./settings/SettingsPanel";
 import { LicensePanel } from "./license/LicensePanel";
 
@@ -43,5 +44,7 @@ export function TabContent({ tab }: { tab: Tab }) {
       return <LicensePanel />;
     case "connection-form":
       return <ConnectionFormTab connectionId={tab.connectionId} folderId={tab.folderId ?? null} tabId={tab.id} />;
+    case "overview":
+      return <Overview connectionId={tab.connectionId} member={tab.member} />;
   }
 }

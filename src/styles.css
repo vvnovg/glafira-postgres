@@ -169,3 +169,8 @@ ul.tree-catalog, .tree-catalog ul { padding-left: 12px; }
 button.link.tree-name { text-align: left; color: inherit; }
 label.inline.wrap { white-space: normal; }
 .kind-badge { font-size: 10px; padding: 0 4px; border: 1px solid var(--border); border-radius: 3px; color: var(--muted); }
+/* Обзор: таблица участников шире окна прокручивается сама, а шапка и журнал остаются на месте. */
+.table-scroll { overflow-x: auto; }
+.members-table th, .members-table td { white-space: nowrap; }
+.members-table td.wrap { white-space: normal; min-width: 180px; }
+.warning-red { color: var(--danger); font-weight: 600; }

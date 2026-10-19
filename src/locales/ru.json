@@ -526,6 +526,56 @@
       "affects": "Расширенные проверки (индексы, bloat, ожидания) будут недоступны"
     }
   },
+  "overview": {
+    "paused": "Пауза",
+    "scope": "scope: {{scope}}",
+    "head": "{{role}}: {{names}}",
+    "pendingRestart": "Нужен перезапуск",
+    "unreachable": "Узел недоступен: {{error}}",
+    "factsFailed": "Не удалось получить сведения об узле: {{error}}",
+    "dcsSeen": "DCS: {{at}}",
+    "journal": "Журнал событий",
+    "journalEmpty": "Пока без событий: журнал ведётся, пока подключение открыто",
+    "minutes_one": "{{count}} минута",
+    "minutes_few": "{{count}} минуты",
+    "minutes_many": "{{count}} минут",
+    "minutes_other": "{{count}} минуты",
+    "hours_one": "{{count}} час",
+    "hours_few": "{{count}} часа",
+    "hours_many": "{{count}} часов",
+    "hours_other": "{{count}} часа",
+    "days_one": "{{count}} день",
+    "days_few": "{{count}} дня",
+    "days_many": "{{count}} дней",
+    "days_other": "{{count}} дня",
+    "col": {
+      "name": "Узел",
+      "role": "Роль",
+      "state": "Состояние",
+      "address": "Адрес",
+      "timeline": "Таймлайн",
+      "lag": "Лаг",
+      "replay": "Задержка replay",
+      "upstream": "Источник WAL",
+      "tags": "Теги",
+      "versions": "Версии",
+      "uptime": "Работает",
+      "connections": "Соединения",
+      "databases": "БД"
+    },
+    "event": {
+      "leaderChanged": "Смена лидера: {{from}} → {{to}}",
+      "memberAdded": "Добавлен узел {{name}}",
+      "memberRemoved": "Узел {{name}} исчез из кластера",
+      "memberRoleChanged": "{{name}}: роль {{from}} → {{to}}",
+      "memberStateChanged": "{{name}}: состояние {{from}} → {{to}}",
+      "memberUnreachable": "Узел {{name}} недоступен",
+      "memberReachable": "Узел {{name}} снова доступен",
+      "timelineChanged": "Таймлайн {{from}} → {{to}}",
+      "paused": "Кластер переведён в паузу",
+      "resumed": "Пауза снята"
+    }
+  },
   "hints": {
     "label": "Подсказка: {{name}}",
     "connections": {
