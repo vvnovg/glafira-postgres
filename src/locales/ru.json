@@ -285,5 +285,10 @@
   },
   "hints": {
     "label": "Подсказка: {{name}}"
+  },
+  "test": {
+    "patroniOk": "Участников: {{members}}, лидер {{leader}}",
+    "discoveryOk": "Найдено узлов: {{members}}",
+    "nodeOk": "{{role}}, PostgreSQL {{version}}"
   }
 }

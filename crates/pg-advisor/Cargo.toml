@@ -1,0 +1,12 @@
+[package]
+name = "pg-advisor"
+version = "0.1.0"
+edition = "2024"
+description = "Правила Glafira for PostgreSQL без ввода-вывода: готовность к диагностике (P1), дальше — проверки и разбор планов"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

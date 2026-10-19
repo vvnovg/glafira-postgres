@@ -8,6 +8,7 @@ pub mod license;
 pub mod logging;
 pub mod policy;
 pub mod product;
+pub mod readiness;
 pub mod secrets;
 pub mod settings;
 pub mod state;
@@ -49,6 +50,7 @@ pub fn run() {
             commands::connections::save_connection,
             commands::connections::delete_connection,
             commands::connections::parse_connection_string,
+            commands::connections::test_connection,
             commands::folders::list_folders,
             commands::folders::create_folder,
             commands::folders::rename_folder,

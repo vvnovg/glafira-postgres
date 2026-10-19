@@ -277,5 +277,10 @@
   },
   "hints": {
     "label": "Hint: {{name}}"
+  },
+  "test": {
+    "patroniOk": "{{members}} members, leader {{leader}}",
+    "discoveryOk": "{{members}} nodes found",
+    "nodeOk": "{{role}}, PostgreSQL {{version}}"
   }
 }

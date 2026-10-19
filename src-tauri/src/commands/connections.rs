@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde::Deserialize;
 use tauri::State;
@@ -8,9 +9,10 @@ use crate::conn::profile::{
     ConnectionProfile, Environment, normalize_profile, same_connection_settings,
 };
 use crate::error::AppResult;
+use crate::readiness::check::{TestEvent, TestReport};
 use crate::secrets::{
-    CONNECTION_SECRET_FIELDS, PATRONI_KEY_PASSWORD, PATRONI_PASSWORD, PG_KEY_PASSWORD, PG_PASSWORD,
-    secret_key,
+    CONNECTION_SECRET_FIELDS, OverlayStore, PATRONI_KEY_PASSWORD, PATRONI_PASSWORD,
+    PG_KEY_PASSWORD, PG_PASSWORD, SecretStore, secret_key,
 };
 use crate::state::AppState;
 
@@ -186,6 +188,30 @@ pub fn parse_connection_string(text: String) -> AppResult<crate::conn::connstr::
 pub async fn delete_connection(state: State<'_, AppState>, id: String) -> AppResult<()> {
     let st = state.inner().clone();
     blocking(move || st.delete_connection_full(&id)).await
+}
+
+/// Проверяет и несохранённый профиль: секреты формы накладываются поверх keychain.
+#[tauri::command]
+pub async fn test_connection(
+    state: State<'_, AppState>,
+    input: ConnectionInput,
+    channel: tauri::ipc::Channel<TestEvent>,
+) -> AppResult<TestReport> {
+    let ConnectionInput {
+        mut profile,
+        secrets,
+    } = input;
+    if profile.id.is_empty() {
+        profile.id = "unsaved".into();
+    }
+    let overlay: Arc<dyn SecretStore> = Arc::new(OverlayStore {
+        base: state.secrets.clone(),
+        overrides: secrets.overrides(&profile.id),
+    });
+    crate::readiness::check::run(profile, overlay, &|e| {
+        let _ = channel.send(e);
+    })
+    .await
 }
 
 #[cfg(test)]
