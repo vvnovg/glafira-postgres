@@ -2,7 +2,7 @@
 
 mod common;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use glafira_pg_lib::conn::errors::from_pg;
 use glafira_pg_lib::conn::pg::ConnectSpec;
@@ -178,4 +178,74 @@ async fn terminated_connection_is_replaced() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     let b = pool.get().await.unwrap();
     assert_ne!(pid(&b).await, victim);
+}
+
+/// Простаивающее соединение проверяется пустым запросом; живое — переиспользуется.
+#[tokio::test]
+async fn live_idle_connection_passes_validation() {
+    let Some(addr) = single() else { return };
+    let pool = PgPool::with_validate_after(
+        spec(
+            &addr,
+            "postgres",
+            SslMode::Disable,
+            common::PG_PASSWORD_VALUE,
+        ),
+        Duration::ZERO,
+    );
+    let a = pool.get().await.unwrap();
+    let first = pid(&a).await;
+    drop(a);
+    let b = pool.get().await.unwrap();
+    assert_eq!(pid(&b).await, first, "проверка прошла, соединение то же");
+}
+
+/// Молчащий путь (ни ответа, ни RST): проверка простаивающего соединения упирается в таймаут
+/// подключения, `get` не виснет, мёртвое соединение закрывается и заменяется новым.
+///
+/// Прокси замораживает только уже открытые соединения, новые он пропускает, поэтому замена
+/// детерминированно удаётся: `get` занимает ≈ `spec.timeout` (проверка) + время подключения.
+#[tokio::test]
+async fn stalled_idle_connection_is_dropped_by_validation_timeout() {
+    let Some(addr) = single() else { return };
+    let proxy = common::PausableProxy::start(&addr).await;
+    let mut s = spec(
+        &addr,
+        "postgres",
+        SslMode::Disable,
+        common::PG_PASSWORD_VALUE,
+    );
+    s.tcp_host = "127.0.0.1".into();
+    s.tcp_port = proxy.port();
+    s.timeout = Duration::from_secs(1);
+    let pool = PgPool::with_validate_after(s, Duration::ZERO);
+
+    let a = pool.get().await.unwrap();
+    let first = pid(&a).await;
+    drop(a);
+    assert_eq!(pool.idle_count(), 1);
+
+    proxy.freeze_existing();
+    let started = Instant::now();
+    let b = tokio::time::timeout(Duration::from_secs(5), pool.get())
+        .await
+        .expect("get не должен висеть на молчащем соединении")
+        .unwrap();
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(900),
+        "проверка должна была дойти до таймаута, прошло {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(2500),
+        "get занял {elapsed:?}: таймаут проверки + подключение"
+    );
+    assert_ne!(pid(&b).await, first, "выдано новое соединение");
+    assert_eq!(
+        pool.idle_count(),
+        0,
+        "мёртвое соединение не вернулось в пул"
+    );
+    drop(b);
+    assert_eq!(pool.idle_count(), 1);
 }

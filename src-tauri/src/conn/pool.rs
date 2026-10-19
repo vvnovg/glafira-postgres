@@ -22,6 +22,29 @@ pub struct PgPool {
     spec: ConnectSpec,
     idle: Mutex<Vec<(Client, Instant)>>,
     permits: Arc<Semaphore>,
+    /// Порог простоя, после которого соединение проверяется при выдаче (`VALIDATE_AFTER`, в тестах — меньше).
+    validate_after: Duration,
+}
+
+/// Что делать с простаивающим соединением при выдаче.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reuse {
+    /// Простояло не меньше `IDLE_TIMEOUT`: закрыть, не выдавать — правило «5 минут» не зависит от частоты обхода.
+    Discard,
+    /// Простояло не меньше порога проверки: выдать только после пустого запроса.
+    Validate,
+    /// Свежее соединение: выдать как есть.
+    AsIs,
+}
+
+fn reuse_decision(idle: Duration, validate_after: Duration) -> Reuse {
+    if idle >= IDLE_TIMEOUT {
+        Reuse::Discard
+    } else if idle >= validate_after {
+        Reuse::Validate
+    } else {
+        Reuse::AsIs
+    }
 }
 
 /// Соединение из пула; при drop живое соединение возвращается в пул.
@@ -50,10 +73,18 @@ impl Drop for PooledClient {
 
 impl PgPool {
     pub fn new(spec: ConnectSpec) -> Arc<Self> {
+        Self::with_validate_after(spec, VALIDATE_AFTER)
+    }
+
+    /// Только для тестов: пул с другим порогом проверки при выдаче (`Duration::ZERO` — проверять всегда).
+    /// Рабочий код использует `new` с порогом в 30 с.
+    #[doc(hidden)]
+    pub fn with_validate_after(spec: ConnectSpec, validate_after: Duration) -> Arc<Self> {
         Arc::new(Self {
             spec,
             idle: Mutex::new(Vec::new()),
             permits: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+            validate_after,
         })
     }
 
@@ -73,8 +104,18 @@ impl PgPool {
             if client.is_closed() {
                 continue;
             }
-            if since.elapsed() >= VALIDATE_AFTER && client.simple_query("").await.is_err() {
-                continue;
+            match reuse_decision(since.elapsed(), self.validate_after) {
+                // Устаревшее и не прошедшее проверку соединение закрывается при drop `client`.
+                Reuse::Discard => continue,
+                Reuse::AsIs => {}
+                // Проверка с таймаутом подключения: на молчащем пути (без RST и keepalive) пустой запрос
+                // иначе висит минутами, удерживая один из трёх permit. Ошибка и таймаут — соединение мёртво.
+                Reuse::Validate => {
+                    match tokio::time::timeout(self.spec.timeout, client.simple_query("")).await {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(_)) | Err(_) => continue,
+                    }
+                }
             }
             return Ok(PooledClient {
                 client: Some(client),
@@ -201,16 +242,55 @@ mod tests {
     #[test]
     fn eviction_by_connection_and_member() {
         let r = PoolRegistry::default();
-        r.insert_if_absent(key("c1", "m1", "d"), spec());
-        r.insert_if_absent(key("c1", "m2", "d"), spec());
-        r.insert_if_absent(key("c2", "m1", "d"), spec());
+        // Слабые ссылки: после вытеснения пул никто не держит и он должен быть освобождён.
+        let weak = |c: &str, m: &str| Arc::downgrade(&r.insert_if_absent(key(c, m, "d"), spec()));
+        let (w_c1m1, w_c1m2, w_c2m1) = (weak("c1", "m1"), weak("c1", "m2"), weak("c2", "m1"));
+        assert!(
+            w_c1m1.upgrade().is_some() && w_c1m2.upgrade().is_some() && w_c2m1.upgrade().is_some()
+        );
+
         r.evict_member("c1", "m1");
         let mut keys = r.keys();
         keys.sort_by(|a, b| (&a.connection_id, &a.member).cmp(&(&b.connection_id, &b.member)));
         assert_eq!(keys, vec![key("c1", "m2", "d"), key("c2", "m1", "d")]);
+        assert!(w_c1m1.upgrade().is_none(), "вытесненный пул освобождён");
+        assert!(w_c1m2.upgrade().is_some() && w_c2m1.upgrade().is_some());
+
         r.evict_connection("c1");
         assert_eq!(r.keys(), vec![key("c2", "m1", "d")]);
+        assert!(
+            w_c1m2.upgrade().is_none(),
+            "пул вытесненного подключения освобождён"
+        );
+        assert!(w_c2m1.upgrade().is_some());
+
         r.evict(&key("c2", "m1", "d"));
         assert!(r.keys().is_empty());
+        assert!(
+            w_c2m1.upgrade().is_none(),
+            "пул, вытесненный по ключу, освобождён"
+        );
+    }
+
+    #[test]
+    fn reuse_decision_by_idle_time() {
+        let s = Duration::from_secs;
+        // Порог проверки по умолчанию — 30 с, жизнь простаивающего соединения — 5 мин.
+        assert_eq!(reuse_decision(s(0), VALIDATE_AFTER), Reuse::AsIs);
+        assert_eq!(reuse_decision(s(29), VALIDATE_AFTER), Reuse::AsIs);
+        assert_eq!(reuse_decision(s(30), VALIDATE_AFTER), Reuse::Validate);
+        assert_eq!(reuse_decision(s(299), VALIDATE_AFTER), Reuse::Validate);
+        assert_eq!(reuse_decision(IDLE_TIMEOUT, VALIDATE_AFTER), Reuse::Discard);
+        assert_eq!(reuse_decision(s(3600), VALIDATE_AFTER), Reuse::Discard);
+        // Порог проверки ноль (тесты): проверяется всё, кроме устаревшего.
+        assert_eq!(reuse_decision(s(0), Duration::ZERO), Reuse::Validate);
+        assert_eq!(reuse_decision(IDLE_TIMEOUT, Duration::ZERO), Reuse::Discard);
+        // Даже с порогом выше IDLE_TIMEOUT устаревшее соединение не выдаётся.
+        assert_eq!(reuse_decision(IDLE_TIMEOUT, s(600)), Reuse::Discard);
+    }
+
+    #[test]
+    fn new_uses_default_validate_after() {
+        assert_eq!(PgPool::new(spec()).validate_after, Duration::from_secs(30));
     }
 }

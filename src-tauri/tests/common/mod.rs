@@ -1,12 +1,18 @@
 #![allow(dead_code)]
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use glafira_pg_lib::conn::profile::{
     ConnectionKind, ConnectionProfile, Environment, HostPort, PgSettings, PgTls, SslMode,
     TargetServerType,
 };
 use glafira_pg_lib::secrets::{MemoryStore, PG_PASSWORD, SecretStore, secret_key};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinHandle;
 
 pub const PG_USER: &str = "glafira_diag";
 pub const PG_PASSWORD_VALUE: &str = "glafira-secret";
@@ -52,4 +58,84 @@ pub fn secrets_with_password(id: &str) -> Arc<MemoryStore> {
     s.set(&secret_key(id, PG_PASSWORD), PG_PASSWORD_VALUE)
         .unwrap();
     Arc::new(s)
+}
+
+/// TCP-прокси перед стендом, который умеет «заморозить» уже открытые соединения: байты перестают
+/// пересылаться в обе стороны, а сокеты остаются открытыми, без RST и FIN — как молчащий путь
+/// (оборванный NAT, пропавший туннель). Соединения, открытые после заморозки, работают как обычно.
+pub struct PausableProxy {
+    port: u16,
+    flags: Arc<Mutex<Vec<Arc<AtomicBool>>>>,
+    accept: JoinHandle<()>,
+}
+
+impl PausableProxy {
+    /// Слушает случайный порт на 127.0.0.1 и пересылает соединения на `upstream` (`host:port`).
+    pub async fn start(upstream: &str) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind proxy");
+        let port = listener.local_addr().expect("proxy addr").port();
+        let flags: Arc<Mutex<Vec<Arc<AtomicBool>>>> = Arc::default();
+        let upstream = upstream.to_string();
+        let accept = tokio::spawn({
+            let flags = flags.clone();
+            async move {
+                while let Ok((client, _)) = listener.accept().await {
+                    let Ok(server) = TcpStream::connect(upstream.as_str()).await else {
+                        continue;
+                    };
+                    let frozen = Arc::new(AtomicBool::new(false));
+                    flags.lock().unwrap().push(frozen.clone());
+                    let (client_r, client_w) = client.into_split();
+                    let (server_r, server_w) = server.into_split();
+                    tokio::spawn(pipe(client_r, server_w, frozen.clone()));
+                    tokio::spawn(pipe(server_r, client_w, frozen));
+                }
+            }
+        });
+        Self {
+            port,
+            flags,
+            accept,
+        }
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Замораживает все соединения, открытые к этому моменту; новые не затрагиваются.
+    pub fn freeze_existing(&self) {
+        for f in self.flags.lock().unwrap().iter() {
+            f.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+impl Drop for PausableProxy {
+    fn drop(&mut self) {
+        self.accept.abort();
+    }
+}
+
+/// Пересылка одного направления; замороженное соединение ничего не читает и не отдаёт дальше.
+/// Задачи замороженных соединений доживают до конца runtime теста.
+async fn pipe(mut from: OwnedReadHalf, mut to: OwnedWriteHalf, frozen: Arc<AtomicBool>) {
+    let mut buf = [0u8; 8192];
+    loop {
+        while frozen.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let n = match from.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        // Заморозка могла наступить, пока ждали данные: они «теряются» вместе с путём.
+        while frozen.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        if to.write_all(&buf[..n]).await.is_err() {
+            break;
+        }
+    }
+    let _ = to.shutdown().await;
 }
