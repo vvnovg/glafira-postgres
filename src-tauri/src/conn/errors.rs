@@ -3,6 +3,7 @@
 use tokio_postgres::error::SqlState;
 
 use crate::error::{AppError, ErrorCode};
+use crate::i18n::LocalizedText;
 
 /// Текст ошибки вместе с цепочкой причин (`error connecting to server: Connection refused`).
 pub fn chain(e: &(dyn std::error::Error + 'static)) -> String {
@@ -19,62 +20,70 @@ pub fn chain(e: &(dyn std::error::Error + 'static)) -> String {
     out
 }
 
-pub fn from_pg(e: &tokio_postgres::Error) -> AppError {
-    if let Some(db) = e.as_db_error() {
-        let code = db.code();
-        let details = match db.detail() {
-            Some(d) => format!("{}: {} ({d})", code.code(), db.message()),
-            None => format!("{}: {}", code.code(), db.message()),
-        };
-        let err = if *code == SqlState::INVALID_PASSWORD
-            || *code == SqlState::INVALID_AUTHORIZATION_SPECIFICATION
-        {
-            app_err!(
-                ErrorCode::AuthFailed,
+/// Строка таблицы SQLSTATE → код и текст ошибки (§13 спеки). Чистая функция: проверяется без сервера.
+fn classify_sqlstate(code: &SqlState) -> (ErrorCode, LocalizedText) {
+    if *code == SqlState::INVALID_PASSWORD || *code == SqlState::INVALID_AUTHORIZATION_SPECIFICATION
+    {
+        (
+            ErrorCode::AuthFailed,
+            ltext!(
                 "errors.pg.authFailed",
                 "Authentication failed: check the user, the password and pg_hba.conf"
-            )
-        } else if *code == SqlState::INVALID_CATALOG_NAME {
-            app_err!(
-                ErrorCode::InvalidInput,
-                "errors.pg.databaseNotFound",
-                "The database does not exist"
-            )
-        } else if *code == SqlState::INSUFFICIENT_PRIVILEGE {
-            app_err!(
-                ErrorCode::NotAuthorized,
+            ),
+        )
+    } else if *code == SqlState::INVALID_CATALOG_NAME {
+        (
+            ErrorCode::InvalidInput,
+            ltext!("errors.pg.databaseNotFound", "The database does not exist"),
+        )
+    } else if *code == SqlState::INSUFFICIENT_PRIVILEGE {
+        (
+            ErrorCode::NotAuthorized,
+            ltext!(
                 "errors.pg.notAuthorized",
                 "Not enough privileges for the query"
-            )
-        } else if *code == SqlState::QUERY_CANCELED {
-            app_err!(
-                ErrorCode::Timeout,
+            ),
+        )
+    } else if *code == SqlState::QUERY_CANCELED {
+        (
+            ErrorCode::Timeout,
+            ltext!(
                 "errors.pg.statementTimeout",
                 "The query was interrupted by statement_timeout"
-            )
-        } else if *code == SqlState::TOO_MANY_CONNECTIONS {
-            app_err!(
-                ErrorCode::ConnectionFailed,
+            ),
+        )
+    } else if *code == SqlState::TOO_MANY_CONNECTIONS {
+        (
+            ErrorCode::ConnectionFailed,
+            ltext!(
                 "errors.pg.tooManyConnections",
                 "The server has no free connections (max_connections)"
-            )
-        } else if *code == SqlState::CANNOT_CONNECT_NOW {
-            app_err!(
-                ErrorCode::NodeUnavailable,
+            ),
+        )
+    } else if *code == SqlState::CANNOT_CONNECT_NOW {
+        (
+            ErrorCode::NodeUnavailable,
+            ltext!(
                 "errors.pg.cannotConnectNow",
                 "The server is starting up or in recovery"
-            )
-        } else {
-            app_err!(
-                ErrorCode::Internal,
+            ),
+        )
+    } else {
+        (
+            ErrorCode::Internal,
+            ltext!(
                 "errors.pg.serverError",
                 "PostgreSQL error {{code}}",
                 code = code.code()
-            )
-        };
-        return err.with_details(details);
+            ),
+        )
     }
-    let text = chain(e);
+}
+
+/// Ошибка без ответа сервера (нет `DbError`): классификация по тексту цепочки причин.
+/// `closed` — `tokio_postgres::Error::is_closed()`. Порядок проверок важен: сообщение о несовпадении
+/// имени хоста содержит и `certificate verify failed`, поэтому идёт раньше.
+fn classify_text(text: &str, closed: bool) -> AppError {
     let lower = text.to_lowercase();
     let err = if lower.contains("password missing") {
         app_err!(
@@ -106,7 +115,7 @@ pub fn from_pg(e: &tokio_postgres::Error) -> AppError {
             "errors.pg.tlsError",
             "TLS connection error"
         )
-    } else if e.is_closed() {
+    } else if closed {
         app_err!(
             ErrorCode::ConnectionFailed,
             "errors.pg.connectionClosed",
@@ -122,6 +131,19 @@ pub fn from_pg(e: &tokio_postgres::Error) -> AppError {
     err.with_details(text)
 }
 
+pub fn from_pg(e: &tokio_postgres::Error) -> AppError {
+    if let Some(db) = e.as_db_error() {
+        let code = db.code();
+        let details = match db.detail() {
+            Some(d) => format!("{}: {} ({d})", code.code(), db.message()),
+            None => format!("{}: {}", code.code(), db.message()),
+        };
+        let (error_code, text) = classify_sqlstate(code);
+        return AppError::localized(error_code, text).with_details(details);
+    }
+    classify_text(&chain(e), e.is_closed())
+}
+
 pub fn tcp_error(e: &std::io::Error, host: &str, port: u16) -> AppError {
     app_err!(
         ErrorCode::ConnectionFailed,
@@ -133,9 +155,10 @@ pub fn tcp_error(e: &std::io::Error, host: &str, port: u16) -> AppError {
     .with_details(e.to_string())
 }
 
+/// Таймаут TCP/TLS-подключения — `CONNECTION_FAILED` (§13 спеки); `TIMEOUT` — только SQLSTATE 57014.
 pub fn connect_timeout(host: &str, port: u16, secs: u64) -> AppError {
     app_err!(
-        ErrorCode::Timeout,
+        ErrorCode::ConnectionFailed,
         "errors.pg.connectTimeout",
         "No answer from {{host}}:{{port}} within {{secs}} s",
         host = host,
@@ -189,5 +212,129 @@ mod tests {
             connect_timeout("db1", 5432, 10).message,
             "No answer from db1:5432 within 10 s"
         );
+    }
+
+    #[test]
+    fn connect_timeout_is_connection_failed_not_timeout() {
+        // §13: TCP-таймаут — CONNECTION_FAILED; TIMEOUT зарезервирован за SQLSTATE 57014.
+        let e = connect_timeout("db1", 5432, 10);
+        assert_eq!(e.code, ErrorCode::ConnectionFailed);
+        assert_eq!(e.key, "errors.pg.connectTimeout");
+        assert!(e.retryable);
+    }
+
+    #[test]
+    fn sqlstate_table() {
+        let rows = [
+            ("28P01", ErrorCode::AuthFailed, "errors.pg.authFailed"),
+            ("28000", ErrorCode::AuthFailed, "errors.pg.authFailed"),
+            (
+                "3D000",
+                ErrorCode::InvalidInput,
+                "errors.pg.databaseNotFound",
+            ),
+            ("42501", ErrorCode::NotAuthorized, "errors.pg.notAuthorized"),
+            ("57014", ErrorCode::Timeout, "errors.pg.statementTimeout"),
+            (
+                "53300",
+                ErrorCode::ConnectionFailed,
+                "errors.pg.tooManyConnections",
+            ),
+            (
+                "57P03",
+                ErrorCode::NodeUnavailable,
+                "errors.pg.cannotConnectNow",
+            ),
+        ];
+        for (sqlstate, code, key) in rows {
+            let (c, t) = classify_sqlstate(&SqlState::from_code(sqlstate));
+            assert_eq!((c, t.key.as_str()), (code, key), "{sqlstate}");
+        }
+        let (c, t) = classify_sqlstate(&SqlState::from_code("23505"));
+        assert_eq!(c, ErrorCode::Internal);
+        assert_eq!(t.key, "errors.pg.serverError");
+        assert_eq!(t.params["code"], "23505");
+        assert_eq!(t.text, "PostgreSQL error 23505");
+    }
+
+    #[test]
+    fn text_branches() {
+        let rows = [
+            (
+                "invalid configuration: password missing",
+                false,
+                ErrorCode::AuthFailed,
+                "errors.pg.passwordMissing",
+            ),
+            (
+                "error performing TLS handshake: server does not support TLS",
+                false,
+                ErrorCode::TlsError,
+                "errors.pg.tlsNotSupported",
+            ),
+            (
+                "error performing TLS handshake: certificate verify failed (hostname mismatch)",
+                false,
+                ErrorCode::TlsError,
+                "errors.pg.hostnameMismatch",
+            ),
+            (
+                "SSL routines:tls_post_process_server_certificate:certificate verify failed: (IP address mismatch)",
+                false,
+                ErrorCode::TlsError,
+                "errors.pg.hostnameMismatch",
+            ),
+            (
+                "SSL routines:tls_post_process_server_certificate:certificate verify failed: (self-signed certificate)",
+                false,
+                ErrorCode::TlsError,
+                "errors.pg.caUntrusted",
+            ),
+            (
+                "error performing TLS handshake: connection reset",
+                false,
+                ErrorCode::TlsError,
+                "errors.pg.tlsError",
+            ),
+            (
+                "SSL routines: unexpected eof while reading",
+                true,
+                ErrorCode::TlsError,
+                "errors.pg.tlsError",
+            ),
+            (
+                "handshake aborted",
+                false,
+                ErrorCode::TlsError,
+                "errors.pg.tlsError",
+            ),
+            (
+                "connection closed",
+                true,
+                ErrorCode::ConnectionFailed,
+                "errors.pg.connectionClosed",
+            ),
+            (
+                "error connecting to server: Connection refused",
+                false,
+                ErrorCode::ConnectionFailed,
+                "errors.pg.connectionFailed",
+            ),
+        ];
+        for (text, closed, code, key) in rows {
+            let e = classify_text(text, closed);
+            assert_eq!((e.code, e.key.as_str()), (code, key), "{text}");
+            assert_eq!(e.details.as_deref(), Some(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn text_classification_is_case_insensitive_and_ordered() {
+        // Сообщение о несовпадении имени содержит и `certificate verify failed`: имя хоста проверяется раньше.
+        let e = classify_text("CERTIFICATE VERIFY FAILED: HOSTNAME MISMATCH", false);
+        assert_eq!(e.key, "errors.pg.hostnameMismatch");
+        // Пароль важнее общей TLS-ветки.
+        let e = classify_text("password missing (tls)", false);
+        assert_eq!(e.key, "errors.pg.passwordMissing");
     }
 }

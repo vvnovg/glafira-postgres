@@ -3,4 +3,6 @@ pub mod errors;
 pub mod pg;
 pub mod pgpass;
 pub mod profile;
+#[cfg(test)]
+mod testutil;
 pub mod tls;

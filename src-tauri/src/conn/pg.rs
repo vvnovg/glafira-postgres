@@ -150,6 +150,8 @@ where
 mod tests {
     use super::*;
     use crate::conn::profile::sample_profile;
+    use crate::conn::testutil;
+    use crate::error::ErrorCode;
     use crate::secrets::MemoryStore;
 
     #[test]
@@ -202,5 +204,142 @@ mod tests {
         let spec =
             ConnectSpec::build(&sample_profile("a"), "h", 5432, "postgres", &secrets).unwrap();
         assert!(!format!("{spec:?}").contains("s3cr3t"));
+    }
+
+    /// Спецификация для заглушки на loopback: TCP — на `port`, имя для проверки сертификата — `host`.
+    fn loopback_spec(port: u16, host: &str, mode: SslMode, ca: Option<&str>) -> ConnectSpec {
+        ConnectSpec {
+            tcp_host: "127.0.0.1".into(),
+            tcp_port: port,
+            host: host.into(),
+            port,
+            user: "u".into(),
+            password: None,
+            database: "postgres".into(),
+            ssl_mode: mode,
+            connector: tls::pg_connector(mode, ca, None, None).unwrap(),
+            timeout: Duration::from_secs(10),
+        }
+    }
+
+    fn write_pem(dir: &std::path::Path, name: &str, cert: &openssl::x509::X509) -> String {
+        let p = dir.join(name);
+        std::fs::write(&p, cert.to_pem().unwrap()).unwrap();
+        p.to_string_lossy().into_owned()
+    }
+
+    /// Рукопожатие прошло: заглушка ответила `ErrorResponse` 28000 на стартовое сообщение.
+    fn assert_handshake_ok(e: crate::error::AppError) {
+        assert_eq!(e.key, "errors.pg.authFailed", "{e:?}");
+        assert!(e.details.unwrap().contains("harness"));
+    }
+
+    #[tokio::test]
+    async fn verify_full_with_pinned_ca_accepts_matching_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = testutil::make_ca("test-ca");
+        let server = testutil::tls_server(&testutil::make_server_cert(&ca, "localhost"));
+        let ca_path = write_pem(dir.path(), "ca.pem", &ca.cert);
+        let spec = loopback_spec(
+            server.port,
+            "localhost",
+            SslMode::VerifyFull,
+            Some(&ca_path),
+        );
+        assert_handshake_ok(spec.connect().await.unwrap_err());
+    }
+
+    #[tokio::test]
+    async fn verify_full_rejects_host_missing_from_certificate() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = testutil::make_ca("test-ca");
+        // В сертификате только DNS:localhost, а проверяется IP-адрес.
+        let server = testutil::tls_server(&testutil::make_server_cert(&ca, "localhost"));
+        let ca_path = write_pem(dir.path(), "ca.pem", &ca.cert);
+        let spec = loopback_spec(
+            server.port,
+            "127.0.0.1",
+            SslMode::VerifyFull,
+            Some(&ca_path),
+        );
+        let e = spec.connect().await.unwrap_err();
+        assert_eq!(e.code, ErrorCode::TlsError);
+        assert_eq!(e.key, "errors.pg.hostnameMismatch", "{e:?}");
+    }
+
+    #[tokio::test]
+    async fn verify_ca_does_not_check_the_host_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = testutil::make_ca("test-ca");
+        let server = testutil::tls_server(&testutil::make_server_cert(&ca, "localhost"));
+        let ca_path = write_pem(dir.path(), "ca.pem", &ca.cert);
+        let spec = loopback_spec(server.port, "127.0.0.1", SslMode::VerifyCa, Some(&ca_path));
+        assert_handshake_ok(spec.connect().await.unwrap_err());
+    }
+
+    #[tokio::test]
+    async fn verify_full_with_another_ca_is_untrusted() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = testutil::make_ca("test-ca");
+        let other = testutil::make_ca("other-ca");
+        let server = testutil::tls_server(&testutil::make_server_cert(&ca, "localhost"));
+        let other_path = write_pem(dir.path(), "other.pem", &other.cert);
+        let spec = loopback_spec(
+            server.port,
+            "localhost",
+            SslMode::VerifyFull,
+            Some(&other_path),
+        );
+        let e = spec.connect().await.unwrap_err();
+        assert_eq!(e.code, ErrorCode::TlsError);
+        assert_eq!(e.key, "errors.pg.caUntrusted", "{e:?}");
+    }
+
+    #[tokio::test]
+    async fn verify_full_without_ca_uses_system_roots_only() {
+        let ca = testutil::make_ca("test-ca");
+        let server = testutil::tls_server(&testutil::make_server_cert(&ca, "localhost"));
+        let spec = loopback_spec(server.port, "localhost", SslMode::VerifyFull, None);
+        let e = spec.connect().await.unwrap_err();
+        assert_eq!(e.code, ErrorCode::TlsError);
+        assert_eq!(e.key, "errors.pg.caUntrusted", "{e:?}");
+    }
+
+    #[tokio::test]
+    async fn require_without_ca_accepts_self_signed_certificate() {
+        let server = testutil::tls_server(&testutil::make_self_signed_server("localhost"));
+        let spec = loopback_spec(server.port, "127.0.0.1", SslMode::Require, None);
+        assert_handshake_ok(spec.connect().await.unwrap_err());
+    }
+
+    #[tokio::test]
+    async fn silent_server_gives_connection_failed_after_timeout() {
+        let server = testutil::silent_server();
+        let mut spec = loopback_spec(server.port, "127.0.0.1", SslMode::Prefer, None);
+        spec.timeout = Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        let e = spec.connect().await.unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+        // §13: таймаут подключения — CONNECTION_FAILED, а не TIMEOUT.
+        assert_eq!(e.code, ErrorCode::ConnectionFailed);
+        assert_eq!(e.key, "errors.pg.connectTimeout");
+        assert!(e.retryable);
+    }
+
+    #[tokio::test]
+    async fn refused_connection_is_tcp_failed() {
+        // Порт освобождается: слушатель закрыт до подключения.
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let spec = loopback_spec(port, "127.0.0.1", SslMode::Disable, None);
+        let e = spec.connect().await.unwrap_err();
+        assert_eq!(e.code, ErrorCode::ConnectionFailed);
+        assert_eq!(e.key, "errors.pg.tcpFailed");
     }
 }

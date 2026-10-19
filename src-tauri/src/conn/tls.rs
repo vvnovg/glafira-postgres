@@ -1,14 +1,17 @@
 //! TLS для PostgreSQL и Patroni API: CA, клиентский сертификат (PEM / PKCS#12), системные корневые
 //! сертификаты. Файлы читаются при каждом создании пула или клиента — ротация подхватывается.
 
+use std::cell::Cell;
+use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use openssl::error::ErrorStack;
 use openssl::pkcs12::{ParsedPkcs12_2, Pkcs12};
 use openssl::pkey::{PKey, Private};
 use openssl::provider::Provider;
-use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
+use openssl::ssl::{SslConnector, SslConnectorBuilder, SslMethod, SslVerifyMode};
 use openssl::x509::X509;
+use openssl::x509::store::{X509Store, X509StoreBuilder};
 
 use crate::conn::errors::tls_setup;
 use crate::conn::profile::{CertFormat, ClientCert, SslMode};
@@ -73,6 +76,30 @@ fn is_unsupported(e: &ErrorStack) -> bool {
     t.contains("unsupported") || t.contains("rc2") || t.contains("fetch")
 }
 
+/// Закрытый ключ из PEM. Без пароля OpenSSL по умолчанию спросил бы его в терминале (`/dev/tty`),
+/// поэтому ставится свой обратный вызов, который отказывает: зашифрованный ключ без пароля — ошибка.
+fn load_pem_key(pem: &[u8], password: Option<&str>) -> Result<PKey<Private>, String> {
+    match password.filter(|p| !p.is_empty()) {
+        Some(p) => {
+            PKey::private_key_from_pem_passphrase(pem, p.as_bytes()).map_err(|e| e.to_string())
+        }
+        None => {
+            let asked = Cell::new(false);
+            PKey::private_key_from_pem_callback(pem, |_buf| {
+                asked.set(true);
+                Err(ErrorStack::get())
+            })
+            .map_err(|e| {
+                if asked.get() {
+                    "the private key is encrypted: a password is required".to_string()
+                } else {
+                    e.to_string()
+                }
+            })
+        }
+    }
+}
+
 pub fn load_identity(c: &ClientCert, password: Option<&str>) -> AppResult<Identity> {
     match c.format {
         CertFormat::Pem => {
@@ -85,11 +112,7 @@ pub fn load_identity(c: &ClientCert, password: Option<&str>) -> AppResult<Identi
                 .ok_or_else(|| bad_file(&c.certificate_path, "no certificate"))?;
             let key_path = c.key_path.as_deref().unwrap_or(&c.certificate_path);
             let key_pem = read(key_path)?;
-            let key = match password.filter(|p| !p.is_empty()) {
-                Some(p) => PKey::private_key_from_pem_passphrase(&key_pem, p.as_bytes()),
-                None => PKey::private_key_from_pem(&key_pem),
-            }
-            .map_err(|e| bad_file(key_path, e))?;
+            let key = load_pem_key(&key_pem, password).map_err(|e| bad_file(key_path, e))?;
             Ok(Identity {
                 cert,
                 chain: certs.collect(),
@@ -132,14 +155,55 @@ fn system_roots() -> &'static [X509] {
     })
 }
 
-/// CA-файл как PEM-набор (для reqwest); проверяется, что в нём есть хотя бы один сертификат.
-pub fn ca_pem_bundle(path: &str) -> AppResult<Vec<u8>> {
+/// Содержимое CA-файла и его сертификаты; в файле должен быть хотя бы один сертификат.
+fn read_ca(path: &str) -> AppResult<(Vec<u8>, Vec<X509>)> {
     let data = read(path)?;
     let certs = X509::stack_from_pem(&data).map_err(|e| bad_file(path, e))?;
     if certs.is_empty() {
         return Err(bad_file(path, "no certificates"));
     }
-    Ok(data)
+    Ok((data, certs))
+}
+
+/// CA-файл как PEM-набор (для reqwest); проверяется, что в нём есть хотя бы один сертификат.
+pub fn ca_pem_bundle(path: &str) -> AppResult<Vec<u8>> {
+    read_ca(path).map(|(data, _)| data)
+}
+
+/// Хранилище доверия только из сертификатов CA-файла: системные корни и пути OpenSSL по умолчанию
+/// (`SSL_CERT_FILE`, `SSL_CERT_DIR`, openssldir) в него не попадают. Повторы в файле пропускаются,
+/// остальные ошибки добавления — это неверный файл.
+fn pinned_store(path: &str) -> AppResult<X509Store> {
+    let (_, certs) = read_ca(path)?;
+    let mut store = X509StoreBuilder::new().map_err(tls_setup)?;
+    let mut seen = HashSet::new();
+    for c in certs {
+        let der = c.to_der().map_err(|e| bad_file(path, e))?;
+        if seen.insert(der) {
+            store.add_cert(c).map_err(|e| bad_file(path, e))?;
+        }
+    }
+    Ok(store.build())
+}
+
+/// Кому доверять: указанный CA-файл заменяет все корни; без него — системные, но только если
+/// режим проверяет сертификат (`verify-ca`, `verify-full`).
+fn install_trust(
+    b: &mut SslConnectorBuilder,
+    mode: SslMode,
+    ca_path: Option<&str>,
+) -> AppResult<()> {
+    match ca_path {
+        Some(p) => b.set_cert_store(pinned_store(p)?),
+        None if matches!(mode, SslMode::VerifyCa | SslMode::VerifyFull) => {
+            for c in system_roots() {
+                // Один негодный системный корень не должен ломать подключение: остальные доверенные.
+                let _ = b.cert_store_mut().add_cert(c.clone());
+            }
+        }
+        None => {}
+    }
+    Ok(())
 }
 
 /// `SslConnector` для режима `mode`; `None` — без TLS (`disable`).
@@ -153,17 +217,7 @@ pub fn pg_connector(
         return Ok(None);
     }
     let mut b = SslConnector::builder(SslMethod::tls_client()).map_err(tls_setup)?;
-    let roots: Vec<X509> = match ca_path {
-        Some(p) => {
-            let data = ca_pem_bundle(p)?;
-            X509::stack_from_pem(&data).map_err(|e| bad_file(p, e))?
-        }
-        None => system_roots().to_vec(),
-    };
-    for c in roots {
-        // Повтор сертификата в хранилище — не ошибка.
-        let _ = b.cert_store_mut().add_cert(c);
-    }
+    install_trust(&mut b, mode, ca_path)?;
     if let Some(c) = cert {
         let id = load_identity(c, key_password)?;
         b.set_certificate(&id.cert).map_err(tls_setup)?;
@@ -193,6 +247,7 @@ pub fn identity_pem(c: &ClientCert, password: Option<&str>) -> AppResult<Vec<u8>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conn::testutil;
     use openssl::asn1::Asn1Time;
     use openssl::hash::MessageDigest;
     use openssl::symm::Cipher;
@@ -313,6 +368,97 @@ mod tests {
                 .key,
             "errors.tls.badFile"
         );
+    }
+
+    #[test]
+    fn encrypted_pem_key_without_password_is_rejected_without_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cert, key) = self_signed();
+        let cert_path = write(dir.path(), "c.pem", &cert.to_pem().unwrap());
+        let enc = write(
+            dir.path(),
+            "ke.pem",
+            &key.private_key_to_pem_pkcs8_passphrase(Cipher::aes_256_cbc(), b"pw")
+                .unwrap(),
+        );
+        let cc = ClientCert {
+            format: CertFormat::Pem,
+            certificate_path: cert_path,
+            key_path: Some(enc),
+        };
+        // Пароля нет или он пустой: OpenSSL не должен спрашивать его в терминале.
+        for password in [None, Some("")] {
+            let e = load_identity(&cc, password).unwrap_err();
+            assert_eq!(e.key, "errors.tls.badFile", "{password:?}");
+            assert!(
+                e.details.unwrap().contains("password is required"),
+                "{password:?}"
+            );
+        }
+    }
+
+    fn store_len(c: &SslConnector) -> usize {
+        c.context().cert_store().all_certificates().len()
+    }
+
+    #[test]
+    fn pinned_ca_replaces_default_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let pinned = testutil::make_ca("pinned");
+        let default_root = testutil::make_ca("default-root");
+        let path = write(dir.path(), "ca.pem", &pinned.cert.to_pem().unwrap());
+        for mode in [SslMode::VerifyCa, SslMode::VerifyFull] {
+            let mut b = SslConnector::builder(SslMethod::tls_client()).unwrap();
+            // Корень «по умолчанию» (как из SSL_CERT_FILE): после установки CA его в хранилище быть не должно.
+            b.cert_store_mut()
+                .add_cert(default_root.cert.clone())
+                .unwrap();
+            install_trust(&mut b, mode, Some(&path)).unwrap();
+            let connector = b.build();
+            let certs = connector.context().cert_store().all_certificates();
+            let ders: Vec<Vec<u8>> = certs.iter().map(|c| c.to_der().unwrap()).collect();
+            assert!(
+                ders == vec![pinned.cert.to_der().unwrap()],
+                "{mode:?}: в хранилище {} сертификатов вместо одного (закреплённого)",
+                ders.len()
+            );
+        }
+    }
+
+    #[test]
+    fn pinned_bundle_tolerates_duplicates_but_not_junk() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = testutil::make_ca("pinned");
+        let pem = ca.cert.to_pem().unwrap();
+        let twice = write(dir.path(), "two.pem", &[pem.clone(), pem].concat());
+        let c = pg_connector(SslMode::VerifyFull, Some(&twice), None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(store_len(&c), 1);
+        let empty = write(dir.path(), "empty.pem", b"");
+        assert_eq!(
+            pg_connector(SslMode::VerifyFull, Some(&empty), None, None)
+                .unwrap_err()
+                .key,
+            "errors.tls.badFile"
+        );
+    }
+
+    #[test]
+    fn system_roots_only_when_the_mode_verifies() {
+        let baseline = store_len(
+            &SslConnector::builder(SslMethod::tls_client())
+                .unwrap()
+                .build(),
+        );
+        for mode in [SslMode::Prefer, SslMode::Require] {
+            let c = pg_connector(mode, None, None, None).unwrap().unwrap();
+            assert_eq!(store_len(&c), baseline, "{mode:?}");
+        }
+        for mode in [SslMode::VerifyCa, SslMode::VerifyFull] {
+            let c = pg_connector(mode, None, None, None).unwrap().unwrap();
+            assert!(store_len(&c) >= baseline, "{mode:?}");
+        }
     }
 
     #[test]
