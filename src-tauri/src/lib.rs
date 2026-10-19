@@ -43,6 +43,7 @@ pub fn run() {
             commands::connections::list_connections,
             commands::connections::save_connection,
             commands::connections::delete_connection,
+            commands::connections::parse_connection_string,
             commands::folders::list_folders,
             commands::folders::create_folder,
             commands::folders::rename_folder,

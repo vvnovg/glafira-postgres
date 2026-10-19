@@ -65,6 +65,20 @@
       "overrideMember": "Укажите имя участника для подмены адреса",
       "overrideDuplicate": "Подмена адреса для {{member}} указана дважды"
     },
+    "connstr": {
+      "unixSocket": "Unix-сокеты не поддерживаются",
+      "syntax": "Ошибка в строке подключения рядом с «{{near}}»",
+      "unrecognized": "Строка не распознана: ожидается jdbc:postgresql://, postgresql:// или пары ключ=значение",
+      "badEncoding": "Неверное %-кодирование в строке подключения",
+      "badPort": "Неверный порт: {{port}}",
+      "portsMismatch": "Число портов ({{ports}}) не совпадает с числом хостов ({{hosts}})",
+      "badSslMode": "Неизвестный sslmode: {{value}}",
+      "badTargetSessionAttrs": "Неизвестный target_session_attrs: {{value}}",
+      "badTargetServerType": "Неизвестный targetServerType: {{value}}",
+      "badTimeout": "Неверный таймаут подключения: {{value}}",
+      "noHosts": "В строке подключения нет хостов",
+      "tooManyHosts": "В строке подключения больше 16 хостов"
+    },
     "storage": {
       "writeFailed": "Не удалось записать {{path}}: {{error}}",
       "newerSchema": "{{file}} создан более новой версией приложения (schemaVersion {{version}})",

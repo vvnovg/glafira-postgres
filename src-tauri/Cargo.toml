@@ -31,6 +31,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "registry", "f
 plist = "1"
 dirs = "7"
 sys-locale = "0.3"
+percent-encoding = "2"
 license-format = { git = "https://github.com/vvnovg/kafka-explorer", rev = "1d32d13d217c64ae1341da3002b88f079b834088" }
 
 [target.'cfg(windows)'.dependencies]

@@ -150,6 +150,11 @@ pub fn save_connection_blocking(
 }
 
 #[tauri::command]
+pub fn parse_connection_string(text: String) -> AppResult<crate::conn::connstr::ParsedConnection> {
+    crate::conn::connstr::parse_connection_string(&text)
+}
+
+#[tauri::command]
 pub async fn delete_connection(state: State<'_, AppState>, id: String) -> AppResult<()> {
     let st = state.inner().clone();
     blocking(move || st.delete_connection_full(&id)).await

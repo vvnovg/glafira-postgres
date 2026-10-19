@@ -65,6 +65,20 @@
       "overrideMember": "Specify the member name for the address override",
       "overrideDuplicate": "Address override for {{member}} is specified twice"
     },
+    "connstr": {
+      "unixSocket": "Unix sockets are not supported",
+      "syntax": "Connection string syntax error near “{{near}}”",
+      "unrecognized": "Unrecognized connection string: expected jdbc:postgresql://, postgresql:// or key=value pairs",
+      "badEncoding": "Invalid percent-encoding in the connection string",
+      "badPort": "Invalid port: {{port}}",
+      "portsMismatch": "The number of ports ({{ports}}) does not match the number of hosts ({{hosts}})",
+      "badSslMode": "Unknown sslmode: {{value}}",
+      "badTargetSessionAttrs": "Unknown target_session_attrs: {{value}}",
+      "badTargetServerType": "Unknown targetServerType: {{value}}",
+      "badTimeout": "Invalid connect timeout: {{value}}",
+      "noHosts": "No hosts in the connection string",
+      "tooManyHosts": "More than 16 hosts in the connection string"
+    },
     "storage": {
       "writeFailed": "Failed to write {{path}}: {{error}}",
       "newerSchema": "{{file}} was created by a newer version of the app (schemaVersion {{version}})",

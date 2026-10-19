@@ -1403,6 +1403,7 @@ dependencies = [
  "dirs",
  "keyring",
  "license-format",
+ "percent-encoding",
  "plist",
  "serde",
  "serde_json",
