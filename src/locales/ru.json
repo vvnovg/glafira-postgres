@@ -9,7 +9,8 @@
     "details": "Подробности",
     "openLicense": "Открыть «Лицензия»",
     "proHint": "Доступно в Pro — активируйте лицензию на экране «Лицензия»",
-    "readOnly": "Только чтение"
+    "readOnly": "Только чтение",
+    "copy": "Копировать"
   },
   "errors": {
     "generic": "{{message}}",
@@ -143,6 +144,81 @@
     },
     "catalog": {
       "badPage": "Неверная страница: смещение {{offset}}, размер {{limit}}"
+    }
+  },
+  "connections": {
+    "form": {
+      "titleNew": "Новое подключение",
+      "titleEdit": "Подключение «{{name}}»",
+      "deleted": "Подключение удалено",
+      "connstr": "Строка подключения",
+      "connstrApply": "Заполнить",
+      "connstrIgnored": "Не распознано и пропущено: {{list}}",
+      "name": "Имя",
+      "folder": "Папка",
+      "folderRoot": "Без папки",
+      "environment": "Окружение",
+      "prodPro": "prod — Pro",
+      "color": "Цвет",
+      "kind": "Вид",
+      "kinds": {
+        "server": "Сервер",
+        "hostList": "Список узлов",
+        "patroni": "Кластер Patroni"
+      },
+      "host": "Хост",
+      "port": "Порт",
+      "hosts": "Узлы",
+      "hostN": "Узел {{n}}",
+      "portN": "Порт узла {{n}}",
+      "moveUp": "Узел {{n}} выше",
+      "moveDown": "Узел {{n}} ниже",
+      "removeHost": "Удалить узел {{n}}",
+      "addHost": "Добавить узел",
+      "target": "Узел по умолчанию",
+      "targets": {
+        "primary": "primary",
+        "standby": "реплика",
+        "preferStandby": "реплика, если есть, иначе primary",
+        "any": "любой доступный"
+      },
+      "underPatroni": "Узлы под управлением Patroni",
+      "patroniUrls": "Адреса REST API",
+      "urlN": "Адрес API {{n}}",
+      "removeUrl": "Удалить адрес {{n}}",
+      "addUrl": "Добавить адрес",
+      "patroniUser": "Пользователь API",
+      "patroniPassword": "Пароль API",
+      "apiTls": "TLS для API",
+      "caPath": "Доверенный CA",
+      "verifyHostname": "Проверять имя хоста",
+      "clientCert": "Клиентский сертификат",
+      "certFormat": "Формат",
+      "certPath": "Сертификат",
+      "keyPath": "Ключ",
+      "keyPassword": "Пароль ключа",
+      "overrides": "Подмена адресов узлов",
+      "overrideMember": "Участник {{n}}",
+      "overrideHost": "Хост PostgreSQL {{n}}",
+      "overridePort": "Порт PostgreSQL {{n}}",
+      "overrideApi": "Адрес API участника {{n}}",
+      "removeOverride": "Удалить подмену {{n}}",
+      "addOverride": "Добавить подмену",
+      "pgUser": "Пользователь",
+      "pgPassword": "Пароль",
+      "passwordKeep": "оставить сохранённый",
+      "passwordClear": "Удалить сохранённый",
+      "pgDatabase": "БД по умолчанию",
+      "timeout": "Таймаут подключения, с",
+      "databases": "Только базы",
+      "databasesPlaceholder": "все",
+      "pick": "Выбрать…",
+      "pickAria": "Выбрать файл: {{label}}",
+      "test": "Проверить",
+      "busy": "Выполняется…",
+      "deleteGroup": "Удаление подключения",
+      "deleteConfirm": "Удалить подключение «{{name}}»?",
+      "deleteYes": "Удалить"
     }
   },
   "sidebar": {
@@ -288,13 +364,18 @@
     "about": "О программе",
     "diagnostics": "Собрать диагностику…"
   },
-  "hints": {
-    "label": "Подсказка: {{name}}"
-  },
   "test": {
     "patroniOk": "Участников: {{members}}, лидер {{leader}}",
     "discoveryOk": "Найдено узлов: {{members}}",
-    "nodeOk": "{{role}}, PostgreSQL {{version}}"
+    "nodeOk": "{{role}}, PostgreSQL {{version}}",
+    "readinessTitle": "Готовность к диагностике",
+    "roleScript": "Скрипт роли для диагностики",
+    "step": {
+      "patroni": "Patroni API",
+      "discovery": "Обнаружение узлов",
+      "node": "Узел",
+      "readiness": "Готовность"
+    }
   },
   "topology": {
     "role": {
@@ -305,6 +386,88 @@
       "quorumStandby": "Quorum",
       "replica": "Реплика",
       "unknown": "—"
+    },
+    "warning": {
+      "noPrimary": "Нет primary: все доступные узлы — реплики",
+      "multiplePrimaries": "Несколько primary ({{members}}): возможен split-brain",
+      "systemIdMismatch": "Узлы из разных кластеров (разный system_identifier): {{members}}",
+      "patroniUnreachable": "Patroni API не отвечает: показаны последние известные данные",
+      "memberUnreachable": "Узел {{name}} недоступен"
+    }
+  },
+  "readiness": {
+    "monitorRole": {
+      "title": "Роль мониторинга",
+      "ok": "Есть pg_monitor",
+      "missing": "Нет роли pg_monitor",
+      "affects": "Не видно запросов других пользователей, pg_stat_statements и размера pg_wal"
+    },
+    "signalRole": {
+      "title": "Отмена и завершение сессий",
+      "ok": "Есть pg_signal_backend",
+      "missing": "Нет роли pg_signal_backend",
+      "affects": "Нельзя будет отменять запросы и завершать сессии"
+    },
+    "maintainRole": {
+      "title": "Обслуживание таблиц",
+      "ok": "VACUUM и ANALYZE доступны",
+      "grant": "Нет роли pg_maintain",
+      "ownerOnly": "До PostgreSQL 17 — только для своих таблиц",
+      "affects": "VACUUM и ANALYZE из приложения — только для своих таблиц"
+    },
+    "pgssPreloaded": {
+      "title": "pg_stat_statements загружен",
+      "ok": "Загружен на всех узлах",
+      "missing": "Не загружен (shared_preload_libraries)",
+      "warn": "Не загружен на узлах: {{members}}",
+      "unknown": "Не удалось проверить: нет доступных узлов или роли не видна shared_preload_libraries (выдайте pg_monitor или pg_read_all_settings)",
+      "affects": "Не будет анализа тяжёлых запросов; нужен перезапуск после изменения"
+    },
+    "pgssInstalled": {
+      "title": "Расширение pg_stat_statements",
+      "ok": "Создано",
+      "missing": "Не создано в БД {{database}}",
+      "affects": "Создайте расширение в каждой БД, где нужен анализ запросов"
+    },
+    "computeQueryId": {
+      "title": "compute_query_id",
+      "ok": "Идентификаторы запросов вычисляются",
+      "warn": "auto, но pg_stat_statements загружен не везде",
+      "missing": "Выключен",
+      "version": "Появился в PostgreSQL 14",
+      "affects": "Активность не связать с топом запросов"
+    },
+    "trackIoTiming": {
+      "title": "track_io_timing",
+      "ok": "Включён",
+      "warn": "Выключен",
+      "affects": "Не будет времени ввода-вывода в запросах и планах"
+    },
+    "trackActivityQuerySize": {
+      "title": "track_activity_query_size",
+      "ok": "Достаточно для текстов запросов",
+      "warn": "Сейчас {{value}} байт — длинные запросы обрезаются",
+      "affects": "Тексты текущих запросов будут неполными"
+    },
+    "extension": {
+      "title": "Расширение {{name}}",
+      "ok": "Установлено, версия {{version}}",
+      "warn": "Доступно, но не создано",
+      "missing": "Не установлено на сервере",
+      "affects": "Расширенные проверки (индексы, bloat, ожидания) будут недоступны"
+    }
+  },
+  "hints": {
+    "label": "Подсказка: {{name}}",
+    "connections": {
+      "connstr": "JDBC (<code>jdbc:postgresql://h1,h2/db</code>), URI (<code>postgresql://…</code>) или <code>host=… port=…</code>. Пароль из строки сохранится в хранилище секретов.",
+      "kind": "Сервер — один PostgreSQL. Список узлов — несколько серверов, роли определяются автоматически. Кластер Patroni — адреса REST API, узлы находятся сами.",
+      "target": "С какого узла по умолчанию читать каталог — как targetServerType в JDBC.",
+      "overrides": "Если Patroni отдаёт адреса, недоступные с вашего компьютера (pod IP, NAT), укажите для участника доступный хост, порт и адрес API.",
+      "sslMode": "prefer — TLS, если сервер умеет; require — только TLS; verify-ca и verify-full — с проверкой сертификата (verify-full проверяет и имя хоста).",
+      "pgpass": "Если пароль не задан, используется ~/.pgpass, как в psql.",
+      "environment": "Помечает подключение цветом. Для prod-подключений (Pro) любое изменение нужно подтвердить вводом имени подключения.",
+      "readOnly": "Запрещает всё, что меняет данные или кластер. Для prod рекомендуется."
     }
   }
 }

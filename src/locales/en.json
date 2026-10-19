@@ -9,7 +9,8 @@
     "details": "Details",
     "openLicense": "Open “License”",
     "proHint": "Available in Pro — activate a license on the “License” screen",
-    "readOnly": "Read-only"
+    "readOnly": "Read-only",
+    "copy": "Copy"
   },
   "errors": {
     "generic": "{{message}}",
@@ -143,6 +144,81 @@
     },
     "catalog": {
       "badPage": "Invalid page: offset {{offset}}, limit {{limit}}"
+    }
+  },
+  "connections": {
+    "form": {
+      "titleNew": "New connection",
+      "titleEdit": "Connection “{{name}}”",
+      "deleted": "The connection was deleted",
+      "connstr": "Connection string",
+      "connstrApply": "Fill form",
+      "connstrIgnored": "Not recognized and skipped: {{list}}",
+      "name": "Name",
+      "folder": "Folder",
+      "folderRoot": "No folder",
+      "environment": "Environment",
+      "prodPro": "prod — Pro",
+      "color": "Color",
+      "kind": "Kind",
+      "kinds": {
+        "server": "Server",
+        "hostList": "Host list",
+        "patroni": "Patroni cluster"
+      },
+      "host": "Host",
+      "port": "Port",
+      "hosts": "Nodes",
+      "hostN": "Node {{n}}",
+      "portN": "Port of node {{n}}",
+      "moveUp": "Move node {{n}} up",
+      "moveDown": "Move node {{n}} down",
+      "removeHost": "Remove node {{n}}",
+      "addHost": "Add node",
+      "target": "Default node",
+      "targets": {
+        "primary": "primary",
+        "standby": "standby",
+        "preferStandby": "standby if any, otherwise primary",
+        "any": "any available"
+      },
+      "underPatroni": "Nodes are managed by Patroni",
+      "patroniUrls": "REST API addresses",
+      "urlN": "API address {{n}}",
+      "removeUrl": "Remove address {{n}}",
+      "addUrl": "Add address",
+      "patroniUser": "API user",
+      "patroniPassword": "API password",
+      "apiTls": "TLS for the API",
+      "caPath": "Trusted CA",
+      "verifyHostname": "Verify host name",
+      "clientCert": "Client certificate",
+      "certFormat": "Format",
+      "certPath": "Certificate",
+      "keyPath": "Key",
+      "keyPassword": "Key password",
+      "overrides": "Node address overrides",
+      "overrideMember": "Member {{n}}",
+      "overrideHost": "PostgreSQL host {{n}}",
+      "overridePort": "PostgreSQL port {{n}}",
+      "overrideApi": "Member API address {{n}}",
+      "removeOverride": "Remove override {{n}}",
+      "addOverride": "Add override",
+      "pgUser": "User",
+      "pgPassword": "Password",
+      "passwordKeep": "keep the saved one",
+      "passwordClear": "Remove the saved one",
+      "pgDatabase": "Default database",
+      "timeout": "Connection timeout, s",
+      "databases": "Only databases",
+      "databasesPlaceholder": "all",
+      "pick": "Browse…",
+      "pickAria": "Choose a file: {{label}}",
+      "test": "Test",
+      "busy": "Working…",
+      "deleteGroup": "Delete connection",
+      "deleteConfirm": "Delete connection “{{name}}”?",
+      "deleteYes": "Delete"
     }
   },
   "sidebar": {
@@ -280,13 +356,18 @@
     "about": "About Glafira",
     "diagnostics": "Collect Diagnostics…"
   },
-  "hints": {
-    "label": "Hint: {{name}}"
-  },
   "test": {
     "patroniOk": "{{members}} members, leader {{leader}}",
     "discoveryOk": "{{members}} nodes found",
-    "nodeOk": "{{role}}, PostgreSQL {{version}}"
+    "nodeOk": "{{role}}, PostgreSQL {{version}}",
+    "readinessTitle": "Readiness for diagnostics",
+    "roleScript": "Role script for diagnostics",
+    "step": {
+      "patroni": "Patroni API",
+      "discovery": "Node discovery",
+      "node": "Node",
+      "readiness": "Readiness"
+    }
   },
   "topology": {
     "role": {
@@ -297,6 +378,88 @@
       "quorumStandby": "Quorum",
       "replica": "Replica",
       "unknown": "—"
+    },
+    "warning": {
+      "noPrimary": "No primary: all reachable nodes are replicas",
+      "multiplePrimaries": "Several primaries ({{members}}): possible split-brain",
+      "systemIdMismatch": "Nodes from different clusters (different system_identifier): {{members}}",
+      "patroniUnreachable": "Patroni API is not responding: showing the last known data",
+      "memberUnreachable": "Node {{name}} is unreachable"
+    }
+  },
+  "readiness": {
+    "monitorRole": {
+      "title": "Monitoring role",
+      "ok": "Has pg_monitor",
+      "missing": "No pg_monitor role",
+      "affects": "Queries of other users, pg_stat_statements and the size of pg_wal are not visible"
+    },
+    "signalRole": {
+      "title": "Cancel and terminate sessions",
+      "ok": "Has pg_signal_backend",
+      "missing": "No pg_signal_backend role",
+      "affects": "Queries cannot be cancelled and sessions cannot be terminated"
+    },
+    "maintainRole": {
+      "title": "Table maintenance",
+      "ok": "VACUUM and ANALYZE are available",
+      "grant": "No pg_maintain role",
+      "ownerOnly": "Before PostgreSQL 17, only for the user's own tables",
+      "affects": "VACUUM and ANALYZE from the app work only for the user's own tables"
+    },
+    "pgssPreloaded": {
+      "title": "pg_stat_statements is loaded",
+      "ok": "Loaded on all nodes",
+      "missing": "Not loaded (shared_preload_libraries)",
+      "warn": "Not loaded on nodes: {{members}}",
+      "unknown": "Could not check: no reachable nodes, or the role cannot read shared_preload_libraries (grant pg_monitor or pg_read_all_settings)",
+      "affects": "Heavy queries cannot be analyzed; a restart is needed after the change"
+    },
+    "pgssInstalled": {
+      "title": "pg_stat_statements extension",
+      "ok": "Created",
+      "missing": "Not created in database {{database}}",
+      "affects": "Create the extension in every database where you need query analysis"
+    },
+    "computeQueryId": {
+      "title": "compute_query_id",
+      "ok": "Query IDs are computed",
+      "warn": "auto, but pg_stat_statements is not loaded everywhere",
+      "missing": "Off",
+      "version": "Available since PostgreSQL 14",
+      "affects": "Activity cannot be linked to top queries"
+    },
+    "trackIoTiming": {
+      "title": "track_io_timing",
+      "ok": "On",
+      "warn": "Off",
+      "affects": "I/O time will not be shown for queries and plans"
+    },
+    "trackActivityQuerySize": {
+      "title": "track_activity_query_size",
+      "ok": "Enough for query texts",
+      "warn": "Currently {{value}} bytes: long queries are truncated",
+      "affects": "Texts of current queries will be incomplete"
+    },
+    "extension": {
+      "title": "Extension {{name}}",
+      "ok": "Installed, version {{version}}",
+      "warn": "Available but not created",
+      "missing": "Not installed on the server",
+      "affects": "Advanced checks (indexes, bloat, waits) will be unavailable"
+    }
+  },
+  "hints": {
+    "label": "Hint: {{name}}",
+    "connections": {
+      "connstr": "JDBC (<code>jdbc:postgresql://h1,h2/db</code>), URI (<code>postgresql://…</code>) or <code>host=… port=…</code>. A password in the string is saved to the secret store.",
+      "kind": "Server — one PostgreSQL. Host list — several servers, roles are detected automatically. Patroni cluster — REST API addresses, nodes are discovered automatically.",
+      "target": "Which node the catalog is read from by default — like targetServerType in JDBC.",
+      "overrides": "If Patroni returns addresses your computer cannot reach (pod IP, NAT), set a reachable host, port and API address for the member.",
+      "sslMode": "prefer — TLS if the server supports it; require — TLS only; verify-ca and verify-full — also check the certificate (verify-full checks the host name too).",
+      "pgpass": "If no password is set, ~/.pgpass is used, as in psql.",
+      "environment": "Marks the connection with a color. prod connections (Pro) ask you to type the connection name before any change.",
+      "readOnly": "Blocks everything that changes data or the cluster. Recommended for prod."
     }
   }
 }

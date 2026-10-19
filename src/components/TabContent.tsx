@@ -2,6 +2,7 @@ import { Component, lazy, type ReactNode, Suspense } from "react";
 import { useTranslation } from "react-i18next";
 import type { Tab } from "../state/workspace";
 import { AboutPanel } from "./about/AboutPanel";
+import { ConnectionFormTab } from "./connections/ConnectionFormTab";
 import { SettingsPanel } from "./settings/SettingsPanel";
 import { LicensePanel } from "./license/LicensePanel";
 
@@ -41,6 +42,6 @@ export function TabContent({ tab }: { tab: Tab }) {
     case "license":
       return <LicensePanel />;
     case "connection-form":
-      return <p className="empty">{tab.connectionId ?? ""}</p>;
+      return <ConnectionFormTab connectionId={tab.connectionId} folderId={tab.folderId ?? null} tabId={tab.id} />;
   }
 }

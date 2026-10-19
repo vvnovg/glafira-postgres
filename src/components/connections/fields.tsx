@@ -1,0 +1,111 @@
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import type { ReactNode } from "react";
+import { useTranslation } from "react-i18next";
+import type { CertFormat, ClientCert } from "../../api/types";
+import { formatFromPath, type SecretField } from "./profile";
+
+/** Подпись строки сетки; значок подсказки — рядом с `<label>`, а не внутри (иначе попадёт в доступное имя). */
+export function RowLabel({ id, label, hint }: { id: string; label: string; hint?: ReactNode }) {
+  if (!hint) return <label htmlFor={id}>{label}</label>;
+  return (
+    <span className="field-label">
+      <label htmlFor={id}>{label}</label>
+      {hint}
+    </span>
+  );
+}
+
+async function pickFile(onPath: (p: string) => void) {
+  const path = await openDialog({ multiple: false, directory: false });
+  if (typeof path === "string") onPath(path);
+}
+
+export function PathRow(props: { id: string; label: string; hint?: ReactNode; value: string | null; onChange: (v: string | null) => void }) {
+  const { t } = useTranslation();
+  return (
+    <>
+      <RowLabel id={props.id} label={props.label} hint={props.hint} />
+      <div className="path-field">
+        <input id={props.id} value={props.value ?? ""} onChange={(e) => props.onChange(e.target.value || null)} />
+        <button type="button" aria-label={t("connections.form.pickAria", { label: props.label })} onClick={() => void pickFile(props.onChange)}>
+          {t("connections.form.pick")}
+        </button>
+      </div>
+    </>
+  );
+}
+
+export function SecretRow(props: { id: string; label: string; hint?: ReactNode; isNew: boolean; value: SecretField; onChange: (v: SecretField) => void }) {
+  const { t } = useTranslation();
+  return (
+    <>
+      <RowLabel id={props.id} label={props.label} hint={props.hint} />
+      <span className="path-field">
+        <input
+          id={props.id}
+          type="password"
+          autoComplete="off"
+          disabled={props.value.clear}
+          placeholder={props.isNew ? "" : t("connections.form.passwordKeep")}
+          value={props.value.text}
+          onChange={(e) => props.onChange({ text: e.target.value, clear: false })}
+        />
+        {!props.isNew && (
+          <label className="inline">
+            <input type="checkbox" checked={props.value.clear} onChange={(e) => props.onChange({ text: "", clear: e.target.checked })} />
+            {t("connections.form.passwordClear")}
+          </label>
+        )}
+      </span>
+    </>
+  );
+}
+
+/** Клиентский сертификат: формат, файлы, пароль ключа. `null` — без сертификата. */
+export function ClientCertRows(props: {
+  idPrefix: string;
+  cert: ClientCert | null;
+  onChange: (c: ClientCert | null) => void;
+  keyPassword: SecretField;
+  onKeyPassword: (v: SecretField) => void;
+  isNew: boolean;
+}) {
+  const { t } = useTranslation();
+  const { cert, idPrefix: p } = props;
+  return (
+    <>
+      <label htmlFor={`${p}-cc`}>{t("connections.form.clientCert")}</label>
+      <span>
+        <input
+          id={`${p}-cc`}
+          type="checkbox"
+          checked={cert !== null}
+          onChange={(e) => props.onChange(e.target.checked ? { format: "pem", certificatePath: "", keyPath: "" } : null)}
+        />
+      </span>
+      {cert && (
+        <>
+          <label htmlFor={`${p}-fmt`}>{t("connections.form.certFormat")}</label>
+          <select id={`${p}-fmt`} value={cert.format} onChange={(e) => props.onChange({ ...cert, format: e.target.value as CertFormat, keyPath: e.target.value === "pem" ? cert.keyPath ?? "" : null })}>
+            <option value="pem">PEM</option>
+            <option value="pkcs12">PKCS#12 (.p12, .pfx)</option>
+          </select>
+          <PathRow
+            id={`${p}-cert`}
+            label={t("connections.form.certPath")}
+            value={cert.certificatePath}
+            onChange={(v) => {
+              const guessed = v ? formatFromPath(v) : null;
+              const format = guessed ?? cert.format;
+              props.onChange({ ...cert, certificatePath: v ?? "", format, keyPath: format === "pem" ? cert.keyPath ?? "" : null });
+            }}
+          />
+          {cert.format === "pem" && (
+            <PathRow id={`${p}-key`} label={t("connections.form.keyPath")} value={cert.keyPath} onChange={(v) => props.onChange({ ...cert, keyPath: v })} />
+          )}
+          <SecretRow id={`${p}-kpw`} label={t("connections.form.keyPassword")} isNew={props.isNew} value={props.keyPassword} onChange={props.onKeyPassword} />
+        </>
+      )}
+    </>
+  );
+}

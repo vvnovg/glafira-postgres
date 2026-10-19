@@ -1,0 +1,112 @@
+import { render, screen } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
+import type { TestEvent, TestReport } from "../../api/types";
+import { DICTIONARIES } from "../../i18n";
+import { TestPanel } from "./TestPanel";
+
+const ev = (patch: Partial<TestEvent>): TestEvent => ({ step: "node", member: null, status: "running", message: null, error: null, ...patch });
+
+describe("TestPanel", () => {
+  it("показывает последнее состояние каждого шага", () => {
+    render(
+      <TestPanel
+        events={[
+          ev({ step: "patroni", status: "skipped" }),
+          ev({ member: "db1:5432", status: "running" }),
+          ev({ member: "db1:5432", status: "ok", message: { key: "test.nodeOk", params: { role: "primary", version: "16.4" }, text: "primary, PostgreSQL 16.4" } }),
+          ev({ member: "db2:5432", status: "failed", error: { code: "AUTH_FAILED", key: "errors.pg.authFailed", message: "Authentication failed", retryable: false } }),
+        ]}
+        report={null}
+      />,
+    );
+    const items = screen.getAllByRole("listitem");
+    expect(items).toHaveLength(3);
+    expect(items[1]).toHaveTextContent("primary, PostgreSQL 16.4");
+    expect(items[2]).toHaveTextContent("Аутентификация не прошла");
+  });
+
+  it("чек-лист с командами для исправления", () => {
+    const report: TestReport = {
+      ok: true,
+      topology: null,
+      readiness: [
+        { id: "monitorRole", status: "ok", params: {}, fix: null },
+        { id: "pgssInstalled", status: "missing", params: { database: "postgres" }, fix: "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;" },
+        { id: "extension", status: "warn", params: { name: "hypopg" }, fix: "CREATE EXTENSION IF NOT EXISTS hypopg;" },
+      ],
+    };
+    render(<TestPanel events={[]} report={report} />);
+    expect(screen.getByText("CREATE EXTENSION IF NOT EXISTS pg_stat_statements;")).toBeInTheDocument();
+    expect(screen.getByText(/hypopg/, { selector: "strong" })).toBeInTheDocument();
+    expect(screen.getByText(/postgres/)).toBeInTheDocument();
+  });
+
+  it("роль без прав: команда GRANT с именем в кавычках и скрипт роли", () => {
+    const report: TestReport = {
+      ok: true,
+      topology: null,
+      readiness: [{ id: "monitorRole", status: "missing", params: {}, fix: 'GRANT pg_monitor TO "glafira_plain";' }],
+    };
+    render(<TestPanel events={[]} report={report} />);
+    expect(screen.getByText('GRANT pg_monitor TO "glafira_plain";')).toBeInTheDocument();
+    expect(screen.getByText("Скрипт роли для диагностики")).toBeInTheDocument();
+  });
+
+  it("pgssPreloaded: «неизвестно» объясняет обе причины", () => {
+    const report: TestReport = {
+      ok: true,
+      topology: null,
+      readiness: [{ id: "pgssPreloaded", status: "warn", params: { reason: "unknown" }, fix: null }],
+    };
+    render(<TestPanel events={[]} report={report} />);
+    const text = screen.getByText(/Не удалось проверить/).textContent ?? "";
+    expect(text).toContain("нет доступных узлов");
+    expect(text).toContain("pg_monitor");
+    expect(text).toContain("pg_read_all_settings");
+  });
+
+  it("предупреждения топологии", () => {
+    const report: TestReport = {
+      ok: true,
+      topology: {
+        connectionId: "c",
+        kind: "hostList",
+        observedAtMs: 0,
+        scope: null,
+        paused: null,
+        members: [],
+        warnings: [{ kind: "multiplePrimaries", members: ["a", "b"] }, { kind: "memberUnreachable", name: "c" }],
+      },
+      readiness: [],
+    };
+    render(<TestPanel events={[]} report={report} />);
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("Несколько primary (a, b)");
+    expect(alert).toHaveTextContent("Узел c недоступен");
+  });
+
+  it("в обоих словарях есть тексты для всех пунктов чек-листа", () => {
+    // Сочетания (id, вариант), которые выдаёт pg_advisor::readiness::evaluate: вариант — params.reason, без него — статус.
+    const variants: Record<string, string[]> = {
+      monitorRole: ["ok", "missing"],
+      signalRole: ["ok", "missing"],
+      maintainRole: ["ok", "grant", "ownerOnly"],
+      pgssPreloaded: ["ok", "missing", "warn", "unknown"],
+      pgssInstalled: ["ok", "missing"],
+      computeQueryId: ["ok", "warn", "missing", "version"],
+      trackIoTiming: ["ok", "warn"],
+      trackActivityQuerySize: ["ok", "warn"],
+      extension: ["ok", "warn", "missing"],
+    };
+    const missing: string[] = [];
+    for (const lng of ["en", "ru"])
+      for (const [id, list] of Object.entries(variants))
+        for (const k of ["title", "affects", ...list]) {
+          const key = `readiness.${id}.${k}`;
+          // Ищем в словаре языка напрямую: i18n.exists засчитал бы запасной язык (en) за перевод.
+          const value = key.split(".").reduce<unknown>((o, part) => (o as Record<string, unknown> | undefined)?.[part], DICTIONARIES[lng]);
+          if (typeof value !== "string") missing.push(`${lng}: ${key}`);
+        }
+    expect(missing).toEqual([]);
+  });
+});

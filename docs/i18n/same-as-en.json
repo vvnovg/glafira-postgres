@@ -1,7 +1,13 @@
 {
   "ru": [
+    "connections.form.prodPro",
+    "connections.form.targets.primary",
+    "readiness.computeQueryId.title",
+    "readiness.trackActivityQuerySize.title",
+    "readiness.trackIoTiming.title",
     "tabs.unknownConnection",
     "test.nodeOk",
+    "test.step.patroni",
     "topology.role.leader",
     "topology.role.primary",
     "topology.role.quorumStandby",
