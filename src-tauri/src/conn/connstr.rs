@@ -257,6 +257,25 @@ fn take(params: &mut Vec<(String, String)>, name: &str) -> Option<String> {
     Some(params.remove(i).1)
 }
 
+/// Порт каждого из `hosts` хостов по значению параметра `port`: одно значение — для всех,
+/// список — по позиции; иное число значений — `portsMismatch`.
+fn ports_per_host(value: &str, hosts: usize) -> AppResult<Vec<u16>> {
+    let ports = value
+        .split(',')
+        .map(parse_port)
+        .collect::<AppResult<Vec<u16>>>()?;
+    match ports.len() {
+        1 => Ok(vec![ports[0]; hosts]),
+        k if k == hosts => Ok(ports),
+        k => Err(invalid(ltext!(
+            "errors.connstr.portsMismatch",
+            "The number of ports ({{ports}}) does not match the number of hosts ({{hosts}})",
+            ports = k,
+            hosts = hosts
+        ))),
+    }
+}
+
 /// Хосты из параметров `host` / `hostaddr` / `port` (conninfo и `?host=` в URI).
 fn hosts_from_params(params: &mut Vec<(String, String)>) -> AppResult<Vec<(String, Option<u16>)>> {
     let names = match take(params, "host") {
@@ -270,25 +289,14 @@ fn hosts_from_params(params: &mut Vec<(String, String)>) -> AppResult<Vec<(Strin
     if names.iter().any(|n| n.is_empty() || n.starts_with('/')) {
         return Err(unix_socket());
     }
-    let ports: Vec<u16> = match take(params, "port") {
-        Some(p) => p.split(',').map(parse_port).collect::<AppResult<_>>()?,
-        None => Vec::new(),
-    };
-    match ports.len() {
-        0 => Ok(names.into_iter().map(|n| (n, None)).collect()),
-        1 => Ok(names.into_iter().map(|n| (n, Some(ports[0]))).collect()),
-        k if k == names.len() => Ok(names
+    let ports: Vec<Option<u16>> = match take(params, "port") {
+        Some(p) => ports_per_host(&p, names.len())?
             .into_iter()
-            .zip(ports)
-            .map(|(n, p)| (n, Some(p)))
-            .collect()),
-        k => Err(invalid(ltext!(
-            "errors.connstr.portsMismatch",
-            "The number of ports ({{ports}}) does not match the number of hosts ({{hosts}})",
-            ports = k,
-            hosts = names.len()
-        ))),
-    }
+            .map(Some)
+            .collect(),
+        None => vec![None; names.len()],
+    };
+    Ok(names.into_iter().zip(ports).collect())
 }
 
 fn parse_sslmode(v: &str) -> AppResult<SslMode> {
@@ -348,6 +356,12 @@ fn parse_timeout(v: &str) -> AppResult<Option<u64>> {
 fn map(mut raw: Raw, d: Dialect) -> AppResult<ParsedConnection> {
     if raw.hosts.is_empty() {
         raw.hosts = hosts_from_params(&mut raw.params)?;
+    } else if let Some(value) = take(&mut raw.params, "port") {
+        // Хосты из authority: `?port=` задаёт порт только тем, у кого он не указан в `host:port`.
+        let ports = ports_per_host(&value, raw.hosts.len())?;
+        for ((_, port), p) in raw.hosts.iter_mut().zip(ports) {
+            *port = port.or(Some(p));
+        }
     }
     if raw.hosts.is_empty() {
         return Err(invalid(ltext!(
@@ -533,6 +547,23 @@ mod tests {
         );
         assert_eq!(
             err_key("host=a,b,c port=1,2"),
+            "errors.connstr.portsMismatch"
+        );
+    }
+
+    #[test]
+    fn uri_port_param_with_host_list() {
+        let p = parse_connection_string("postgresql://h1,h2/db?port=6432").unwrap();
+        assert_eq!(p.patch.hosts, vec![hp("h1", 6432), hp("h2", 6432)]);
+        assert!(p.ignored.is_empty());
+        let p = parse_connection_string("postgresql://h1,h2/db?port=5433,5434").unwrap();
+        assert_eq!(p.patch.hosts, vec![hp("h1", 5433), hp("h2", 5434)]);
+        assert!(p.ignored.is_empty());
+        let p = parse_connection_string("postgresql://h1:7000,h2/db?port=6432").unwrap();
+        assert_eq!(p.patch.hosts, vec![hp("h1", 7000), hp("h2", 6432)]);
+        assert!(p.ignored.is_empty());
+        assert_eq!(
+            err_key("postgresql://h1,h2,h3/db?port=1,2"),
             "errors.connstr.portsMismatch"
         );
     }
