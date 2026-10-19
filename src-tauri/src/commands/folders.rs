@@ -17,9 +17,11 @@ use crate::storage::exchange::{
 use crate::storage::fs::write_json;
 use crate::storage::tree::{TreeItemKind, TreeItemRef};
 
+/// Как `list_connections`: блокировку хранилища ждёт фоновый поток, а не главный.
 #[tauri::command]
-pub fn list_folders(state: State<'_, AppState>) -> AppResult<Vec<ConnectionFolder>> {
-    Ok(state.connections.list_folders())
+pub async fn list_folders(state: State<'_, AppState>) -> AppResult<Vec<ConnectionFolder>> {
+    let st = state.inner().clone();
+    blocking(move || Ok(st.connections.list_folders())).await
 }
 
 #[tauri::command]

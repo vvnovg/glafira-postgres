@@ -60,7 +60,11 @@ fn catalog_limit(profile: &ConnectionProfile) -> Duration {
 /// ожидание свободного места в пуле и подключение) и запрос вместе: серверный `statement_timeout`
 /// не защищает от молчащего пути. Таймаут и обрыв закрывают соединение, а не возвращают в пул.
 /// Предел и получение соединения передаются снаружи, чтобы проверять границы без стенда.
-async fn on_catalog_node_within<T, A, F>(limit: Duration, acquire: A, query: F) -> AppResult<T>
+pub(crate) async fn on_catalog_node_within<T, A, F>(
+    limit: Duration,
+    acquire: A,
+    query: F,
+) -> AppResult<T>
 where
     T: Send,
     A: Future<Output = AppResult<PooledClient>> + Send,

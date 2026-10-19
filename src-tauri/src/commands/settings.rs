@@ -26,9 +26,12 @@ fn apply_language(st: &AppState, lang: Option<&str>) -> AppResult<LanguageSettin
     Ok(current(st))
 }
 
+/// Настройки читаются под блокировкой, которую держит запись файла (с fsync): асинхронная команда ждёт её
+/// в фоновом потоке — синхронная ждала бы в главном и замораживала окно.
 #[tauri::command]
-pub fn get_language_settings(state: State<'_, AppState>) -> AppResult<LanguageSettings> {
-    Ok(current(&state))
+pub async fn get_language_settings(state: State<'_, AppState>) -> AppResult<LanguageSettings> {
+    let st = state.inner().clone();
+    blocking(move || Ok(current(&st))).await
 }
 
 #[tauri::command]
@@ -41,8 +44,9 @@ pub async fn set_language(
 }
 
 #[tauri::command]
-pub fn get_ui_settings(state: State<'_, AppState>) -> AppResult<crate::settings::UiSettings> {
-    Ok(state.settings.ui())
+pub async fn get_ui_settings(state: State<'_, AppState>) -> AppResult<crate::settings::UiSettings> {
+    let st = state.inner().clone();
+    blocking(move || Ok(st.settings.ui())).await
 }
 
 #[tauri::command]
