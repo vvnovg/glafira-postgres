@@ -357,13 +357,33 @@ impl ConnectionStore {
     /// Изменяет данные одной транзакцией: `f` работает с копией, затем проверяются
     /// инварианты дерева и пишется файл; кэш заменяется только после успешной записи.
     pub(crate) fn update<R>(&self, f: impl FnOnce(&mut StoreData) -> AppResult<R>) -> AppResult<R> {
+        self.update_if(|data| f(data).map(Some))
+            .map(|r| r.expect("update always writes"))
+    }
+
+    /// Как `update`, но `f` может отказаться от записи (`Ok(None)`): тогда ни файл, ни кэш не меняются.
+    pub(crate) fn update_if<R>(
+        &self,
+        f: impl FnOnce(&mut StoreData) -> AppResult<Option<R>>,
+    ) -> AppResult<Option<R>> {
         let mut cache = self.cache.write_safe();
         let mut next = cache.clone();
-        let result = f(&mut next)?;
+        let Some(result) = f(&mut next)? else {
+            return Ok(None);
+        };
         check_tree(&next)?;
         self.persist(&next)?;
         *cache = next;
-        Ok(result)
+        Ok(Some(result))
+    }
+
+    /// Держит ли кто-то блокировку записи кэша (для тестов: keychain не должен вызываться под ней).
+    #[cfg(test)]
+    pub(crate) fn write_locked(&self) -> bool {
+        matches!(
+            self.cache.try_read(),
+            Err(std::sync::TryLockError::WouldBlock)
+        )
     }
 
     /// Создаёт или обновляет подключение и возвращает его в сохранённом виде.

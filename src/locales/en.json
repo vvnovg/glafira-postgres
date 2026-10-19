@@ -105,7 +105,9 @@
       "unsupportedConnection": "Not supported by this version of Glafira (update the app): {{error}}",
       "duplicateId": "Duplicate connection id in the file",
       "fieldNotList": "The file is damaged: “{{field}}” is not a list",
-      "tooLarge": "The file is larger than {{limit_mb}} MB: this is not a connections file"
+      "tooLarge": "The file is larger than {{limit_mb}} MB: this is not a connections file",
+      "notSaved": "The import was not saved. Saved passwords of {{count}} connections it would change have already been removed — enter them again",
+      "storeChanged": "Connections changed while the import was being applied: try again"
     },
     "pg": {
       "authFailed": "Authentication failed: check the user, the password and pg_hba.conf",
