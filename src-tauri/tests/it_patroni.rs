@@ -50,6 +50,13 @@ async fn switchover_and_pause_are_observed() {
     let Some(before) = observe(None).await else {
         return;
     };
+    // Стенд приводится в порядок при любом выходе, в том числе при падении проверок: после
+    // переключения и паузы следующий тест должен видеть лидера и две потоковые реплики.
+    let restore = common::restore_on_drop(|| {
+        // Если пауза не включилась, `resume` вернёт ошибку — это не помеха.
+        let _ = common::try_patronictl(&["resume", "--wait"]);
+        common::wait_stand();
+    });
     let leader = before.leader().unwrap().name.clone();
     let candidate = before
         .members
@@ -86,9 +93,10 @@ async fn switchover_and_pause_are_observed() {
 
     common::patronictl(&["pause", "--wait"]);
     let paused = observe(Some(&after)).await.unwrap();
-    common::patronictl(&["resume", "--wait"]);
-    common::wait_stand();
+    drop(restore);
     assert_eq!(paused.paused, Some(true));
+    let resumed = observe(Some(&paused)).await.unwrap();
+    assert_eq!(resumed.paused, Some(false), "пауза снята");
 }
 
 #[tokio::test]
@@ -108,10 +116,14 @@ async fn stopped_member_becomes_unreachable() {
         .name
         .clone();
     let container = format!("gp-{victim}");
+    // Контейнер запускается снова, даже если `observe` или проверка ниже упали.
+    let start = common::restore_on_drop(|| {
+        common::docker(&["start", &container]);
+        common::wait_stand();
+    });
     common::docker(&["stop", &container]);
     let t = observe(Some(&before)).await.unwrap();
-    common::docker(&["start", &container]);
-    common::wait_stand();
+    drop(start);
     let m = t
         .member(&victim)
         .expect("участник ещё в /cluster до истечения ttl");

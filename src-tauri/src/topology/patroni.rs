@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::conn::errors::chain;
-use crate::conn::profile::{ConnectionKind, HostOverride, PatroniSettings};
+use crate::conn::profile::{ConnectionKind, PatroniSettings};
 use crate::conn::tls;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::topology::BoxFuture;
@@ -116,6 +116,20 @@ fn bad_json(url: &str, e: impl std::fmt::Display) -> AppError {
     .with_details(e.to_string())
 }
 
+/// `/patroni` у узла с остановленным PostgreSQL отвечает 503, но с обычным JSON состояния
+/// (`state`, `role`). Любой другой 503 — например, `{"message": "Service Unavailable"}` от шлюза
+/// или 503 на `/cluster` — остаётся ошибкой, чтобы опрос перешёл к следующему адресу.
+fn is_patroni_state(url: &str, v: &serde_json::Value) -> bool {
+    let path = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .trim_end_matches('/');
+    path.ends_with("/patroni")
+        && v.as_object()
+            .is_some_and(|o| o.contains_key("state") || o.contains_key("role"))
+}
+
 impl PatroniHttp for ReqwestHttp {
     fn get_json<'a>(&'a self, url: &'a str) -> BoxFuture<'a, AppResult<serde_json::Value>> {
         Box::pin(async move {
@@ -127,10 +141,9 @@ impl PatroniHttp for ReqwestHttp {
             let status = resp.status();
             let body = resp.text().await.map_err(|e| request_error(url, &e))?;
             let parsed = serde_json::from_str::<serde_json::Value>(&body);
-            // /patroni у узла с остановленным PostgreSQL отвечает 503, но с тем же JSON.
             match (status.as_u16(), parsed) {
                 (200..=299, Ok(v)) => Ok(v),
-                (503, Ok(v)) if v.is_object() => Ok(v),
+                (503, Ok(v)) if is_patroni_state(url, &v) => Ok(v),
                 (200..=299, Err(e)) => Err(bad_json(url, e)),
                 (401 | 403, _) => Err(app_err!(
                     ErrorCode::AuthFailed,
@@ -185,7 +198,8 @@ pub struct MemberJson {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ClusterJson {
-    #[serde(default)]
+    /// Обязательное поле: Patroni присылает его всегда, даже `[]`. Без него ответ — не Patroni
+    /// (шлюз, чужой сервис), и пустой кластер из него делать нельзя.
     pub members: Vec<MemberJson>,
     #[serde(default)]
     pub pause: Option<bool>,
@@ -214,12 +228,14 @@ struct PatroniJson {
 }
 
 /// Базовый адрес API: `http://h:8008/patroni` → `http://h:8008`.
+/// Сегмент `/patroni` отбрасывается только в пути: хост может называться `patroni`.
 pub fn api_base(url: &str) -> String {
-    url.trim()
-        .trim_end_matches('/')
-        .trim_end_matches("/patroni")
-        .trim_end_matches('/')
-        .to_string()
+    let url = url.trim();
+    let (scheme, rest) = url.find("://").map_or(("", url), |i| url.split_at(i + 3));
+    let (authority, path) = rest.find('/').map_or((rest, ""), |i| rest.split_at(i));
+    let path = path.trim_end_matches('/');
+    let path = path.strip_suffix("/patroni").unwrap_or(path);
+    format!("{scheme}{authority}{}", path.trim_end_matches('/'))
 }
 
 pub fn map_role(raw: Option<&str>) -> Role {
@@ -249,17 +265,12 @@ fn lag_bytes(l: Option<&LagJson>) -> Option<i64> {
     }
 }
 
-/// Подмена адресов участника из профиля.
-fn override_for<'a>(settings: &'a PatroniSettings, member: &str) -> Option<&'a HostOverride> {
-    settings.host_overrides.iter().find(|o| o.member == member)
-}
-
 /// Участники из `/cluster` с подменой адресов из профиля.
 pub fn members_from_cluster(c: &ClusterJson, settings: &PatroniSettings) -> Vec<Member> {
     c.members
         .iter()
         .map(|m| {
-            let ov = override_for(settings, &m.name);
+            let ov = settings.host_overrides.iter().find(|o| o.member == m.name);
             let host = ov
                 .and_then(|o| o.host.clone())
                 .or_else(|| m.host.clone())
@@ -404,7 +415,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::conn::profile::{ApiTls, CertFormat, ClientCert};
+    use crate::conn::profile::{ApiTls, CertFormat, ClientCert, HostOverride};
     use crate::conn::testutil;
     use crate::sync::MutexExt;
 
@@ -501,7 +512,7 @@ mod tests {
             "members": [
                 {"name": "a", "role": "leader", "state": "running", "api_url": "http://a:8008/patroni", "host": "a", "port": 5432, "timeline": 3},
                 {"name": "b", "role": "quorum_standby", "state": "streaming", "api_url": "http://b:8008/patroni", "host": "b", "port": 5432,
-                 "receive_lag": 10, "replay_lag": 20, "lag": 20}
+                 "receive_lag": 10, "replay_lag": 20, "lag": 30}
             ],
             "pause": true
         }))
@@ -515,7 +526,7 @@ mod tests {
         }];
         let m = members_from_cluster(&c, &s);
         assert_eq!(m[1].role, Role::QuorumStandby);
-        assert_eq!(m[1].lag_bytes, Some(20));
+        assert_eq!(m[1].lag_bytes, Some(20), "replay_lag важнее lag");
         assert_eq!((m[1].host.as_str(), m[1].port), ("localhost", 5442));
         assert_eq!(m[1].api_url.as_deref(), Some("http://localhost:8012"));
         assert_eq!(c.pause, Some(true));
@@ -613,13 +624,173 @@ mod tests {
         assert_eq!(http.calls.lock_safe()[0], "http://10.0.0.1:8008/cluster");
     }
 
-    /// Минимальный HTTP-сервер: на каждый путь отвечает заготовленным ответом, `/echo` возвращает заголовок авторизации.
-    async fn stub_server() -> String {
+    /// Кластер из трёх участников, лидер — второй (не первый в списке).
+    fn cluster_leader_second() -> serde_json::Value {
+        serde_json::json!({
+            "members": [
+                {"name": "pg-1", "role": "replica", "state": "streaming", "api_url": "http://10.0.0.1:8008/patroni",
+                 "host": "10.0.0.1", "port": 5432},
+                {"name": "pg-2", "role": "leader", "state": "running", "api_url": "http://10.0.0.2:8008/patroni",
+                 "host": "10.0.0.2", "port": 5432},
+                {"name": "pg-3", "role": "replica", "state": "streaming", "api_url": "http://10.0.0.3:8008/patroni",
+                 "host": "10.0.0.3", "port": 5432}
+            ],
+            "scope": "billing"
+        })
+    }
+
+    #[tokio::test]
+    async fn later_polls_start_with_leader_then_members_then_profile_urls() {
+        let ok = FakeHttp::new(vec![("http://s:8008/cluster", Ok(cluster_leader_second()))]);
+        // Профиль: адрес одного из участников (повтор) и посторонний шлюз.
+        let s = settings(&[
+            "http://10.0.0.3:8008/patroni",
+            "http://s:8008",
+            "http://gw:8008/",
+        ]);
+        let prev = discover(&ok, &s, "c", None, 1).await.unwrap();
+        assert_eq!(prev.leader().unwrap().name, "pg-2");
+        assert_eq!(prev.members[0].name, "pg-1", "лидер не первый в списке");
+
+        let expected = [
+            "http://10.0.0.2:8008",
+            "http://10.0.0.1:8008",
+            "http://10.0.0.3:8008",
+            "http://s:8008",
+            "http://gw:8008",
+        ];
+        assert_eq!(cluster_bases(&s, Some(&prev)), expected);
+        assert_eq!(
+            cluster_bases(&s, None),
+            ["http://10.0.0.3:8008", "http://s:8008", "http://gw:8008"],
+            "без прошлой топологии — только адреса профиля"
+        );
+
+        // Все адреса молчат: `discover` обходит их ровно в этом порядке.
+        let down = FakeHttp::new(vec![]);
+        let t = discover(&down, &s, "c", Some(&prev), 2).await.unwrap();
+        assert_eq!(t.warnings, vec![TopologyWarning::PatroniUnreachable]);
+        let calls: Vec<String> = down.calls.lock_safe().clone();
+        let want: Vec<String> = expected.iter().map(|b| format!("{b}/cluster")).collect();
+        assert_eq!(calls, want);
+    }
+
+    #[tokio::test]
+    async fn cluster_answer_without_members_is_an_error_and_next_url_is_tried() {
+        // Шлюз ответил `{}` — это не Patroni; пустой кластер из него не получается.
+        let only_empty = FakeHttp::new(vec![("http://s:8008/cluster", Ok(serde_json::json!({})))]);
+        let err = discover(&only_empty, &settings(&["http://s:8008"]), "c", None, 1)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (err.code, err.key.as_str()),
+            (ErrorCode::PatroniError, "errors.patroni.badJson")
+        );
+
+        // Первый адрес отвечает `{}`, второй — настоящим кластером.
+        let http = FakeHttp::new(vec![
+            ("http://gw:8008/cluster", Ok(serde_json::json!({}))),
+            ("http://s:8008/cluster", Ok(cluster_v3())),
+        ]);
+        let t = discover(
+            &http,
+            &settings(&["http://gw:8008", "http://s:8008"]),
+            "c",
+            None,
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(t.members.len(), 3);
+        assert_eq!(
+            http.calls.lock_safe()[..2],
+            ["http://gw:8008/cluster", "http://s:8008/cluster"]
+        );
+
+        // Настоящий кластер без участников (`"members": []`) — допустимый ответ.
+        let empty = FakeHttp::new(vec![(
+            "http://s:8008/cluster",
+            Ok(serde_json::json!({"members": [], "scope": "x"})),
+        )]);
+        let t = discover(&empty, &settings(&["http://s:8008"]), "c", None, 1)
+            .await
+            .unwrap();
+        assert!(t.members.is_empty());
+    }
+
+    #[tokio::test]
+    async fn later_poll_with_members_less_answers_degrades() {
+        let ok = FakeHttp::new(vec![("http://s:8008/cluster", Ok(cluster_v3()))]);
+        let s = settings(&["http://s:8008"]);
+        let prev = discover(&ok, &s, "c", None, 1).await.unwrap();
+
+        let empty = serde_json::json!({});
+        let gateway = FakeHttp::new(vec![
+            ("http://10.0.0.1:8008/cluster", Ok(empty.clone())),
+            ("http://10.0.0.2:8008/cluster", Ok(empty.clone())),
+            ("http://10.0.0.3:8008/cluster", Ok(empty.clone())),
+            ("http://s:8008/cluster", Ok(empty)),
+        ]);
+        let t = discover(&gateway, &s, "c", Some(&prev), 2).await.unwrap();
+        assert_eq!(t.warnings, vec![TopologyWarning::PatroniUnreachable]);
+        assert_eq!(t.members.len(), 3, "участники прошлого опроса сохранены");
+        assert!(t.members.iter().all(|m| !m.reachable));
+        assert!(t.members.iter().all(|m| {
+            m.error
+                .as_ref()
+                .is_some_and(|e| e.key == "errors.patroni.badJson")
+        }));
+        assert_eq!(t.observed_at_ms, 2);
+    }
+
+    #[tokio::test]
+    async fn gateway_503_on_cluster_falls_through_to_next_base() {
+        // Первый адрес — шлюз: 503 с JSON, но не от Patroni.
+        let gateway = routes_server(vec![(
+            "/cluster",
+            503,
+            serde_json::json!({"message": "Service Unavailable"}),
+        )])
+        .await;
+        // Второй — настоящий Patroni (без api_url у участника: детали не запрашиваются).
+        let patroni = routes_server(vec![(
+            "/cluster",
+            200,
+            serde_json::json!({"members": [
+                {"name": "pg-1", "role": "leader", "state": "running", "host": "10.0.0.1", "port": 5432}
+            ], "scope": "billing"}),
+        )])
+        .await;
+        let s = settings(&[&gateway, &patroni]);
+        let http = ReqwestHttp::new(&s, None, None).unwrap();
+        let t = discover(&http, &s, "c", None, 1).await.unwrap();
+        assert_eq!(t.members.len(), 1);
+        assert_eq!(t.leader().unwrap().name, "pg-1");
+        assert_eq!(t.scope.as_deref(), Some("billing"));
+
+        // 200 `{}` от шлюза — тоже не кластер.
+        let gateway = routes_server(vec![("/cluster", 200, serde_json::json!({}))]).await;
+        let s = settings(&[&gateway, &patroni]);
+        let t = discover(&http, &s, "c", None, 1).await.unwrap();
+        assert_eq!(t.members.len(), 1);
+
+        // Если настоящего Patroni нет, первый опрос — ошибка, а не пустой кластер.
+        let s = settings(&[&gateway]);
+        let err = discover(&http, &s, "c", None, 1).await.unwrap_err();
+        assert_eq!(err.key, "errors.patroni.badJson");
+    }
+
+    /// Минимальный HTTP-сервер: `handler(путь, заголовок авторизации)` возвращает статус и тело ответа.
+    async fn serve(
+        handler: impl Fn(&str, &str) -> (u16, String) + Send + Sync + 'static,
+    ) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let handler = std::sync::Arc::new(handler);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             while let Ok((mut sock, _)) = listener.accept().await {
+                let handler = handler.clone();
                 tokio::spawn(async move {
                     let mut buf = vec![0u8; 4096];
                     let n = sock.read(&mut buf).await.unwrap_or(0);
@@ -633,14 +804,7 @@ mod tests {
                         })
                         .unwrap_or("")
                         .to_string();
-                    let (status, body) = match path.as_str() {
-                        "/ok" => (200, r#"{"state":"running"}"#.to_string()),
-                        "/degraded" => (503, r#"{"state":"stopped"}"#.to_string()),
-                        "/denied" => (401, "no".to_string()),
-                        "/garbage" => (200, "<html>".to_string()),
-                        "/echo" => (200, serde_json::json!({ "auth": auth }).to_string()),
-                        _ => (500, "boom".to_string()),
-                    };
+                    let (status, body) = handler(&path, &auth);
                     let resp = format!(
                         "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
@@ -651,6 +815,39 @@ mod tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    /// Сервер с заготовленными ответами по путям; неизвестный путь — 500.
+    async fn routes_server(routes: Vec<(&str, u16, serde_json::Value)>) -> String {
+        let routes: HashMap<String, (u16, String)> = routes
+            .into_iter()
+            .map(|(p, status, body)| (p.to_string(), (status, body.to_string())))
+            .collect();
+        serve(move |path, _| {
+            routes
+                .get(path)
+                .cloned()
+                .unwrap_or((500, "boom".to_string()))
+        })
+        .await
+    }
+
+    /// Сервер для проверки соответствия статусов ответа ошибкам; `/echo` возвращает заголовок авторизации.
+    async fn stub_server() -> String {
+        serve(|path, auth| match path {
+            "/ok" => (200, r#"{"state":"running"}"#.to_string()),
+            "/patroni" => (503, r#"{"state":"stopped","role":"replica"}"#.to_string()),
+            "/denied" => (401, "no".to_string()),
+            "/forbidden" => (403, "no".to_string()),
+            "/garbage" => (200, "<html>".to_string()),
+            "/unavailable" => (503, "<html>bad gateway</html>".to_string()),
+            // Шлюз перед Patroni: 503 с JSON, но не от Patroni.
+            "/cluster" => (503, r#"{"state":"stopped"}"#.to_string()),
+            "/gateway/patroni" => (503, r#"{"message":"Service Unavailable"}"#.to_string()),
+            "/echo" => (200, serde_json::json!({ "auth": auth }).to_string()),
+            _ => (500, "boom".to_string()),
+        })
+        .await
     }
 
     #[tokio::test]
@@ -664,10 +861,10 @@ mod tests {
             http.get_json(&format!("{base}/ok")).await.unwrap()["state"],
             "running"
         );
-        let degraded = http.get_json(&format!("{base}/degraded")).await.unwrap();
+        let degraded = http.get_json(&format!("{base}/patroni")).await.unwrap();
         assert_eq!(
             degraded["state"], "stopped",
-            "503 с JSON — ответ узла с остановленным PostgreSQL"
+            "503 с JSON на /patroni — ответ узла с остановленным PostgreSQL"
         );
         assert_eq!(
             http.get_json(&format!("{base}/echo")).await.unwrap()["auth"],
@@ -677,6 +874,14 @@ mod tests {
         let denied = http.get_json(&format!("{base}/denied")).await.unwrap_err();
         assert_eq!(
             (denied.code, denied.key.as_str()),
+            (ErrorCode::AuthFailed, "errors.patroni.unauthorized")
+        );
+        let forbidden = http
+            .get_json(&format!("{base}/forbidden"))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (forbidden.code, forbidden.key.as_str()),
             (ErrorCode::AuthFailed, "errors.patroni.unauthorized")
         );
         let garbage = http.get_json(&format!("{base}/garbage")).await.unwrap_err();
@@ -691,6 +896,58 @@ mod tests {
         );
         assert_eq!(boom.params["status"], "500");
         assert_eq!(boom.details.as_deref(), Some("boom"));
+
+        // 503 не с JSON — обычная ошибка статуса, а не ответ узла.
+        let unavailable = http
+            .get_json(&format!("{base}/unavailable"))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (unavailable.code, unavailable.key.as_str()),
+            (ErrorCode::PatroniError, "errors.patroni.httpStatus")
+        );
+        assert_eq!(unavailable.params["status"], "503");
+    }
+
+    #[tokio::test]
+    async fn status_503_with_json_is_only_a_patroni_node_answer() {
+        let base = stub_server().await;
+        let http = ReqwestHttp::new(&settings(&[&base]), None, None).unwrap();
+        // 503 на /cluster — даже с JSON — ошибка: опрос должен перейти к следующему адресу.
+        let cluster = http.get_json(&format!("{base}/cluster")).await.unwrap_err();
+        assert_eq!(
+            (cluster.code, cluster.key.as_str()),
+            (ErrorCode::PatroniError, "errors.patroni.httpStatus")
+        );
+        // 503 на /patroni с JSON без `state` и `role` (шлюз) — тоже ошибка.
+        let gateway = http
+            .get_json(&format!("{base}/gateway/patroni"))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (gateway.code, gateway.key.as_str()),
+            (ErrorCode::PatroniError, "errors.patroni.httpStatus")
+        );
+    }
+
+    #[tokio::test]
+    async fn reqwest_http_times_out_on_silent_server() {
+        let server = testutil::silent_server();
+        let http = ReqwestHttp::new(&settings(&["http://x"]), None, None).unwrap();
+        let started = std::time::Instant::now();
+        let err = http
+            .get_json(&format!("http://127.0.0.1:{}/cluster", server.port))
+            .await
+            .unwrap_err();
+        let took = started.elapsed();
+        assert_eq!(
+            (err.code, err.key.as_str()),
+            (ErrorCode::PatroniError, "errors.patroni.timeout")
+        );
+        assert!(
+            took >= Duration::from_secs(4) && took < Duration::from_secs(7),
+            "таймаут ≈ 5 с, получилось {took:?}"
+        );
     }
 
     #[tokio::test]
@@ -839,6 +1096,29 @@ mod tests {
             client_cert: None,
         });
         ReqwestHttp::new(&s, None, None).unwrap();
+    }
+
+    #[test]
+    fn api_base_strips_patroni_only_from_path() {
+        // Хост может называться `patroni`: сегмент отбрасывается только после адреса.
+        assert_eq!(api_base("http://patroni"), "http://patroni");
+        assert_eq!(api_base("https://patroni/"), "https://patroni");
+        assert_eq!(api_base("http://patroni:8008"), "http://patroni:8008");
+        assert_eq!(
+            api_base("http://patroni:8008/patroni"),
+            "http://patroni:8008"
+        );
+        assert_eq!(api_base("http://h:8008/patroni/"), "http://h:8008");
+        assert_eq!(api_base(" http://h:8008/patroni "), "http://h:8008");
+        assert_eq!(
+            api_base("http://h:8008/prefix/patroni"),
+            "http://h:8008/prefix"
+        );
+        assert_eq!(
+            api_base("http://h:8008/mypatroni"),
+            "http://h:8008/mypatroni"
+        );
+        assert_eq!(api_base("h:8008/patroni"), "h:8008");
     }
 
     #[test]

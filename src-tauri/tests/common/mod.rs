@@ -160,18 +160,25 @@ pub fn patroni_settings() -> Option<PatroniSettings> {
 
 pub const PATRONI_PASSWORD_VALUE: &str = "patroni-secret";
 
-/// `docker …`; паника, если команда не удалась.
-pub fn docker(args: &[&str]) -> String {
+/// `docker …`; `Err` с текстом stderr, если команда не удалась.
+pub fn try_docker(args: &[&str]) -> Result<String, String> {
     let out = std::process::Command::new("docker")
         .args(args)
         .output()
-        .expect("docker");
-    assert!(
-        out.status.success(),
-        "docker {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).into_owned()
+        .map_err(|e| format!("docker {args:?}: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(format!(
+            "docker {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ))
+    }
+}
+
+/// `docker …`; паника, если команда не удалась.
+pub fn docker(args: &[&str]) -> String {
+    try_docker(args).unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// Ждёт готовности стенда (`scripts/wait-stand.sh`): после остановок и переключений следующий тест
@@ -188,7 +195,7 @@ pub fn wait_stand() {
     );
 }
 
-pub fn patronictl(args: &[&str]) -> String {
+fn patronictl_args<'a>(args: &[&'a str]) -> Vec<&'a str> {
     let mut full = vec![
         "exec",
         "gp-patroni1",
@@ -197,5 +204,44 @@ pub fn patronictl(args: &[&str]) -> String {
         "/etc/patroni/patroni.yml",
     ];
     full.extend_from_slice(args);
-    docker(&full)
+    full
+}
+
+pub fn patronictl(args: &[&str]) -> String {
+    docker(&patronictl_args(args))
+}
+
+/// `patronictl …` без паники: для восстановления стенда, где «уже восстановлено» — не ошибка.
+pub fn try_patronictl(args: &[&str]) -> Result<String, String> {
+    try_docker(&patronictl_args(args))
+}
+
+/// Возвращает стенд в рабочее состояние при выходе из области видимости — и когда проверка теста
+/// упала с паникой. На обычном выходе сбой восстановления роняет тест; при уже идущей панике он
+/// только выводится (вторая паника в `Drop` прервала бы процесс и скрыла исходную ошибку).
+#[must_use = "без привязки к переменной восстановление выполнится сразу"]
+pub struct RestoreGuard<F: FnOnce()> {
+    restore: Option<F>,
+}
+
+pub fn restore_on_drop<F: FnOnce()>(restore: F) -> RestoreGuard<F> {
+    RestoreGuard {
+        restore: Some(restore),
+    }
+}
+
+impl<F: FnOnce()> Drop for RestoreGuard<F> {
+    fn drop(&mut self) {
+        let Some(restore) = self.restore.take() else {
+            return;
+        };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(restore));
+        if let Err(cause) = result {
+            if std::thread::panicking() {
+                eprintln!("не удалось восстановить стенд после сбоя теста");
+            } else {
+                std::panic::resume_unwind(cause);
+            }
+        }
+    }
 }
