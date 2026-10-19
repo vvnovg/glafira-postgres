@@ -74,20 +74,11 @@ fn item(
     }
 }
 
-/// Имя роли в SQL: простое — как есть, иначе в двойных кавычках.
+/// Имя роли в SQL: всегда в двойных кавычках (`"` внутри удваивается). Правило «простое имя — как есть»
+/// ломается на зарезервированных словах (`user`, `select`, `current_user`): `GRANT … TO user` — другая роль
+/// или ошибка синтаксиса, а кавычки безопасны для любого имени.
 fn quote_ident(name: &str) -> String {
-    let simple = name
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
-        && name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
-    if simple {
-        name.to_string()
-    } else {
-        format!("\"{}\"", name.replace('"', "\"\""))
-    }
+    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 const PRELOAD_FIX: &str = "shared_preload_libraries = 'pg_stat_statements'";
@@ -334,6 +325,31 @@ mod tests {
         );
         assert_eq!(get(&items, "maintainRole").status, Status::Warn);
         assert_eq!(get(&items, "maintainRole").params["reason"], "grant");
+    }
+
+    #[test]
+    fn role_name_is_always_quoted() {
+        let mut f = facts();
+        f.member_of.clear();
+        for (user, quoted) in [
+            ("glafira_diag", "\"glafira_diag\""),
+            ("user", "\"user\""),
+            ("select", "\"select\""),
+            ("current_user", "\"current_user\""),
+            ("Mixed", "\"Mixed\""),
+            ("we\"ird", "\"we\"\"ird\""),
+        ] {
+            f.user = user.into();
+            let items = evaluate(&f);
+            assert_eq!(
+                get(&items, "monitorRole").fix,
+                Some(format!("GRANT pg_monitor TO {quoted};"))
+            );
+            assert_eq!(
+                get(&items, "maintainRole").fix,
+                Some(format!("GRANT pg_maintain TO {quoted};"))
+            );
+        }
     }
 
     #[test]

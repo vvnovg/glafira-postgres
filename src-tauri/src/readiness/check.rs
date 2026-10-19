@@ -141,7 +141,10 @@ async fn readiness_queries(
     let mut target_client = None;
     for (name, host, port) in reachable {
         let c = adhoc_client(profile, secrets, host, *port, tasks).await?;
-        preload.push((name.clone(), bounded(limit, preload_of(&c)).await?));
+        // Значение, не видимое роли, в оценку не попадает: чек-лист скажет «неизвестно», а не упадёт.
+        if let Some(loaded) = bounded(limit, preload_of(&c)).await? {
+            preload.push((name.clone(), loaded));
+        }
         if name == target {
             target_client = Some(c);
         }
