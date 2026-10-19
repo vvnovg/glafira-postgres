@@ -314,18 +314,65 @@ fn validate_tls(ca: Option<&String>, cert: Option<&ClientCert>) -> AppResult<()>
     Ok(())
 }
 
+/// Адрес без `user:password@` в authority: пароль, вписанный в URL, нельзя хранить в профиле
+/// (секреты — только в keychain), выносить в файл обмена и класть в архив диагностики.
+pub fn strip_url_credentials(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    match rest[..end].rfind('@') {
+        Some(at) => format!("{scheme}://{}", &rest[at + 1..]),
+        None => url.to_string(),
+    }
+}
+
+/// Есть ли в адресе `user:password@` или `user@` (userinfo).
+pub fn has_url_credentials(url: &str) -> bool {
+    strip_url_credentials(url) != url
+}
+
+/// Адреса Patroni REST API профиля: списки `urls` и `apiUrl` подмен адресов участников.
+fn patroni_urls_mut(p: &mut ConnectionProfile) -> impl Iterator<Item = &mut String> {
+    p.patroni.iter_mut().flat_map(|pt| {
+        pt.urls.iter_mut().chain(
+            pt.host_overrides
+                .iter_mut()
+                .filter_map(|o| o.api_url.as_mut()),
+        )
+    })
+}
+
+/// Вырезает userinfo из адресов Patroni API (профили с диска не проходят проверку, и такой адрес
+/// мог остаться от старой версии). Возвращает `true`, если что-то вырезано: пароль из адреса
+/// пропал, и получатель должен ввести его заново.
+pub fn strip_patroni_url_credentials(p: &mut ConnectionProfile) -> bool {
+    let mut stripped = false;
+    for url in patroni_urls_mut(p).filter(|u| has_url_credentials(u)) {
+        *url = strip_url_credentials(url);
+        stripped = true;
+    }
+    stripped
+}
+
 fn validate_http_url(url: &str) -> AppResult<()> {
     let ok = (url.starts_with("http://") || url.starts_with("https://"))
         && url.split("://").nth(1).is_some_and(|rest| !rest.is_empty());
-    if ok {
-        Ok(())
-    } else {
-        Err(invalid(ltext!(
+    if !ok {
+        return Err(invalid(ltext!(
             "errors.connections.patroniUrl",
             "The Patroni API address must start with http:// or https://: {{url}}",
             url = url
-        )))
+        )));
     }
+    // Адрес в ошибку не подставляется: в нём как раз пароль.
+    if has_url_credentials(url) {
+        return Err(invalid(ltext!(
+            "errors.connections.patroniUrlCredentials",
+            "The Patroni API address must not contain a user name or password: use the “API user” and “API password” fields"
+        )));
+    }
+    Ok(())
 }
 
 pub fn validate_profile(p: &ConnectionProfile) -> AppResult<()> {
@@ -714,6 +761,35 @@ mod tests {
                     }];
                 }),
             ),
+            // Пароль в адресе Patroni API: в профиль (connections.json, архив диагностики) он не попадает.
+            (
+                "errors.connections.patroniUrlCredentials",
+                Box::new(|p| {
+                    *p = patroni(p.clone());
+                    p.patroni.as_mut().unwrap().urls =
+                        vec!["https://admin:s3cr3t@pg-1:8008".into()];
+                }),
+            ),
+            (
+                "errors.connections.patroniUrlCredentials",
+                Box::new(|p| {
+                    *p = patroni(p.clone());
+                    p.patroni.as_mut().unwrap().urls =
+                        vec!["https://pg-1:8008".into(), "http://admin@pg-2:8008".into()];
+                }),
+            ),
+            (
+                "errors.connections.patroniUrlCredentials",
+                Box::new(|p| {
+                    *p = patroni(p.clone());
+                    p.patroni.as_mut().unwrap().host_overrides = vec![HostOverride {
+                        member: "pg-1".into(),
+                        host: None,
+                        port: None,
+                        api_url: Some("https://admin:s3cr3t@10.0.0.1:8008".into()),
+                    }];
+                }),
+            ),
         ];
         for (key, change) in cases {
             let mut p = sample_profile("a");
@@ -736,6 +812,81 @@ mod tests {
             key_path: None,
         });
         validate_profile(&pkcs).unwrap();
+    }
+
+    #[test]
+    fn credentials_error_does_not_echo_the_password() {
+        let mut p = patroni(sample_profile("a"));
+        p.patroni.as_mut().unwrap().urls = vec!["https://admin:s3cr3t@pg-1:8008".into()];
+        let err = validate_profile(&p).unwrap_err();
+        assert_eq!(err.key, "errors.connections.patroniUrlCredentials");
+        assert!(
+            !format!("{err:?}").contains("s3cr3t"),
+            "пароль не должен попасть в текст ошибки: {err:?}"
+        );
+    }
+
+    #[test]
+    fn at_sign_outside_authority_is_not_userinfo() {
+        let mut p = patroni(sample_profile("a"));
+        let pt = p.patroni.as_mut().unwrap();
+        pt.urls = vec![
+            "https://pg-1:8008".into(),
+            "http://pg-2:8008/health?user=a@b".into(),
+            "http://[::1]:8008/x@y#z@w".into(),
+        ];
+        pt.host_overrides = vec![HostOverride {
+            member: "pg-1".into(),
+            host: None,
+            port: None,
+            api_url: Some("https://10.0.0.1:8008/a@b".into()),
+        }];
+        validate_profile(&p).unwrap();
+    }
+
+    #[test]
+    fn url_credentials_helpers() {
+        for (url, clean) in [
+            ("https://pg-1:8008", "https://pg-1:8008"),
+            ("https://u:p@pg-1:8008", "https://pg-1:8008"),
+            ("https://u@pg-1:8008/x", "https://pg-1:8008/x"),
+            ("https://u:p@w@pg-1/x", "https://pg-1/x"),
+            ("http://pg-1/a@b", "http://pg-1/a@b"),
+            ("http://pg-1?x=a@b", "http://pg-1?x=a@b"),
+            ("no-scheme@host", "no-scheme@host"),
+        ] {
+            assert_eq!(strip_url_credentials(url), clean, "{url}");
+            assert_eq!(has_url_credentials(url), url != clean, "{url}");
+        }
+    }
+
+    #[test]
+    fn stripping_patroni_url_credentials_reports_what_it_did() {
+        let mut p = patroni(sample_profile("a"));
+        let pt = p.patroni.as_mut().unwrap();
+        pt.urls = vec![
+            "https://admin:s3cr3t@pg-1:8008".into(),
+            "http://pg-2:8008/health?user=a@b".into(),
+        ];
+        pt.host_overrides = vec![HostOverride {
+            member: "pg-1".into(),
+            host: None,
+            port: None,
+            api_url: Some("https://admin:s3cr3t@10.0.0.1:8008".into()),
+        }];
+        assert!(strip_patroni_url_credentials(&mut p));
+        let pt = p.patroni.as_ref().unwrap();
+        assert_eq!(
+            pt.urls,
+            ["https://pg-1:8008", "http://pg-2:8008/health?user=a@b"]
+        );
+        assert_eq!(
+            pt.host_overrides[0].api_url.as_deref(),
+            Some("https://10.0.0.1:8008")
+        );
+        // Чистый профиль не меняется, и это видно по результату.
+        assert!(!strip_patroni_url_credentials(&mut p));
+        assert!(!strip_patroni_url_credentials(&mut sample_profile("s")));
     }
 
     #[test]

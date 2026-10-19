@@ -31,6 +31,16 @@ pub struct SecretsInput {
 }
 
 impl SecretsInput {
+    /// «Удалить все сохранённые секреты»: пустое значение у каждого поля.
+    pub(crate) fn clear_all() -> Self {
+        Self {
+            pg_password: Some(String::new()),
+            pg_key_password: Some(String::new()),
+            patroni_password: Some(String::new()),
+            patroni_key_password: Some(String::new()),
+        }
+    }
+
     fn get(&self, field: &str) -> Option<&String> {
         match field {
             PG_PASSWORD => self.pg_password.as_ref(),
@@ -62,14 +72,14 @@ pub struct ConnectionInput {
 }
 
 /// Что делать с секретом при сохранении.
-enum SecretOp {
+pub(crate) enum SecretOp {
     Keep,
     Set(String),
     Delete,
 }
 
 /// Используемые профилем секреты — по данным формы, неиспользуемые — удаляются.
-fn secret_ops(
+pub(crate) fn secret_ops(
     profile: &ConnectionProfile,
     secrets: &SecretsInput,
 ) -> Vec<(&'static str, SecretOp)> {
@@ -88,6 +98,38 @@ fn secret_ops(
             (field, op)
         })
         .collect()
+}
+
+/// Применяет операции над секретами подключения `id` в keychain; первая ошибка прерывает работу.
+pub(crate) fn apply_secret_ops(
+    store: &dyn SecretStore,
+    id: &str,
+    ops: Vec<(&'static str, SecretOp)>,
+) -> AppResult<()> {
+    ops.into_iter().try_for_each(|(field, op)| {
+        let key = secret_key(id, field);
+        match op {
+            SecretOp::Keep => Ok(()),
+            SecretOp::Set(v) => store.set(&key, &v),
+            SecretOp::Delete => store.delete(&key),
+        }
+    })
+}
+
+/// Удаляет из keychain секреты, которые подключению не нужны; с `reset` — все секреты подключения
+/// (импорт файла поменял его адрес или настройки безопасности, пароли получателя за новым адресом
+/// оставлять нельзя). Остальное не трогает.
+pub(crate) fn delete_stale_secrets(
+    store: &dyn SecretStore,
+    profile: &ConnectionProfile,
+    reset: bool,
+) -> AppResult<()> {
+    let input = if reset {
+        SecretsInput::clear_all()
+    } else {
+        SecretsInput::default()
+    };
+    apply_secret_ops(store, &profile.id, secret_ops(profile, &input))
 }
 
 /// Менял ли сохранённый секрет хоть одно используемое профилем поле (`Set` или `Delete`): тогда открытое
@@ -151,14 +193,7 @@ pub fn save_connection_blocking(
     let saved = st.connections.upsert(profile)?;
     let ops = secret_ops(&saved, &secrets);
     let secrets_changed = secrets_changed(&saved, &ops);
-    let result = ops.into_iter().try_for_each(|(field, op)| {
-        let key = secret_key(&saved.id, field);
-        match op {
-            SecretOp::Keep => Ok(()),
-            SecretOp::Set(v) => st.secrets.set(&key, &v),
-            SecretOp::Delete => st.secrets.delete(&key),
-        }
-    });
+    let result = apply_secret_ops(st.secrets.as_ref(), &saved.id, ops);
     if let Err(e) = result {
         let rollback = match previous {
             Some(p) => st.connections.upsert(p).map(|_| ()),
@@ -353,6 +388,26 @@ mod tests {
             st.secrets.get(&secret_key("a", PG_KEY_PASSWORD)).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn stale_secrets_cleanup_keeps_used_and_reset_removes_all() {
+        let store = MemoryStore::default();
+        let p = sample_profile("a");
+        for f in CONNECTION_SECRET_FIELDS {
+            store.set(&secret_key("a", f), "x").unwrap();
+        }
+        let left = |store: &MemoryStore| -> Vec<&str> {
+            CONNECTION_SECRET_FIELDS
+                .into_iter()
+                .filter(|f| store.get(&secret_key("a", f)).unwrap().is_some())
+                .collect()
+        };
+        // Сервер без Patroni и сертификата использует только пароль PG.
+        delete_stale_secrets(&store, &p, false).unwrap();
+        assert_eq!(left(&store), [PG_PASSWORD]);
+        delete_stale_secrets(&store, &p, true).unwrap();
+        assert!(left(&store).is_empty());
     }
 
     #[test]

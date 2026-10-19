@@ -2,10 +2,15 @@
 //! предпросмотр и применение импорта.
 
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::conn::profile::{ConnectionProfile, Environment, normalize_profile, validate_profile};
+use crate::conn::profile::{
+    ConnectionProfile, Environment, normalize_profile, same_connection_settings,
+    strip_patroni_url_credentials, validate_profile,
+};
 use crate::error::{AppResult, ErrorCode};
 use crate::i18n::LocalizedText;
 use crate::secrets::{
@@ -83,34 +88,6 @@ fn needs_password(secrets: &dyn SecretStore, p: &ConnectionProfile) -> AppResult
     })
 }
 
-/// Адрес без `user:password@` в authority: пароль, вписанный в URL, в файл обмена не попадает.
-fn strip_url_credentials(url: &str) -> String {
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return url.to_string();
-    };
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    match rest[..end].rfind('@') {
-        Some(at) => format!("{scheme}://{}", &rest[at + 1..]),
-        None => url.to_string(),
-    }
-}
-
-/// Есть ли в адресе `user:password@` (хранить такое в профиле нельзя: секреты только в keychain).
-fn has_url_credentials(url: &str) -> bool {
-    strip_url_credentials(url) != url
-}
-
-/// Адреса Patroni REST API профиля: списки `urls` и `apiUrl` подмен адресов участников.
-fn patroni_urls_mut(p: &mut ConnectionProfile) -> impl Iterator<Item = &mut String> {
-    p.patroni.iter_mut().flat_map(|pt| {
-        pt.urls.iter_mut().chain(
-            pt.host_overrides
-                .iter_mut()
-                .filter_map(|o| o.api_url.as_mut()),
-        )
-    })
-}
-
 /// Собирает файл экспорта: всё дерево или поддерево `root` (сама папка становится корнем).
 /// Секреты (keychain и `user:password@` в адресах Patroni) не попадают в файл; неизвестные
 /// локальные поля (`extra`) не выносятся.
@@ -167,9 +144,11 @@ pub fn build_export(
         .filter(|p| in_scope(p.folder_id.as_deref()))
         .map(|mut profile| {
             profile.extra.clear();
-            // Профили с диска не валидируются: пароль, вписанный в адрес Patroni, не выносим.
-            patroni_urls_mut(&mut profile).for_each(|u| *u = strip_url_credentials(u));
-            let needs_password = needs_password(secrets, &profile)?;
+            // Профили с диска не валидируются: пароль, вписанный в адрес Patroni (так мог сохранить
+            // профиль старый билд), не выносим, а получателя просим ввести пароль Patroni заново.
+            let url_password_stripped = strip_patroni_url_credentials(&mut profile);
+            let mut needs_password = needs_password(secrets, &profile)?;
+            needs_password.patroni |= url_password_stripped;
             Ok(ExportedConnection {
                 profile,
                 needs_password,
@@ -253,7 +232,12 @@ pub fn parse_exchange(bytes: &[u8]) -> AppResult<ParsedExchange> {
         match root.get(key) {
             None | Some(serde_json::Value::Null) => Ok(Vec::new()),
             Some(serde_json::Value::Array(items)) => Ok(items.clone()),
-            Some(_) => Err(invalid_json(format!("“{key}” is not a list"))),
+            Some(_) => Err(app_err!(
+                ErrorCode::InvalidInput,
+                "errors.import.fieldNotList",
+                "The file is damaged: “{{field}}” is not a list",
+                field = key
+            )),
         }
     };
 
@@ -292,22 +276,13 @@ pub fn parse_exchange(bytes: &[u8]) -> AppResult<ParsedExchange> {
         };
         // Неизвестные поля файла не переносятся в хранилище.
         c.profile.extra.clear();
-        // Профиль проходит ту же нормализацию и проверку, что и при сохранении формы.
+        // Профиль проходит ту же нормализацию и проверку, что и при сохранении формы
+        // (в том числе: пароля в адресе Patroni API быть не может).
         normalize_profile(&mut c.profile);
         if let Err(e) = validate_profile(&c.profile) {
             skipped.push(Skipped {
                 name,
                 reason: e.text(),
-            });
-            continue;
-        }
-        if patroni_urls_mut(&mut c.profile).any(|u| has_url_credentials(u)) {
-            skipped.push(Skipped {
-                name,
-                reason: ltext!(
-                    "errors.import.secretInUrl",
-                    "The Patroni API address contains a user name or password: remove it from the address"
-                ),
             });
             continue;
         }
@@ -362,6 +337,10 @@ pub struct ImportPreview {
 pub(crate) struct ImportPlan {
     pub next: StoreData,
     pub preview: ImportPreview,
+    /// Обновляемые подключения, у которых меняются настройки соединения (адрес, Patroni, TLS…).
+    /// Файл недоверенный: сохранённые пароли получателя нельзя оставлять за новым адресом,
+    /// иначе при подключении они уйдут на сервер из файла. Секреты этих подключений удаляются.
+    pub secrets_reset: Vec<String>,
 }
 
 /// Имена папок от корня до `folder` включительно.
@@ -417,8 +396,8 @@ fn parents_first(folders: &[ConnectionFolder]) -> Vec<(&ConnectionFolder, bool)>
     out
 }
 
-/// Хотя бы один указанный файл сертификата (PG или Patroni API) отсутствует на этом компьютере.
-fn misses_files(p: &ConnectionProfile, file_exists: &dyn Fn(&str) -> bool) -> bool {
+/// Пути файлов сертификатов профиля (PG и Patroni API: CA, сертификат, ключ), без пустых.
+fn certificate_paths(p: &ConnectionProfile) -> impl Iterator<Item = &str> {
     let pg_cert = p.pg.tls.client_cert.as_ref();
     let api_tls = p.patroni.as_ref().and_then(|x| x.tls.as_ref());
     let api_cert = api_tls.and_then(|t| t.client_cert.as_ref());
@@ -434,7 +413,67 @@ fn misses_files(p: &ConnectionProfile, file_exists: &dyn Fn(&str) -> bool) -> bo
     .flatten()
     .map(str::trim)
     .filter(|s| !s.is_empty())
-    .any(|path| !file_exists(path))
+}
+
+/// Хотя бы один указанный файл сертификата (PG или Patroni API) отсутствует на этом компьютере.
+fn misses_files(p: &ConnectionProfile, file_exists: &dyn Fn(&str) -> bool) -> bool {
+    certificate_paths(p).any(|path| !file_exists(path))
+}
+
+/// Сетевой путь Windows (UNC и пространство имён устройств): `\\server\share\a.pem`, `//server/share/a.pem`,
+/// `\\?\…`. Путь из недоверенного файла не проверяется на диске: обращение к `\\server\…` — это исходящее
+/// SMB-соединение к адресу из файла (утечка NTLM-хеша, зависание на недоступном хосте).
+/// Правило одинаково на всех платформах: такой файл считается отсутствующим.
+pub(crate) fn is_unc_path(path: &str) -> bool {
+    let mut chars = path.trim_start().chars();
+    matches!(
+        (chars.next(), chars.next()),
+        (Some('/' | '\\'), Some('/' | '\\'))
+    )
+}
+
+/// Файл сертификата существует и лежит не на сетевом ресурсе.
+fn certificate_file_exists(path: &str) -> bool {
+    !is_unc_path(path) && Path::new(path).is_file()
+}
+
+/// Какие из файлов сертификатов подключений файла обмена есть на этом компьютере. Обращается к
+/// диску, поэтому вызывается заранее, до `ConnectionStore::update` (там держится блокировка записи
+/// кэша): планировщик получает готовое множество и сам диск не трогает.
+pub fn existing_certificate_files(parsed: &ParsedExchange) -> HashSet<String> {
+    parsed
+        .connections
+        .iter()
+        .flat_map(|(p, _)| certificate_paths(p))
+        .filter(|path| certificate_file_exists(path))
+        .map(String::from)
+        .collect()
+}
+
+/// Читает файл импорта целиком, но не больше `max` байт: выбранный файл может оказаться огромным
+/// (или бесконечным, как `/dev/zero`), а файл обмена — это десятки килобайт.
+fn read_capped(path: &Path, max: u64) -> AppResult<Vec<u8>> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(max.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max {
+        return Err(app_err!(
+            ErrorCode::InvalidInput,
+            "errors.import.tooLarge",
+            "The file is larger than {{limit_mb}} MB: this is not a connections file",
+            limit_mb = max / (1024 * 1024)
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Наибольший допустимый размер файла импорта.
+pub const MAX_IMPORT_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Читает файл импорта (не больше 10 МБ).
+pub fn read_import_file(path: &Path) -> AppResult<Vec<u8>> {
+    read_capped(path, MAX_IMPORT_BYTES)
 }
 
 /// Настройки подключения без места в дереве и локальных неизвестных полей.
@@ -515,6 +554,7 @@ pub(crate) fn plan_import(
     connections.sort_by_key(|(p, _)| p.order);
     let mut prod_read_only = 0usize;
     let mut missing_files = 0usize;
+    let mut secrets_reset = Vec::new();
     for (incoming, needs) in connections {
         let mut profile = incoming.clone();
         let forced_read_only = !opts.is_pro && profile.environment == Environment::Prod;
@@ -529,12 +569,18 @@ pub(crate) fn plan_import(
                 unchanged.push((TreeItemKind::Connection, profile.id.clone()));
                 continue;
             }
-            // Место в дереве и неизвестные поля — локальные; пароли получателя не трогаются.
+            // Место в дереве и неизвестные поля — локальные. Пароли получателя остаются, только пока
+            // подключение идёт по тому же адресу и с теми же настройками безопасности; иначе они
+            // были бы отправлены на адрес из файла (см. `ImportPlan::secrets_reset`).
             profile.folder_id = slot.folder_id.clone();
             profile.order = slot.order;
             profile.extra = std::mem::take(&mut slot.extra);
             prod_read_only += usize::from(forced_read_only);
             missing_files += usize::from(misses_files(&profile, file_exists));
+            if !same_connection_settings(slot, &profile) {
+                secrets_reset.push(profile.id.clone());
+                preview.needs_passwords += 1;
+            }
             updated.push((TreeItemKind::Connection, profile.id.clone()));
             *slot = profile;
             continue;
@@ -593,6 +639,13 @@ pub(crate) fn plan_import(
             count = missing_files
         ));
     }
+    if !secrets_reset.is_empty() {
+        preview.warnings.push(ltext!(
+            "warnings.import.passwordsReset",
+            "Saved passwords of {{count}} connections will be removed because their address or security settings change — enter them again",
+            count = secrets_reset.len()
+        ));
+    }
     check_tree(&next)?;
 
     let folders_by_id: HashMap<&str, &ConnectionFolder> =
@@ -622,7 +675,11 @@ pub(crate) fn plan_import(
     preview.added = added.into_iter().map(item).collect();
     preview.updated = updated.into_iter().map(item).collect();
     preview.unchanged = unchanged.into_iter().map(item).collect();
-    Ok(ImportPlan { next, preview })
+    Ok(ImportPlan {
+        next,
+        preview,
+        secrets_reset,
+    })
 }
 
 #[cfg(test)]
@@ -834,6 +891,14 @@ mod tests {
             !json.contains("s3cr3t") && !json.contains("admin:"),
             "{json}"
         );
+        // Пароль из адреса пропал: получателя просим ввести пароль Patroni (в keychain отправителя его нет).
+        assert_eq!(
+            out.connections[0].needs_password,
+            NeedsPassword {
+                patroni: true,
+                ..Default::default()
+            }
+        );
         let pt = out.connections[0].profile.patroni.as_ref().unwrap();
         assert_eq!(
             pt.urls,
@@ -851,19 +916,18 @@ mod tests {
     }
 
     #[test]
-    fn url_credentials_helpers() {
-        for (url, clean) in [
-            ("https://pg-1:8008", "https://pg-1:8008"),
-            ("https://u:p@pg-1:8008", "https://pg-1:8008"),
-            ("https://u@pg-1:8008/x", "https://pg-1:8008/x"),
-            ("https://u:p@w@pg-1/x", "https://pg-1/x"),
-            ("http://pg-1/a@b", "http://pg-1/a@b"),
-            ("http://pg-1?x=a@b", "http://pg-1?x=a@b"),
-            ("no-scheme@host", "no-scheme@host"),
-        ] {
-            assert_eq!(strip_url_credentials(url), clean, "{url}");
-            assert_eq!(has_url_credentials(url), url != clean, "{url}");
-        }
+    fn clean_patroni_urls_do_not_raise_needs_password() {
+        let (_d, s) = store();
+        let mut p = patroni_profile("p");
+        // `@` вне authority — не userinfo.
+        p.patroni.as_mut().unwrap().urls = vec!["http://pg-2:8008/health?user=a@b".into()];
+        s.upsert(p).unwrap();
+        let out = build_export(&s, &MemoryStore::default(), None, "1", "now").unwrap();
+        assert_eq!(out.connections[0].needs_password, NeedsPassword::default());
+        assert_eq!(
+            out.connections[0].profile.patroni.as_ref().unwrap().urls,
+            ["http://pg-2:8008/health?user=a@b"]
+        );
     }
 
     #[test]
@@ -1278,11 +1342,17 @@ mod tests {
             parsed
                 .skipped
                 .iter()
-                .all(|s| s.reason.key == "errors.import.secretInUrl")
+                .all(|s| s.reason.key == "errors.connections.patroniUrlCredentials")
         );
         let p = plan_import(&StoreData::default(), &parsed, &opts(None), &all_exist).unwrap();
         assert!(
             !serde_json::to_string(&p.next.connections)
+                .unwrap()
+                .contains("s3cr3t")
+        );
+        // В причине пропуска пароля нет.
+        assert!(
+            !serde_json::to_string(&parsed.skipped)
                 .unwrap()
                 .contains("s3cr3t")
         );
@@ -1338,9 +1408,16 @@ mod tests {
         let parsed = parse_exchange(&only_t).unwrap();
         let p = plan_import(&data, &parsed, &opts(None), &missing).unwrap();
         assert_eq!(preview_ids(&p.preview.updated), ["t"]);
-        assert_eq!(p.preview.warnings.len(), 1);
-        assert_eq!(p.preview.warnings[0].key, "warnings.import.missingFiles");
-        assert_eq!(p.preview.warnings[0].params["count"], "1");
+        let missing_files: Vec<_> = p
+            .preview
+            .warnings
+            .iter()
+            .filter(|w| w.key == "warnings.import.missingFiles")
+            .collect();
+        assert_eq!(missing_files.len(), 1);
+        assert_eq!(missing_files[0].params["count"], "1");
+        // TLS-настройки подключения изменились — это и сброс сохранённых паролей.
+        assert_eq!(p.secrets_reset, ["t"]);
     }
 
     #[test]
@@ -1370,6 +1447,126 @@ mod tests {
     }
 
     #[test]
+    fn unc_paths_are_recognized_without_touching_the_disk() {
+        for unc in [
+            r"\\server\share\ca.pem",
+            "//server/share/ca.pem",
+            r"\\?\C:\certs\ca.pem",
+            r"\\.\pipe\x",
+            r"\/server/share/ca.pem",
+            r"/\server\share\ca.pem",
+            "////server/share",
+        ] {
+            assert!(is_unc_path(unc), "{unc}");
+        }
+        for local in [
+            "/certs/ca.pem",
+            "/",
+            "",
+            "ca.pem",
+            r"C:\certs\ca.pem",
+            "C://certs/ca.pem",
+            "/a//b/ca.pem",
+            r"relative\dir\ca.pem",
+        ] {
+            assert!(!is_unc_path(local), "{local}");
+        }
+    }
+
+    #[test]
+    fn existing_files_are_collected_beforehand_and_unc_is_never_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("ca.pem");
+        std::fs::write(&real, "pem").unwrap();
+        let real = real.to_string_lossy().into_owned();
+        let absent = dir.path().join("absent.pem").to_string_lossy().into_owned();
+        let mut a = conn_json("a", "A", None);
+        a["pg"]["tls"] = serde_json::json!({"caPath": real});
+        let mut b = conn_json("b", "B", None);
+        b["pg"]["tls"] = serde_json::json!({"caPath": absent});
+        let mut c = conn_json("c", "C", None);
+        // Абсолютный путь и на Unix, и на Windows (UNC).
+        c["pg"]["tls"] = serde_json::json!({"caPath": "//server/share/ca.pem"});
+        let parsed = parse_exchange(&file(vec![], vec![a, b, c])).unwrap();
+        assert_eq!(parsed.connections.len(), 3, "{:?}", parsed.skipped);
+        let existing = existing_certificate_files(&parsed);
+        assert_eq!(existing, HashSet::from([real.clone()]));
+        // Набор готов заранее, планировщик по нему и работает: недостающие и сетевые пути — «не найдены».
+        let p = plan_import(
+            &StoreData::default(),
+            &parsed,
+            &opts(None),
+            &|path: &str| existing.contains(path),
+        )
+        .unwrap();
+        assert_eq!(p.preview.warnings.len(), 1);
+        assert_eq!(p.preview.warnings[0].key, "warnings.import.missingFiles");
+        assert_eq!(p.preview.warnings[0].params["count"], "2");
+    }
+
+    /// На Unix `//путь` — тот же файл, что `/путь`: существующий файл по такому пути должен быть
+    /// «не найден» именно из-за правила про сетевые пути, а не из-за отсутствия на диске.
+    #[cfg(unix)]
+    #[test]
+    fn double_slash_path_to_a_real_file_is_not_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("ca.pem");
+        std::fs::write(&real, "pem").unwrap();
+        let doubled = format!("/{}", real.display());
+        assert!(
+            Path::new(&doubled).is_file(),
+            "предпосылка теста: путь существует"
+        );
+        let mut a = conn_json("a", "A", None);
+        a["pg"]["tls"] = serde_json::json!({"caPath": doubled});
+        let parsed = parse_exchange(&file(vec![], vec![a])).unwrap();
+        assert!(existing_certificate_files(&parsed).is_empty());
+        assert!(!certificate_file_exists(&doubled));
+        assert!(certificate_file_exists(&real.to_string_lossy()));
+    }
+
+    #[test]
+    fn oversized_import_file_is_rejected_without_reading_it_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.json");
+        std::fs::write(&path, [b' '; 16]).unwrap();
+        assert_eq!(read_capped(&path, 16).unwrap().len(), 16);
+        std::fs::write(&path, [b' '; 17]).unwrap();
+        let err = read_capped(&path, 16).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+        assert_eq!(err.key, "errors.import.tooLarge");
+        assert_eq!(err.params["limit_mb"], "0");
+        // Предел по умолчанию — 10 МБ; отсутствующий файл — обычная ошибка чтения.
+        assert_eq!(MAX_IMPORT_BYTES, 10 * 1024 * 1024);
+        assert!(read_import_file(&dir.path().join("missing.json")).is_err());
+        // Файл ровно в предел читается (в том числе не JSON: это уже забота разбора).
+        std::fs::write(&path, vec![b' '; MAX_IMPORT_BYTES as usize]).unwrap();
+        assert_eq!(
+            read_import_file(&path).unwrap().len() as u64,
+            MAX_IMPORT_BYTES
+        );
+        std::fs::write(&path, vec![b' '; MAX_IMPORT_BYTES as usize + 1]).unwrap();
+        assert_eq!(
+            read_import_file(&path).unwrap_err().key,
+            "errors.import.tooLarge"
+        );
+    }
+
+    #[test]
+    fn structural_errors_carry_only_the_field_name() {
+        for field in ["folders", "connections"] {
+            let mut v: serde_json::Value = serde_json::from_slice(&file(vec![], vec![])).unwrap();
+            v[field] = serde_json::json!({"not": "a list"});
+            let err = parse_exchange(&serde_json::to_vec(&v).unwrap()).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidInput);
+            assert_eq!(err.key, "errors.import.fieldNotList");
+            assert_eq!(err.params["field"], field);
+            // Текст не содержит английского фрагмента внутри параметров: только имя поля.
+            assert_eq!(err.params.len(), 1);
+        }
+    }
+
+    #[test]
     fn partial_needs_password_flags_default_to_false() {
         let mut a = conn_json("a", "A", None);
         a["needsPassword"] = serde_json::json!({"patroni": true});
@@ -1388,22 +1585,166 @@ mod tests {
     }
 
     #[test]
-    fn needs_passwords_counts_new_connections_only() {
+    fn needs_passwords_counts_new_and_reset_connections() {
         let mut a = conn_json("a", "A", None);
         a["needsPassword"]["pg"] = true.into();
         let mut b = conn_json("b", "B", None);
+        // Флаги файла у обновляемого подключения ничего не значат: пароль получателя остаётся у него.
         b["needsPassword"]["pgKey"] = true.into();
-        b["hosts"] = serde_json::json!([{"host": "changed", "port": 1}]);
+        b["name"] = "renamed".into();
         let mut c = conn_json("c", "C", None);
         c["needsPassword"]["patroniKey"] = true.into();
         let d = conn_json("d", "D", None);
+        // Меняется адрес: сохранённый пароль будет удалён, пароль нужно ввести заново.
+        let mut e = conn_json("e", "conn-e", None);
+        e["hosts"] = serde_json::json!([{"host": "changed", "port": 1}]);
         let data = StoreData {
-            connections: vec![sample_profile("b")],
+            connections: vec![sample_profile("b"), sample_profile("e")],
             ..Default::default()
         };
-        let p = plan(&data, &file(vec![], vec![a, b, c, d]), &opts(None));
-        assert_eq!(preview_ids(&p.preview.updated), ["b"]);
+        let p = plan(&data, &file(vec![], vec![a, b, c, d, e]), &opts(None));
+        assert_eq!(preview_ids(&p.preview.updated), ["b", "e"]);
+        assert_eq!(p.preview.needs_passwords, 3);
+        assert_eq!(p.secrets_reset, ["e"]);
+    }
+
+    /// Хранилище с подключением `old`, файл с подключением `new` (тот же id): план импорта.
+    fn plan_update(old: ConnectionProfile, new: &ConnectionProfile) -> ImportPlan {
+        let data = StoreData {
+            connections: vec![old],
+            ..Default::default()
+        };
+        plan(
+            &data,
+            &file(vec![], vec![serde_json::to_value(new).unwrap()]),
+            &opts(None),
+        )
+    }
+
+    /// Предупреждение «пароли будут удалены» с числом подключений.
+    fn passwords_reset_warning(p: &ImportPlan) -> Option<String> {
+        p.preview
+            .warnings
+            .iter()
+            .find(|w| w.key == "warnings.import.passwordsReset")
+            .map(|w| w.params["count"].clone())
+    }
+
+    #[test]
+    fn address_and_security_changes_reset_saved_secrets() {
+        let server = sample_profile("a");
+        let mut verify_full = sample_profile("a");
+        verify_full.pg.ssl_mode = crate::conn::profile::SslMode::VerifyFull;
+        let mut other_ca = sample_profile("a");
+        other_ca.pg.tls.ca_path = Some(abs("other-ca.pem"));
+        let patroni = patroni_profile("a");
+        let mut other_patroni_url = patroni_profile("a");
+        other_patroni_url.patroni.as_mut().unwrap().urls = vec!["https://evil:8008".into()];
+        let mut other_api_url = patroni_profile("a");
+        other_api_url.patroni.as_mut().unwrap().host_overrides = vec![HostOverride {
+            member: "pg-1".into(),
+            host: None,
+            port: None,
+            api_url: Some("https://evil:8008".into()),
+        }];
+        let mut no_api_verify = patroni_profile("a");
+        no_api_verify
+            .patroni
+            .as_mut()
+            .unwrap()
+            .tls
+            .as_mut()
+            .unwrap()
+            .verify_hostname = false;
+        let mut other_host = sample_profile("a");
+        other_host.hosts[0].host = "evil".into();
+        let mut other_port = sample_profile("a");
+        other_port.hosts[0].port = 6543;
+        let mut other_user = sample_profile("a");
+        other_user.pg.username = "other".into();
+
+        let cases = [
+            ("host", server.clone(), other_host),
+            ("port", server.clone(), other_port),
+            ("pg user", server.clone(), other_user),
+            ("ssl up", server.clone(), verify_full.clone()),
+            // Понижение защиты: verify-full → prefer.
+            ("ssl downgrade", verify_full, server.clone()),
+            ("pg ca", server, other_ca),
+            ("patroni url", patroni.clone(), other_patroni_url),
+            ("patroni apiUrl", patroni.clone(), other_api_url),
+            ("patroni api tls", patroni, no_api_verify),
+        ];
+        for (what, old, new) in cases {
+            let p = plan_update(old, &new);
+            assert_eq!(preview_ids(&p.preview.updated), ["a"], "{what}");
+            assert_eq!(p.secrets_reset, ["a"], "{what}");
+            assert_eq!(p.preview.needs_passwords, 1, "{what}");
+            assert_eq!(passwords_reset_warning(&p).as_deref(), Some("1"), "{what}");
+        }
+    }
+
+    #[test]
+    fn cosmetic_updates_keep_saved_secrets() {
+        let old = patroni_profile("a");
+        let mut new = old.clone();
+        new.name = "Renamed".into();
+        new.color = "#ff0000".into();
+        new.environment = Environment::Stage;
+        new.read_only = true;
+        let p = plan_update(old, &new);
+        assert_eq!(preview_ids(&p.preview.updated), ["a"]);
+        assert!(p.secrets_reset.is_empty());
+        assert_eq!(p.preview.needs_passwords, 0);
+        assert_eq!(passwords_reset_warning(&p), None);
+        assert!(p.preview.warnings.is_empty());
+    }
+
+    #[test]
+    fn reset_is_counted_per_connection() {
+        let mut moved = conn_json("m", "conn-m", None);
+        moved["hosts"] = serde_json::json!([{"host": "evil", "port": 5432}]);
+        let mut moved2 = conn_json("n", "conn-n", None);
+        moved2["pg"]["sslMode"] = "disable".into();
+        let mut renamed = conn_json("r", "renamed", None);
+        renamed["color"] = "#000000".into();
+        let data = StoreData {
+            connections: vec![
+                sample_profile("m"),
+                sample_profile("n"),
+                sample_profile("r"),
+            ],
+            ..Default::default()
+        };
+        let p = plan(
+            &data,
+            &file(vec![], vec![moved, moved2, renamed]),
+            &opts(None),
+        );
+        assert_eq!(p.secrets_reset, ["m", "n"]);
+        assert_eq!(passwords_reset_warning(&p).as_deref(), Some("2"));
         assert_eq!(p.preview.needs_passwords, 2);
+
+        // Без «обновлять существующие» ничего не меняется и секреты не сбрасываются.
+        let skip = ImportOptions {
+            update_existing: false,
+            ..opts(None)
+        };
+        let parsed = parse_exchange(&file(
+            vec![],
+            vec![
+                serde_json::to_value({
+                    let mut x = sample_profile("m");
+                    x.hosts[0].host = "evil".into();
+                    x
+                })
+                .unwrap(),
+            ],
+        ))
+        .unwrap();
+        let p = plan_import(&data, &parsed, &skip, &all_exist).unwrap();
+        assert!(p.secrets_reset.is_empty() && p.preview.updated.is_empty());
+        assert_eq!(p.preview.needs_passwords, 0);
     }
 
     #[test]

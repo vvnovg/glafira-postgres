@@ -63,6 +63,7 @@
       "keyRequired": "Specify the client key file for a PEM certificate",
       "patroniUrls": "Specify from 1 to 8 Patroni REST API addresses",
       "patroniUrl": "The Patroni API address must start with http:// or https://: {{url}}",
+      "patroniUrlCredentials": "The Patroni API address must not contain a user name or password: use the “API user” and “API password” fields",
       "overrideMember": "Specify the member name for the address override",
       "overrideDuplicate": "Address override for {{member}} is specified twice"
     },
@@ -102,7 +103,8 @@
       "invalidJson": "The file is damaged or is not JSON: {{error}}",
       "unsupportedConnection": "Not supported by this version of Glafira (update the app): {{error}}",
       "duplicateId": "Duplicate connection id in the file",
-      "secretInUrl": "The Patroni API address contains a user name or password: remove it from the address"
+      "fieldNotList": "The file is damaged: “{{field}}” is not a list",
+      "tooLarge": "The file is larger than {{limit_mb}} MB: this is not a connections file"
     },
     "pg": {
       "authFailed": "Authentication failed: check the user, the password and pg_hba.conf",
@@ -384,7 +386,9 @@
       "prodReadOnly_one": "{{count}} prod connection will be read-only: changing prod connections requires Pro",
       "prodReadOnly_other": "{{count}} prod connections will be read-only: changing prod connections requires Pro",
       "missingFiles_one": "Certificate files of {{count}} connection are not found on this computer — check the paths",
-      "missingFiles_other": "Certificate files of {{count}} connections are not found on this computer — check the paths"
+      "missingFiles_other": "Certificate files of {{count}} connections are not found on this computer — check the paths",
+      "passwordsReset_one": "Saved passwords of {{count}} connection will be removed because its address or security settings change — enter them again",
+      "passwordsReset_other": "Saved passwords of {{count}} connections will be removed because their address or security settings change — enter them again"
     }
   },
   "exchange": {
@@ -584,7 +588,7 @@
     },
     "import": {
       "target": "Where new folders and connections go. Existing ones stay where they are.",
-      "updateExisting": "Connections that already exist get the settings from the file; your passwords and their place in the tree are kept."
+      "updateExisting": "Existing connections get the settings from the file and keep their place in the tree. Saved passwords are kept only if the address and security settings do not change."
     }
   }
 }
