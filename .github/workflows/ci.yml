@@ -1,0 +1,115 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Токен задания только читает репозиторий; kafka-explorer читается отдельным секретом ниже.
+permissions:
+  contents: read
+
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      # Полная отладочная информация в тестовых бинарниках (каждый с Tauri) занимает много места
+      # на диске раннера; номеров строк в backtrace достаточно.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Доступ к kafka-explorer (license-format)
+        run: git config --global url."https://x-access-token:${{ secrets.KAFKA_EXPLORER_TOKEN }}@github.com/vvnovg/kafka-explorer".insteadOf "https://github.com/vvnovg/kafka-explorer"
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 11
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # ветка stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            src-tauri -> target
+            crates/pg-advisor -> target
+      - name: Системные зависимости Tauri
+        # cmake не нужен: aws-lc-sys собирается крейтом cc, а vendored OpenSSL — Perl и make из образа раннера.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libsecret-1-dev
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm test:scripts
+      - run: pnpm i18n:check
+      - run: pnpm build
+      - name: pg-advisor
+        run: |
+          cargo fmt --manifest-path crates/pg-advisor/Cargo.toml --check
+          cargo clippy --manifest-path crates/pg-advisor/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path crates/pg-advisor/Cargo.toml
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      - name: Закрытые ключи лицензий не в репозитории
+        run: |
+          if git ls-files | grep -E '(^|/)license-signing\.key$'; then
+            echo "::error::в репозитории закрытый ключ лицензий"; exit 1
+          fi
+      - name: Стенд
+        run: |
+          docker compose -f dev/docker-compose.yml up -d --build
+          scripts/wait-stand.sh
+      - name: Тесты Rust (unit + интеграционные)
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib --tests -- --test-threads=1
+        env:
+          GPG_IT_SINGLE: localhost:5460
+          GPG_IT_PRIMARY: localhost:5451
+          GPG_IT_REPLICA: localhost:5452
+          GPG_IT_PATRONI: http://localhost:8011,http://localhost:8012,http://localhost:8013
+          GPG_IT_DOCKER: "1"
+      - name: Логи стенда при сбое
+        if: failure()
+        run: docker compose -f dev/docker-compose.yml logs --tail=200
+
+  platforms:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Доступ к kafka-explorer (license-format)
+        shell: bash
+        run: git config --global url."https://x-access-token:${{ secrets.KAFKA_EXPLORER_TOKEN }}@github.com/vvnovg/kafka-explorer".insteadOf "https://github.com/vvnovg/kafka-explorer"
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 11
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+      # Отдельных шагов установки cmake и NASM нет намеренно (aws-lc-sys 0.46, зависимость reqwest/rustls):
+      # - cmake не нужен: для macOS и Windows x64 есть готовые привязки, и aws-lc-sys собирается крейтом cc;
+      # - NASM на Windows x64 не нужен: rustls включает feature prebuilt-nasm, без nasm в PATH берутся
+      #   готовые объектные файлы, а vendored OpenSSL (openssl-src) без nasm собирается с no-asm;
+      # - vendored OpenSSL нужен Perl (Strawberry Perl есть в образе windows-2022, perl — в macOS) и nmake из Visual Studio.
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # ветка stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri -> target
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
