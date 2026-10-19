@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { act, fireEvent, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderWithClient } from "../../../test/render";
@@ -76,8 +76,23 @@ describe("CatalogNodes", () => {
     await user.click(await screen.findByRole("button", { name: /^orders/ }));
     await user.click(await screen.findByRole("button", { name: /^shop/ }));
     await user.click(screen.getByRole("button", { name: /^Таблицы/ }));
-    await user.type(await screen.findByLabelText("Фильтр: Таблицы"), "cust");
-    await vi.waitFor(() => expect(api.listObjects).toHaveBeenLastCalledWith("c", "orders", "shop", "tables", "cust", 0, 500));
+    const input = await screen.findByLabelText("Фильтр: Таблицы (orders.shop)");
+    const filtered = () => vi.mocked(api.listObjects).mock.calls.filter((call) => call[4] !== null);
+    expect(filtered()).toHaveLength(0);
+
+    // Задержка фильтра — 300 мс от последнего нажатия: каждое новое откладывает запрос заново.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      fireEvent.change(input, { target: { value: "c" } });
+      await act(() => vi.advanceTimersByTimeAsync(200));
+      fireEvent.change(input, { target: { value: "cust" } });
+      await act(() => vi.advanceTimersByTimeAsync(299));
+      expect(filtered()).toHaveLength(0);
+      await act(() => vi.advanceTimersByTimeAsync(1));
+      expect(filtered()).toEqual([["c", "orders", "shop", "tables", "cust", 0, 500]]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("уведомление о возврате к узлу по умолчанию", () => {

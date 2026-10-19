@@ -1,4 +1,5 @@
-import { screen, waitFor } from "@testing-library/react";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ObjectItem, ObjectPage } from "../../../api/types";
@@ -42,8 +43,15 @@ const page = (from: number, count: number, total: number): ObjectPage => ({
   nextOffset: from + count < total ? from + count : null,
 });
 
+const listEl = (count: number) => <ObjectList connectionId="c" db="orders" schema="shop" kind="tables" count={count} label="Таблицы" />;
+
 function renderList(count: number) {
-  return renderWithClient(<ObjectList connectionId="c" db="orders" schema="shop" kind="tables" count={count} label="Таблицы" />);
+  return renderWithClient(listEl(count));
+}
+
+/** Повторная отрисовка с тем же клиентом: окно виртуализатора в тесте читается при каждом рендере. */
+function rerenderList(r: ReturnType<typeof renderList>, count: number) {
+  r.rerender(<QueryClientProvider client={r.client}>{listEl(count)}</QueryClientProvider>);
 }
 
 beforeEach(() => {
@@ -59,12 +67,12 @@ describe("ObjectList", () => {
     renderList(5);
     expect(await screen.findByText("t3")).toBeInTheDocument();
     expect(screen.getByText("Показано 3 из 5")).toBeInTheDocument();
-    expect(screen.queryByLabelText("Фильтр: Таблицы")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Ещё" }));
+    expect(screen.queryByLabelText(/^Фильтр: /)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Ещё: Таблицы (orders.shop)" }));
     expect(await screen.findByText("t5")).toBeInTheDocument();
     expect(api.listObjects).toHaveBeenLastCalledWith("c", "orders", "shop", "tables", null, 3, PAGE);
     expect(screen.getByText("Показано 5 из 5")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Ещё" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Ещё/ })).not.toBeInTheDocument();
   });
 
   it("пустой результат фильтра", async () => {
@@ -136,5 +144,139 @@ describe("ObjectList", () => {
     });
     renderList(1);
     expect(await screen.findByText("total(integer, text)")).toBeInTheDocument();
+  });
+
+  it("перекрывающиеся страницы: повторов нет, ключи React уникальны", async () => {
+    // Между запросами список сдвинулся: объект 3 пришёл и в конце первой страницы, и в начале второй.
+    vi.mocked(api.listObjects)
+      .mockResolvedValueOnce({ total: 6, nextOffset: 3, items: [item(1), item(2), item(3)] })
+      .mockResolvedValueOnce({ total: 6, nextOffset: null, items: [item(3), item(4), item(5)] });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const user = userEvent.setup();
+    renderList(6);
+    await screen.findByText("t3");
+    await user.click(screen.getByRole("button", { name: /^Ещё/ }));
+    expect(await screen.findByText("t5")).toBeInTheDocument();
+    expect(screen.getAllByText("t3")).toHaveLength(1);
+    expect(screen.getByText("Показано 5 из 6")).toBeInTheDocument();
+    expect(errors.mock.calls.filter((c) => String(c[0]).includes("same key"))).toEqual([]);
+    errors.mockRestore();
+  });
+
+  it("перекрывающиеся страницы в виртуальном списке считаются без повторов", async () => {
+    win.from = 290;
+    vi.mocked(api.listObjects)
+      .mockResolvedValueOnce(page(0, 300, 600))
+      // Вторая страница начинается с объекта 296: пять объектов уже были на первой.
+      .mockResolvedValueOnce({ total: 600, nextOffset: null, items: Array.from({ length: 300 }, (_, i) => item(296 + i)) });
+    renderList(600);
+    expect(await screen.findByText("Показано 595 из 600")).toBeInTheDocument();
+  });
+
+  it("раскрытая партиция остаётся раскрытой, когда строка уходит из окна и возвращается", async () => {
+    vi.mocked(api.listObjects).mockResolvedValue({
+      total: 300,
+      nextOffset: null,
+      items: Array.from({ length: 300 }, (_, i) => (i === 1 ? item(2, { name: "events", relkind: "p", partitions: 1 }) : item(i + 1))),
+    });
+    vi.mocked(api.listPartitions).mockResolvedValue({ total: 1, nextOffset: null, items: [item(900, { name: "events_2026_10" })] });
+    const user = userEvent.setup();
+    const r = renderList(300);
+    await user.click(await screen.findByRole("button", { name: /^events/ }));
+    expect(await screen.findByText("events_2026_10")).toBeInTheDocument();
+
+    win.from = 100; // строка events вышла из окна и размонтирована
+    rerenderList(r, 300);
+    await waitFor(() => expect(screen.queryByRole("button", { name: /^events/ })).not.toBeInTheDocument());
+
+    win.from = 0; // вернулась — всё ещё раскрыта
+    rerenderList(r, 300);
+    expect(await screen.findByRole("button", { name: /^events/ })).toHaveAttribute("aria-expanded", "true");
+    expect(await screen.findByText("events_2026_10")).toBeInTheDocument();
+  });
+
+  it("смена фильтра возвращает прокрутку виртуального списка в начало", async () => {
+    vi.mocked(api.listObjects).mockResolvedValue(page(0, 300, 600));
+    const user = userEvent.setup();
+    renderList(600);
+    const scroller = await screen.findByRole("group", { name: "Список: Таблицы (orders.shop)" });
+    scroller.scrollTop = 400;
+    await user.type(screen.getByLabelText("Фильтр: Таблицы (orders.shop)"), "a");
+    // До истечения задержки фильтр не применён и прокрутка на месте.
+    expect(scroller.scrollTop).toBe(400);
+    await waitFor(() => expect(api.listObjects).toHaveBeenLastCalledWith("c", "orders", "shop", "tables", "a", 0, PAGE));
+    expect(scroller.scrollTop).toBe(0);
+  });
+
+  it("партиция из другой схемы подписана схемой, из той же — нет", async () => {
+    vi.mocked(api.listObjects).mockResolvedValue({
+      total: 1,
+      nextOffset: null,
+      items: [item(2, { name: "events", relkind: "p", partitions: 2 })],
+    });
+    vi.mocked(api.listPartitions).mockResolvedValue({
+      total: 2,
+      nextOffset: null,
+      items: [item(9, { name: "events_2026_10" }), item(10, { name: "events_old", schema: "archive" })],
+    });
+    const user = userEvent.setup();
+    renderList(1);
+    await user.click(await screen.findByRole("button", { name: /^events/ }));
+    expect(await screen.findByText("archive.events_old")).toBeInTheDocument();
+    expect(screen.getByText("events_2026_10")).toBeInTheDocument();
+    expect(screen.queryByText("shop.events_2026_10")).not.toBeInTheDocument();
+  });
+
+  it("доступные имена: прокручиваемые области и поля фильтра разных списков различимы", async () => {
+    vi.mocked(api.listObjects).mockResolvedValue(page(0, 300, 600));
+    renderWithClient(
+      <>
+        <ObjectList connectionId="c" db="orders" schema="shop" kind="tables" count={600} label="Таблицы" />
+        <ObjectList connectionId="c" db="orders" schema="audit" kind="views" count={600} label="Представления" />
+      </>,
+    );
+    await waitFor(() => expect(screen.getAllByRole("group")).toHaveLength(2));
+    const scrollers = screen.getAllByRole("group");
+    expect(scrollers.map((g) => g.getAttribute("aria-label"))).toEqual(["Список: Таблицы (orders.shop)", "Список: Представления (orders.audit)"]);
+    // Область прокрутки достижима с клавиатуры.
+    for (const g of scrollers) expect(g).toHaveAttribute("tabindex", "0");
+    expect(screen.getByLabelText("Фильтр: Таблицы (orders.shop)")).toBeInTheDocument();
+    expect(screen.getByLabelText("Фильтр: Представления (orders.audit)")).toBeInTheDocument();
+  });
+
+  it("доступные имена: кнопки «Ещё» разных списков называют свой список", async () => {
+    vi.mocked(api.listObjects).mockResolvedValue({ total: 9, nextOffset: 3, items: [item(1), item(2), item(3)] });
+    renderWithClient(
+      <>
+        <ObjectList connectionId="c" db="orders" schema="shop" kind="tables" count={9} label="Таблицы" />
+        <ObjectList connectionId="c" db="orders" schema="audit" kind="views" count={9} label="Представления" />
+      </>,
+    );
+    await waitFor(() => expect(screen.getAllByRole("button", { name: /^Ещё/ })).toHaveLength(2));
+    expect(screen.getByRole("button", { name: "Ещё: Таблицы (orders.shop)" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Ещё: Представления (orders.audit)" })).toBeInTheDocument();
+  });
+
+  it("«Ещё» в списке партиций называет таблицу", async () => {
+    vi.mocked(api.listObjects).mockResolvedValue({ total: 1, nextOffset: null, items: [item(2, { name: "events", relkind: "p", partitions: 5 })] });
+    vi.mocked(api.listPartitions).mockResolvedValue({ total: 5, nextOffset: 2, items: [item(9), item(10)] });
+    const user = userEvent.setup();
+    renderList(1);
+    await user.click(await screen.findByRole("button", { name: /^events/ }));
+    expect(await screen.findByRole("button", { name: "Ещё партиции: orders.shop.events" })).toBeInTheDocument();
+  });
+
+  it("индикаторы загрузки — role=status", async () => {
+    vi.mocked(api.listObjects).mockResolvedValueOnce({ total: 1, nextOffset: null, items: [item(2, { name: "events", relkind: "p", partitions: 1 })] });
+    vi.mocked(api.listPartitions).mockReturnValue(new Promise(() => {}));
+    const user = userEvent.setup();
+    const r = renderList(1);
+    await user.click(await screen.findByRole("button", { name: /^events/ }));
+    expect(within(r.container).getByRole("status")).toHaveTextContent("Загрузка…");
+    r.unmount();
+
+    vi.mocked(api.listObjects).mockReturnValue(new Promise(() => {}));
+    renderList(1);
+    expect(screen.getByRole("status")).toHaveTextContent("Загрузка…");
   });
 });

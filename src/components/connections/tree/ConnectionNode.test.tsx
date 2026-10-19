@@ -1,7 +1,8 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { topologyView } from "../../../test/fixtures";
+import type { ConnectionProfile } from "../../../api/types";
+import { member, topology, topologyView } from "../../../test/fixtures";
 import { renderWithClient } from "../../../test/render";
 import { newProfile } from "../profile";
 
@@ -22,6 +23,7 @@ vi.mock("../../../api/client", async (importOriginal) => {
 });
 
 import { api } from "../../../api/client";
+import { i18n } from "../../../i18n";
 import { disconnectedView } from "../../../lib/useConnectionEvents";
 import { useWorkspace } from "../../../state/workspace";
 import { ConnectionNode } from "./ConnectionNode";
@@ -29,13 +31,18 @@ import { ConnectionNode } from "./ConnectionNode";
 const conn = { ...newProfile(), id: "c", name: "billing", kind: "patroni" as const };
 const toggleName = "Развернуть или свернуть подключение billing";
 
-function renderNode() {
+function renderNode(connection: ConnectionProfile = conn) {
   return renderWithClient(
     <ul>
-      <ConnectionNode connection={conn} />
+      <ConnectionNode connection={connection} />
     </ul>,
   );
 }
+
+const serverConn = { ...conn, kind: "server" as const };
+/** Вид одиночного сервера: один участник с заданной ролью. */
+const serverView = (role: "primary" | "replica" | "unknown") =>
+  topologyView({ topology: topology({ kind: "server", members: [member("pg-1", { role, state: "running", lagBytes: null })] }) });
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -136,7 +143,7 @@ describe("ConnectionNode", () => {
     expect(client.getQueryState(["catalog", "other", "databases"])?.isInvalidated).toBe(false);
   });
 
-  it("меню: отключение сворачивает узел; у одиночного сервера выбора узла каталога нет", async () => {
+  it("меню: отключение сворачивает узел", async () => {
     vi.mocked(api.getTopology).mockResolvedValue(topologyView());
     vi.mocked(api.disconnect).mockResolvedValue(undefined);
     const user = userEvent.setup();
@@ -147,6 +154,17 @@ describe("ConnectionNode", () => {
     await user.click(screen.getByRole("menuitem", { name: "Отключиться" }));
     expect(api.disconnect).toHaveBeenCalledWith("c");
     await waitFor(() => expect(screen.getByRole("button", { name: toggleName })).toHaveAttribute("aria-expanded", "false"));
+  });
+
+  it("меню одиночного сервера: выбора узла каталога нет", async () => {
+    vi.mocked(api.getTopology).mockResolvedValue(serverView("primary"));
+    const user = userEvent.setup();
+    renderNode(serverConn);
+    await screen.findByRole("img", { name: "Подключено" });
+    await user.click(screen.getByRole("button", { name: "Действия с подключением billing" }));
+    const items = within(screen.getByRole("menu")).getAllByRole("menuitem");
+    expect(items.map((m) => m.textContent)).toEqual(["Обзор", "Изменить подключение", "Отключиться"]);
+    expect(within(screen.getByRole("menu")).queryByRole("menuitem", { name: /Каталог/ })).not.toBeInTheDocument();
   });
 
   it("меню отключённого подключения: «Подключиться» раскрывает и подключает", async () => {
@@ -172,5 +190,123 @@ describe("ConnectionNode", () => {
     await user.click(screen.getByRole("button", { name: "Действия с подключением billing" }));
     await user.click(screen.getByRole("menuitem", { name: "Отключиться" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("boom");
+  });
+
+  describe("роль одиночного сервера в заголовке", () => {
+    it("primary и standby показывают роль единственного узла", async () => {
+      vi.mocked(api.getTopology).mockResolvedValue(serverView("primary"));
+      const first = renderNode(serverConn);
+      expect(await screen.findByText("Primary")).toBeInTheDocument();
+      first.unmount();
+
+      vi.mocked(api.getTopology).mockResolvedValue(serverView("replica"));
+      renderNode(serverConn);
+      expect(await screen.findByText("Реплика")).toBeInTheDocument();
+      expect(screen.queryByText("Primary")).not.toBeInTheDocument();
+    });
+
+    it("подпись следует за языком интерфейса", async () => {
+      vi.mocked(api.getTopology).mockResolvedValue(serverView("replica"));
+      renderNode(serverConn);
+      expect(await screen.findByText("Реплика")).toBeInTheDocument();
+      try {
+        await act(() => i18n.changeLanguage("en"));
+        expect(screen.getByText("Replica")).toBeInTheDocument();
+      } finally {
+        await act(() => i18n.changeLanguage("ru"));
+      }
+    });
+
+    it("пока топология неизвестна (не подключено) — значка нет", async () => {
+      renderNode(serverConn); // getTopology → disconnectedView, топологии нет
+      await screen.findByRole("img", { name: "Не подключено" });
+      expect(document.querySelector(".kind-badge")).toBeNull();
+    });
+
+    it("роль не определена — значка нет, а не «—»", async () => {
+      vi.mocked(api.getTopology).mockResolvedValue(serverView("unknown"));
+      renderNode(serverConn);
+      await screen.findByRole("img", { name: "Подключено" });
+      expect(document.querySelector(".kind-badge")).toBeNull();
+    });
+
+    it("у Patroni и списка хостов роль в заголовке не показывается", async () => {
+      vi.mocked(api.getTopology).mockResolvedValue(topologyView());
+      const first = renderNode();
+      await screen.findByRole("img", { name: "Подключено" });
+      expect(screen.getByText("Patroni")).toBeInTheDocument();
+      for (const text of ["Primary", "Leader", "Реплика", "Sync"]) expect(screen.queryByText(text)).not.toBeInTheDocument();
+      first.unmount();
+
+      vi.mocked(api.getTopology).mockResolvedValue(topologyView({ topology: topology({ kind: "hostList" }) }));
+      renderNode({ ...conn, kind: "hostList" });
+      await screen.findByRole("img", { name: "Подключено" });
+      for (const text of ["Primary", "Leader", "Реплика", "Sync"]) expect(screen.queryByText(text)).not.toBeInTheDocument();
+    });
+  });
+
+  describe("устаревшая локальная ошибка", () => {
+    const openMenuAndPick = async (user: ReturnType<typeof userEvent.setup>, item: string) => {
+      await user.click(screen.getByRole("button", { name: "Действия с подключением billing" }));
+      await user.click(screen.getByRole("menuitem", { name: item }));
+    };
+
+    it("ошибка смены узла каталога исчезает, когда подключение снова connected", async () => {
+      vi.mocked(api.getTopology).mockResolvedValue(topologyView());
+      vi.mocked(api.setCatalogMember).mockRejectedValue({ code: "NODE_UNAVAILABLE", message: "node down", retryable: true });
+      const user = userEvent.setup();
+      const { client } = renderNode();
+      await screen.findByRole("img", { name: "Подключено" });
+      await user.click(screen.getByRole("button", { name: toggleName }));
+      await openMenuAndPick(user, "Каталог — с узла pg-2");
+      expect(await screen.findByRole("alert")).toHaveTextContent("node down");
+
+      // Часть узлов недоступна — подключение ещё не здорово, ошибка остаётся.
+      act(() => client.setQueryData(["topology", "c"], topologyView({ state: "degraded" })));
+      await screen.findByRole("img", { name: "Часть узлов недоступна" });
+      expect(screen.getByRole("alert")).toHaveTextContent("node down");
+      // Снова connected — ошибка устарела.
+      act(() => client.setQueryData(["topology", "c"], topologyView()));
+      await screen.findByRole("img", { name: "Подключено" });
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
+
+    it("ошибка подключения не висит под узлом, который ожил по событию", async () => {
+      vi.mocked(api.connect).mockRejectedValue({ code: "CONNECTION_FAILED", message: "connection refused", retryable: true });
+      const user = userEvent.setup();
+      const { client } = renderNode();
+      await screen.findByRole("img", { name: "Не подключено" });
+      await user.click(screen.getByRole("button", { name: toggleName }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("connection refused");
+
+      act(() => client.setQueryData(["topology", "c"], topologyView()));
+      expect(await screen.findByRole("button", { name: /^Узлы/ })).toBeInTheDocument();
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
+
+    it("следующая удачная смена узла каталога очищает прежнюю ошибку", async () => {
+      vi.mocked(api.getTopology).mockResolvedValue(topologyView());
+      vi.mocked(api.setCatalogMember).mockRejectedValueOnce({ code: "NODE_UNAVAILABLE", message: "node down", retryable: true });
+      vi.mocked(api.setCatalogMember).mockResolvedValueOnce(topologyView({ catalogMember: "pg-1" }));
+      const user = userEvent.setup();
+      renderNode();
+      await screen.findByRole("img", { name: "Подключено" });
+      await user.click(screen.getByRole("button", { name: toggleName }));
+      await openMenuAndPick(user, "Каталог — с узла pg-2");
+      expect(await screen.findByRole("alert")).toHaveTextContent("node down");
+
+      await openMenuAndPick(user, "Каталог — с узла pg-1");
+      await waitFor(() => expect(api.setCatalogMember).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+    });
+  });
+
+  it("пока идёт подключение, показывается статус «Подключение…»", async () => {
+    vi.mocked(api.connect).mockReturnValue(new Promise(() => {}));
+    const user = userEvent.setup();
+    renderNode();
+    await screen.findByRole("img", { name: "Не подключено" });
+    await user.click(screen.getByRole("button", { name: toggleName }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Подключение…");
   });
 });

@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { member, topology, topologyView } from "../../../test/fixtures";
@@ -21,6 +21,7 @@ vi.mock("../../../api/client", async (importOriginal) => {
 });
 
 import { api } from "../../../api/client";
+import { i18n } from "../../../i18n";
 import { useWorkspace } from "../../../state/workspace";
 import { CatalogNodes } from "./CatalogNodes";
 
@@ -72,14 +73,61 @@ describe("CatalogNodes: детали", () => {
     await waitFor(() => expect(api.listSchemas).toHaveBeenCalledWith("c", "orders", false));
   });
 
-  it("роли: superuser и «без входа»", async () => {
+  it("роли: суперпользователь и «без входа» переводятся вместе с языком", async () => {
     vi.mocked(api.listRoles).mockResolvedValue([role("postgres", { superuser: true }), role("app_ro", { login: false })]);
     const user = userEvent.setup();
     renderWithClient(<CatalogNodes connection={conn} view={topologyView()} />);
     await user.click(screen.getByRole("button", { name: "Роли" }));
     expect(await screen.findByText("postgres")).toBeInTheDocument();
-    expect(screen.getByText("superuser")).toBeInTheDocument();
+    expect(screen.getByText("суперпользователь")).toBeInTheDocument();
     expect(screen.getByText("без входа")).toBeInTheDocument();
+    try {
+      await act(() => i18n.changeLanguage("en"));
+      expect(screen.getByText("superuser")).toBeInTheDocument();
+      expect(screen.getByText("no login")).toBeInTheDocument();
+    } finally {
+      await act(() => i18n.changeLanguage("ru"));
+    }
+  });
+
+  it("линия времени лидера — через словарь, с пояснением", async () => {
+    const user = userEvent.setup();
+    renderWithClient(<CatalogNodes connection={conn} view={topologyView()} />);
+    await user.click(screen.getByRole("button", { name: /^Узлы/ }));
+    const tl = screen.getByText("TL 1");
+    expect(tl).toHaveAttribute("title", "Линия времени");
+    try {
+      await act(() => i18n.changeLanguage("en"));
+      expect(screen.getByText("TL 1")).toHaveAttribute("title", "Timeline");
+    } finally {
+      await act(() => i18n.changeLanguage("ru"));
+    }
+  });
+
+  it("каталоги двух подключений различимы по названию списка", async () => {
+    const other = { ...conn, id: "d", name: "audit" };
+    const user = userEvent.setup();
+    renderWithClient(
+      <>
+        <CatalogNodes connection={conn} view={topologyView()} />
+        <CatalogNodes connection={other} view={topologyView()} />
+      </>,
+    );
+    const billing = screen.getByRole("list", { name: "Содержимое подключения billing" });
+    const audit = screen.getByRole("list", { name: "Содержимое подключения audit" });
+    // Одинаковые «Узлы» и «Роли» в обоих списках — но каждая принадлежит своему.
+    expect(screen.getAllByRole("button", { name: /^Узлы/ })).toHaveLength(2);
+    await user.click(within(audit).getByRole("button", { name: /^Узлы/ }));
+    expect(within(audit).getByRole("button", { name: "★ pg-1" })).toBeInTheDocument();
+    expect(within(billing).queryByRole("button", { name: "★ pg-1" })).not.toBeInTheDocument();
+  });
+
+  it("индикатор загрузки списка баз — role=status", async () => {
+    vi.mocked(api.listDatabases).mockReturnValue(new Promise(() => {}));
+    const user = userEvent.setup();
+    renderWithClient(<CatalogNodes connection={conn} view={topologyView()} />);
+    await user.click(screen.getByRole("button", { name: /Базы данных/ }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Загрузка…");
   });
 
   it("расширения с доступным обновлением и база без права CONNECT имеют текстовые альтернативы", async () => {

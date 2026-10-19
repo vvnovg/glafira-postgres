@@ -46,7 +46,15 @@ function useShowSystem(): { showSystem: boolean; ready: boolean } {
 
 function Loading({ q }: { q: { isPending: boolean; error: unknown; refetch: () => unknown } }) {
   const { t } = useTranslation();
-  if (q.isPending) return <li className="tree-note">{t("common.loading")}</li>;
+  if (q.isPending) {
+    return (
+      <li>
+        <span className="tree-note" role="status">
+          {t("common.loading")}
+        </span>
+      </li>
+    );
+  }
   if (q.error) {
     return (
       <li>
@@ -169,7 +177,7 @@ function RoleList({ connectionId }: { connectionId: string }) {
           <span className="tree-name">{r.name}</span>
           {r.superuser && (
             <span className="env-badge" style={{ background: "var(--danger)" }}>
-              superuser
+              {t("sidebar.superuser")}
             </span>
           )}
           {!r.login && <span className="muted"> {t("sidebar.noLogin")}</span>}
@@ -186,7 +194,8 @@ export function CatalogNodes({ connection, view }: { connection: ConnectionProfi
   const topo = view.topology;
   const member = view.catalogMember;
   return (
-    <ul className="tree-catalog">
+    // Список назван по подключению: «Узлы», «Базы данных» и «Роли» разных подключений различимы.
+    <ul className="tree-catalog" aria-label={t("sidebar.catalogOf", { name: connection.name })}>
       {connection.kind !== "server" && topo && (
         <TreeGroup label={t("sidebar.members")}>
           {() =>
@@ -197,7 +206,12 @@ export function CatalogNodes({ connection, view }: { connection: ConnectionProfi
                   {m.name}
                 </button>{" "}
                 <span className="muted">{roleLabel(m.role, topo.kind)}</span>
-                {m.timeline !== null && m.role === "primary" && <span className="muted"> TL {m.timeline}</span>}
+                {m.timeline !== null && m.role === "primary" && (
+                  <span className="muted" title={t("sidebar.timelineTitle")}>
+                    {" "}
+                    {t("sidebar.timeline", { timeline: m.timeline })}
+                  </span>
+                )}
                 {m.lagBytes !== null && m.role !== "primary" && <span className="muted"> {formatBytes(m.lagBytes)}</span>}
                 {(!m.reachable || (m.lagBytes ?? 0) > LAG_WARN_BYTES) && (
                   <>

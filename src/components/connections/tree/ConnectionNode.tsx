@@ -1,9 +1,10 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { type HTMLAttributes, useState } from "react";
+import { type HTMLAttributes, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../../api/client";
 import type { AppError, ConnectionProfile, TopologyView } from "../../../api/types";
 import { tr } from "../../../i18n/text";
+import { roleLabel } from "../../../lib/topology";
 import { disconnectedView, useTopology } from "../../../lib/useConnectionEvents";
 import { useWorkspace } from "../../../state/workspace";
 import { EnvBadge } from "../../common/EnvBadge";
@@ -25,6 +26,12 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
   const [error, setError] = useState<AppError | null>(null);
   const { data: view = disconnectedView } = useTopology(c.id);
   const live = view.state === "connected" || view.state === "degraded";
+
+  // Локальная ошибка — про прошлую попытку или действие. Когда подключение снова здорово («connected»),
+  // она устарела и не должна висеть под живым узлом.
+  useEffect(() => {
+    if (view.state === "connected") setError(null);
+  }, [view.state]);
 
   const setView = (v: TopologyView) => qc.setQueryData(["topology", c.id], v);
 
@@ -99,6 +106,8 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
 
   // Ошибка последней попытки или причина, по которой Rust пометил подключение как недоступное.
   const shownError = error ?? (view.state === "failed" ? view.error : null);
+  // У одиночного сервера группы «Узлы» нет, и роль (primary или standby) показывается в заголовке (спека P1 §8).
+  const serverRole = c.kind === "server" ? view.topology?.members[0]?.role : undefined;
 
   return (
     <li>
@@ -115,6 +124,7 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
         </button>
         <EnvBadge environment={c.environment} readOnly={c.readOnly} />
         {c.kind === "patroni" && <span className="kind-badge">Patroni</span>}
+        {serverRole !== undefined && serverRole !== "unknown" && <span className="kind-badge">{roleLabel(serverRole, "server")}</span>}
         <span className="tree-menu-anchor">
           <button
             type="button"
@@ -131,7 +141,11 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
       </div>
       {expanded && (
         <>
-          {(view.state === "connecting" || busy) && <p className="tree-notice">{t("sidebar.state.connecting")}</p>}
+          {(view.state === "connecting" || busy) && (
+            <p className="tree-notice" role="status">
+              {t("sidebar.state.connecting")}
+            </p>
+          )}
           {shownError && (
             <p className="tree-error" role="alert">
               {tr(shownError)}

@@ -6,6 +6,7 @@
     "readiness.computeQueryId.title",
     "readiness.trackActivityQuerySize.title",
     "readiness.trackIoTiming.title",
+    "sidebar.timeline",
     "tabs.unknownConnection",
     "test.nodeOk",
     "test.step.patroni",
