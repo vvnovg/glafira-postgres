@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useEffect, useId, useState } from "react";
+import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../api/client";
 import type { AppError, ConnectionKind, Member, Topology, TopologyEvent } from "../../api/types";
@@ -62,6 +62,24 @@ function tagList(tags: Record<string, unknown>): string[] {
   });
 }
 
+/**
+ * Ключи строк журнала. Новые события добавляются сверху, поэтому ключ по индексу пересоздавал бы все строки.
+ * Событие описывается целиком (время, вид, узлы, значения), а полные дубли различаются номером, который
+ * считается от старых событий к новым: добавление сверху его не меняет.
+ */
+function eventKeys(events: TopologyEvent[]): string[] {
+  const seen = new Map<string, number>();
+  return events
+    .map((e) => JSON.stringify(e))
+    .reverse()
+    .map((base) => {
+      const n = seen.get(base) ?? 0;
+      seen.set(base, n + 1);
+      return n === 0 ? base : `${base}#${n}`;
+    })
+    .reverse();
+}
+
 /** Узлы, возглавляющие кластер: primary, а в standby-кластере Patroni — standby leader. */
 function leaders(members: Member[]): Member[] {
   const primaries = members.filter((m) => m.role === "primary");
@@ -97,11 +115,26 @@ function FactsCells({ connectionId, m, live }: { connectionId: string; m: Member
       </>
     );
   }
+  // Последний ответ есть, но очередное чтение не удалось: цифры устарели. Значок с причиной и приглушённый цвет
+  // говорят об этом; без них сбой («too many clients», таймаут) выглядел бы как живые числа.
+  const stale = q.isError;
+  const cls = stale ? "stale" : undefined;
+  // Время работы — на момент последнего чтения. q.dataUpdatedAt меняется при каждом опросе, даже при тех же данных,
+  // поэтому ячейка перерисовывается и подпись не замирает, пока цифры не изменились.
+  const uptime = duration(q.dataUpdatedAt - q.data.startedAtMs);
   return (
     <>
-      <td>{duration(Date.now() - q.data.startedAtMs)}</td>
-      <td>{`${formatCount(q.data.connections)} / ${formatCount(q.data.maxConnections)}`}</td>
-      <td>{formatCount(q.data.databases)}</td>
+      <td className={cls}>
+        {uptime}
+        {stale && (
+          <>
+            {" "}
+            <Glyph className="warn" symbol="⚠" label={t("overview.factsStale", { error: tr(toAppError(q.error)) })} />
+          </>
+        )}
+      </td>
+      <td className={cls}>{`${formatCount(q.data.connections)} / ${formatCount(q.data.maxConnections)}`}</td>
+      <td className={cls}>{formatCount(q.data.databases)}</td>
     </>
   );
 }
@@ -126,11 +159,9 @@ function MembersTable({ connectionId, topo, live, selected }: { connectionId: st
           {!m.reachable && (
             <>
               {" "}
-              <Glyph
-                className="warn"
-                symbol="⚠"
-                label={m.error ? t("overview.unreachable", { error: tr(m.error) }) : t("sidebar.unreachable")}
-              />
+              <Glyph className="warn" symbol="⚠" label={t("sidebar.unreachable")} />
+              {/* Причина — видимым текстом, а не только в подсказке: её видно без наведения мыши. */}
+              {m.error && <div className="member-error muted">{tr(m.error)}</div>}
             </>
           )}
         </>
@@ -180,16 +211,19 @@ function MembersTable({ connectionId, topo, live, selected }: { connectionId: st
   ];
 
   return (
-    <div className="table-scroll">
+    // Прокручиваемая область достижима с клавиатуры: фокус на ней + стрелки (иначе правые столбцы недоступны).
+    <div className="table-scroll" role="region" tabIndex={0} aria-label={t("overview.tableRegion")}>
       <table className="members-table" aria-label={t("sidebar.members")}>
         <thead>
           <tr>
             {columns.map((c) => (
-              <th key={c.id}>{c.header}</th>
+              <th key={c.id} scope="col">
+                {c.header}
+              </th>
             ))}
-            <th>{t("overview.col.uptime")}</th>
-            <th>{t("overview.col.connections")}</th>
-            <th>{t("overview.col.databases")}</th>
+            <th scope="col">{t("overview.col.uptime")}</th>
+            <th scope="col">{t("overview.col.connections")}</th>
+            <th scope="col">{t("overview.col.databases")}</th>
           </tr>
         </thead>
         <tbody>
@@ -220,6 +254,8 @@ export function Overview({ connectionId, member }: { connectionId: string; membe
   const conn = conns.data?.find((c) => c.id === connectionId);
   const view = useTopology(connectionId);
   const events = useTopologyEvents(connectionId);
+  const journal = events.data ?? [];
+  const journalKeys = eventKeys(journal);
   const [error, setError] = useState<AppError | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -235,8 +271,19 @@ export function Overview({ connectionId, member }: { connectionId: string; membe
     }
   };
 
-  // Ошибка попытки подключения устаревает, когда подключение стало живым (например, из дерева).
   const state = view.data?.state;
+  // Спец. P1 §7: подключение открывается при открытии вкладки. Решает первый загруженный вид, один раз на подключение
+  // вкладки (ref переживает двойной монтаж StrictMode): явное «Отключиться» при открытой вкладке подключение не
+  // возвращает — для этого остаётся кнопка. `failed` и `connecting` сами по себе подключение не запускают.
+  const autoConnected = useRef<string | null>(null);
+  useEffect(() => {
+    if (state === undefined || autoConnected.current === connectionId) return;
+    autoConnected.current = connectionId;
+    if (state === "disconnected") void connect();
+    // connect замыкает только connectionId и setState: ждать его смены не нужно.
+  }, [state, connectionId]);
+
+  // Ошибка попытки подключения устаревает, когда подключение стало живым (например, из дерева).
   useEffect(() => {
     if (state === "connected" || state === "degraded") setError(null);
   }, [state]);
@@ -249,8 +296,11 @@ export function Overview({ connectionId, member }: { connectionId: string; membe
   const topo = v.topology;
   const live = v.state === "connected" || v.state === "degraded";
   const shownError = error ?? v.error;
-  // У одиночного сервера один узел и «лидера» нет: его роль видна в таблице и в дереве.
-  const head = topo && topo.kind !== "server" ? leaders(topo.members) : [];
+  // У одиночного сервера один узел и «лидера» нет: в шапке его роль (как значок в дереве). У остальных видов лидер
+  // показывается всегда; без него — «—», чтобы отсутствие лидера было видно, а не пропадала сама строка.
+  const isServer = topo?.kind === "server";
+  const head = topo && !isServer ? leaders(topo.members) : [];
+  const serverRole = isServer ? topo.members[0]?.role : undefined;
 
   return (
     <div className="page">
@@ -259,9 +309,15 @@ export function Overview({ connectionId, member }: { connectionId: string; membe
         <span className="muted">{conn ? t(`connections.form.kinds.${conn.kind}`) : ""}</span>
         {topo?.scope && <span className="muted">{t("overview.scope", { scope: topo.scope })}</span>}
         {topo?.paused && <span className="warn">{t("overview.paused")}</span>}
-        {topo && head.length > 0 && (
-          <span>{t("overview.head", { role: roleLabel(head[0].role, topo.kind), names: head.map((m) => m.name).join(", ") })}</span>
+        {topo && !isServer && (
+          <span>
+            {t("overview.head", {
+              role: roleLabel(head[0]?.role ?? "primary", topo.kind),
+              names: head.length > 0 ? head.map((m) => m.name).join(", ") : "—",
+            })}
+          </span>
         )}
+        {serverRole !== undefined && serverRole !== "unknown" && <span className="kind-badge">{roleLabel(serverRole, "server")}</span>}
         <span>{t(`sidebar.state.${v.state}`)}</span>
         {(v.state === "disconnected" || v.state === "failed") && (
           <button type="button" className="primary" disabled={busy} onClick={() => void connect()}>
@@ -285,12 +341,12 @@ export function Overview({ connectionId, member }: { connectionId: string; membe
       {topo && (
         <section aria-labelledby={journalId}>
           <h3 id={journalId}>{t("overview.journal")}</h3>
-          {(events.data ?? []).length === 0 ? (
+          {journal.length === 0 ? (
             <p className="muted">{t("overview.journalEmpty")}</p>
           ) : (
             <ul className="steps">
-              {(events.data ?? []).map((e, i) => (
-                <li key={`${e.atMs}:${i}`}>
+              {journal.map((e, i) => (
+                <li key={journalKeys[i]}>
                   <span className="muted">{formatTimestamp(e.atMs)}</span> {eventText(e, topo.kind)}
                 </li>
               ))}

@@ -1,6 +1,8 @@
-import { act, screen, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { StrictMode } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TopologyEvent } from "../../api/types";
 import { renderWithClient } from "../../test/render";
 import { member, topology, topologyView } from "../../test/fixtures";
@@ -23,6 +25,7 @@ vi.mock("../../api/client", async (importOriginal) => {
 import { api } from "../../api/client";
 import { i18n } from "../../i18n";
 import { formatTimestamp } from "../../lib/format";
+import { applyState, disconnectedView } from "../../lib/useConnectionEvents";
 import { Overview, eventText } from "./Overview";
 
 beforeEach(() => {
@@ -57,32 +60,91 @@ describe("Overview", () => {
     expect(api.getMemberFacts).not.toHaveBeenCalledWith("c", "pg-2");
   });
 
-  it("неподключённое подключение предлагает подключиться", async () => {
-    const user = userEvent.setup();
-    vi.mocked(api.getTopology).mockResolvedValue(topologyView({ state: "disconnected", topology: null, catalogMember: null }));
-    vi.mocked(api.connect).mockResolvedValue(topologyView());
-    renderWithClient(<Overview connectionId="c" />);
-    await user.click(await screen.findByRole("button", { name: "Подключиться" }));
-    expect(api.connect).toHaveBeenCalledWith("c");
-  });
+  describe("подключение при открытии вкладки (спец. P1 §7)", () => {
+    const disconnected = () =>
+      vi.mocked(api.getTopology).mockResolvedValue(topologyView({ state: "disconnected", topology: null, catalogMember: null }));
 
-  it("ошибка подключения показывается баннером, а таблицы и фактов нет", async () => {
-    const user = userEvent.setup();
-    vi.mocked(api.getTopology).mockResolvedValue(topologyView({ state: "disconnected", topology: null, catalogMember: null }));
-    vi.mocked(api.connect).mockRejectedValue({ code: "CONNECTION_FAILED", message: "Connection refused", retryable: true });
-    renderWithClient(<Overview connectionId="c" />);
-    await user.click(await screen.findByRole("button", { name: "Подключиться" }));
-    expect(await screen.findByText("Connection refused")).toBeInTheDocument();
-    expect(screen.queryByRole("table")).not.toBeInTheDocument();
-    expect(api.getMemberFacts).not.toHaveBeenCalled();
+    it("неподключённое подключение подключается само, а после явного отключения предлагает подключиться кнопкой", async () => {
+      const user = userEvent.setup();
+      disconnected();
+      vi.mocked(api.connect).mockResolvedValue(topologyView());
+      const { client } = renderWithClient(<Overview connectionId="c" />);
+      expect(await screen.findByText("Подключено")).toBeInTheDocument();
+      expect(api.connect).toHaveBeenCalledTimes(1);
+      expect(api.connect).toHaveBeenCalledWith("c");
+
+      // Пользователь отключил подключение при открытой вкладке (событие Rust): само оно не возвращается.
+      act(() => applyState(client, { connectionId: "c", state: "disconnected", error: null }));
+      const button = await screen.findByRole("button", { name: "Подключиться" });
+      expect(screen.queryByText("Подключено")).not.toBeInTheDocument();
+      expect(api.connect).toHaveBeenCalledTimes(1);
+
+      await user.click(button);
+      expect(api.connect).toHaveBeenCalledTimes(2);
+      expect(await screen.findByText("Подключено")).toBeInTheDocument();
+    });
+
+    // Кэш топологии тёплый, как в приложении (дерево уже загрузило вид): состояние известно уже при монтировании,
+    // и эффект StrictMode выполняется дважды, пока подключение ещё не закончилось.
+    const renderStrictWithWarmCache = () => {
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      client.setQueryData(["topology", "c"], disconnectedView);
+      // StrictMode снаружи провайдера — как в main.tsx: так React повторяет эффекты вложенных компонентов.
+      return render(
+        <StrictMode>
+          <QueryClientProvider client={client}>
+            <Overview connectionId="c" />
+          </QueryClientProvider>
+        </StrictMode>,
+      );
+    };
+
+    it("StrictMode (двойной монтаж) при тёплом кэше подключает один раз", async () => {
+      vi.mocked(api.connect).mockResolvedValue(topologyView());
+      renderStrictWithWarmCache();
+      expect(await screen.findByText("Подключено")).toBeInTheDocument();
+      expect(api.connect).toHaveBeenCalledTimes(1);
+    });
+
+    it("StrictMode: подключение, ещё не закончившееся к повторному монтажу, не запускается дважды", async () => {
+      vi.mocked(api.connect).mockReturnValue(new Promise(() => {}));
+      renderStrictWithWarmCache();
+      expect(await screen.findByRole("button", { name: "Подключиться" })).toBeDisabled();
+      expect(api.connect).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ["connecting", "Подключение…"],
+      ["connected", "Подключено"],
+      ["degraded", "Часть узлов недоступна"],
+      ["failed", "Не удалось подключиться"],
+    ] as const)("состояние %s само подключение не запускает", async (state, label) => {
+      vi.mocked(api.getTopology).mockResolvedValue(
+        topologyView({ state, error: state === "failed" ? { code: "CONNECTION_FAILED", message: "gone", retryable: true } : null }),
+      );
+      renderWithClient(<Overview connectionId="c" />);
+      expect(await screen.findByText(label)).toBeInTheDocument();
+      expect(api.connect).not.toHaveBeenCalled();
+    });
+
+    it("сбой автоподключения: ошибка баннером, таблицы и фактов нет, кнопка повторяет попытку", async () => {
+      const user = userEvent.setup();
+      disconnected();
+      vi.mocked(api.connect).mockRejectedValue({ code: "CONNECTION_FAILED", message: "Connection refused", retryable: true });
+      renderWithClient(<Overview connectionId="c" />);
+      expect(await screen.findByText("Connection refused")).toBeInTheDocument();
+      expect(api.connect).toHaveBeenCalledTimes(1);
+      expect(screen.queryByRole("table")).not.toBeInTheDocument();
+      expect(api.getMemberFacts).not.toHaveBeenCalled();
+      await user.click(screen.getByRole("button", { name: "Подключиться" }));
+      expect(api.connect).toHaveBeenCalledTimes(2);
+    });
   });
 
   it("ошибка прошлой попытки пропадает, когда подключение стало живым (например, из дерева)", async () => {
-    const user = userEvent.setup();
     vi.mocked(api.getTopology).mockResolvedValue(topologyView({ state: "disconnected", topology: null, catalogMember: null }));
     vi.mocked(api.connect).mockRejectedValue({ code: "CONNECTION_FAILED", message: "Connection refused", retryable: true });
     const { client } = renderWithClient(<Overview connectionId="c" />);
-    await user.click(await screen.findByRole("button", { name: "Подключиться" }));
     expect(await screen.findByText("Connection refused")).toBeInTheDocument();
     act(() => client.setQueryData(["topology", "c"], topologyView()));
     expect(await screen.findByText("Подключено")).toBeInTheDocument();
@@ -119,7 +181,7 @@ describe("Overview", () => {
     }
   });
 
-  it("Несколько primary: предупреждение красным, лидеры перечислены в шапке", async () => {
+  it("несколько primary: предупреждение красным, лидеры перечислены в шапке", async () => {
     vi.mocked(api.getTopology).mockResolvedValue(
       topologyView({
         topology: topology({
@@ -144,7 +206,7 @@ describe("Overview", () => {
     expect(screen.getByRole("row", { name: /^pg-1 / })).not.toHaveAttribute("aria-current");
   });
 
-  it("недоступный участник помечен значком с текстом и ошибкой в подсказке, строки фактов — прочерки", async () => {
+  it("недоступный участник помечен значком, причина видна текстом без наведения; строки фактов — прочерки", async () => {
     vi.mocked(api.getTopology).mockResolvedValue(
       topologyView({
         state: "degraded",
@@ -154,11 +216,24 @@ describe("Overview", () => {
       }),
     );
     renderWithClient(<Overview connectionId="c" />);
-    const mark = await screen.findByRole("img", { name: "Узел недоступен: connection refused" });
-    expect(mark).toHaveAttribute("title", "Узел недоступен: connection refused");
+    const mark = await screen.findByRole("img", { name: "Узел недоступен" });
     const row = mark.closest("tr")!;
+    // Причина — обычный текст в ячейке (видна клавиатурным и сенсорным пользователям), а не только title значка.
+    const reason = within(row).getByText("connection refused");
+    expect(reason).toBeVisible();
+    expect(reason).toHaveClass("member-error");
+    expect(reason.closest("td")).toBe(mark.closest("td"));
     expect(within(row).getAllByText("—").length).toBeGreaterThanOrEqual(3);
     expect(within(row).queryByText("12 / 100")).not.toBeInTheDocument();
+  });
+
+  it("недоступный узел без причины: значок есть, текста причины нет", async () => {
+    vi.mocked(api.getTopology).mockResolvedValue(
+      topologyView({ state: "degraded", topology: topology({ members: [member("pg-1", { role: "primary" }), member("pg-2", { reachable: false, role: "unknown", error: null })] }) }),
+    );
+    renderWithClient(<Overview connectionId="c" />);
+    const row = (await screen.findByRole("img", { name: "Узел недоступен" })).closest("tr")!;
+    expect(row.querySelector(".member-error")).toBeNull();
   });
 
   it("теги: флаги и значения, без выключенных; pending restart — подписью", async () => {
@@ -225,6 +300,7 @@ describe("Overview", () => {
     expect(await screen.findByText("gone")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Подключиться" })).toBeInTheDocument();
     expect(api.getMemberFacts).not.toHaveBeenCalled();
+    expect(api.connect).not.toHaveBeenCalled();
   });
 
   it("сбой чтения фактов узла помечен значком с причиной", async () => {
@@ -278,7 +354,10 @@ describe("Overview", () => {
       for (const shown of ["Роль", "Адрес", "Версии", "Работает", "Соединения", "БД"]) {
         expect(screen.getByRole("columnheader", { name: shown })).toBeInTheDocument();
       }
-      expect(screen.getByText("Primary")).toBeInTheDocument();
+      // Роль одиночного сервера — значок в шапке (как в дереве) и ячейка таблицы.
+      expect(screen.getAllByText("Primary")).toHaveLength(2);
+      expect(screen.getByText("Primary", { selector: ".kind-badge" })).toBeInTheDocument();
+      expect(within(screen.getByRole("table")).getByText("Primary")).toBeInTheDocument();
       expect(screen.queryByText("Leader")).not.toBeInTheDocument();
       expect(screen.queryByText(/scope/)).not.toBeInTheDocument();
       expect(screen.queryByText("Пауза")).not.toBeInTheDocument();
@@ -300,6 +379,274 @@ describe("Overview", () => {
       expect(screen.getByRole("columnheader", { name: "Источник WAL" })).toBeInTheDocument();
       expect(screen.getByText("up:5432")).toBeInTheDocument();
     });
+  });
+});
+
+describe("Overview: шапка", () => {
+  it("кластер без лидера: «Leader: —» и предупреждение, а не пустое место", async () => {
+    vi.mocked(api.getTopology).mockResolvedValue(
+      topologyView({
+        state: "degraded",
+        topology: topology({ members: [member("pg-1"), member("pg-2")], warnings: [{ kind: "noPrimary" }] }),
+      }),
+    );
+    renderWithClient(<Overview connectionId="c" />);
+    expect(await screen.findByText("Leader: —")).toBeInTheDocument();
+    expect(screen.getByText(/Нет primary/)).toBeInTheDocument();
+  });
+
+  it("список узлов без primary: «Primary: —»", async () => {
+    vi.mocked(api.listConnections).mockResolvedValue([{ ...newProfile(), id: "c", name: "pair", kind: "hostList" }]);
+    vi.mocked(api.getTopology).mockResolvedValue(
+      topologyView({ topology: topology({ kind: "hostList", scope: null, paused: null, members: [member("a:5432"), member("b:5432")] }) }),
+    );
+    renderWithClient(<Overview connectionId="c" />);
+    expect(await screen.findByText("Primary: —")).toBeInTheDocument();
+  });
+
+  it("одиночный сервер: роль значком в шапке, как в дереве; неизвестная роль значка не даёт", async () => {
+    vi.mocked(api.listConnections).mockResolvedValue([{ ...newProfile(), id: "c", name: "solo", kind: "server" }]);
+    const server = (role: "primary" | "replica" | "unknown") =>
+      topologyView({ topology: topology({ kind: "server", scope: null, paused: null, members: [member("db:5432", { role })] }) });
+    vi.mocked(api.getTopology).mockResolvedValue(server("replica"));
+    const first = renderWithClient(<Overview connectionId="c" />);
+    expect(await screen.findByText("Реплика", { selector: ".kind-badge" })).toBeInTheDocument();
+    first.unmount();
+
+    vi.mocked(api.getTopology).mockResolvedValue(server("unknown"));
+    renderWithClient(<Overview connectionId="c" />);
+    expect(await screen.findByRole("heading", { level: 2, name: "solo" })).toBeInTheDocument();
+    expect(document.querySelector(".kind-badge")).toBeNull();
+  });
+
+  it("у кластера Patroni значка роли в шапке нет", async () => {
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView());
+    renderWithClient(<Overview connectionId="c" />);
+    expect(await screen.findByText("Leader: pg-1")).toBeInTheDocument();
+    expect(document.querySelector(".kind-badge")).toBeNull();
+  });
+});
+
+describe("Overview: столбцы по виду подключения", () => {
+  const headers = () => screen.getAllByRole("columnheader").map((h) => h.textContent);
+
+  it("список узлов: лаг, replay и источник WAL есть всегда, а столбцов Patroni (таймлайн, теги) и версии Patroni нет", async () => {
+    vi.mocked(api.listConnections).mockResolvedValue([{ ...newProfile(), id: "c", name: "pair", kind: "hostList" }]);
+    vi.mocked(api.getTopology).mockResolvedValue(
+      topologyView({
+        topology: topology({
+          kind: "hostList",
+          scope: null,
+          paused: null,
+          members: [
+            member("a:5432", { role: "primary", state: null, timeline: null, lagBytes: null, patroniVersion: null }),
+            member("b:5432", { role: "replica", state: null, timeline: null, lagBytes: null, patroniVersion: null }),
+          ],
+        }),
+      }),
+    );
+    renderWithClient(<Overview connectionId="c" />);
+    await screen.findByRole("columnheader", { name: "Узел" });
+    expect(headers()).toEqual(["Узел", "Роль", "Состояние", "Адрес", "Лаг", "Задержка replay", "Источник WAL", "Версии", "Работает", "Соединения", "БД"]);
+    expect(screen.getByText("Primary: a:5432")).toBeInTheDocument();
+    expect(screen.queryByText(/Patroni \d/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/scope|Пауза/)).not.toBeInTheDocument();
+  });
+
+  it("кластер Patroni: полный набор столбцов", async () => {
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView());
+    renderWithClient(<Overview connectionId="c" />);
+    await screen.findByRole("columnheader", { name: "Узел" });
+    expect(headers()).toEqual([
+      "Узел", "Роль", "Состояние", "Адрес", "Таймлайн", "Лаг", "Задержка replay", "Источник WAL", "Теги", "Версии", "Работает", "Соединения", "БД",
+    ]);
+  });
+});
+
+describe("Overview: доступность", () => {
+  it("прокручиваемая таблица — именованная область, достижимая с клавиатуры", async () => {
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView());
+    renderWithClient(<Overview connectionId="c" />);
+    const region = await screen.findByRole("region", { name: "Таблица узлов" });
+    expect(region).toHaveAttribute("tabindex", "0");
+    expect(within(region).getByRole("table", { name: "Узлы" })).toBeInTheDocument();
+  });
+
+  it("заголовки столбцов — scope=col, в обоих языках", async () => {
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView());
+    const { unmount } = renderWithClient(<Overview connectionId="c" />);
+    const headers = await screen.findAllByRole("columnheader");
+    expect(headers.length).toBeGreaterThan(10);
+    for (const h of headers) expect(h).toHaveAttribute("scope", "col");
+    try {
+      await act(async () => {
+        await i18n.changeLanguage("en");
+      });
+      expect(screen.getByRole("region", { name: "Nodes table" })).toBeInTheDocument();
+    } finally {
+      unmount();
+      await i18n.changeLanguage("ru");
+    }
+  });
+
+  it("журнал: добавление события сверху не пересоздаёт прежние строки", async () => {
+    const old: TopologyEvent[] = [
+      { atMs: 2_000, kind: "memberUnreachable", name: "pg-3" },
+      { atMs: 1_000, kind: "leaderChanged", from: null, to: "pg-1" },
+    ];
+    vi.mocked(api.listTopologyEvents).mockResolvedValue(old);
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView());
+    const { client } = renderWithClient(<Overview connectionId="c" />);
+    const journal = await screen.findByRole("region", { name: "Журнал событий" });
+    const before = within(journal).getAllByRole("listitem");
+    expect(before).toHaveLength(2);
+
+    act(() => client.setQueryData<TopologyEvent[]>(["topologyEvents", "c"], [{ atMs: 3_000, kind: "memberReachable", name: "pg-3" }, ...old]));
+    await within(journal).findByText(/Узел pg-3 снова доступен/);
+    const after = within(journal).getAllByRole("listitem");
+    expect(after).toHaveLength(3);
+    expect(after[0].textContent).toContain("Узел pg-3 снова доступен");
+    // Те же DOM-узлы, сдвинутые вниз: ключ не зависит от позиции.
+    expect(after[1]).toBe(before[0]);
+    expect(after[2]).toBe(before[1]);
+  });
+
+  it("журнал: полные дубли различаются номером и не склеиваются", async () => {
+    const dup: TopologyEvent = { atMs: 5_000, kind: "memberUnreachable", name: "pg-3" };
+    vi.mocked(api.listTopologyEvents).mockResolvedValue([dup, dup, { atMs: 1_000, kind: "pauseChanged", paused: true }]);
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView());
+    renderWithClient(<Overview connectionId="c" />);
+    const journal = await screen.findByRole("region", { name: "Журнал событий" });
+    expect(within(journal).getAllByRole("listitem")).toHaveLength(3);
+    expect(within(journal).getAllByText(/Узел pg-3 недоступен/)).toHaveLength(2);
+  });
+});
+
+describe("Overview: опрос фактов и устаревшие данные (фейковые таймеры)", () => {
+  const callsFor = (name: string) => vi.mocked(api.getMemberFacts).mock.calls.filter(([, n]) => n === name).length;
+  /** Продвигает часы и выполняет всё, что успело запуститься (опрос, ответы, перерисовки). */
+  const tick = (ms: number) =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  /** Загрузка идёт цепочкой (подключения → топология → таблица → факты), каждое звено — свой тик планировщика (таймер в 0 мс срабатывает на 1 мс фейковых часов). */
+  const settle = async () => {
+    for (let i = 0; i < 8; i++) await tick(1);
+  };
+  const onePrimary = () => topologyView({ topology: topology({ members: [member("pg-1", { role: "primary" })] }) });
+
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("факты перечитываются раз в 10 секунд", async () => {
+    vi.mocked(api.getTopology).mockResolvedValue(onePrimary());
+    renderWithClient(<Overview connectionId="c" />);
+    await settle();
+    expect(screen.getByText("12 / 100")).toBeInTheDocument();
+    expect(callsFor("pg-1")).toBe(1);
+    await tick(9_000);
+    expect(callsFor("pg-1")).toBe(1);
+    await tick(1_000);
+    expect(callsFor("pg-1")).toBe(2);
+    await tick(20_000);
+    expect(callsFor("pg-1")).toBe(4);
+  });
+
+  it("опрос останавливается, когда подключение закрыто или упало", async () => {
+    vi.mocked(api.getTopology).mockResolvedValue(onePrimary());
+    const { client } = renderWithClient(<Overview connectionId="c" />);
+    await settle();
+    await tick(10_000);
+    expect(callsFor("pg-1")).toBe(2);
+
+    // Rust сообщил о сбое: таблица остаётся последней известной, а спрашивать узлы нечем.
+    act(() => applyState(client, { connectionId: "c", state: "failed", error: { code: "CONNECTION_FAILED", message: "gone", retryable: true } }));
+    await settle();
+    expect(screen.getByText("gone")).toBeInTheDocument();
+    await tick(60_000);
+    expect(callsFor("pg-1")).toBe(2);
+
+    // Подключение вернулось — опрос возобновляется; затем его закрыли.
+    act(() => applyState(client, { connectionId: "c", state: "connected", error: null }));
+    await settle();
+    const resumed = callsFor("pg-1");
+    expect(resumed).toBeGreaterThan(2);
+    await tick(10_000);
+    expect(callsFor("pg-1")).toBe(resumed + 1);
+    act(() => applyState(client, { connectionId: "c", state: "disconnected", error: null }));
+    await tick(60_000);
+    expect(callsFor("pg-1")).toBe(resumed + 1);
+  });
+
+  it("узел, ставший недоступным, больше не опрашивается, остальные — продолжают", async () => {
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView({ topology: topology({ members: [member("pg-1", { role: "primary" }), member("pg-2")] }) }));
+    const { client } = renderWithClient(<Overview connectionId="c" />);
+    await settle();
+    expect([callsFor("pg-1"), callsFor("pg-2")]).toEqual([1, 1]);
+
+    act(() =>
+      client.setQueryData(
+        ["topology", "c"],
+        topologyView({
+          state: "degraded",
+          topology: topology({ members: [member("pg-1", { role: "primary" }), member("pg-2", { reachable: false, role: "unknown", error: null })] }),
+        }),
+      ),
+    );
+    await tick(30_000);
+    expect(callsFor("pg-1")).toBe(4);
+    expect(callsFor("pg-2")).toBe(1);
+  });
+
+  it("пока идёт подключение (connecting), узлы не опрашиваются", async () => {
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView({ state: "connecting" }));
+    renderWithClient(<Overview connectionId="c" />);
+    await settle();
+    expect(screen.getByText("Подключение…")).toBeInTheDocument();
+    await tick(30_000);
+    expect(api.getMemberFacts).not.toHaveBeenCalled();
+    expect(api.connect).not.toHaveBeenCalled();
+  });
+
+  it("время работы идёт вперёд при каждом опросе, даже если факты не изменились", async () => {
+    // 4 мин 45 с на момент первого ответа; ответы равны по значению (react-query отдаёт тот же объект).
+    const startedAtMs = Date.now() - (4 * 60 + 45) * 1000;
+    vi.mocked(api.getMemberFacts).mockImplementation(() => Promise.resolve({ startedAtMs, connections: 12, maxConnections: 100, databases: 3 }));
+    vi.mocked(api.getTopology).mockResolvedValue(onePrimary());
+    renderWithClient(<Overview connectionId="c" />);
+    await settle();
+    expect(screen.getByText("4 минуты")).toBeInTheDocument();
+    await tick(10_000);
+    expect(callsFor("pg-1")).toBe(2);
+    expect(screen.getByText("4 минуты")).toBeInTheDocument();
+    await tick(10_000);
+    expect(callsFor("pg-1")).toBe(3);
+    expect(screen.getByText("5 минут")).toBeInTheDocument();
+    expect(screen.queryByText("4 минуты")).not.toBeInTheDocument();
+  });
+
+  it("сбой перечитывания после успеха: числа остаются, но помечены значком с причиной и приглушены; успех снимает пометку", async () => {
+    vi.mocked(api.getMemberFacts)
+      .mockResolvedValueOnce({ startedAtMs: Date.now() - 3_600_000, connections: 12, maxConnections: 100, databases: 3 })
+      .mockRejectedValueOnce({ code: "PG_ERROR", message: "too many clients already", retryable: true })
+      .mockResolvedValue({ startedAtMs: Date.now() - 3_600_000, connections: 13, maxConnections: 100, databases: 3 });
+    vi.mocked(api.getTopology).mockResolvedValue(onePrimary());
+    renderWithClient(<Overview connectionId="c" />);
+    await settle();
+    expect(screen.getByText("12 / 100")).not.toHaveClass("stale");
+    expect(screen.queryByRole("img", { name: /последние известные данные/ })).not.toBeInTheDocument();
+
+    await tick(10_000);
+    const mark = screen.getByRole("img", { name: "Показаны последние известные данные, обновить не удалось: too many clients already" });
+    expect(mark).toHaveAttribute("title", mark.getAttribute("aria-label"));
+    const stale = screen.getByText("12 / 100");
+    expect(stale).toHaveClass("stale");
+    expect(screen.getByText("3")).toHaveClass("stale");
+    expect(mark.closest("td")).toHaveClass("stale");
+
+    await tick(10_000);
+    expect(screen.getByText("13 / 100")).not.toHaveClass("stale");
+    expect(screen.queryByRole("img", { name: /последние известные данные/ })).not.toBeInTheDocument();
   });
 });
 
