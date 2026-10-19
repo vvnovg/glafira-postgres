@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ReadinessItem, ReadinessStatus, StepStatus, TestEvent, TestReport, TopologyWarning } from "../../api/types";
 import { tr } from "../../i18n/text";
@@ -26,6 +27,45 @@ function latestSteps(events: TestEvent[]): TestEvent[] {
 }
 
 type Translate = (k: string, o?: Record<string, unknown>) => string;
+
+/** Значок статуса: эмодзи не читается скринридером как статус, поэтому у него текстовая подпись. */
+function StatusIcon({ icon, label }: { icon: string; label: string }) {
+  return (
+    <span role="img" aria-label={label}>
+      {icon}
+    </span>
+  );
+}
+
+/** Кнопка «Копировать»: буфер обмена может быть недоступен или отказать — об итоге сообщаем в любом случае. */
+function CopyButton({ text, label }: { text: string; label: string }) {
+  const { t } = useTranslation();
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+  const timer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  async function copy() {
+    let next: "copied" | "failed" = "copied";
+    try {
+      if (!navigator.clipboard) throw new Error("clipboard unavailable");
+      await navigator.clipboard.writeText(text);
+    } catch {
+      next = "failed";
+    }
+    setState(next);
+    window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => setState("idle"), 2500);
+  }
+  return (
+    <>
+      <button type="button" aria-label={label} onClick={() => void copy()}>
+        {t("common.copy")}
+      </button>
+      <span role="status" className="muted">
+        {state === "copied" ? t("test.copied") : state === "failed" ? t("test.copyFailed") : ""}
+      </span>
+    </>
+  );
+}
 
 /** Тексты пункта: вариант — `params.reason` (если есть), иначе статус; ключи `readiness.<id>.<вариант>`. */
 function itemText(item: ReadinessItem, t: Translate) {
@@ -62,7 +102,7 @@ export function TestPanel({ events, report }: { events: TestEvent[]; report: Tes
         <ul className="steps">
           {steps.map((s) => (
             <li key={`${s.step}:${s.member ?? ""}`}>
-              {STEP_ICON[s.status]} <strong>{t(`test.step.${s.step}`)}{s.member ? ` ${s.member}` : ""}:</strong>{" "}
+              <StatusIcon icon={STEP_ICON[s.status]} label={t(`test.status.${s.status}`)} /> <strong>{t(`test.step.${s.step}`)}{s.member ? ` ${s.member}` : ""}:</strong>{" "}
               {s.message && <span>{tr(s.message)}</span>}
               {s.error && <span className="warn">{tr(s.error)}</span>}
               {s.error?.details && <pre className="muted">{s.error.details}</pre>}
@@ -86,7 +126,9 @@ export function TestPanel({ events, report }: { events: TestEvent[]; report: Tes
                 const text = itemText(item, t);
                 return (
                   <tr key={`${item.id}:${i}`}>
-                    <td>{READY_ICON[item.status]}</td>
+                    <td>
+                      <StatusIcon icon={READY_ICON[item.status]} label={t(`test.readyStatus.${item.status}`)} />
+                    </td>
                     <td>
                       <strong>{text.title}</strong>
                       <div className="muted">{text.state}</div>
@@ -96,9 +138,7 @@ export function TestPanel({ events, report }: { events: TestEvent[]; report: Tes
                       {item.fix && (
                         <span className="path-field">
                           <pre>{item.fix}</pre>
-                          <button type="button" onClick={() => void navigator.clipboard?.writeText(item.fix!)}>
-                            {t("common.copy")}
-                          </button>
+                          <CopyButton text={item.fix} label={t("test.copyFix", { name: text.title, state: text.state })} />
                         </span>
                       )}
                     </td>

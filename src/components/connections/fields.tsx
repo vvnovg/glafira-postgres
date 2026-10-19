@@ -15,19 +15,36 @@ export function RowLabel({ id, label, hint }: { id: string; label: string; hint?
   );
 }
 
+/** Название поля с указанием раздела, если одинаковые подписи есть в нескольких (CA в «TLS для API» и в «TLS PostgreSQL»). */
+function useScopedLabel(label: string, scope?: string): string {
+  const { t } = useTranslation();
+  return scope ? t("connections.form.scoped", { label, scope }) : label;
+}
+
+/** Рамка с заголовком для набора полей: у доступной группы своё имя, а подписи внутри остаются короткими. */
+export function FieldGroup({ legend, children }: { legend: string; children: ReactNode }) {
+  return (
+    <fieldset className="field-group">
+      <legend>{legend}</legend>
+      <div className="form">{children}</div>
+    </fieldset>
+  );
+}
+
 async function pickFile(onPath: (p: string) => void) {
   const path = await openDialog({ multiple: false, directory: false });
   if (typeof path === "string") onPath(path);
 }
 
-export function PathRow(props: { id: string; label: string; hint?: ReactNode; value: string | null; onChange: (v: string | null) => void }) {
+export function PathRow(props: { id: string; label: string; scope?: string; hint?: ReactNode; value: string | null; onChange: (v: string | null) => void }) {
   const { t } = useTranslation();
+  const scoped = useScopedLabel(props.label, props.scope);
   return (
     <>
       <RowLabel id={props.id} label={props.label} hint={props.hint} />
       <div className="path-field">
         <input id={props.id} value={props.value ?? ""} onChange={(e) => props.onChange(e.target.value || null)} />
-        <button type="button" aria-label={t("connections.form.pickAria", { label: props.label })} onClick={() => void pickFile(props.onChange)}>
+        <button type="button" aria-label={t("connections.form.pickAria", { label: scoped })} onClick={() => void pickFile(props.onChange)}>
           {t("connections.form.pick")}
         </button>
       </div>
@@ -35,8 +52,9 @@ export function PathRow(props: { id: string; label: string; hint?: ReactNode; va
   );
 }
 
-export function SecretRow(props: { id: string; label: string; hint?: ReactNode; isNew: boolean; value: SecretField; onChange: (v: SecretField) => void }) {
+export function SecretRow(props: { id: string; label: string; scope?: string; hint?: ReactNode; isNew: boolean; value: SecretField; onChange: (v: SecretField) => void }) {
   const { t } = useTranslation();
+  const scoped = useScopedLabel(props.label, props.scope);
   return (
     <>
       <RowLabel id={props.id} label={props.label} hint={props.hint} />
@@ -52,7 +70,7 @@ export function SecretRow(props: { id: string; label: string; hint?: ReactNode; 
         />
         {!props.isNew && (
           <label className="inline">
-            <input type="checkbox" checked={props.value.clear} onChange={(e) => props.onChange({ text: "", clear: e.target.checked })} />
+            <input type="checkbox" aria-label={t("connections.form.passwordClearAria", { label: scoped })} checked={props.value.clear} onChange={(e) => props.onChange({ text: "", clear: e.target.checked })} />
             {t("connections.form.passwordClear")}
           </label>
         )}
@@ -64,6 +82,8 @@ export function SecretRow(props: { id: string; label: string; hint?: ReactNode; 
 /** Клиентский сертификат: формат, файлы, пароль ключа. `null` — без сертификата. */
 export function ClientCertRows(props: {
   idPrefix: string;
+  /** Раздел, в котором стоят поля, — для различимых имён кнопок и флажков. */
+  scope?: string;
   cert: ClientCert | null;
   onChange: (c: ClientCert | null) => void;
   keyPassword: SecretField;
@@ -93,6 +113,7 @@ export function ClientCertRows(props: {
           <PathRow
             id={`${p}-cert`}
             label={t("connections.form.certPath")}
+            scope={props.scope}
             value={cert.certificatePath}
             onChange={(v) => {
               const guessed = v ? formatFromPath(v) : null;
@@ -101,9 +122,9 @@ export function ClientCertRows(props: {
             }}
           />
           {cert.format === "pem" && (
-            <PathRow id={`${p}-key`} label={t("connections.form.keyPath")} value={cert.keyPath} onChange={(v) => props.onChange({ ...cert, keyPath: v })} />
+            <PathRow id={`${p}-key`} label={t("connections.form.keyPath")} scope={props.scope} value={cert.keyPath} onChange={(v) => props.onChange({ ...cert, keyPath: v })} />
           )}
-          <SecretRow id={`${p}-kpw`} label={t("connections.form.keyPassword")} isNew={props.isNew} value={props.keyPassword} onChange={props.onKeyPassword} />
+          <SecretRow id={`${p}-kpw`} label={t("connections.form.keyPassword")} scope={props.scope} isNew={props.isNew} value={props.keyPassword} onChange={props.onKeyPassword} />
         </>
       )}
     </>

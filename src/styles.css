@@ -116,6 +116,10 @@ tr.selected { background: color-mix(in srgb, var(--accent) 15%, transparent); }
 .path-field > input:not([type="checkbox"]) { flex: 1; min-width: 0; }
 label.inline { display: inline-flex; gap: 4px; align-items: center; white-space: nowrap; color: var(--muted); }
 .headers-editor { border: 1px solid var(--border); border-radius: 4px; padding: 6px; display: flex; flex-direction: column; gap: 4px; }
+/* Группа полей (TLS): рамка с заголовком; внутренняя сетка совпадает с внешней по колонкам (180px + 12px зазор = 168px + рамка и поля). */
+.form .field-group { grid-column: 1 / -1; min-width: 0; margin: 0; padding: 8px 12px 8px 11px; border: 1px solid var(--border); border-radius: 4px; }
+.field-group > legend { padding: 0 4px; color: var(--muted); font-size: 12px; }
+.field-group > .form { grid-template-columns: 168px minmax(240px, 520px); }
 /* Команда для исправления в чек-листе: переносится по пробелам, а не посреди слова. */
 .panel td pre { word-break: normal; overflow-wrap: anywhere; }
 

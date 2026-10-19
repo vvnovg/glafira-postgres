@@ -190,6 +190,7 @@
       "patroniUser": "Пользователь API",
       "patroniPassword": "Пароль API",
       "apiTls": "TLS для API",
+      "pgTls": "TLS PostgreSQL",
       "caPath": "Доверенный CA",
       "verifyHostname": "Проверять имя хоста",
       "clientCert": "Клиентский сертификат",
@@ -208,12 +209,14 @@
       "pgPassword": "Пароль",
       "passwordKeep": "оставить сохранённый",
       "passwordClear": "Удалить сохранённый",
+      "passwordClearAria": "Удалить сохранённый: {{label}}",
       "pgDatabase": "БД по умолчанию",
       "timeout": "Таймаут подключения, с",
       "databases": "Только базы",
       "databasesPlaceholder": "все",
       "pick": "Выбрать…",
       "pickAria": "Выбрать файл: {{label}}",
+      "scoped": "{{label}} ({{scope}})",
       "test": "Проверить",
       "busy": "Выполняется…",
       "deleteGroup": "Удаление подключения",
@@ -375,7 +378,21 @@
       "discovery": "Обнаружение узлов",
       "node": "Узел",
       "readiness": "Готовность"
-    }
+    },
+    "status": {
+      "running": "Выполняется",
+      "ok": "Успешно",
+      "failed": "Ошибка",
+      "skipped": "Пропущено"
+    },
+    "readyStatus": {
+      "ok": "Готово",
+      "warn": "Предупреждение",
+      "missing": "Не хватает"
+    },
+    "copyFix": "Копировать: {{name}} ({{state}})",
+    "copied": "Скопировано",
+    "copyFailed": "Не удалось скопировать"
   },
   "topology": {
     "role": {

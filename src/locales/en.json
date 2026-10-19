@@ -190,6 +190,7 @@
       "patroniUser": "API user",
       "patroniPassword": "API password",
       "apiTls": "TLS for the API",
+      "pgTls": "PostgreSQL TLS",
       "caPath": "Trusted CA",
       "verifyHostname": "Verify host name",
       "clientCert": "Client certificate",
@@ -208,12 +209,14 @@
       "pgPassword": "Password",
       "passwordKeep": "keep the saved one",
       "passwordClear": "Remove the saved one",
+      "passwordClearAria": "Remove the saved one: {{label}}",
       "pgDatabase": "Default database",
       "timeout": "Connection timeout, s",
       "databases": "Only databases",
       "databasesPlaceholder": "all",
       "pick": "Browse…",
       "pickAria": "Choose a file: {{label}}",
+      "scoped": "{{label}} ({{scope}})",
       "test": "Test",
       "busy": "Working…",
       "deleteGroup": "Delete connection",
@@ -367,7 +370,21 @@
       "discovery": "Node discovery",
       "node": "Node",
       "readiness": "Readiness"
-    }
+    },
+    "status": {
+      "running": "In progress",
+      "ok": "Succeeded",
+      "failed": "Failed",
+      "skipped": "Skipped"
+    },
+    "readyStatus": {
+      "ok": "Ready",
+      "warn": "Warning",
+      "missing": "Missing"
+    },
+    "copyFix": "Copy: {{name}} ({{state}})",
+    "copied": "Copied",
+    "copyFailed": "Could not copy"
   },
   "topology": {
     "role": {

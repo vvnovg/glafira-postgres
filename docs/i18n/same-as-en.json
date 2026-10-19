@@ -1,6 +1,7 @@
 {
   "ru": [
     "connections.form.prodPro",
+    "connections.form.scoped",
     "connections.form.targets.primary",
     "readiness.computeQueryId.title",
     "readiness.trackActivityQuerySize.title",

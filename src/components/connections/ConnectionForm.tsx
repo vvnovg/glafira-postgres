@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useId, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../api/client";
 import type { AppError, ConnectionKind, ConnectionProfile, Environment, SecretsInput, TestEvent, TestReport } from "../../api/types";
@@ -10,7 +10,7 @@ import { Hint } from "../common/Hint";
 import { ProLock } from "../common/ProLock";
 import { NodesSection, type PatroniSecrets } from "./NodesSection";
 import { PgSection, type PgSecrets } from "./PgSection";
-import { applyParsed, emptySecret, secretValue, withKind } from "./profile";
+import { applyParsed, emptyKindMemo, emptySecret, type KindMemo, secretValue, switchKind, visibleProfile } from "./profile";
 import { TestPanel } from "./TestPanel";
 import { folderPaths } from "./tree/folderTree";
 
@@ -19,7 +19,10 @@ const KINDS: ConnectionKind[] = ["server", "hostList", "patroni"];
 
 export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile; tabId: string }) {
   const { t } = useTranslation();
+  // Вкладки формы остаются смонтированными (скрытые), поэтому id полей и имя группы радио у каждой формы свои.
+  const uid = useId();
   const [profile, setProfile] = useState(initial);
+  const [kindMemo, setKindMemo] = useState<KindMemo>(emptyKindMemo);
   const [pgSecrets, setPgSecrets] = useState<PgSecrets>({ password: emptySecret, keyPassword: emptySecret });
   const [apiSecrets, setApiSecrets] = useState<PatroniSecrets>({ password: emptySecret, keyPassword: emptySecret });
   const [connstr, setConnstr] = useState("");
@@ -27,7 +30,10 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
   const [events, setEvents] = useState<TestEvent[]>([]);
   const [report, setReport] = useState<TestReport | null>(null);
   const [error, setError] = useState<AppError | null>(null);
+  // busy — разбор строки, сохранение, удаление; testing — проверка (долгая, не должна блокировать остальное).
   const [busy, setBusy] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const testingRef = useRef(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const queryClient = useQueryClient();
   const foldersQ = useQuery({ queryKey: ["folders"], queryFn: api.listFolders });
@@ -45,10 +51,11 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
   const { locked } = useLicense();
   const readOnlyLocked = locked && initial.environment === "prod" && initial.readOnly && profile.environment === "prod";
 
-  const current = (): ConnectionProfile => ({ ...profile, folderId });
+  const current = (): ConnectionProfile => visibleProfile({ ...profile, folderId });
   const secrets = (): SecretsInput => ({
     pgPassword: secretValue(pgSecrets.password),
-    pgKeyPassword: secretValue(pgSecrets.keyPassword),
+    // Без TLS (sslmode=disable) пароль ключа не нужен: поля сертификата скрыты и в профиль не уходят.
+    pgKeyPassword: profile.pg.sslMode === "disable" ? null : secretValue(pgSecrets.keyPassword),
     patroniPassword: secretValue(apiSecrets.password),
     patroniKeyPassword: secretValue(apiSecrets.keyPassword),
   });
@@ -67,34 +74,63 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
 
   const onParse = () =>
     run(async () => {
-      const parsed = await api.parseConnectionString(connstr);
-      setProfile((p) => applyParsed(p, parsed));
-      if (parsed.password) setPgSecrets((s) => ({ ...s, password: { text: parsed.password!, clear: false } }));
-      setIgnored(parsed.ignored);
+      try {
+        const parsed = await api.parseConnectionString(connstr);
+        setProfile((p) => applyParsed(p, parsed));
+        setKindMemo(emptyKindMemo); // разобранная строка заменила узлы — прежняя память о них устарела
+        if (parsed.password) setPgSecrets((s) => ({ ...s, password: { text: parsed.password!, clear: false } }));
+        setIgnored(parsed.ignored);
+        // Пароль из строки перенесён в поле пароля (скрытое); в открытом виде строка не остаётся.
+        setConnstr("");
+      } catch (e) {
+        setIgnored([]); // список «пропущено» относился к прошлому разбору
+        throw e;
+      }
     });
 
-  const onTest = () =>
-    run(async () => {
-      setEvents([]);
-      setReport(null);
+  const onTest = async () => {
+    if (testingRef.current) return; // повторный запуск, пока идёт проверка, не нужен
+    testingRef.current = true;
+    setTesting(true);
+    setError(null);
+    setEvents([]);
+    setReport(null);
+    try {
       setReport(await api.testConnection(current(), secrets(), (e) => setEvents((prev) => [...prev, e])));
-    });
+    } catch (e) {
+      setError(toAppError(e));
+    } finally {
+      testingRef.current = false;
+      setTesting(false);
+    }
+  };
 
   const onSave = () =>
     run(async () => {
       const saved = await api.saveConnection(current(), secrets());
+      // Смена папки — отдельная команда; её сбой не должен оставить кэш устаревшим: профиль уже сохранён.
+      let moveError: unknown = null;
       try {
         if (!isNew && folderTouched && folderId !== knownFolder(loadedFolderId)) {
           await api.moveItems([{ kind: "connection", id: saved.id }], folderId, null);
         }
-      } finally {
-        await queryClient.invalidateQueries({ queryKey: ["connections"] });
+      } catch (e) {
+        moveError = e;
       }
+      await queryClient.invalidateQueries({ queryKey: ["connections"] });
       // Сохранение закрывает открытое подключение (Rust): кэш его каталога больше не нужен.
       queryClient.removeQueries({ predicate: (q) => q.queryKey[1] === saved.id });
+      // Папка не сменилась: остаёмся на форме и показываем ошибку (повторное сохранение повторит перенос).
+      if (moveError !== null) throw moveError;
       close(tabId);
       open({ kind: "overview", connectionId: saved.id });
     });
+
+  const changeKind = (kind: ConnectionKind) => {
+    const next = switchKind(profile, kind, kindMemo);
+    setProfile(next.profile);
+    setKindMemo(next.memo);
+  };
 
   const onDelete = () =>
     run(async () => {
@@ -113,23 +149,23 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
       </div>
       <div className="form">
         <span className="field-label">
-          <label htmlFor="cf-connstr">{t("connections.form.connstr")}</label>
+          <label htmlFor={`${uid}-connstr`}>{t("connections.form.connstr")}</label>
           <Hint k="hints.connections.connstr" label={t("connections.form.connstr")} />
         </span>
         <span className="path-field">
-          <input id="cf-connstr" placeholder="jdbc:postgresql://h1,h2/db?targetServerType=primary" value={connstr} onChange={(e) => setConnstr(e.target.value)} />
+          <input id={`${uid}-connstr`} placeholder="jdbc:postgresql://h1,h2/db?targetServerType=primary" value={connstr} onChange={(e) => setConnstr(e.target.value)} />
           <button type="button" disabled={busy || !connstr.trim()} onClick={onParse}>
             {t("connections.form.connstrApply")}
           </button>
         </span>
         {ignored.length > 0 && <p className="full muted">{t("connections.form.connstrIgnored", { list: ignored.join(", ") })}</p>}
 
-        <label htmlFor="cf-name">{t("connections.form.name")}</label>
-        <input id="cf-name" value={profile.name} onChange={(e) => setProfile({ ...profile, name: e.target.value })} />
+        <label htmlFor={`${uid}-name`}>{t("connections.form.name")}</label>
+        <input id={`${uid}-name`} value={profile.name} onChange={(e) => setProfile({ ...profile, name: e.target.value })} />
 
-        <label htmlFor="cf-folder">{t("connections.form.folder")}</label>
+        <label htmlFor={`${uid}-folder`}>{t("connections.form.folder")}</label>
         <select
-          id="cf-folder"
+          id={`${uid}-folder`}
           value={folderId ?? ""}
           onChange={(e) => {
             setFolderTouched(true);
@@ -145,11 +181,11 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
         </select>
 
         <span className="field-label">
-          <label htmlFor="cf-env">{t("connections.form.environment")}</label>
+          <label htmlFor={`${uid}-env`}>{t("connections.form.environment")}</label>
           <Hint k="hints.connections.environment" label={t("connections.form.environment")} />
         </span>
         <select
-          id="cf-env"
+          id={`${uid}-env`}
           value={profile.environment}
           onChange={(e) => {
             const environment = e.target.value as Environment;
@@ -168,12 +204,12 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
         </select>
 
         <span className="field-label">
-          <label htmlFor="cf-ro">{t("common.readOnly")}</label>
+          <label htmlFor={`${uid}-ro`}>{t("common.readOnly")}</label>
           <Hint k="hints.connections.readOnly" label={t("common.readOnly")} />
         </span>
         <span>
           <input
-            id="cf-ro"
+            id={`${uid}-ro`}
             type="checkbox"
             checked={profile.readOnly}
             disabled={readOnlyLocked}
@@ -188,8 +224,8 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
           )}
         </span>
 
-        <label htmlFor="cf-color">{t("connections.form.color")}</label>
-        <input id="cf-color" type="color" value={profile.color} onChange={(e) => setProfile({ ...profile, color: e.target.value })} />
+        <label htmlFor={`${uid}-color`}>{t("connections.form.color")}</label>
+        <input id={`${uid}-color`} type="color" value={profile.color} onChange={(e) => setProfile({ ...profile, color: e.target.value })} />
 
         <span className="field-label">
           {t("connections.form.kind")} <Hint k="hints.connections.kind" label={t("connections.form.kind")} />
@@ -197,19 +233,19 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
         <span role="radiogroup" aria-label={t("connections.form.kind")}>
           {KINDS.map((k) => (
             <label key={k} className="inline">
-              <input type="radio" name="cf-kind" checked={profile.kind === k} onChange={() => setProfile(withKind(profile, k))} />
+              <input type="radio" name={`${uid}-kind`} checked={profile.kind === k} onChange={() => changeKind(k)} />
               {t(`connections.form.kinds.${k}`)}
             </label>
           ))}
         </span>
 
-        <NodesSection profile={profile} onChange={setProfile} secrets={apiSecrets} onSecrets={setApiSecrets} isNew={isNew} />
+        <NodesSection idPrefix={uid} profile={profile} onChange={setProfile} onKind={changeKind} secrets={apiSecrets} onSecrets={setApiSecrets} isNew={isNew} />
         <h3 className="full">PostgreSQL</h3>
-        <PgSection profile={profile} onChange={setProfile} secrets={pgSecrets} onSecrets={setPgSecrets} isNew={isNew} />
+        <PgSection idPrefix={uid} profile={profile} onChange={setProfile} secrets={pgSecrets} onSecrets={setPgSecrets} isNew={isNew} />
       </div>
 
       <div className="toolbar">
-        <button type="button" disabled={busy} onClick={onTest}>
+        <button type="button" disabled={busy || testing} onClick={() => void onTest()}>
           {t("connections.form.test")}
         </button>
         <button type="button" className="primary" disabled={busy} onClick={onSave}>
@@ -231,7 +267,7 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
               {t("common.delete")}
             </button>
           ))}
-        {busy && <span className="muted">{t("connections.form.busy")}</span>}
+        {(busy || testing) && <span className="muted">{t("connections.form.busy")}</span>}
       </div>
 
       {error && <ErrorBanner error={error} />}

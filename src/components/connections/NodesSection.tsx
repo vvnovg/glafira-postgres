@@ -1,22 +1,26 @@
 import { useTranslation } from "react-i18next";
-import type { ConnectionProfile, HostOverride, HostPort, PatroniSettings, TargetServerType } from "../../api/types";
+import type { ConnectionKind, ConnectionProfile, HostOverride, HostPort, PatroniSettings, TargetServerType } from "../../api/types";
 import { Hint } from "../common/Hint";
-import { ClientCertRows, PathRow, RowLabel, SecretRow } from "./fields";
-import { emptyPatroni, type SecretField, withKind } from "./profile";
+import { ClientCertRows, FieldGroup, PathRow, RowLabel, SecretRow } from "./fields";
+import { emptyPatroni, type SecretField } from "./profile";
 
 const TARGETS: TargetServerType[] = ["primary", "standby", "preferStandby", "any"];
 
 export type PatroniSecrets = { password: SecretField; keyPassword: SecretField };
 
 export function NodesSection(props: {
+  /** Префикс id полей: у каждой формы свой (вкладки остаются смонтированными, одинаковые id склеили бы подписи). */
+  idPrefix: string;
   profile: ConnectionProfile;
   onChange: (p: ConnectionProfile) => void;
+  /** Смена вида (флажок «под управлением Patroni»); память формы между видами ведёт форма. */
+  onKind: (kind: ConnectionKind) => void;
   secrets: PatroniSecrets;
   onSecrets: (s: PatroniSecrets) => void;
   isNew: boolean;
 }) {
   const { t } = useTranslation();
-  const { profile: p, onChange } = props;
+  const { profile: p, onChange, idPrefix: id } = props;
   const setHosts = (hosts: HostPort[]) => onChange({ ...p, hosts });
   const setPatroni = (patch: Partial<PatroniSettings>) => onChange({ ...p, patroni: { ...(p.patroni ?? emptyPatroni()), ...patch } });
 
@@ -24,9 +28,9 @@ export function NodesSection(props: {
     const h = p.hosts[0] ?? { host: "", port: 5432 };
     return (
       <>
-        <label htmlFor="cf-host">{t("connections.form.host")}</label>
+        <label htmlFor={`${id}-host`}>{t("connections.form.host")}</label>
         <span className="path-field">
-          <input id="cf-host" value={h.host} onChange={(e) => setHosts([{ ...h, host: e.target.value }])} />
+          <input id={`${id}-host`} value={h.host} onChange={(e) => setHosts([{ ...h, host: e.target.value }])} />
           <input aria-label={t("connections.form.port")} type="number" min={1} max={65535} style={{ width: 90 }} value={h.port} onChange={(e) => setHosts([{ ...h, port: Number(e.target.value) }])} />
         </span>
       </>
@@ -57,8 +61,8 @@ export function NodesSection(props: {
           </button>
         </div>
 
-        <RowLabel id="cf-target" label={t("connections.form.target")} hint={<Hint k="hints.connections.target" label={t("connections.form.target")} />} />
-        <select id="cf-target" value={p.targetServerType} onChange={(e) => onChange({ ...p, targetServerType: e.target.value as TargetServerType })}>
+        <RowLabel id={`${id}-target`} label={t("connections.form.target")} hint={<Hint k="hints.connections.target" label={t("connections.form.target")} />} />
+        <select id={`${id}-target`} value={p.targetServerType} onChange={(e) => onChange({ ...p, targetServerType: e.target.value as TargetServerType })}>
           {TARGETS.map((x) => (
             <option key={x} value={x}>
               {t(`connections.form.targets.${x}`)}
@@ -66,9 +70,9 @@ export function NodesSection(props: {
           ))}
         </select>
 
-        <label htmlFor="cf-under-patroni">{t("connections.form.underPatroni")}</label>
+        <label htmlFor={`${id}-under-patroni`}>{t("connections.form.underPatroni")}</label>
         <span>
-          <input id="cf-under-patroni" type="checkbox" checked={false} onChange={() => onChange(withKind(p, "patroni"))} />
+          <input id={`${id}-under-patroni`} type="checkbox" checked={false} onChange={() => props.onKind("patroni")} />
         </span>
       </>
     );
@@ -76,6 +80,7 @@ export function NodesSection(props: {
 
   const pt = p.patroni ?? emptyPatroni();
   const tls = pt.tls;
+  const apiScope = t("connections.form.apiTls");
   const setOverride = (i: number, patch: Partial<HostOverride>) =>
     setPatroni({ hostOverrides: pt.hostOverrides.map((o, j) => (j === i ? { ...o, ...patch } : o)) });
   return (
@@ -93,32 +98,33 @@ export function NodesSection(props: {
         </button>
       </div>
 
-      <label htmlFor="cf-api-user">{t("connections.form.patroniUser")}</label>
-      <input id="cf-api-user" value={pt.username ?? ""} onChange={(e) => setPatroni({ username: e.target.value || null })} />
+      <label htmlFor={`${id}-api-user`}>{t("connections.form.patroniUser")}</label>
+      <input id={`${id}-api-user`} value={pt.username ?? ""} onChange={(e) => setPatroni({ username: e.target.value || null })} />
       {pt.username && (
-        <SecretRow id="cf-api-pass" label={t("connections.form.patroniPassword")} isNew={props.isNew} value={props.secrets.password} onChange={(password) => props.onSecrets({ ...props.secrets, password })} />
+        <SecretRow id={`${id}-api-pass`} label={t("connections.form.patroniPassword")} isNew={props.isNew} value={props.secrets.password} onChange={(password) => props.onSecrets({ ...props.secrets, password })} />
       )}
 
-      <label htmlFor="cf-api-tls">{t("connections.form.apiTls")}</label>
+      <label htmlFor={`${id}-api-tls`}>{t("connections.form.apiTls")}</label>
       <span>
-        <input id="cf-api-tls" type="checkbox" checked={tls !== null} onChange={(e) => setPatroni({ tls: e.target.checked ? { caPath: null, verifyHostname: true, clientCert: null } : null })} />
+        <input id={`${id}-api-tls`} type="checkbox" checked={tls !== null} onChange={(e) => setPatroni({ tls: e.target.checked ? { caPath: null, verifyHostname: true, clientCert: null } : null })} />
       </span>
       {tls && (
-        <>
-          <PathRow id="cf-api-ca" label={t("connections.form.caPath")} value={tls.caPath} onChange={(caPath) => setPatroni({ tls: { ...tls, caPath } })} />
-          <label htmlFor="cf-api-verify">{t("connections.form.verifyHostname")}</label>
+        <FieldGroup legend={t("connections.form.apiTls")}>
+          <PathRow id={`${id}-api-ca`} label={t("connections.form.caPath")} scope={apiScope} value={tls.caPath} onChange={(caPath) => setPatroni({ tls: { ...tls, caPath } })} />
+          <label htmlFor={`${id}-api-verify`}>{t("connections.form.verifyHostname")}</label>
           <span>
-            <input id="cf-api-verify" type="checkbox" checked={tls.verifyHostname} onChange={(e) => setPatroni({ tls: { ...tls, verifyHostname: e.target.checked } })} />
+            <input id={`${id}-api-verify`} type="checkbox" checked={tls.verifyHostname} onChange={(e) => setPatroni({ tls: { ...tls, verifyHostname: e.target.checked } })} />
           </span>
           <ClientCertRows
-            idPrefix="cf-api"
+            idPrefix={`${id}-api`}
+            scope={apiScope}
             cert={tls.clientCert}
             onChange={(clientCert) => setPatroni({ tls: { ...tls, clientCert } })}
             keyPassword={props.secrets.keyPassword}
             onKeyPassword={(keyPassword) => props.onSecrets({ ...props.secrets, keyPassword })}
             isNew={props.isNew}
           />
-        </>
+        </FieldGroup>
       )}
 
       <details className="full">

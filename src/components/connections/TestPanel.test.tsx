@@ -1,12 +1,29 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { TestEvent, TestReport } from "../../api/types";
 import { DICTIONARIES } from "../../i18n";
 import { TestPanel } from "./TestPanel";
 
 const ev = (patch: Partial<TestEvent>): TestEvent => ({ step: "node", member: null, status: "running", message: null, error: null, ...patch });
 
+const FIXES: TestReport = {
+  ok: true,
+  topology: null,
+  readiness: [
+    { id: "pgssInstalled", status: "missing", params: { database: "postgres" }, fix: "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;" },
+    { id: "extension", status: "warn", params: { name: "hypopg" }, fix: "CREATE EXTENSION IF NOT EXISTS hypopg;" },
+  ],
+};
+
+/** Подменяет буфер обмена (user-event.setup() ставит свою заглушку — подменять нужно после него). */
+function stubClipboard(clipboard: { writeText: (t: string) => Promise<void> } | undefined) {
+  Object.defineProperty(navigator, "clipboard", { value: clipboard, configurable: true });
+}
+
 describe("TestPanel", () => {
+  afterEach(() => stubClipboard(undefined));
+
   it("показывает последнее состояние каждого шага", () => {
     render(
       <TestPanel
@@ -108,5 +125,68 @@ describe("TestPanel", () => {
           if (typeof value !== "string") missing.push(`${lng}: ${key}`);
         }
     expect(missing).toEqual([]);
+  });
+
+  it("значки статусов читаются как текст", () => {
+    render(
+      <TestPanel
+        events={[
+          ev({ step: "patroni", status: "skipped" }),
+          ev({ member: "db1:5432", status: "ok" }),
+          ev({ member: "db2:5432", status: "failed", error: { code: "AUTH_FAILED", key: "errors.pg.authFailed", message: "x", retryable: false } }),
+          ev({ member: "db3:5432", status: "running" }),
+        ]}
+        report={{
+          ok: true,
+          topology: null,
+          readiness: [
+            { id: "monitorRole", status: "ok", params: {}, fix: null },
+            { id: "trackIoTiming", status: "warn", params: {}, fix: null },
+            { id: "pgssInstalled", status: "missing", params: { database: "postgres" }, fix: null },
+          ],
+        }}
+      />,
+    );
+    for (const name of ["Пропущено", "Успешно", "Ошибка", "Выполняется", "Готово", "Предупреждение", "Не хватает"]) {
+      expect(screen.getByRole("img", { name })).toBeInTheDocument();
+    }
+  });
+
+  it("кнопки «Копировать» различимы по имени", () => {
+    render(<TestPanel events={[]} report={FIXES} />);
+    const names = screen.getAllByRole("button", { name: /^Копировать/ }).map((b) => b.getAttribute("aria-label"));
+    expect(new Set(names).size).toBe(2);
+    expect(names[0]).toContain("Расширение pg_stat_statements");
+    expect(names[1]).toContain("hypopg");
+  });
+
+  it("копирование: команда уходит в буфер, итог сообщается", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    stubClipboard({ writeText });
+    render(<TestPanel events={[]} report={FIXES} />);
+    await user.click(screen.getAllByRole("button", { name: /^Копировать/ })[1]);
+    expect(writeText).toHaveBeenCalledWith("CREATE EXTENSION IF NOT EXISTS hypopg;");
+    expect(await screen.findByText("Скопировано")).toBeInTheDocument();
+    // Сообщение — в живой области (скринридер объявит), и только у нажатой кнопки.
+    expect(screen.getByText("Скопировано")).toHaveAttribute("role", "status");
+  });
+
+  it("копирование: отказ буфера обмена не остаётся необработанным, пользователь видит сообщение", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockRejectedValue(new DOMException("denied", "NotAllowedError"));
+    stubClipboard({ writeText });
+    render(<TestPanel events={[]} report={FIXES} />);
+    await user.click(screen.getAllByRole("button", { name: /^Копировать/ })[0]);
+    expect(await screen.findByText("Не удалось скопировать")).toBeInTheDocument();
+    expect(screen.queryByText("Скопировано")).not.toBeInTheDocument();
+  });
+
+  it("копирование: буфера обмена нет (небезопасный контекст) — то же сообщение", async () => {
+    const user = userEvent.setup();
+    stubClipboard(undefined);
+    render(<TestPanel events={[]} report={FIXES} />);
+    await user.click(screen.getAllByRole("button", { name: /^Копировать/ })[0]);
+    expect(await screen.findByText("Не удалось скопировать")).toBeInTheDocument();
   });
 });

@@ -1,4 +1,4 @@
-import type { CertFormat, ConnectionKind, ConnectionProfile, ParsedConnection, PatroniSettings } from "../../api/types";
+import type { CertFormat, ConnectionKind, ConnectionProfile, HostPort, ParsedConnection, PatroniSettings } from "../../api/types";
 
 export function newProfile(): ConnectionProfile {
   return {
@@ -28,20 +28,68 @@ export function emptyPatroni(): PatroniSettings {
   return { urls: ["http://localhost:8008"], username: null, tls: null, hostOverrides: [] };
 }
 
+/** Хост для URL: пробелы обрезаются, IPv6 берётся в скобки (уже заключённый в скобки не трогаем). */
+function urlHost(host: string): string {
+  const h = host.trim();
+  return h.includes(":") && !(h.startsWith("[") && h.endsWith("]")) ? `[${h}]` : h;
+}
+
 /** «Узлы под управлением Patroni»: адреса API — хосты списка с портом 8008 (спец. P1 §3.1). */
 export function toPatroniFromHosts(p: ConnectionProfile): PatroniSettings {
-  const urls = p.hosts
-    .filter((h) => h.host.trim())
-    .map((h) => `http://${h.host.includes(":") ? `[${h.host}]` : h.host}:8008`);
+  const urls = p.hosts.filter((h) => h.host.trim()).map((h) => `http://${urlHost(h.host)}:8008`);
   return { ...emptyPatroni(), urls: urls.length > 0 ? urls : emptyPatroni().urls };
 }
 
-/** Смена вида: узлы и настройки Patroni переносятся так, чтобы ввод не терялся. */
+/** Обратное преобразование: хосты из адресов API (порт PostgreSQL — 5432); не-адреса пропускаются, повторы схлопываются. */
+export function hostsFromPatroni(pt: PatroniSettings | null): HostPort[] {
+  const hosts: HostPort[] = [];
+  for (const raw of pt?.urls ?? []) {
+    const m = /^https?:\/\/(?:[^/?#@]*@)?(\[[^\]]*\]|[^/?#:]+)/i.exec(raw.trim());
+    // IPv6 в хранимом профиле — без скобок (скобки добавляются только в URL).
+    const host = m?.[1].replace(/^\[|\]$/g, "").trim();
+    if (host && !hosts.some((h) => h.host === host)) hosts.push({ host, port: 5432 });
+  }
+  return hosts;
+}
+
+/**
+ * Память формы между сменами вида — то, что нельзя хранить в самом профиле (оно уйдёт в Rust и на диск).
+ * `hosts` — полный список узлов, который вид «сервер» урезал до одного;
+ * `derivedUrls` — адреса API, которые форма вычислила из узлов сама (если их правили руками — они другие).
+ */
+export type KindMemo = { hosts: HostPort[] | null; derivedUrls: string[] | null };
+export const emptyKindMemo: KindMemo = { hosts: null, derivedUrls: null };
+
+const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
+
+/**
+ * Смена вида: узлы и настройки Patroni переносятся так, чтобы ввод не терялся ни при каких обходах.
+ * Возвращает и новую память формы — её хранит вызывающий.
+ */
+export function switchKind(p: ConnectionProfile, kind: ConnectionKind, memo: KindMemo = emptyKindMemo): { profile: ConnectionProfile; memo: KindMemo } {
+  if (kind === p.kind) return { profile: p, memo };
+  // Полный список: в «сервере» один узел (его правки сохраняются), остальные — из памяти.
+  const full = p.kind === "server" && memo.hosts && p.hosts.length > 0 ? [p.hosts[0], ...memo.hosts.slice(1)] : p.hosts;
+
+  if (kind === "patroni") {
+    const derived = toPatroniFromHosts({ ...p, hosts: full }).urls;
+    // Адреса, которые форма вычислила сама и которые не правили, пересчитываются по нынешним узлам; правленые — нет.
+    const rederive = p.patroni !== null && memo.derivedUrls !== null && sameList(p.patroni.urls, memo.derivedUrls);
+    const patroni = p.patroni === null ? toPatroniFromHosts({ ...p, hosts: full }) : rederive ? { ...p.patroni, urls: derived } : p.patroni;
+    const derivedUrls = p.patroni === null || rederive ? derived : memo.derivedUrls;
+    return { profile: { ...p, kind, hosts: full, patroni }, memo: { hosts: null, derivedUrls } };
+  }
+
+  // У подключения Patroni узлов может не быть (Rust очищает их при сохранении) — берём хосты из адресов API.
+  const fromUrls = full.length > 0 ? full : hostsFromPatroni(p.patroni);
+  const hosts = fromUrls.length > 0 ? fromUrls : [{ host: "localhost", port: 5432 }];
+  if (kind === "server") return { profile: { ...p, kind, hosts: hosts.slice(0, 1) }, memo: { ...memo, hosts: hosts.length > 1 ? hosts : null } };
+  return { profile: { ...p, kind, hosts }, memo: { ...memo, hosts: null } };
+}
+
+/** Смена вида без памяти формы (для кода, которому не нужен возврат к урезанному списку). */
 export function withKind(p: ConnectionProfile, kind: ConnectionKind): ConnectionProfile {
-  if (kind === p.kind) return p;
-  if (kind === "patroni") return { ...p, kind, patroni: p.patroni ?? toPatroniFromHosts(p) };
-  const hosts = p.hosts.length > 0 ? p.hosts : [{ host: "localhost", port: 5432 }];
-  return { ...p, kind, hosts: kind === "server" ? hosts.slice(0, 1) : hosts };
+  return switchKind(p, kind).profile;
 }
 
 export function applyParsed(p: ConnectionProfile, parsed: ParsedConnection): ConnectionProfile {
@@ -61,6 +109,17 @@ export function applyParsed(p: ConnectionProfile, parsed: ParsedConnection): Con
       connectTimeoutS: x.connectTimeoutS ?? p.pg.connectTimeoutS,
     },
   };
+}
+
+/**
+ * Профиль в том виде, в каком его видит пользователь: при sslmode=disable поля CA и клиентского сертификата
+ * скрыты, и в профиль они не попадают. Rust при `disable` TLS не использует (`pg_connector` → `None`), но
+ * `validate_tls` проверил бы и скрытые пути, а `uses_secret(pgKeyPassword)` считал бы сертификат «в работе».
+ * Сама форма поля помнит — при возврате на другой режим они не теряются.
+ */
+export function visibleProfile(p: ConnectionProfile): ConnectionProfile {
+  if (p.pg.sslMode !== "disable" || (p.pg.tls.caPath === null && p.pg.tls.clientCert === null)) return p;
+  return { ...p, pg: { ...p.pg, tls: { caPath: null, clientCert: null } } };
 }
 
 /** Фильтр баз «orders, billing» → список; пусто — все базы. */
