@@ -10,7 +10,7 @@ use crate::conn::run_blocking;
 use crate::error::{AppResult, ErrorCode};
 use crate::secrets::SecretStore;
 use crate::topology::BoxFuture;
-use crate::topology::probe::{COLLECT_TIMEOUT, NodeFacts, collect_with_timeout};
+use crate::topology::probe::{COLLECT_TIMEOUT, NodeFacts, collect_with_timeout, no_answer};
 
 pub trait NodeConnector: Send + Sync {
     fn facts<'a>(
@@ -62,7 +62,7 @@ impl NodeConnector for AdhocConnector {
 }
 
 /// Соединение из пула приложения; при AUTH/TLS-ошибке пул вытесняется — следующая попытка
-/// перечитает keychain и файлы сертификатов.
+/// перечитает keychain и файлы сертификатов. Пул, открытый на другой адрес узла, заменяется.
 pub async fn pooled_client(
     pools: &PoolRegistry,
     profile: &ConnectionProfile,
@@ -77,7 +77,7 @@ pub async fn pooled_client(
         member: member.into(),
         database: database.into(),
     };
-    let pool = match pools.get(&key) {
+    let pool = match pools.get(&key).filter(|p| p.looks_at(host, port)) {
         Some(p) => p,
         None => {
             let (p, h, d) = (profile.clone(), host.to_string(), database.to_string());
@@ -100,9 +100,11 @@ pub struct PooledConnector {
 }
 
 impl PooledConnector {
-    /// Опрос узла соединением из пула не дольше `limit`. Если опрос не удался (узел молчит, обрыв,
-    /// ошибка запроса), соединение закрывается, а не возвращается в пул: следующий опрос не должен
-    /// получить зависшее соединение.
+    /// Опрос узла соединением из пула. Получение соединения (ожидание свободного места в пуле, проверка
+    /// простоявшего соединения, подключение) и `collect` укладываются в один предел:
+    /// таймаут подключения профиля + `limit`; иначе опрос не завершился бы, пока пул занят другими.
+    /// Если опрос не удался (узел молчит, обрыв, ошибка запроса, предел вышел), соединение закрывается,
+    /// а не возвращается в пул: следующий опрос не должен получить зависшее соединение.
     pub async fn facts_within(
         &self,
         member: &str,
@@ -110,23 +112,33 @@ impl PooledConnector {
         port: u16,
         limit: Duration,
     ) -> AppResult<NodeFacts> {
-        let client = pooled_client(
-            &self.pools,
-            &self.profile,
-            self.secrets.clone(),
-            member,
-            host,
-            port,
-            &self.profile.pg.database,
-        )
-        .await?;
-        match collect_with_timeout(&client, limit).await {
-            Ok(facts) => Ok(facts),
-            Err(e) => {
-                client.discard();
-                Err(e)
-            }
+        let total = Duration::from_secs(self.profile.pg.connect_timeout_s) + limit;
+        // Соединение лежит вне будущего под таймаутом: если предел вышел посреди `collect`, будущее
+        // отбрасывается, а соединение с неотвеченными запросами нужно закрыть, а не вернуть в пул.
+        let mut client = None;
+        let outcome = tokio::time::timeout(total, async {
+            let c = client.insert(
+                pooled_client(
+                    &self.pools,
+                    &self.profile,
+                    self.secrets.clone(),
+                    member,
+                    host,
+                    port,
+                    &self.profile.pg.database,
+                )
+                .await?,
+            );
+            collect_with_timeout(c, limit).await
+        })
+        .await;
+        let result = outcome.unwrap_or_else(|_| Err(no_answer(total)));
+        if result.is_err()
+            && let Some(c) = client
+        {
+            c.discard();
         }
+        result
     }
 }
 
@@ -245,5 +257,104 @@ mod tests {
             .unwrap_err();
         assert_eq!(e.key, "errors.pg.noAnswer");
         assert!(server.wait_closed(1, WAIT).await, "сокет закрыт");
+    }
+
+    async fn client_of(nodes: &PooledConnector, port: u16) -> PooledClient {
+        pooled_client(
+            &nodes.pools,
+            &nodes.profile,
+            nodes.secrets.clone(),
+            "m",
+            "127.0.0.1",
+            port,
+            "postgres",
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn pool_is_replaced_when_the_member_moves_to_another_address() {
+        let (first, second) = (
+            testutil::stalling_pg_server(),
+            testutil::stalling_pg_server(),
+        );
+        let nodes = pooled(SslMode::Disable);
+        drop(client_of(&nodes, first.port).await);
+        let pool = nodes.pools.get(&key("m")).unwrap();
+        assert!(pool.looks_at("127.0.0.1", first.port));
+
+        // Тот же адрес — тот же пул, соединение переиспользуется.
+        drop(client_of(&nodes, first.port).await);
+        assert!(Arc::ptr_eq(&pool, &nodes.pools.get(&key("m")).unwrap()));
+        assert_eq!(first.accepted(), 1);
+
+        // Узел переехал: соединения идут на новый адрес, а не на старый.
+        drop(client_of(&nodes, second.port).await);
+        let moved = nodes.pools.get(&key("m")).unwrap();
+        assert!(!Arc::ptr_eq(&pool, &moved));
+        assert!(moved.looks_at("127.0.0.1", second.port));
+        assert_eq!((first.accepted(), second.accepted()), (1, 1));
+        assert_eq!(nodes.pools.keys(), vec![key("m")]);
+    }
+
+    #[tokio::test]
+    async fn waiting_for_a_pool_permit_is_bounded_by_the_limit() {
+        let server = testutil::stalling_pg_server();
+        let nodes = pooled(SslMode::Disable);
+        // Все три места пула заняты: опрос ждал бы освобождения бесконечно.
+        let mut held = Vec::new();
+        for _ in 0..crate::conn::pool::MAX_CONNECTIONS {
+            held.push(client_of(&nodes, server.port).await);
+        }
+        let started = std::time::Instant::now();
+        let e = tokio::time::timeout(
+            Duration::from_secs(5),
+            nodes.facts_within("m", "127.0.0.1", server.port, LIMIT),
+        )
+        .await
+        .expect("опрос не должен висеть на занятом пуле")
+        .unwrap_err();
+        assert_eq!(e.key, "errors.pg.noAnswer");
+        // Таймаут подключения профиля (1 с) + предел опроса.
+        let elapsed = started.elapsed();
+        assert!(elapsed >= Duration::from_secs(1), "{elapsed:?}");
+        assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+        drop(held);
+    }
+
+    /// Предел вышел, пока опрос уже шёл (соединения пришлось ждать): соединение с неотвеченными запросами
+    /// закрывается, а не возвращается в пул.
+    #[tokio::test]
+    async fn limit_expiring_during_collect_discards_the_connection() {
+        let server = testutil::stalling_pg_server();
+        let nodes = pooled(SslMode::Disable);
+        let mut held = Vec::new();
+        for _ in 0..crate::conn::pool::MAX_CONNECTIONS {
+            held.push(client_of(&nodes, server.port).await);
+        }
+        let pool = nodes.pools.get(&key("m")).unwrap();
+        // Предел: 1 с (подключение) + 1 с. Место освобождается через 1,5 с — опрос начнётся, но до
+        // собственного таймаута `collect` (2,5 с) общий предел (2 с) уже выйдет.
+        let facts = nodes.facts_within("m", "127.0.0.1", server.port, Duration::from_secs(1));
+        let release = async {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            held.pop();
+        };
+        let (result, ()) = tokio::join!(facts, release);
+        let e = result.unwrap_err();
+        assert_eq!(e.key, "errors.pg.noAnswer");
+        assert_eq!(
+            pool.idle_count(),
+            0,
+            "зависшее соединение не вернулось в пул"
+        );
+        assert!(server.wait_closed(1, WAIT).await, "и его сокет закрыт");
+        assert_eq!(
+            server.closed(),
+            1,
+            "остальные два соединения заняты и открыты"
+        );
+        drop(held);
     }
 }

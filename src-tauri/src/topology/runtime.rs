@@ -2,6 +2,7 @@
 //! фоновый опрос раз в 10 с. События уходят в интерфейс через `RuntimeSink`.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -9,7 +10,7 @@ use serde::Serialize;
 use tokio::task::JoinHandle;
 
 use crate::conn::pool::{IDLE_TIMEOUT, PoolRegistry};
-use crate::conn::profile::{ConnectionKind, ConnectionProfile};
+use crate::conn::profile::{ConnectionKind, ConnectionProfile, same_connection_settings};
 use crate::conn::run_blocking;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::secrets::{PATRONI_KEY_PASSWORD, PATRONI_PASSWORD, SecretStore, secret_key};
@@ -58,6 +59,9 @@ impl TopologyView {
     }
 }
 
+/// Приёмник событий открытых подключений. Методы вызываются под внутренней блокировкой `Runtimes`
+/// (так порядок событий совпадает с порядком изменений: после `Disconnected` не приходит ничего от
+/// прежнего открытия), поэтому обработчик должен быть быстрым и не обращаться к `Runtimes`.
 pub trait RuntimeSink: Send + Sync {
     fn state_changed(&self, connection_id: &str, state: ConnState, error: Option<&AppError>);
     fn topology_changed(
@@ -155,6 +159,8 @@ impl TopologySource for LiveSource {
 }
 
 struct Entry {
+    /// Номер открытия: ответ, пришедший после закрытия или переоткрытия, относится к прошлому открытию.
+    generation: u64,
     profile: ConnectionProfile,
     state: ConnState,
     topology: Option<Topology>,
@@ -201,6 +207,8 @@ pub struct Runtimes {
     source: Arc<dyn TopologySource>,
     pools: Arc<PoolRegistry>,
     interval: Duration,
+    /// Счётчик номеров открытий (`Entry::generation`).
+    generations: AtomicU64,
     entries: Mutex<HashMap<String, Entry>>,
     connect_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     sink: Mutex<Option<Arc<dyn RuntimeSink>>>,
@@ -228,6 +236,7 @@ impl Runtimes {
             source,
             pools,
             interval,
+            generations: AtomicU64::new(0),
             entries: Mutex::new(HashMap::new()),
             connect_locks: Mutex::new(HashMap::new()),
             sink: Mutex::new(None),
@@ -254,7 +263,8 @@ impl Runtimes {
         }
     }
 
-    /// Открывает подключение (или возвращает уже открытое с тем же профилем).
+    /// Открывает подключение. Уже открытое с теми же настройками соединения возвращается как есть
+    /// (журнал, узел каталога и пулы сохраняются), оформление профиля — имя, цвет, папка — обновляется.
     pub async fn connect(self: &Arc<Self>, profile: ConnectionProfile) -> AppResult<TopologyView> {
         let id = profile.id.clone();
         let lock = self
@@ -264,12 +274,13 @@ impl Runtimes {
             .or_default()
             .clone();
         let _guard = lock.lock().await;
-        {
+        let generation = {
             let mut entries = self.entries.lock_safe();
-            if let Some(e) = entries.get(&id)
+            if let Some(e) = entries.get_mut(&id)
                 && matches!(e.state, ConnState::Connected | ConnState::Degraded)
-                && e.profile == profile
+                && same_connection_settings(&e.profile, &profile)
             {
+                e.profile = profile;
                 return Ok(e.view());
             }
             if let Some(old) = entries.remove(&id)
@@ -277,9 +288,13 @@ impl Runtimes {
             {
                 h.abort();
             }
+            self.pools.evict_connection(&id);
+            self.source.forget(&id);
+            let generation = self.generations.fetch_add(1, Ordering::Relaxed) + 1;
             entries.insert(
                 id.clone(),
                 Entry {
+                    generation,
                     profile: profile.clone(),
                     state: ConnState::Connecting,
                     topology: None,
@@ -289,60 +304,65 @@ impl Runtimes {
                     poller: None,
                 },
             );
-        }
-        self.pools.evict_connection(&id);
-        self.source.forget(&id);
-        self.emit_state(&id, ConnState::Connecting, None);
-        match self.source.observe(&profile, None).await {
+            self.emit_state(&id, ConnState::Connecting, None);
+            generation
+        };
+        let result = self.source.observe(&profile, None).await;
+        let mut entries = self.entries.lock_safe();
+        // Подключение закрыто (или открыто заново), пока шёл опрос: результат устарел, событий не будет.
+        let Some(e) = entries.get_mut(&id).filter(|e| e.generation == generation) else {
+            drop(entries);
+            return Err(self.discard_stale(&id));
+        };
+        match result {
             Ok(t) => {
-                let view = {
-                    let mut entries = self.entries.lock_safe();
-                    let e = entries.get_mut(&id).ok_or_else(not_connected)?;
-                    // Таймлайн первого опроса — исходная точка: событие о нём не создаётся.
-                    e.journal.observe_timeline(t.cluster_timeline());
-                    e.state = state_for(&t);
-                    e.topology = Some(t);
-                    e.view()
-                };
+                // Таймлайн первого опроса — исходная точка: событие о нём не создаётся.
+                e.journal.observe_timeline(t.cluster_timeline());
+                e.state = state_for(&t);
+                e.topology = Some(t);
+                let view = e.view();
+                e.poller = Some(self.spawn_poller(&id, generation));
                 self.emit_state(&id, view.state, None);
                 self.emit_topology(&id, &view, &[]);
-                self.start_poller(&id);
                 Ok(view)
             }
             Err(err) => {
-                if let Some(e) = self.entries.lock_safe().get_mut(&id) {
-                    e.state = ConnState::Failed;
-                    e.error = Some(err.clone());
-                }
+                e.state = ConnState::Failed;
+                e.error = Some(err.clone());
                 self.emit_state(&id, ConnState::Failed, Some(&err));
                 Err(err)
             }
         }
     }
 
-    fn start_poller(self: &Arc<Self>, id: &str) {
+    /// Опрос, закончившийся после закрытия подключения, мог заново создать то, что закрытие убрало
+    /// (пулы, клиент HTTP): убираем это и сообщаем, что подключение уже не открыто.
+    fn discard_stale(&self, id: &str) -> AppError {
+        self.pools.evict_connection(id);
+        self.source.forget(id);
+        not_connected()
+    }
+
+    /// Фоновый опрос открытия `generation`: прекращается, как только открытие закрыто или заменено.
+    fn spawn_poller(self: &Arc<Self>, id: &str, generation: u64) -> JoinHandle<()> {
         let weak: Weak<Self> = Arc::downgrade(self);
         let (key, interval) = (id.to_string(), self.interval);
-        let handle = tokio::spawn(async move {
+        tokio::spawn(async move {
             loop {
                 tokio::time::sleep(interval).await;
                 let Some(rt) = weak.upgrade() else { break };
-                if !rt.poll_once(&key).await {
+                if !rt.poll_once(&key, generation).await {
                     break;
                 }
             }
-        });
-        match self.entries.lock_safe().get_mut(id) {
-            Some(e) => e.poller = Some(handle),
-            None => handle.abort(),
-        }
+        })
     }
 
-    /// Один опрос; `false` — подключение закрыто, опрос прекращается.
-    async fn poll_once(&self, id: &str) -> bool {
+    /// Один опрос открытия `generation`; `false` — оно закрыто или заменено, опрос прекращается.
+    async fn poll_once(&self, id: &str, generation: u64) -> bool {
         let (profile, previous) = {
             let entries = self.entries.lock_safe();
-            let Some(e) = entries.get(id) else {
+            let Some(e) = entries.get(id).filter(|e| e.generation == generation) else {
                 return false;
             };
             (e.profile.clone(), e.topology.clone())
@@ -350,8 +370,10 @@ impl Runtimes {
         self.pools.close_idle(IDLE_TIMEOUT);
         let result = self.source.observe(&profile, previous.as_ref()).await;
         let mut entries = self.entries.lock_safe();
-        // Подключение закрыто или открыто заново с другим профилем, пока шёл опрос: результат устарел.
-        let Some(e) = entries.get_mut(id).filter(|e| e.profile == profile) else {
+        // Подключение закрыто или открыто заново, пока шёл опрос: результат устарел.
+        let Some(e) = entries.get_mut(id).filter(|e| e.generation == generation) else {
+            drop(entries);
+            self.discard_stale(id);
             return false;
         };
         match result {
@@ -377,7 +399,6 @@ impl Runtimes {
                 e.error = None;
                 e.topology = Some(t);
                 let view = e.view();
-                drop(entries);
                 if state_changed {
                     self.emit_state(id, state, None);
                 }
@@ -388,16 +409,17 @@ impl Runtimes {
             Err(err) => {
                 e.state = ConnState::Degraded;
                 e.error = Some(err.clone());
-                drop(entries);
                 self.emit_state(id, ConnState::Degraded, Some(&err));
             }
         }
         true
     }
 
+    /// Закрывает подключение. Всё под одной блокировкой: открытие, начатое сразу после, не увидит
+    /// полузакрытого состояния, а событие `Disconnected` не обгонит и не отстанет от изменений.
     pub fn disconnect(&self, id: &str) {
-        let removed = self.entries.lock_safe().remove(id);
-        if let Some(e) = removed
+        let mut entries = self.entries.lock_safe();
+        if let Some(e) = entries.remove(id)
             && let Some(h) = e.poller
         {
             h.abort();
@@ -405,6 +427,17 @@ impl Runtimes {
         self.pools.evict_connection(id);
         self.source.forget(id);
         self.emit_state(id, ConnState::Disconnected, None);
+    }
+
+    /// Профиль сохранён с правкой, не затрагивающей соединение (имя, цвет, папка…): открытое подключение
+    /// остаётся, профиль в нём обновляется. Если настройки соединения изменились, ничего не делает —
+    /// такое подключение закрывают (`disconnect`).
+    pub fn refresh_profile(&self, profile: &ConnectionProfile) {
+        if let Some(e) = self.entries.lock_safe().get_mut(&profile.id)
+            && same_connection_settings(&e.profile, profile)
+        {
+            e.profile = profile.clone();
+        }
     }
 
     pub fn view(&self, id: &str) -> TopologyView {
@@ -480,6 +513,7 @@ impl Runtimes {
 mod tests {
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
     use std::time::Instant;
 
     use super::*;
@@ -494,22 +528,41 @@ mod tests {
         answers: Mutex<VecDeque<AppResult<Topology>>>,
         last: Mutex<Option<AppResult<Topology>>>,
         calls: AtomicUsize,
-        delay: Duration,
+        delay: Mutex<Duration>,
+        /// Что происходило: «observe-done» — ответ готов, «forget» — вызван `forget`.
+        log: Mutex<Vec<&'static str>>,
+        /// Выполняется, когда ответ готов: так опрос, не успевший закончиться до закрытия, заново
+        /// создаёт то, что закрытие убрало (пул узла).
+        on_finish: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     }
 
     impl Scripted {
         fn new(answers: Vec<AppResult<Topology>>) -> Arc<Self> {
+            Self::with_delay(answers, Duration::ZERO)
+        }
+
+        fn with_delay(answers: Vec<AppResult<Topology>>, delay: Duration) -> Arc<Self> {
             Arc::new(Self {
                 answers: Mutex::new(answers.into()),
                 last: Mutex::new(None),
                 calls: AtomicUsize::new(0),
-                delay: Duration::ZERO,
+                delay: Mutex::new(delay),
+                log: Mutex::new(Vec::new()),
+                on_finish: Mutex::new(None),
             })
         }
 
         /// Следующие ответы вместо оставшихся; прежний «последний» повторяется, пока очередь не опустеет.
         fn then(&self, answers: Vec<AppResult<Topology>>) {
             *self.answers.lock_safe() = answers.into();
+        }
+
+        fn set_delay(&self, delay: Duration) {
+            *self.delay.lock_safe() = delay;
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
         }
     }
 
@@ -528,14 +581,22 @@ mod tests {
                 }
                 None => self.last.lock_safe().clone().expect("есть ответ"),
             };
-            let delay = self.delay;
+            let delay = *self.delay.lock_safe();
             Box::pin(async move {
                 tokio::time::sleep(delay).await;
+                self.log.lock_safe().push("observe-done");
+                if let Some(f) = self.on_finish.lock_safe().as_ref() {
+                    f();
+                }
                 r.map(|mut t| {
                     t.observed_at_ms = crate::topology::model::now_ms();
                     t
                 })
             })
+        }
+
+        fn forget(&self, _id: &str) {
+            self.log.lock_safe().push("forget");
         }
     }
 
@@ -579,21 +640,30 @@ mod tests {
         ])
     }
 
-    #[allow(clippy::type_complexity)]
-    fn setup(
-        answers: Vec<AppResult<Topology>>,
-    ) -> (
+    type Fixture = (
         Arc<Runtimes>,
         Arc<Scripted>,
         Arc<Recorder>,
         Arc<PoolRegistry>,
-    ) {
+    );
+
+    fn setup_with(interval: Duration, answers: Vec<AppResult<Topology>>) -> Fixture {
         let src = Scripted::new(answers);
         let pools = Arc::new(PoolRegistry::default());
-        let rt = Runtimes::with_interval(src.clone(), pools.clone(), Duration::from_millis(40));
+        let rt = Runtimes::with_interval(src.clone(), pools.clone(), interval);
         let rec = Arc::new(Recorder::default());
         rt.set_sink(rec.clone());
         (rt, src, rec, pools)
+    }
+
+    /// Фоновый опрос идёт каждые 40 мс.
+    fn setup(answers: Vec<AppResult<Topology>>) -> Fixture {
+        setup_with(Duration::from_millis(40), answers)
+    }
+
+    /// Опрос вручную: интервал 60 с, тест сам решает, когда опрашивать, и не гонится с фоновым опросом.
+    fn manual(answers: Vec<AppResult<Topology>>) -> Fixture {
+        setup_with(Duration::from_secs(60), answers)
     }
 
     fn err() -> AppError {
@@ -718,9 +788,9 @@ mod tests {
         rt.disconnect("c");
         assert_eq!(rt.view("c").state, ConnState::Disconnected);
         assert!(pools.keys().is_empty(), "пулы подключения закрыты");
-        let calls = src.calls.load(Ordering::SeqCst);
+        let calls = src.calls();
         tokio::time::sleep(Duration::from_millis(120)).await;
-        assert_eq!(src.calls.load(Ordering::SeqCst), calls, "опрос остановлен");
+        assert_eq!(src.calls(), calls, "опрос остановлен");
         assert_eq!(
             rec.states.lock_safe().last(),
             Some(&ConnState::Disconnected)
@@ -766,12 +836,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_connects_observe_once() {
-        let src = Arc::new(Scripted {
-            answers: Mutex::new(VecDeque::from(vec![Ok(two("a"))])),
-            last: Mutex::new(None),
-            calls: AtomicUsize::new(0),
-            delay: Duration::from_millis(50),
-        });
+        let src = Scripted::with_delay(vec![Ok(two("a"))], Duration::from_millis(50));
         let rt = Runtimes::with_interval(
             src.clone(),
             Arc::new(PoolRegistry::default()),
@@ -779,7 +844,7 @@ mod tests {
         );
         let (a, b) = tokio::join!(rt.connect(patroni_profile()), rt.connect(patroni_profile()));
         assert!(a.is_ok() && b.is_ok());
-        assert_eq!(src.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(src.calls(), 1);
         rt.shutdown();
     }
 
@@ -887,30 +952,329 @@ mod tests {
         rt.shutdown();
     }
 
+    fn generation_of(rt: &Runtimes, id: &str) -> u64 {
+        rt.entries.lock_safe().get(id).expect("открыто").generation
+    }
+
+    /// Профиль с теми же настройками соединения, но другим оформлением.
+    fn restyled() -> ConnectionProfile {
+        let mut p = patroni_profile();
+        p.name = "renamed".into();
+        p.color = "#ff0000".into();
+        p.environment = crate::conn::profile::Environment::Stage;
+        p.folder_id = Some("folder".into());
+        p.order = 5;
+        p
+    }
+
+    /// Профиль с другим адресом: соединение нужно открыть заново.
+    fn relocated() -> ConnectionProfile {
+        let mut p = patroni_profile();
+        p.hosts[0].host = "elsewhere".into();
+        p
+    }
+
     #[tokio::test]
-    async fn poll_result_for_a_replaced_profile_is_dropped() {
-        let src = Arc::new(Scripted {
-            answers: Mutex::new(VecDeque::from(vec![Ok(two("a"))])),
-            last: Mutex::new(None),
-            calls: AtomicUsize::new(0),
-            delay: Duration::from_millis(150),
-        });
-        let rt = Runtimes::with_interval(
-            src,
-            Arc::new(PoolRegistry::default()),
-            Duration::from_secs(60),
-        );
+    async fn poll_result_for_a_replaced_connection_is_dropped() {
+        let (rt, src, rec, _) = manual(vec![Ok(two("a"))]);
         rt.connect(patroni_profile()).await.unwrap();
-        // Опрос идёт, а подключение открывают заново с изменённым профилем: ответ прежнего профиля устарел.
+        let first = generation_of(&rt, "c");
+        src.set_delay(Duration::from_millis(150));
+        // Опрос идёт, а подключение открывают заново с другими настройками: ответ прежнего открытия устарел.
+        src.then(vec![Ok(two("b"))]);
         let poll = tokio::spawn({
             let rt = rt.clone();
-            async move { rt.poll_once("c").await }
+            async move { rt.poll_once("c", first).await }
         });
-        tokio::time::sleep(Duration::from_millis(40)).await;
-        let mut changed = patroni_profile();
-        changed.name = "renamed".into();
-        rt.connect(changed).await.unwrap();
+        eventually("опрос начался", || src.calls() == 2).await;
+        src.then(vec![Ok(two("a"))]);
+        rt.connect(relocated()).await.unwrap();
         assert!(!poll.await.unwrap(), "опрос прекращается");
+        assert_ne!(generation_of(&rt, "c"), first);
+        assert!(rt.events("c").is_empty());
+        assert!(rec.sent_events().is_empty());
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn cosmetic_change_during_a_poll_keeps_the_poll() {
+        let (rt, src, _rec, _) = manual(vec![Ok(two("a"))]);
+        rt.connect(patroni_profile()).await.unwrap();
+        let generation = generation_of(&rt, "c");
+        src.set_delay(Duration::from_millis(150));
+        src.then(vec![Ok(two("b"))]);
+        let poll = tokio::spawn({
+            let rt = rt.clone();
+            async move { rt.poll_once("c", generation).await }
+        });
+        eventually("опрос начался", || src.calls() == 2).await;
+        // Переименование идёт мимо опроса: соединение то же, результат опроса принимается.
+        rt.connect(restyled()).await.unwrap();
+        assert!(poll.await.unwrap(), "опрос продолжается");
+        assert_eq!(generation_of(&rt, "c"), generation);
+        assert!(
+            rt.events("c")
+                .iter()
+                .any(|e| matches!(e.event, EventKind::LeaderChanged { .. })),
+            "результат опроса записан в журнал"
+        );
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn cosmetic_reconnect_keeps_journal_catalog_member_and_pools() {
+        let (rt, src, rec, pools) = manual(vec![Ok(two("a"))]);
+        rt.connect(patroni_profile()).await.unwrap();
+        let generation = generation_of(&rt, "c");
+        add_pool(&pools, "a");
+        src.then(vec![Ok(two("b"))]);
+        assert!(rt.poll_once("c", generation).await);
+        let events_before = rt.events("c");
+        assert!(
+            events_before
+                .iter()
+                .any(|e| matches!(e.event, EventKind::LeaderChanged { .. })),
+            "в журнале переключение лидера"
+        );
+        // Узел каталога выбран вручную: не лидер.
+        rt.set_catalog_member("c", Some("a".into())).unwrap();
+        let (calls, states) = (src.calls(), rec.states.lock_safe().len());
+
+        // Переименование, цвет, папка и порядок (перетаскивание в дереве) соединение не трогают.
+        let view = rt.connect(restyled()).await.unwrap();
+        assert_eq!(view.state, ConnState::Connected);
+        assert_eq!(view.catalog_member.as_deref(), Some("a"));
+        assert_eq!(rt.events("c"), events_before, "журнал не потерян");
+        assert_eq!(generation_of(&rt, "c"), generation);
+        assert!(pools.get(&pool_key("a")).is_some(), "пулы на месте");
+        assert_eq!(src.calls(), calls, "узлы не опрашивались заново");
+        assert_eq!(
+            rec.states.lock_safe().len(),
+            states,
+            "состояние не менялось и не объявлялось"
+        );
+        let (_, profile) = rt.target("c", None).unwrap();
+        assert_eq!(
+            (profile.name.as_str(), profile.order),
+            ("renamed", 5),
+            "оформление профиля обновлено"
+        );
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn changed_connection_settings_reopen_the_connection() {
+        let (rt, src, rec, pools) = manual(vec![Ok(two("a"))]);
+        rt.connect(patroni_profile()).await.unwrap();
+        let generation = generation_of(&rt, "c");
+        add_pool(&pools, "a");
+        src.then(vec![Ok(two("b"))]);
+        assert!(rt.poll_once("c", generation).await);
+        rt.set_catalog_member("c", Some("a".into())).unwrap();
+        assert!(!rt.events("c").is_empty());
+        let calls = src.calls();
+        src.then(vec![Ok(two("a"))]);
+
+        let view = rt.connect(relocated()).await.unwrap();
+        assert_eq!(src.calls(), calls + 1, "узлы опрошены заново");
+        assert_ne!(generation_of(&rt, "c"), generation);
+        assert!(rt.events("c").is_empty(), "журнал новый");
+        assert_eq!(
+            view.catalog_member.as_deref(),
+            Some("a"),
+            "узел каталога — по умолчанию (лидер)"
+        );
+        assert!(!view.catalog_fallback);
+        assert!(pools.keys().is_empty(), "пулы прежнего открытия закрыты");
+        assert!(
+            rec.states
+                .lock_safe()
+                .ends_with(&[ConnState::Connecting, ConnState::Connected])
+        );
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn refresh_profile_updates_cosmetics_only() {
+        let (rt, _src, _rec, _) = manual(vec![Ok(two("a"))]);
+        rt.connect(patroni_profile()).await.unwrap();
+        rt.refresh_profile(&relocated());
+        assert_eq!(rt.target("c", None).unwrap().1.hosts[0].host, "localhost");
+        rt.refresh_profile(&restyled());
+        assert_eq!(rt.target("c", None).unwrap().1.name, "renamed");
+        // Чужого подключения нет — ничего не происходит.
+        let mut other = patroni_profile();
+        other.id = "nope".into();
+        rt.refresh_profile(&other);
+        assert_eq!(rt.view("nope").state, ConnState::Disconnected);
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn disconnect_during_a_slow_connect_leaves_no_trace() {
+        let src = Scripted::with_delay(vec![Ok(two("a"))], Duration::from_millis(150));
+        let pools = Arc::new(PoolRegistry::default());
+        let rt = Runtimes::with_interval(src.clone(), pools.clone(), Duration::from_secs(60));
+        let rec = Arc::new(Recorder::default());
+        rt.set_sink(rec.clone());
+        // Опрос, не успевший до закрытия, создаёт пул уже после того, как закрытие их убрало.
+        *src.on_finish.lock_safe() = Some(Box::new({
+            let pools = pools.clone();
+            move || add_pool(&pools, "a")
+        }));
+
+        let connect = tokio::spawn({
+            let rt = rt.clone();
+            async move { rt.connect(patroni_profile()).await }
+        });
+        eventually("опрос начался", || src.calls() == 1).await;
+        rt.disconnect("c");
+        let e = connect.await.unwrap().unwrap_err();
+        assert_eq!(e.key, "errors.topology.notConnected");
+
+        assert_eq!(
+            *rec.states.lock_safe(),
+            vec![ConnState::Connecting, ConnState::Disconnected],
+            "после Disconnected событий нет"
+        );
+        assert!(rec.topologies.lock_safe().is_empty());
+        assert!(pools.keys().is_empty(), "пул, созданный опросом, закрыт");
+        assert_eq!(
+            src.log.lock_safe().last(),
+            Some(&"forget"),
+            "кэш источника забыт и после завершения опроса"
+        );
+        assert_eq!(rt.view("c").state, ConnState::Disconnected);
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn disconnect_during_a_failing_slow_connect_leaves_no_trace() {
+        let src = Scripted::with_delay(vec![Err(err())], Duration::from_millis(150));
+        let pools = Arc::new(PoolRegistry::default());
+        let rt = Runtimes::with_interval(src.clone(), pools.clone(), Duration::from_secs(60));
+        let rec = Arc::new(Recorder::default());
+        rt.set_sink(rec.clone());
+        *src.on_finish.lock_safe() = Some(Box::new({
+            let pools = pools.clone();
+            move || add_pool(&pools, "a")
+        }));
+
+        let connect = tokio::spawn({
+            let rt = rt.clone();
+            async move { rt.connect(patroni_profile()).await }
+        });
+        eventually("опрос начался", || src.calls() == 1).await;
+        rt.disconnect("c");
+        let e = connect.await.unwrap().unwrap_err();
+        assert_eq!(
+            e.key, "errors.topology.notConnected",
+            "ошибка опроса уже никому не нужна"
+        );
+
+        assert_eq!(
+            *rec.states.lock_safe(),
+            vec![ConnState::Connecting, ConnState::Disconnected],
+            "Failed после Disconnected не приходит"
+        );
+        assert!(pools.keys().is_empty());
+        assert_eq!(src.log.lock_safe().last(), Some(&"forget"));
+        assert_eq!(rt.view("c").state, ConnState::Disconnected);
+        rt.shutdown();
+    }
+
+    /// Приёмник, который на `Connected` останавливается, пока тест не разрешит продолжить.
+    struct Gate {
+        states: Mutex<Vec<ConnState>>,
+        entered: Mutex<mpsc::Sender<()>>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl RuntimeSink for Gate {
+        fn state_changed(&self, _id: &str, state: ConnState, _e: Option<&AppError>) {
+            if state == ConnState::Connected {
+                self.entered.lock_safe().send(()).unwrap();
+                let _ = self
+                    .release
+                    .lock_safe()
+                    .recv_timeout(Duration::from_secs(5));
+            }
+            self.states.lock_safe().push(state);
+        }
+        fn topology_changed(&self, _id: &str, _v: &TopologyView, _events: &[TopologyEvent]) {}
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn disconnect_cannot_overtake_a_notification_in_progress() {
+        let (rt, _src, _rec, _pools) = manual(vec![Ok(two("a"))]);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let gate = Arc::new(Gate {
+            states: Mutex::new(Vec::new()),
+            entered: Mutex::new(entered_tx),
+            release: Mutex::new(release_rx),
+        });
+        rt.set_sink(gate.clone());
+
+        let connect = tokio::spawn({
+            let rt = rt.clone();
+            async move { rt.connect(patroni_profile()).await }
+        });
+        // Тест ждёт блокирующе, на своём потоке: рабочий поток runtime занят остановленным приёмником.
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Connected объявляется");
+        // Закрытие приходит, пока объявляется `Connected`: оно ждёт, а не обгоняет, — иначе интерфейс
+        // получил бы `Connected` после `Disconnected` и показал бы закрытое подключение открытым.
+        let disconnect = std::thread::spawn({
+            let rt = rt.clone();
+            move || rt.disconnect("c")
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!disconnect.is_finished(), "закрытие ждёт объявления");
+        release_tx.send(()).unwrap();
+        disconnect.join().unwrap();
+        connect.await.unwrap().unwrap();
+        assert_eq!(
+            *gate.states.lock_safe(),
+            vec![
+                ConnState::Connecting,
+                ConnState::Connected,
+                ConnState::Disconnected
+            ]
+        );
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn poll_finishing_after_disconnect_emits_nothing_and_cleans_up() {
+        let (rt, src, rec, pools) = manual(vec![Ok(two("a"))]);
+        rt.connect(patroni_profile()).await.unwrap();
+        let generation = generation_of(&rt, "c");
+        let (states, topologies) = (
+            rec.states.lock_safe().len(),
+            rec.topologies.lock_safe().len(),
+        );
+        src.set_delay(Duration::from_millis(150));
+        src.then(vec![Ok(two("b"))]);
+        *src.on_finish.lock_safe() = Some(Box::new({
+            let pools = pools.clone();
+            move || add_pool(&pools, "a")
+        }));
+        let poll = tokio::spawn({
+            let rt = rt.clone();
+            async move { rt.poll_once("c", generation).await }
+        });
+        eventually("опрос начался", || src.calls() == 2).await;
+        rt.disconnect("c");
+        assert!(!poll.await.unwrap());
+        assert_eq!(
+            rec.states.lock_safe()[states..],
+            [ConnState::Disconnected],
+            "после Disconnected событий нет"
+        );
+        assert_eq!(rec.topologies.lock_safe().len(), topologies);
+        assert!(pools.keys().is_empty());
         assert!(rt.events("c").is_empty());
         rt.shutdown();
     }

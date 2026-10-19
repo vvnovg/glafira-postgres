@@ -187,6 +187,33 @@ impl ConnectionProfile {
     }
 }
 
+/// Совпадают ли настройки, от которых зависит соединение с кластером: вид, адреса, целевой узел,
+/// Patroni и PostgreSQL. Имя, цвет, окружение, read-only, папка и порядок в дереве на соединение не
+/// влияют: их правка не должна его переоткрывать. Поля перечислены явно — новое поле профиля не
+/// скомпилируется, пока его не отнесут к одной из групп.
+pub fn same_connection_settings(a: &ConnectionProfile, b: &ConnectionProfile) -> bool {
+    let ConnectionProfile {
+        id: _,
+        name: _,
+        color: _,
+        environment: _,
+        read_only: _,
+        kind,
+        hosts,
+        target_server_type,
+        patroni,
+        pg,
+        folder_id: _,
+        order: _,
+        extra: _,
+    } = a;
+    *kind == b.kind
+        && *hosts == b.hosts
+        && *target_server_type == b.target_server_type
+        && *patroni == b.patroni
+        && *pg == b.pg
+}
+
 fn trim_opt(v: &mut Option<String>) {
     *v = v
         .take()
@@ -447,7 +474,7 @@ mod tests {
     use super::*;
     use crate::secrets::{PATRONI_KEY_PASSWORD, PATRONI_PASSWORD, PG_KEY_PASSWORD, PG_PASSWORD};
 
-    /// Ключ ожидаемой ошибки и правка, ломающая корректный профиль.
+    /// Название случая (ключ ожидаемой ошибки) и правка профиля.
     type Case = (&'static str, Box<dyn Fn(&mut ConnectionProfile)>);
 
     fn abs(p: &str) -> String {
@@ -737,5 +764,65 @@ mod tests {
         assert!(q.uses_secret(PATRONI_KEY_PASSWORD));
         q.patroni.as_mut().unwrap().username = None;
         assert!(!q.uses_secret(PATRONI_PASSWORD));
+    }
+
+    #[test]
+    fn cosmetic_edits_keep_the_connection_settings() {
+        let base = patroni(sample_profile("a"));
+        let mut cosmetic = base.clone();
+        cosmetic.id = "other-id-is-not-compared".into();
+        cosmetic.name = "renamed".into();
+        cosmetic.color = "#000000".into();
+        cosmetic.environment = Environment::Stage;
+        cosmetic.read_only = !base.read_only;
+        cosmetic.folder_id = Some("folder".into());
+        cosmetic.order = 7;
+        cosmetic
+            .extra
+            .insert("future".into(), serde_json::json!(true));
+        assert!(same_connection_settings(&base, &cosmetic));
+        assert!(same_connection_settings(&cosmetic, &base));
+    }
+
+    #[test]
+    fn connection_settings_changes_are_detected() {
+        let base = patroni(sample_profile("a"));
+        let edits: Vec<Case> = vec![
+            ("kind", Box::new(|p| p.kind = ConnectionKind::HostList)),
+            (
+                "hosts",
+                Box::new(|p| {
+                    p.hosts.push(HostPort {
+                        host: "h".into(),
+                        port: 1,
+                    })
+                }),
+            ),
+            (
+                "targetServerType",
+                Box::new(|p| p.target_server_type = TargetServerType::Standby),
+            ),
+            (
+                "patroni urls",
+                Box::new(|p| {
+                    p.patroni
+                        .as_mut()
+                        .unwrap()
+                        .urls
+                        .push("http://x:8008".into())
+                }),
+            ),
+            ("patroni", Box::new(|p| p.patroni = None)),
+            ("pg user", Box::new(|p| p.pg.username = "another".into())),
+            ("pg database", Box::new(|p| p.pg.database = "orders".into())),
+            ("pg ssl", Box::new(|p| p.pg.ssl_mode = SslMode::VerifyFull)),
+            ("pg timeout", Box::new(|p| p.pg.connect_timeout_s = 3)),
+        ];
+        for (what, edit) in edits {
+            let mut changed = base.clone();
+            edit(&mut changed);
+            assert!(!same_connection_settings(&base, &changed), "{what}");
+            assert!(!same_connection_settings(&changed, &base), "{what}");
+        }
     }
 }

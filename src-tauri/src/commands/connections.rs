@@ -4,7 +4,9 @@ use serde::Deserialize;
 use tauri::State;
 
 use super::blocking;
-use crate::conn::profile::{ConnectionProfile, Environment, normalize_profile};
+use crate::conn::profile::{
+    ConnectionProfile, Environment, normalize_profile, same_connection_settings,
+};
 use crate::error::AppResult;
 use crate::secrets::{
     CONNECTION_SECRET_FIELDS, PATRONI_KEY_PASSWORD, PATRONI_PASSWORD, PG_KEY_PASSWORD, PG_PASSWORD,
@@ -86,6 +88,25 @@ fn secret_ops(
         .collect()
 }
 
+/// Менял ли сохранённый секрет хоть одно используемое профилем поле (`Set` или `Delete`): тогда открытое
+/// подключение работает со старым значением и должно быть переоткрыто. Неиспользуемые поля удаляются при
+/// каждом сохранении — на подключение это не влияет.
+fn secrets_changed(profile: &ConnectionProfile, ops: &[(&'static str, SecretOp)]) -> bool {
+    ops.iter()
+        .any(|(field, op)| profile.uses_secret(field) && !matches!(op, SecretOp::Keep))
+}
+
+/// Нужно ли закрыть открытое подключение после сохранения: изменились настройки соединения
+/// (или профиль новый) либо секрет, которым пользуется профиль. Имя, цвет, окружение, папка и порядок
+/// соединения не касаются.
+fn needs_reconnect(
+    previous: Option<&ConnectionProfile>,
+    saved: &ConnectionProfile,
+    secrets_changed: bool,
+) -> bool {
+    secrets_changed || previous.is_none_or(|p| !same_connection_settings(p, saved))
+}
+
 #[tauri::command]
 pub fn list_connections(state: State<'_, AppState>) -> AppResult<Vec<ConnectionProfile>> {
     Ok(state.connections.list())
@@ -126,16 +147,16 @@ pub fn save_connection_blocking(
         st.license.require_pro()?;
     }
     let saved = st.connections.upsert(profile)?;
-    let result = secret_ops(&saved, &secrets)
-        .into_iter()
-        .try_for_each(|(field, op)| {
-            let key = secret_key(&saved.id, field);
-            match op {
-                SecretOp::Keep => Ok(()),
-                SecretOp::Set(v) => st.secrets.set(&key, &v),
-                SecretOp::Delete => st.secrets.delete(&key),
-            }
-        });
+    let ops = secret_ops(&saved, &secrets);
+    let secrets_changed = secrets_changed(&saved, &ops);
+    let result = ops.into_iter().try_for_each(|(field, op)| {
+        let key = secret_key(&saved.id, field);
+        match op {
+            SecretOp::Keep => Ok(()),
+            SecretOp::Set(v) => st.secrets.set(&key, &v),
+            SecretOp::Delete => st.secrets.delete(&key),
+        }
+    });
     if let Err(e) = result {
         let rollback = match previous {
             Some(p) => st.connections.upsert(p).map(|_| ()),
@@ -146,8 +167,13 @@ pub fn save_connection_blocking(
         }
         return Err(e);
     }
-    // Профиль или секреты изменились: подключение переоткроется при следующем раскрытии.
-    st.runtimes.disconnect(&saved.id);
+    if needs_reconnect(previous.as_ref(), &saved, secrets_changed) {
+        // Настройки соединения или секреты изменились: подключение переоткроется при следующем раскрытии.
+        st.runtimes.disconnect(&saved.id);
+    } else {
+        // Правка оформления: подключение, журнал и узел каталога остаются, обновляется только профиль.
+        st.runtimes.refresh_profile(&saved);
+    }
     Ok(saved)
 }
 
@@ -165,11 +191,17 @@ pub async fn delete_connection(state: State<'_, AppState>, id: String) -> AppRes
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use super::*;
     use crate::conn::profile::{CertFormat, ClientCert, sample_profile};
     use crate::error::{AppError, ErrorCode};
     use crate::secrets::{MemoryStore, SecretStore};
+    use crate::state::tests::Closed;
+    use crate::storage::tree::{TreeItemKind, TreeItemRef};
+    use crate::topology::BoxFuture;
+    use crate::topology::model::{Role, Topology, member, topo};
+    use crate::topology::runtime::{ConnState, Runtimes, TopologySource};
 
     /// Keychain, в который ничего нельзя записать.
     struct BrokenKeychain;
@@ -342,6 +374,169 @@ mod tests {
         };
         save_connection_blocking(&st, input(sample_profile("a"), secrets)).unwrap_err();
         assert!(closed.0.lock().unwrap().is_empty());
+    }
+
+    /// Источник с готовой топологией из двух узлов: открытое подключение не ходит в сеть.
+    struct Fixed;
+
+    impl TopologySource for Fixed {
+        fn observe<'a>(
+            &'a self,
+            _p: &'a ConnectionProfile,
+            _prev: Option<&'a Topology>,
+        ) -> BoxFuture<'a, AppResult<Topology>> {
+            Box::pin(async {
+                Ok(topo(vec![
+                    member("localhost:5432", Role::Primary),
+                    member("b", Role::Replica),
+                ]))
+            })
+        }
+    }
+
+    /// Состояние с сохранённым и открытым подключением `a`; узел каталога выбран вручную (`b`).
+    async fn open_connection() -> (tempfile::TempDir, AppState, Arc<Closed>, ConnectionProfile) {
+        let (dir, mut st) = state_with(Arc::new(MemoryStore::default()));
+        st.runtimes =
+            Runtimes::with_interval(Arc::new(Fixed), st.pools.clone(), Duration::from_secs(60));
+        let saved = save_connection_blocking(
+            &st,
+            input(
+                sample_profile("a"),
+                SecretsInput {
+                    pg_password: Some("pw".into()),
+                    ..Default::default()
+                },
+            ),
+        )
+        .unwrap();
+        st.runtimes.connect(saved.clone()).await.unwrap();
+        st.runtimes
+            .set_catalog_member("a", Some("b".into()))
+            .unwrap();
+        let closed = Arc::new(Closed::default());
+        st.runtimes.set_sink(closed.clone());
+        (dir, st, closed, saved)
+    }
+
+    fn still_open(st: &AppState) -> bool {
+        let v = st.runtimes.view("a");
+        v.state == ConnState::Connected && v.catalog_member.as_deref() == Some("b")
+    }
+
+    #[tokio::test]
+    async fn saving_cosmetic_changes_keeps_the_open_connection() {
+        let (_d, st, closed, saved) = open_connection().await;
+        let mut p = saved.clone();
+        p.name = "renamed".into();
+        p.color = "#000000".into();
+        p.environment = Environment::Test;
+        p.read_only = true;
+        // Поле секрета, которым профиль не пользуется, удаляется при каждом сохранении: не повод закрывать.
+        let secrets = SecretsInput {
+            patroni_password: Some("x".into()),
+            ..Default::default()
+        };
+        save_connection_blocking(&st, input(p, secrets)).unwrap();
+        assert!(closed.0.lock().unwrap().is_empty());
+        assert!(still_open(&st), "узел каталога и состояние сохранились");
+        assert_eq!(
+            st.runtimes.target("a", None).unwrap().1.name,
+            "renamed",
+            "профиль в открытом подключении обновлён"
+        );
+        assert_eq!(
+            st.secrets
+                .get(&secret_key("a", PG_PASSWORD))
+                .unwrap()
+                .as_deref(),
+            Some("pw")
+        );
+    }
+
+    #[tokio::test]
+    async fn moving_in_the_tree_does_not_reopen_the_connection() {
+        // Перетаскивание меняет папку и порядок прямо в хранилище, подключение не закрывая;
+        // следом раскрытие узла дерева снова вызывает `connect` с профилем из хранилища.
+        let (_d, st, closed, _saved) = open_connection().await;
+        let folder = st.connections.create_folder("F", None).unwrap();
+        let item = TreeItemRef {
+            kind: TreeItemKind::Connection,
+            id: "a".into(),
+        };
+        st.connections
+            .move_items(&[item], Some(&folder.id), None)
+            .unwrap();
+        let moved = st.profile("a").unwrap();
+        assert_eq!(moved.folder_id.as_deref(), Some(folder.id.as_str()));
+
+        st.runtimes.connect(moved.clone()).await.unwrap();
+        assert!(closed.0.lock().unwrap().is_empty());
+        assert!(still_open(&st), "узел каталога и состояние сохранились");
+        // И сохранение формы после перетаскивания его не закрывает.
+        save_connection_blocking(&st, input(moved, SecretsInput::default())).unwrap();
+        assert!(closed.0.lock().unwrap().is_empty());
+        assert!(still_open(&st));
+    }
+
+    #[tokio::test]
+    async fn saving_new_connection_settings_closes_the_open_connection() {
+        for edit in [
+            (|p: &mut ConnectionProfile| p.hosts[0].host = "elsewhere".into())
+                as fn(&mut ConnectionProfile),
+            |p| p.pg.database = "orders".into(),
+            |p| p.pg.username = "other".into(),
+            |p| p.target_server_type = crate::conn::profile::TargetServerType::Standby,
+        ] {
+            let (_d, st, closed, saved) = open_connection().await;
+            let mut p = saved;
+            edit(&mut p);
+            save_connection_blocking(&st, input(p, SecretsInput::default())).unwrap();
+            assert_eq!(*closed.0.lock().unwrap(), vec!["a".to_string()]);
+            assert_eq!(st.runtimes.view("a").state, ConnState::Disconnected);
+        }
+    }
+
+    #[tokio::test]
+    async fn saving_a_new_or_cleared_password_closes_the_open_connection() {
+        for password in ["new-password", ""] {
+            let (_d, st, closed, saved) = open_connection().await;
+            let secrets = SecretsInput {
+                pg_password: Some(password.into()),
+                ..Default::default()
+            };
+            save_connection_blocking(&st, input(saved, secrets)).unwrap();
+            assert_eq!(
+                *closed.0.lock().unwrap(),
+                vec!["a".to_string()],
+                "пароль {password:?}"
+            );
+            assert_eq!(st.runtimes.view("a").state, ConnState::Disconnected);
+        }
+    }
+
+    #[test]
+    fn reconnect_decision() {
+        let p = sample_profile("a");
+        assert!(needs_reconnect(None, &p, false), "новый профиль");
+        assert!(needs_reconnect(Some(&p), &p, true), "секрет изменён");
+        assert!(!needs_reconnect(Some(&p), &p, false));
+        let ops = secret_ops(&p, &SecretsInput::default());
+        assert!(
+            !secrets_changed(&p, &ops),
+            "оставленный секрет и удаление неиспользуемых — не изменение"
+        );
+        let ops = secret_ops(
+            &p,
+            &SecretsInput {
+                pg_key_password: Some("k".into()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            !secrets_changed(&p, &ops),
+            "пароль ключа не используется профилем без сертификата"
+        );
     }
 
     #[test]

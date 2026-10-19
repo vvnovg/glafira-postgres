@@ -6,6 +6,7 @@ use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use tokio::runtime::Handle;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::AbortHandle;
 use tokio_postgres::Client;
@@ -19,18 +20,46 @@ pub const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Соединение, простоявшее дольше, перед выдачей проверяется пустым запросом.
 const VALIDATE_AFTER: Duration = Duration::from_secs(30);
 
-/// Соединение вместе с задачей, которая его обслуживает. При drop задача прерывается: так закрывается
-/// и молчащее соединение (см. `ConnectSpec::connect_with_handle`), которое drop одного `Client` не
-/// закрыл бы. Здоровое простаивающее соединение закрывается так же — сокет, без сообщения Terminate;
-/// сервер видит конец потока между командами и закрывает сеанс без записи в журнал.
+/// Соединение вместе с задачей, которая его обслуживает.
+///
+/// Здоровое соединение закрывается штатно: drop `Client` заставляет tokio-postgres отправить
+/// Terminate и закрыть сокет, и сервер не считает сеанс оборванным (`sessions_abandoned` в
+/// `pg_stat_database`, строка «unexpected EOF» в журнале при TLS). Если ответа на запрос ждут, Terminate
+/// не уйдёт никогда, поэтому после `grace` задача всё равно прерывается. Негодное соединение (таймаут,
+/// обрыв, неудачная проверка) закрывается сразу — `PgConn::kill`.
 struct PgConn {
     client: Client,
     abort: AbortHandle,
+    /// Runtime, в котором работает задача соединения: drop может случиться в потоке без runtime
+    /// (например, синхронная команда Tauri), а срок до принудительного закрытия должен отсчитываться всё равно.
+    runtime: Handle,
+    /// Сколько задача соединения ещё живёт после drop клиента (по умолчанию — таймаут подключения).
+    grace: Duration,
+    /// Закрыть сразу, не дожидаясь Terminate.
+    immediate: bool,
+}
+
+impl PgConn {
+    /// Соединение негодно: ответы могут не прийти никогда, Terminate не отправить. Задача прерывается сразу.
+    fn kill(mut self) {
+        self.immediate = true;
+    }
 }
 
 impl Drop for PgConn {
     fn drop(&mut self) {
-        self.abort.abort();
+        // Закрытое соединение ждать нечего: задача уже закончилась или будет прервана сейчас.
+        if self.immediate || self.client.is_closed() {
+            self.abort.abort();
+            return;
+        }
+        // `client` освобождается сразу после этой функции — тогда и уходит Terminate;
+        // страховка закрывает соединение, которое не смогло его отправить.
+        let (abort, grace) = (self.abort.clone(), self.grace);
+        self.runtime.spawn(async move {
+            tokio::time::sleep(grace).await;
+            abort.abort();
+        });
     }
 }
 
@@ -40,6 +69,8 @@ pub struct PgPool {
     permits: Arc<Semaphore>,
     /// Порог простоя, после которого соединение проверяется при выдаче (`VALIDATE_AFTER`, в тестах — меньше).
     validate_after: Duration,
+    /// Срок штатного закрытия соединения (`PgConn::grace`).
+    close_grace: Duration,
 }
 
 /// Что делать с простаивающим соединением при выдаче.
@@ -71,10 +102,12 @@ pub struct PooledClient {
 }
 
 impl PooledClient {
-    /// Соединение негодно (таймаут, обрыв, молчащий путь): прерывает его задачу и не возвращает в пул.
+    /// Соединение негодно (таймаут, обрыв, молчащий путь): сразу прерывает его задачу и не возвращает в пул.
     /// Обычного drop здесь мало — запрос без ответа не даёт tokio-postgres закрыть соединение.
     pub fn discard(mut self) {
-        self.conn.take();
+        if let Some(c) = self.conn.take() {
+            c.kill();
+        }
     }
 }
 
@@ -109,16 +142,27 @@ impl PgPool {
     /// Рабочий код использует `new` с порогом в 30 с.
     #[doc(hidden)]
     pub fn with_validate_after(spec: ConnectSpec, validate_after: Duration) -> Arc<Self> {
+        let close_grace = spec.timeout;
+        Self::build(spec, validate_after, close_grace)
+    }
+
+    fn build(spec: ConnectSpec, validate_after: Duration, close_grace: Duration) -> Arc<Self> {
         Arc::new(Self {
             spec,
             idle: Mutex::new(Vec::new()),
             permits: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
             validate_after,
+            close_grace,
         })
     }
 
     pub fn spec(&self) -> &ConnectSpec {
         &self.spec
+    }
+
+    /// Пул открывает соединения с этим адресом узла.
+    pub fn looks_at(&self, host: &str, port: u16) -> bool {
+        self.spec.host == host && self.spec.port == port
     }
 
     /// Свободное соединение или новое; при занятых трёх — ждёт освобождения.
@@ -134,17 +178,21 @@ impl PgPool {
                 continue;
             }
             match reuse_decision(since.elapsed(), self.validate_after) {
-                // Устаревшее и не прошедшее проверку соединение закрывается при drop `conn`.
+                // Устаревшее здоровое соединение закрывается штатно (drop `conn`).
                 Reuse::Discard => continue,
                 Reuse::AsIs => {}
                 // Проверка с таймаутом подключения: на молчащем пути (без RST и keepalive) пустой запрос
-                // иначе висит минутами, удерживая один из трёх permit. Ошибка и таймаут — соединение мёртво.
+                // иначе висит минутами, удерживая один из трёх permit. Ошибка и таймаут — соединение
+                // мёртво, ответ на пустой запрос может прийти когда угодно: закрываем сразу.
                 Reuse::Validate => {
                     match tokio::time::timeout(self.spec.timeout, conn.client.simple_query(""))
                         .await
                     {
                         Ok(Ok(_)) => {}
-                        Ok(Err(_)) | Err(_) => continue,
+                        Ok(Err(_)) | Err(_) => {
+                            conn.kill();
+                            continue;
+                        }
                     }
                 }
             }
@@ -155,8 +203,15 @@ impl PgPool {
             });
         }
         let (client, abort) = self.spec.connect_with_handle().await?;
+        let conn = PgConn {
+            client,
+            abort,
+            runtime: Handle::current(),
+            grace: self.close_grace,
+            immediate: false,
+        };
         Ok(PooledClient {
-            conn: Some(PgConn { client, abort }),
+            conn: Some(conn),
             pool: self.clone(),
             _permit: permit,
         })
@@ -166,8 +221,8 @@ impl PgPool {
         self.idle.lock_safe().pop()
     }
 
-    /// Закрывает соединения, простоявшие не меньше `max_idle` (их задачи прерываются при drop);
-    /// возвращает, сколько закрыто.
+    /// Закрывает соединения, простоявшие не меньше `max_idle` (штатно: Terminate, затем, если не вышло,
+    /// принудительно); возвращает, сколько закрыто.
     pub fn close_idle(&self, max_idle: Duration) -> usize {
         let mut idle = self.idle.lock_safe();
         let before = idle.len();
@@ -197,13 +252,19 @@ impl PoolRegistry {
         self.pools.lock_safe().get(key).cloned()
     }
 
-    /// Пул по ключу; если его нет — новый из `spec` (успевший раньше поток выигрывает).
+    /// Пул по ключу; если его нет или он смотрит на другой адрес узла (узел сменил адрес, пока пул жил) —
+    /// новый из `spec`, прежний вытесняется. Пул того же адреса остаётся со своей спецификацией:
+    /// успевший раньше поток выигрывает, а смена пароля и сертификатов закрывает пулы подключения целиком.
     pub fn insert_if_absent(&self, key: PoolKey, spec: ConnectSpec) -> Arc<PgPool> {
-        self.pools
-            .lock_safe()
-            .entry(key)
-            .or_insert_with(|| PgPool::new(spec))
-            .clone()
+        let mut pools = self.pools.lock_safe();
+        if let Some(p) = pools.get(&key)
+            && p.looks_at(&spec.host, spec.port)
+        {
+            return p.clone();
+        }
+        let pool = PgPool::new(spec);
+        pools.insert(key, pool.clone());
+        pool
     }
 
     pub fn evict(&self, key: &PoolKey) {
@@ -276,12 +337,42 @@ mod tests {
     fn existing_pool_keeps_its_spec() {
         let r = PoolRegistry::default();
         let first = r.insert_if_absent(key("c", "m", "d"), spec());
-        let mut other = spec();
-        other.host = "other".into();
-        let again = r.insert_if_absent(key("c", "m", "d"), other);
+        // Тот же адрес узла: пул остаётся со своей спецификацией, остальное в новой не важно.
+        let mut same_address = spec();
+        same_address.user = "other".into();
+        let again = r.insert_if_absent(key("c", "m", "d"), same_address);
         assert!(Arc::ptr_eq(&first, &again));
-        // Спецификация меняется только вытеснением пула (подключение закрыто, адрес узла сменился).
-        assert_eq!(again.spec().host, "h");
+        assert_eq!(again.spec().user, "u");
+    }
+
+    #[test]
+    fn pool_is_replaced_when_the_member_changes_address() {
+        let r = PoolRegistry::default();
+        let first = r.insert_if_absent(key("c", "m", "d"), spec());
+        let weak_first = Arc::downgrade(&first);
+
+        let mut other_host = spec();
+        other_host.host = "other".into();
+        let by_host = r.insert_if_absent(key("c", "m", "d"), other_host.clone());
+        assert!(!Arc::ptr_eq(&first, &by_host));
+        assert_eq!(by_host.spec().host, "other");
+        assert!(Arc::ptr_eq(&by_host, &r.get(&key("c", "m", "d")).unwrap()));
+        drop(first);
+        assert!(weak_first.upgrade().is_none(), "прежний пул освобождён");
+        // Тот же (новый) адрес — пул уже тот.
+        let again = r.insert_if_absent(key("c", "m", "d"), other_host);
+        assert!(Arc::ptr_eq(&by_host, &again));
+
+        let mut other_port = spec();
+        other_port.host = "other".into();
+        other_port.port = 6432;
+        let by_port = r.insert_if_absent(key("c", "m", "d"), other_port);
+        assert!(!Arc::ptr_eq(&by_host, &by_port));
+        assert_eq!(
+            (by_port.spec().host.as_str(), by_port.spec().port),
+            ("other", 6432)
+        );
+        assert_eq!(r.keys().len(), 1);
     }
 
     #[test]
@@ -357,15 +448,30 @@ mod tests {
     }
 
     const WAIT: Duration = Duration::from_secs(2);
+    /// Срок штатного закрытия, который тест не должен ждать.
+    const LONG_GRACE: Duration = Duration::from_secs(60);
+
+    /// Пул, где принудительное закрытие наступило бы через минуту: что закрылось раньше — закрылось сразу.
+    fn pool_with_long_grace(port: u16, validate_after: Duration) -> Arc<PgPool> {
+        PgPool::build(
+            stalling_spec(port, Duration::from_millis(300)),
+            validate_after,
+            LONG_GRACE,
+        )
+    }
 
     #[tokio::test]
     async fn discard_aborts_the_connection_and_keeps_it_out_of_idle() {
         let server = testutil::stalling_pg_server();
-        let pool = PgPool::new(stalling_spec(server.port, Duration::from_secs(1)));
+        let pool = pool_with_long_grace(server.port, VALIDATE_AFTER);
         let c = pool.get().await.unwrap();
         stall(&c).await;
         c.discard();
-        assert!(server.wait_closed(1, WAIT).await, "сокет закрыт");
+        assert!(
+            server.wait_closed(1, WAIT).await,
+            "сокет закрыт сразу, не после срока штатного закрытия"
+        );
+        assert_eq!(server.terminated(), 0, "ответы ждали: Terminate не уходит");
         assert_eq!(
             pool.idle_count(),
             0,
@@ -386,47 +492,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closing_idle_connections_aborts_their_tasks() {
+    async fn closing_a_healthy_idle_connection_sends_terminate() {
         let server = testutil::stalling_pg_server();
-        let pool = PgPool::new(stalling_spec(server.port, Duration::from_secs(1)));
+        let pool = pool_with_long_grace(server.port, VALIDATE_AFTER);
         let c = pool.get().await.unwrap();
-        stall(&c).await;
         drop(c);
         assert_eq!(pool.idle_count(), 1);
         assert_eq!(pool.close_idle(Duration::ZERO), 1);
         assert!(
-            server.wait_closed(1, WAIT).await,
-            "close_idle закрывает сокет"
+            server.wait_terminated(1, WAIT).await,
+            "сервер получил Terminate, а не обрыв потока"
         );
+        assert!(server.wait_closed(1, WAIT).await);
     }
 
     #[tokio::test]
-    async fn eviction_aborts_idle_connections() {
+    async fn evicting_a_pool_closes_its_healthy_idle_connections_with_terminate() {
         let server = testutil::stalling_pg_server();
         let registry = PoolRegistry::default();
         let k = key("c", "m", "d");
         let pool = registry.insert_if_absent(
             k.clone(),
-            stalling_spec(server.port, Duration::from_secs(1)),
+            stalling_spec(server.port, Duration::from_secs(60)),
         );
-        let c = pool.get().await.unwrap();
-        stall(&c).await;
-        drop(c);
+        drop(pool.get().await.unwrap());
         drop(pool);
-        registry.evict(&k);
-        assert!(
-            server.wait_closed(1, WAIT).await,
-            "вытеснение пула закрывает сокет"
-        );
+        registry.evict_connection("c");
+        assert!(server.wait_terminated(1, WAIT).await);
+        assert!(server.wait_closed(1, WAIT).await);
     }
 
     #[tokio::test]
-    async fn failed_validation_aborts_the_stalled_connection() {
+    async fn dropping_a_pool_outside_the_runtime_still_closes_gracefully() {
         let server = testutil::stalling_pg_server();
-        let pool = PgPool::with_validate_after(
-            stalling_spec(server.port, Duration::from_millis(300)),
-            Duration::ZERO,
+        let pool = pool_with_long_grace(server.port, VALIDATE_AFTER);
+        drop(pool.get().await.unwrap());
+        // Синхронная команда Tauri вытесняет пул из потока без runtime tokio.
+        std::thread::spawn(move || drop(pool)).join().unwrap();
+        assert!(server.wait_terminated(1, WAIT).await);
+        assert!(server.wait_closed(1, WAIT).await);
+    }
+
+    #[tokio::test]
+    async fn closing_a_stalled_idle_connection_falls_back_to_abort_after_the_grace_period() {
+        let server = testutil::stalling_pg_server();
+        let pool = PgPool::new(stalling_spec(server.port, Duration::from_millis(400)));
+        let c = pool.get().await.unwrap();
+        stall(&c).await;
+        drop(c);
+        assert_eq!(pool.close_idle(Duration::ZERO), 1);
+        // Ответ на запрос ждут: Terminate не уйдёт, но и обрывать сразу незачем — срок штатного закрытия.
+        assert!(
+            !server.wait_closed(1, Duration::from_millis(100)).await,
+            "до конца срока сокет открыт"
         );
+        assert!(
+            server.wait_closed(1, WAIT).await,
+            "по истечении срока задача прервана"
+        );
+        assert_eq!((server.closed(), server.terminated()), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn failed_validation_aborts_the_stalled_connection_at_once() {
+        let server = testutil::stalling_pg_server();
+        let pool = pool_with_long_grace(server.port, Duration::ZERO);
         let c = pool.get().await.unwrap();
         stall(&c).await;
         drop(c);
@@ -438,8 +568,9 @@ mod tests {
             .unwrap();
         assert!(
             server.wait_closed(1, WAIT).await,
-            "проверенное и негодное соединение закрыто"
+            "негодное соединение закрыто сразу, не по сроку штатного закрытия"
         );
+        assert_eq!(server.terminated(), 0);
         assert_eq!(server.accepted(), 2);
         drop(fresh);
     }

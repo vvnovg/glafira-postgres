@@ -298,3 +298,79 @@ async fn pid_query(
 ) -> Result<tokio_postgres::Row, tokio_postgres::Error> {
     c.query_one("SELECT pg_backend_pid()", &[]).await
 }
+
+/// Сеансов `template1`, закончившихся обрывом потока без Terminate (`sessions_abandoned`, PostgreSQL 14+).
+async fn abandoned(mon: &tokio_postgres::Client) -> i64 {
+    mon.query_one(
+        "SELECT sessions_abandoned FROM pg_stat_database WHERE datname = 'template1'",
+        &[],
+    )
+    .await
+    .unwrap()
+    .get(0)
+}
+
+/// Ждёт, пока сеанс `backend_pid` исчезнет: к этому моменту сервер уже учёл его завершение в статистике.
+async fn wait_session_gone(mon: &tokio_postgres::Client, backend_pid: i32) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let alive: i64 = mon
+            .query_one(
+                "SELECT count(*) FROM pg_stat_activity WHERE pid = $1",
+                &[&backend_pid],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if alive == 0 {
+            return;
+        }
+        assert!(Instant::now() < deadline, "сеанс {backend_pid} не закрылся");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Здоровое простаивающее соединение закрывается штатно: сервер получает Terminate и не считает сеанс
+/// оборванным (`sessions_abandoned`, а при TLS — строка «unexpected EOF» в журнале). `discard` обрывает
+/// соединение сразу и оборванным его и считает — это контрольная проверка самого замера.
+#[tokio::test]
+async fn idle_close_ends_the_session_cleanly_but_discard_abandons_it() {
+    let Some(addr) = single() else { return };
+    let mon = spec(
+        &addr,
+        "postgres",
+        SslMode::Disable,
+        common::PG_PASSWORD_VALUE,
+    )
+    .connect()
+    .await
+    .unwrap();
+    let pool = PgPool::new(spec(
+        &addr,
+        "template1",
+        SslMode::Disable,
+        common::PG_PASSWORD_VALUE,
+    ));
+    let before = abandoned(&mon).await;
+
+    let c = pool.get().await.unwrap();
+    let clean = pid(&c).await;
+    drop(c);
+    assert_eq!(pool.close_idle(Duration::ZERO), 1);
+    wait_session_gone(&mon, clean).await;
+    assert_eq!(
+        abandoned(&mon).await,
+        before,
+        "штатное закрытие не оборванный сеанс"
+    );
+
+    let c = pool.get().await.unwrap();
+    let dropped = pid(&c).await;
+    c.discard();
+    wait_session_gone(&mon, dropped).await;
+    assert_eq!(
+        abandoned(&mon).await,
+        before + 1,
+        "обрыв без Terminate сервер считает оборванным сеансом"
+    );
+}

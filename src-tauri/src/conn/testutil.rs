@@ -187,12 +187,14 @@ pub fn tls_server(server: &Issued) -> FakeServer {
 
 /// «Сервер PostgreSQL», который не отвечает на запросы. Принимает любое число соединений, на
 /// стартовое сообщение отвечает `AuthenticationOk` и `ReadyForQuery` (без пароля; на `SSLRequest` —
-/// `N`), дальше только читает. Клиент подключается, но ответа на запрос не получит никогда: так
-/// выглядит молчащий путь после успешного подключения. По счётчикам видно, закрыл ли клиент сокет.
+/// `N`), дальше только читает сообщения клиента. Клиент подключается, но ответа на запрос не получит
+/// никогда: так выглядит молчащий путь после успешного подключения. По счётчикам видно, закрыл ли
+/// клиент сокет и отправил ли перед этим сообщение Terminate (`X`).
 pub struct StallingPg {
     pub port: u16,
     accepted: Arc<AtomicUsize>,
     closed: Arc<AtomicUsize>,
+    terminated: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
 }
 
@@ -206,17 +208,31 @@ impl StallingPg {
         self.closed.load(Ordering::SeqCst)
     }
 
+    /// Сколько соединений клиент завершил сообщением Terminate.
+    pub fn terminated(&self) -> usize {
+        self.terminated.load(Ordering::SeqCst)
+    }
+
     /// Ждёт, пока клиент закроет не меньше `n` соединений, но не дольше `limit`.
     pub async fn wait_closed(&self, n: usize, limit: Duration) -> bool {
-        let deadline = Instant::now() + limit;
-        while self.closed() < n {
-            if Instant::now() >= deadline {
-                return false;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        true
+        wait_for(&self.closed, n, limit).await
     }
+
+    /// Ждёт, пока клиент отправит Terminate не меньше `n` раз, но не дольше `limit`.
+    pub async fn wait_terminated(&self, n: usize, limit: Duration) -> bool {
+        wait_for(&self.terminated, n, limit).await
+    }
+}
+
+async fn wait_for(counter: &AtomicUsize, n: usize, limit: Duration) -> bool {
+    let deadline = Instant::now() + limit;
+    while counter.load(Ordering::SeqCst) < n {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    true
 }
 
 impl Drop for StallingPg {
@@ -232,11 +248,13 @@ pub fn stalling_pg_server() -> StallingPg {
         port,
         accepted: Arc::default(),
         closed: Arc::default(),
+        terminated: Arc::default(),
         stop: Arc::default(),
     };
-    let (accepted, closed, stop) = (
+    let (accepted, closed, terminated, stop) = (
         server.accepted.clone(),
         server.closed.clone(),
+        server.terminated.clone(),
         server.stop.clone(),
     );
     std::thread::spawn(move || {
@@ -244,9 +262,9 @@ pub fn stalling_pg_server() -> StallingPg {
             match listener.accept() {
                 Ok((tcp, _)) => {
                     accepted.fetch_add(1, Ordering::SeqCst);
-                    let closed = closed.clone();
+                    let (closed, terminated) = (closed.clone(), terminated.clone());
                     std::thread::spawn(move || {
-                        serve_stalling(tcp);
+                        serve_stalling(tcp, &terminated);
                         closed.fetch_add(1, Ordering::SeqCst);
                     });
                 }
@@ -257,8 +275,8 @@ pub fn stalling_pg_server() -> StallingPg {
     server
 }
 
-/// Одно соединение: рукопожатие, затем чтение до конца потока.
-fn serve_stalling(mut tcp: TcpStream) {
+/// Одно соединение: рукопожатие, затем чтение сообщений клиента до конца потока (Terminate считается).
+fn serve_stalling(mut tcp: TcpStream, terminated: &AtomicUsize) {
     // Принятый сокет наследует неблокирующий режим слушателя (macOS, BSD).
     let _ = tcp.set_nonblocking(false);
     let _ = tcp.set_nodelay(true);
@@ -287,6 +305,19 @@ fn serve_stalling(mut tcp: TcpStream) {
     if tcp.write_all(&reply).is_err() {
         return;
     }
-    let mut buf = [0u8; 4096];
-    while matches!(tcp.read(&mut buf), Ok(n) if n > 0) {}
+    // Сообщение клиента: тип (1 байт), длина вместе с самой собой (4 байта), содержимое.
+    loop {
+        let mut tag = [0u8; 1];
+        let mut len = [0u8; 4];
+        if tcp.read_exact(&mut tag).is_err() || tcp.read_exact(&mut len).is_err() {
+            return;
+        }
+        let mut body = vec![0u8; (u32::from_be_bytes(len) as usize).saturating_sub(4)];
+        if tcp.read_exact(&mut body).is_err() {
+            return;
+        }
+        if tag[0] == b'X' {
+            terminated.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 }
