@@ -2,8 +2,11 @@
 
 mod common;
 
+use std::time::Duration;
+
 use glafira_pg_lib::conn::errors::from_pg;
 use glafira_pg_lib::conn::pg::ConnectSpec;
+use glafira_pg_lib::conn::pool::PgPool;
 use glafira_pg_lib::conn::profile::SslMode;
 use glafira_pg_lib::error::ErrorCode;
 use glafira_pg_lib::secrets::{MemoryStore, PG_PASSWORD, SecretStore, secret_key};
@@ -103,4 +106,76 @@ async fn closed_port_and_statement_timeout() {
     .unwrap();
     let err = c.simple_query("SELECT pg_sleep(6)").await.unwrap_err();
     assert_eq!(from_pg(&err).key, "errors.pg.statementTimeout");
+}
+
+async fn pid(c: &tokio_postgres::Client) -> i32 {
+    c.query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .unwrap()
+        .get(0)
+}
+
+#[tokio::test]
+async fn pool_reuses_limits_and_closes_idle() {
+    let Some(addr) = single() else { return };
+    let pool = PgPool::new(spec(
+        &addr,
+        "postgres",
+        SslMode::Disable,
+        common::PG_PASSWORD_VALUE,
+    ));
+    let a = pool.get().await.unwrap();
+    let first = pid(&a).await;
+    drop(a);
+    assert_eq!(pool.idle_count(), 1);
+    let again = pool.get().await.unwrap();
+    assert_eq!(pid(&again).await, first, "соединение переиспользуется");
+
+    let b = pool.get().await.unwrap();
+    let c = pool.get().await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), pool.get())
+            .await
+            .is_err(),
+        "четвёртое соединение ждёт"
+    );
+    drop(b);
+    let d = tokio::time::timeout(Duration::from_secs(2), pool.get())
+        .await
+        .unwrap()
+        .unwrap();
+    drop((again, c, d));
+    assert_eq!(pool.idle_count(), 3);
+    assert_eq!(pool.close_idle(Duration::ZERO), 3);
+    assert_eq!(pool.idle_count(), 0);
+}
+
+#[tokio::test]
+async fn terminated_connection_is_replaced() {
+    let Some(addr) = single() else { return };
+    let pool = PgPool::new(spec(
+        &addr,
+        "postgres",
+        SslMode::Disable,
+        common::PG_PASSWORD_VALUE,
+    ));
+    let a = pool.get().await.unwrap();
+    let victim = pid(&a).await;
+    drop(a);
+    let killer = spec(
+        &addr,
+        "postgres",
+        SslMode::Disable,
+        common::PG_PASSWORD_VALUE,
+    )
+    .connect()
+    .await
+    .unwrap();
+    killer
+        .execute("SELECT pg_terminate_backend($1)", &[&victim])
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let b = pool.get().await.unwrap();
+    assert_ne!(pid(&b).await, victim);
 }
