@@ -13,6 +13,7 @@ pub mod settings;
 pub mod state;
 pub mod storage;
 pub mod sync;
+pub mod topology;
 
 use std::sync::Arc;
 
