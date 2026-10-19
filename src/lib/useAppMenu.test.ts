@@ -95,6 +95,7 @@ vi.mock("@tauri-apps/api/menu", () => {
 });
 
 import { i18n } from "../i18n";
+import { useDiagnosticsRequest } from "../state/diagnosticsRequest";
 import { useWorkspace } from "../state/workspace";
 import { useAppMenu } from "./useAppMenu";
 
@@ -117,6 +118,7 @@ beforeEach(() => {
   h.previous = [];
   h.channels.clear();
   useWorkspace.setState({ tabs: [], activeId: null });
+  useDiagnosticsRequest.setState({ pending: false });
 });
 
 afterEach(async () => {
@@ -141,7 +143,7 @@ describe("useAppMenu", () => {
     renderHook(() => useAppMenu());
     await waitFor(() => expect(helpSubmenu()).toBeDefined());
     expect(helpSubmenu()?.opts.text).toBe("Справка");
-    expect(labels()).toEqual(["Руководство Glafira", "—", "О программе"]);
+    expect(labels()).toEqual(["Руководство Glafira", "—", "О программе", "Собрать диагностику…"]);
     // Стандартное пустое Help из меню по умолчанию заменено нашим; остальные подменю на месте.
     expect(h.appMenu?.items.some((i) => i.opts.id === "__tauri_help_menu__")).toBe(false);
     expect(h.appMenu?.items.some((i) => i.opts.id === "__tauri_window_menu__")).toBe(true);
@@ -156,12 +158,12 @@ describe("useAppMenu", () => {
     await waitFor(() => expect(helpSubmenu()?.opts.text).toBe("Справка"));
     await act(() => i18n.changeLanguage("en"));
     await waitFor(() => expect(helpSubmenu()?.opts.text).toBe("Help"));
-    expect(labels()).toEqual(["Glafira Guide", "—", "About Glafira"]);
+    expect(labels()).toEqual(["Glafira Guide", "—", "About Glafira", "Collect Diagnostics…"]);
     // Прежнее меню освобождено.
     expect(h.menus[0].closed).toBe(true);
   });
 
-  it("пункты открывают справку и «О программе»", async () => {
+  it("пункты открывают справку, «О программе» и сбор диагностики", async () => {
     setUA("Macintosh");
     renderHook(() => useAppMenu());
     await waitFor(() => expect(helpSubmenu()).toBeDefined());
@@ -171,6 +173,12 @@ describe("useAppMenu", () => {
 
     click("about");
     expect(useWorkspace.getState().activeId).toBe("about");
+    expect(useDiagnosticsRequest.getState().pending).toBe(false);
+
+    useWorkspace.setState({ tabs: [], activeId: null });
+    click("diagnostics");
+    expect(useWorkspace.getState().activeId).toBe("about");
+    expect(useDiagnosticsRequest.getState().pending).toBe(true);
   });
 
   it("хэндлы освобождаются: стандартный Help, прежнее меню из setAsAppMenu, пункты заменённого меню", async () => {

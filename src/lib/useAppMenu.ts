@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { Menu, MenuItem, PredefinedMenuItem, Submenu } from "@tauri-apps/api/menu";
 import { i18n } from "../i18n";
+import { useDiagnosticsRequest } from "../state/diagnosticsRequest";
 import { useWorkspace } from "../state/workspace";
 
 /** id пустого подменю Help в меню Tauri по умолчанию (`tauri::menu::HELP_SUBMENU_ID`). */
@@ -44,6 +45,14 @@ async function buildAppMenu(): Promise<BuiltMenu> {
     await MenuItem.new({ id: id("guide"), text: t("menu.guide"), accelerator: "CmdOrCtrl+Shift+/", action: () => open({ kind: "help" }) }),
     await PredefinedMenuItem.new({ item: "Separator" }),
     await MenuItem.new({ id: id("about"), text: t("menu.about"), action: () => open({ kind: "about" }) }),
+    await MenuItem.new({
+      id: id("diagnostics"),
+      text: t("menu.diagnostics"),
+      action: () => {
+        useDiagnosticsRequest.getState().request();
+        open({ kind: "about" });
+      },
+    }),
   ];
   const help = await Submenu.new({ id: id("glafira-help"), text: t("menu.help"), items });
   await menu.append(help);

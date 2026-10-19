@@ -1,7 +1,10 @@
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { save } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api/client";
 import { tr } from "../../i18n/text";
+import { useDiagnosticsRequest } from "../../state/diagnosticsRequest";
 import { ErrorBanner } from "../common/ErrorBanner";
 
 export function AboutPanel() {
@@ -9,6 +12,27 @@ export function AboutPanel() {
   const info = useQuery({ queryKey: ["app-info"], queryFn: api.getAppInfo });
   const license = useQuery({ queryKey: ["license"], queryFn: api.getLicenseStatus });
   const policy = useQuery({ queryKey: ["policy"], queryFn: api.getPolicyStatus });
+  const [saved, setSaved] = useState<string | null>(null);
+  const diag = useMutation({
+    mutationFn: async () => {
+      setSaved(null);
+      const date = new Date().toISOString().slice(0, 10);
+      const path = await save({ defaultPath: `diagnostics-${date}.zip`, filters: [{ name: "ZIP", extensions: ["zip"] }] });
+      if (!path) return null;
+      await api.exportDiagnostics(path);
+      return path;
+    },
+    onSuccess: (path) => {
+      if (path) setSaved(path);
+    },
+  });
+  // «Собрать диагностику…» из меню Help: тот же сбор, что и по кнопке; запрос забирается один раз.
+  // Пока сбор идёт, запрос снимается без второго сбора и второго диалога сохранения.
+  const diagRequested = useDiagnosticsRequest((s) => s.pending);
+  const { mutate: collect, isPending: collecting } = diag;
+  useEffect(() => {
+    if (diagRequested && useDiagnosticsRequest.getState().consume() && !collecting) collect();
+  }, [diagRequested, collect, collecting]);
 
   if (info.error) return <ErrorBanner error={info.error} onRetry={() => info.refetch()} />;
   const i = info.data;
@@ -33,6 +57,17 @@ export function AboutPanel() {
       ))}
       <p className="muted">{t("about.dataDir")} <code>{i.dataDir}</code></p>
       <p className="muted">{t("about.logDir")} <code>{i.logDir}</code></p>
+      <section className="panel">
+        <h3>{t("about.diagnostics.title")}</h3>
+        <p className="muted">{t("about.diagnostics.hint")}</p>
+        <div className="toolbar">
+          <button type="button" disabled={diag.isPending} onClick={() => diag.mutate()}>
+            {t("about.diagnostics.collect")}
+          </button>
+        </div>
+        {saved && <p role="status">{t("about.diagnostics.saved", { path: saved })}</p>}
+        {diag.error && <ErrorBanner error={diag.error} />}
+      </section>
     </div>
   );
 }
