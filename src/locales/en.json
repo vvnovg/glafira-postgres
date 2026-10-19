@@ -50,7 +50,20 @@
     "connections": {
       "noId": "The connection has no ID",
       "emptyName": "Connection name cannot be empty",
-      "notFound": "Connection {{id}} not found"
+      "notFound": "Connection {{id}} not found",
+      "serverHosts": "A server connection needs exactly one host",
+      "hostListCount": "Specify from 1 to 16 hosts",
+      "hostInvalid": "Invalid host name: “{{host}}”",
+      "portInvalid": "Port must be from 1 to 65535",
+      "pgUserRequired": "Specify the PostgreSQL user",
+      "pgDatabaseRequired": "Specify the default database",
+      "timeoutRange": "Connection timeout must be from 1 to 120 seconds",
+      "pathNotAbsolute": "The file path must be absolute: {{path}}",
+      "keyRequired": "Specify the client key file for a PEM certificate",
+      "patroniUrls": "Specify from 1 to 8 Patroni REST API addresses",
+      "patroniUrl": "The Patroni API address must start with http:// or https://: {{url}}",
+      "overrideMember": "Specify the member name for the address override",
+      "overrideDuplicate": "Address override for {{member}} is specified twice"
     },
     "storage": {
       "writeFailed": "Failed to write {{path}}: {{error}}",

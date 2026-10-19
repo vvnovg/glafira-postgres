@@ -50,7 +50,20 @@
     "connections": {
       "noId": "У подключения нет идентификатора",
       "emptyName": "Имя подключения не может быть пустым",
-      "notFound": "Подключение {{id}} не найдено"
+      "notFound": "Подключение {{id}} не найдено",
+      "serverHosts": "У подключения к серверу должен быть ровно один хост",
+      "hostListCount": "Укажите от 1 до 16 хостов",
+      "hostInvalid": "Неверное имя хоста: «{{host}}»",
+      "portInvalid": "Порт — от 1 до 65535",
+      "pgUserRequired": "Укажите пользователя PostgreSQL",
+      "pgDatabaseRequired": "Укажите базу данных по умолчанию",
+      "timeoutRange": "Таймаут подключения — от 1 до 120 секунд",
+      "pathNotAbsolute": "Путь к файлу должен быть абсолютным: {{path}}",
+      "keyRequired": "Для PEM-сертификата укажите файл ключа",
+      "patroniUrls": "Укажите от 1 до 8 адресов REST API Patroni",
+      "patroniUrl": "Адрес API Patroni должен начинаться с http:// или https://: {{url}}",
+      "overrideMember": "Укажите имя участника для подмены адреса",
+      "overrideDuplicate": "Подмена адреса для {{member}} указана дважды"
     },
     "storage": {
       "writeFailed": "Не удалось записать {{path}}: {{error}}",

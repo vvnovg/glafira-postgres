@@ -1,6 +1,7 @@
 #[macro_use]
 pub mod i18n;
 pub mod commands;
+pub mod conn;
 pub mod diagnostics;
 pub mod error;
 pub mod license;
@@ -38,6 +39,15 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::app::get_app_info,
+            commands::app::export_diagnostics,
+            commands::connections::list_connections,
+            commands::connections::save_connection,
+            commands::connections::delete_connection,
+            commands::folders::list_folders,
+            commands::folders::create_folder,
+            commands::folders::rename_folder,
+            commands::folders::delete_folder,
+            commands::folders::move_items,
             commands::license::get_policy_status,
             commands::license::get_license_status,
             commands::license::set_license_key,

@@ -1,4 +1,6 @@
 pub mod app;
+pub mod connections;
+pub mod folders;
 pub mod license;
 pub mod settings;
 
