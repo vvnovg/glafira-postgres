@@ -53,6 +53,8 @@ pub struct TopologyEvent {
 }
 
 /// События между двумя опросами; время событий — момент второго опроса.
+/// `TimelineChanged` — только рост таймлайна кластера: его падение значит лишь, что узел с
+/// наибольшим таймлайном стал недоступен (таймлайн PostgreSQL не убывает).
 pub fn diff(prev: &Topology, next: &Topology) -> Vec<TopologyEvent> {
     let mut out = Vec::new();
     let mut push = |event: EventKind| {
@@ -68,7 +70,7 @@ pub fn diff(prev: &Topology, next: &Topology) -> Vec<TopologyEvent> {
         push(EventKind::LeaderChanged { from, to });
     }
     if let (Some(a), Some(b)) = (prev.cluster_timeline(), next.cluster_timeline())
-        && a != b
+        && b > a
     {
         push(EventKind::TimelineChanged { from: a, to: b });
     }
@@ -120,21 +122,37 @@ pub fn diff(prev: &Topology, next: &Topology) -> Vec<TopologyEvent> {
     out
 }
 
+/// Журнал событий: до `CAP` записей, в памяти.
 #[derive(Debug, Default)]
 pub struct Journal {
     events: VecDeque<TopologyEvent>,
+    /// Наибольший таймлайн, уже записанный в журнал.
+    high_water: Option<i64>,
 }
 
 impl Journal {
     pub const CAP: usize = 500;
 
-    pub fn extend(&mut self, events: &[TopologyEvent]) {
+    /// Записывает события и возвращает принятые: только их нужно передать в UI.
+    /// `TimelineChanged`, у которого `to` не выше уже записанного таймлайна, отбрасывается:
+    /// это повтор, когда узел с высоким таймлайном возвращается из недоступности.
+    /// Остальные события проходят без изменений.
+    pub fn extend(&mut self, events: &[TopologyEvent]) -> Vec<TopologyEvent> {
+        let mut accepted = Vec::with_capacity(events.len());
         for e in events {
+            if let EventKind::TimelineChanged { to, .. } = e.event {
+                if self.high_water.is_some_and(|hw| to <= hw) {
+                    continue;
+                }
+                self.high_water = Some(to);
+            }
             if self.events.len() == Self::CAP {
                 self.events.pop_front();
             }
             self.events.push_back(e.clone());
+            accepted.push(e.clone());
         }
+        accepted
     }
 
     /// Новые сверху.
@@ -257,6 +275,22 @@ mod tests {
     }
 
     #[test]
+    fn timeline_drop_is_not_reported() {
+        // Единственный узел с TL 2 стал недоступен, реплика всё ещё на TL 1: это не откат таймлайна.
+        let mut prev = topo(vec![member("a", Role::Replica), member("b", Role::Primary)]);
+        prev.members[1].timeline = Some(2);
+        let mut next = prev.clone();
+        next.observed_at_ms = 2_000;
+        next.members[1].reachable = false;
+        next.members[1].role = Role::Unknown;
+        next.members[1].state = None;
+
+        assert_eq!(prev.cluster_timeline(), Some(2));
+        assert_eq!(next.cluster_timeline(), Some(1));
+        assert!(!has_timeline_change(&diff(&prev, &next)));
+    }
+
+    #[test]
     fn journal_keeps_500_newest_first() {
         let mut j = Journal::default();
         let events: Vec<TopologyEvent> = (0..510)
@@ -270,6 +304,21 @@ mod tests {
         assert_eq!(list.len(), Journal::CAP);
         assert_eq!(list[0].at_ms, 509);
         assert_eq!(list.last().unwrap().at_ms, 10);
+    }
+
+    #[test]
+    fn journal_drops_repeated_timeline_change() {
+        let tl = |at_ms, from, to| TopologyEvent {
+            at_ms,
+            event: EventKind::TimelineChanged { from, to },
+        };
+        let mut j = Journal::default();
+        assert_eq!(j.extend(&[tl(1, 1, 2)]), vec![tl(1, 1, 2)]);
+        // Узел с TL 2 вернулся после недоступности: diff снова даёт 1→2, журнал его не принимает.
+        assert!(j.extend(&[tl(2, 1, 2)]).is_empty());
+        assert_eq!(j.extend(&[tl(3, 2, 3)]), vec![tl(3, 2, 3)]);
+        let at: Vec<i64> = j.newest_first().iter().map(|e| e.at_ms).collect();
+        assert_eq!(at, vec![3, 1]);
     }
 
     #[test]
