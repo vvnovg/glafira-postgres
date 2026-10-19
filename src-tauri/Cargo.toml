@@ -32,6 +32,10 @@ plist = "1"
 dirs = "7"
 sys-locale = "0.3"
 percent-encoding = "2"
+tokio-postgres = "0.7"
+postgres-openssl = "0.5"
+openssl = { version = "0.10", features = ["vendored"] }
+rustls-native-certs = "0.8"
 license-format = { git = "https://github.com/vvnovg/kafka-explorer", rev = "1d32d13d217c64ae1341da3002b88f079b834088" }
 
 [target.'cfg(windows)'.dependencies]

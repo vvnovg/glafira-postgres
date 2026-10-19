@@ -101,6 +101,29 @@
       "invalidJson": "The file is damaged or is not JSON: {{error}}",
       "unsupportedConnection": "Not supported by this version of Glafira (update the app): {{error}}",
       "duplicateId": "Duplicate connection id in the file"
+    },
+    "pg": {
+      "authFailed": "Authentication failed: check the user, the password and pg_hba.conf",
+      "databaseNotFound": "The database does not exist",
+      "notAuthorized": "Not enough privileges for the query",
+      "statementTimeout": "The query was interrupted by statement_timeout",
+      "tooManyConnections": "The server has no free connections (max_connections)",
+      "cannotConnectNow": "The server is starting up or in recovery",
+      "serverError": "PostgreSQL error {{code}}",
+      "passwordMissing": "The server asked for a password, but none is saved or found in ~/.pgpass",
+      "tlsNotSupported": "The server does not accept TLS connections: choose sslmode prefer or disable",
+      "hostnameMismatch": "The server host name does not match its certificate",
+      "caUntrusted": "The server certificate is not signed by a trusted CA",
+      "tlsError": "TLS connection error",
+      "connectionClosed": "The connection to the server was closed",
+      "connectionFailed": "Could not connect to the server",
+      "tcpFailed": "Could not reach {{host}}:{{port}}",
+      "connectTimeout": "No answer from {{host}}:{{port}} within {{secs}} s",
+      "tlsSetup": "Could not prepare TLS settings"
+    },
+    "tls": {
+      "readFailed": "Cannot read {{path}}",
+      "badFile": "{{path}} is not a valid certificate or key, or the password is wrong"
     }
   },
   "sidebar": {

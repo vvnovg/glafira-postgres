@@ -101,6 +101,29 @@
       "invalidJson": "Файл повреждён или это не JSON: {{error}}",
       "unsupportedConnection": "Не поддерживается этой версией Glafira (обновите приложение): {{error}}",
       "duplicateId": "Повторяющийся id подключения в файле"
+    },
+    "pg": {
+      "authFailed": "Аутентификация не прошла: проверьте пользователя, пароль и pg_hba.conf",
+      "databaseNotFound": "База данных не существует",
+      "notAuthorized": "Недостаточно прав для запроса",
+      "statementTimeout": "Запрос прерван по statement_timeout",
+      "tooManyConnections": "На сервере нет свободных соединений (max_connections)",
+      "cannotConnectNow": "Сервер запускается или находится в восстановлении",
+      "serverError": "Ошибка PostgreSQL {{code}}",
+      "passwordMissing": "Сервер запросил пароль, но он не сохранён и не найден в ~/.pgpass",
+      "tlsNotSupported": "Сервер не принимает TLS-соединения: выберите sslmode prefer или disable",
+      "hostnameMismatch": "Имя хоста сервера не совпадает с его сертификатом",
+      "caUntrusted": "Сертификат сервера подписан недоверенным CA",
+      "tlsError": "Ошибка TLS-соединения",
+      "connectionClosed": "Соединение с сервером закрыто",
+      "connectionFailed": "Не удалось подключиться к серверу",
+      "tcpFailed": "Не удалось связаться с {{host}}:{{port}}",
+      "connectTimeout": "{{host}}:{{port}} не ответил за {{secs}} с",
+      "tlsSetup": "Не удалось подготовить параметры TLS"
+    },
+    "tls": {
+      "readFailed": "Не удалось прочитать {{path}}",
+      "badFile": "{{path}} — не сертификат или ключ, либо неверный пароль"
     }
   },
   "sidebar": {
