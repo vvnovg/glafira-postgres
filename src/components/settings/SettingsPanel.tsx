@@ -16,6 +16,12 @@ export function SettingsPanel() {
       void setLanguage(st.effective);
     },
   });
+  // Настройка дерева: системные схемы и роли pg_*. Каталог в дереве перечитывается сам — ключи запросов зависят от значения.
+  const ui = useQuery({ queryKey: ["uiSettings"], queryFn: api.getUiSettings });
+  const changeUi = useMutation({
+    mutationFn: (showSystemObjects: boolean) => api.setUiSettings({ showSystemObjects }),
+    onSuccess: (saved) => qc.setQueryData(["uiSettings"], saved),
+  });
 
   if (lang.error) return <ErrorBanner error={lang.error} onRetry={() => lang.refetch()} />;
   const s = lang.data;
@@ -55,6 +61,20 @@ export function SettingsPanel() {
         </div>
         {byPolicy && <p className="hint">{t("settings.language.policy")}</p>}
         {change.error && <ErrorBanner error={change.error} />}
+      </section>
+      <section>
+        <h3>{t("settings.display.section")}</h3>
+        <label className="inline wrap">
+          <input
+            type="checkbox"
+            checked={ui.data?.showSystemObjects ?? false}
+            disabled={ui.isPending || changeUi.isPending}
+            onChange={(e) => changeUi.mutate(e.target.checked)}
+          />
+          {t("settings.showSystemObjects")}
+        </label>
+        {ui.error && <ErrorBanner error={ui.error} onRetry={() => void ui.refetch()} />}
+        {changeUi.error && <ErrorBanner error={changeUi.error} />}
       </section>
     </div>
   );

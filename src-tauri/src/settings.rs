@@ -71,12 +71,23 @@ pub fn resolve(
     }
 }
 
+/// Настройки интерфейса, влияющие на то, что показывает дерево.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UiSettings {
+    /// Системные схемы (pg_catalog, information_schema…) и роли pg_*.
+    #[serde(default)]
+    pub show_system_objects: bool,
+}
+
 #[derive(Serialize, Deserialize, Default, Clone)]
 #[serde(rename_all = "camelCase")]
 struct SettingsFile {
     schema_version: u32,
     #[serde(default)]
     language: Option<String>,
+    #[serde(default)]
+    ui: UiSettings,
 }
 
 pub struct SettingsStore {
@@ -129,6 +140,15 @@ impl SettingsStore {
             ));
         }
         self.update(|d| d.language = lang.map(String::from))
+    }
+
+    pub fn ui(&self) -> UiSettings {
+        self.data.read_safe().ui.clone()
+    }
+
+    /// Блокирующий вызов (запись файла).
+    pub fn set_ui(&self, ui: UiSettings) -> AppResult<()> {
+        self.update(|d| d.ui = ui)
     }
 }
 
@@ -249,6 +269,52 @@ mod tests {
         );
         s.set_language(None).unwrap();
         assert_eq!(SettingsStore::open(dir.path()).language(), None);
+    }
+
+    #[test]
+    fn ui_settings_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = SettingsStore::open(dir.path());
+        assert!(!s.ui().show_system_objects);
+        s.set_ui(UiSettings {
+            show_system_objects: true,
+        })
+        .unwrap();
+        assert!(SettingsStore::open(dir.path()).ui().show_system_objects);
+        // Язык и настройки интерфейса живут в одном файле и не затирают друг друга.
+        s.set_language(Some("ru")).unwrap();
+        let reopened = SettingsStore::open(dir.path());
+        assert!(reopened.ui().show_system_objects);
+        assert_eq!(reopened.language().as_deref(), Some("ru"));
+    }
+
+    #[test]
+    fn ui_settings_wire_format_is_camel_case() {
+        let on = UiSettings {
+            show_system_objects: true,
+        };
+        assert_eq!(
+            serde_json::to_string(&on).unwrap(),
+            r#"{"showSystemObjects":true}"#
+        );
+        // Поле необязательное: пустой объект — значения по умолчанию.
+        assert_eq!(
+            serde_json::from_str::<UiSettings>("{}").unwrap(),
+            UiSettings::default()
+        );
+    }
+
+    #[test]
+    fn old_settings_file_without_ui_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"schemaVersion":1,"language":"ru"}"#,
+        )
+        .unwrap();
+        let s = SettingsStore::open(dir.path());
+        assert_eq!(s.language().as_deref(), Some("ru"));
+        assert_eq!(s.ui(), UiSettings::default());
     }
 
     #[test]

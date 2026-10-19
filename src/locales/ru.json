@@ -248,7 +248,48 @@
       "importHere": "Импортировать сюда…"
     },
     "exportAll": "Экспортировать всё…",
-    "import": "Импортировать…"
+    "import": "Импортировать…",
+    "connectionToggle": "Развернуть или свернуть подключение {{name}}",
+    "connectionMenu": "Действия с подключением {{name}}",
+    "overview": "Обзор",
+    "connect": "Подключиться",
+    "disconnect": "Отключиться",
+    "catalogDefault": "Каталог — с узла по умолчанию",
+    "catalogFrom": "Каталог — с узла {{member}}",
+    "catalogFallback": "Выбранный узел недоступен — каталог читается с {{member}}",
+    "noCatalogNode": "Нет доступного узла для каталога",
+    "members": "Узлы",
+    "databases": "Базы данных",
+    "databasesFrom": "Базы данных (с узла {{member}})",
+    "roles": "Роли",
+    "extensions": "Расширения",
+    "extensionUpdate": "Доступна версия {{version}}",
+    "kinds": {
+      "tables": "Таблицы",
+      "views": "Представления",
+      "matviews": "Мат. представления",
+      "functions": "Функции",
+      "sequences": "Последовательности"
+    },
+    "objectFilter": "Фильтр: {{label}}",
+    "objectFilterPlaceholder": "фильтр",
+    "partitions_one": "{{count}} партиция",
+    "partitions_few": "{{count}} партиции",
+    "partitions_many": "{{count}} партиций",
+    "partitions_other": "{{count}} партиции",
+    "more": "Ещё",
+    "shown": "Показано {{shown}} из {{total}}",
+    "sizeUnavailable": "Нет права CONNECT на базу",
+    "noLogin": "без входа",
+    "lagHigh": "Лаг больше 16 МБ",
+    "unreachable": "Узел недоступен",
+    "state": {
+      "disconnected": "Не подключено",
+      "connecting": "Подключение…",
+      "connected": "Подключено",
+      "degraded": "Часть узлов недоступна",
+      "failed": "Не удалось подключиться"
+    }
   },
   "tabs": {
     "settings": "Настройки",
@@ -268,6 +309,10 @@
       "system": "Как в системе ({{name}})",
       "systemUnknown": "Как в системе",
       "policy": "Язык задан вашей организацией"
+    },
+    "showSystemObjects": "Показывать системные объекты (pg_catalog, information_schema, роли pg_*)",
+    "display": {
+      "section": "Отображение"
     }
   },
   "layout": {
@@ -485,6 +530,10 @@
       "pgpass": "Если пароль не задан, используется ~/.pgpass, как в psql.",
       "environment": "Помечает подключение цветом. Для prod-подключений (Pro) любое изменение нужно подтвердить вводом имени подключения.",
       "readOnly": "Запрещает всё, что меняет данные или кластер. Для prod рекомендуется."
+    },
+    "import": {
+      "target": "Куда попадут новые папки и подключения. Существующие останутся на своих местах.",
+      "updateExisting": "Уже существующие подключения получат настройки из файла; ваши пароли и их место в дереве сохранятся."
     }
   }
 }

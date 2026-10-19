@@ -124,6 +124,36 @@ export interface TreeItemRef {
   id: string;
 }
 
+/** Итог экспорта подключений: сколько записано в файл. */
+export interface ExportSummary {
+  connections: number;
+  folders: number;
+}
+
+/** Элемент предпросмотра импорта; `path` — имена папок от корня до места элемента. */
+export interface PreviewItem {
+  kind: "folder" | "connection";
+  id: string;
+  name: string;
+  path: string[];
+}
+
+/** Подключение файла, которое не будет импортировано. */
+export interface SkippedImport {
+  name: string;
+  reason: LocalizedText;
+}
+
+/** Предпросмотр (и итог) импорта подключений. */
+export interface ImportPreview {
+  added: PreviewItem[];
+  updated: PreviewItem[];
+  unchanged: PreviewItem[];
+  skipped: SkippedImport[];
+  warnings: LocalizedText[];
+  needsPasswords: number;
+}
+
 export type Role = "primary" | "standbyLeader" | "syncStandby" | "quorumStandby" | "replica" | "unknown";
 export interface Member {
   name: string;

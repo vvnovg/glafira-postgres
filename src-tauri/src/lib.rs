@@ -69,6 +69,8 @@ pub fn run() {
             commands::license::remove_license_key,
             commands::settings::get_language_settings,
             commands::settings::set_language,
+            commands::settings::get_ui_settings,
+            commands::settings::set_ui_settings,
             commands::topology::connect,
             commands::topology::disconnect,
             commands::topology::get_topology,

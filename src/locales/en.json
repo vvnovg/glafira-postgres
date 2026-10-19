@@ -248,7 +248,46 @@
       "importHere": "Import here…"
     },
     "exportAll": "Export all…",
-    "import": "Import…"
+    "import": "Import…",
+    "connectionToggle": "Expand or collapse connection {{name}}",
+    "connectionMenu": "Actions for connection {{name}}",
+    "overview": "Overview",
+    "connect": "Connect",
+    "disconnect": "Disconnect",
+    "catalogDefault": "Catalog — from the default node",
+    "catalogFrom": "Catalog — from node {{member}}",
+    "catalogFallback": "The selected node is unavailable — the catalog is read from {{member}}",
+    "noCatalogNode": "No node is available for the catalog",
+    "members": "Nodes",
+    "databases": "Databases",
+    "databasesFrom": "Databases (from node {{member}})",
+    "roles": "Roles",
+    "extensions": "Extensions",
+    "extensionUpdate": "Version {{version}} is available",
+    "kinds": {
+      "tables": "Tables",
+      "views": "Views",
+      "matviews": "Materialized views",
+      "functions": "Functions",
+      "sequences": "Sequences"
+    },
+    "objectFilter": "Filter: {{label}}",
+    "objectFilterPlaceholder": "filter",
+    "partitions_one": "{{count}} partition",
+    "partitions_other": "{{count}} partitions",
+    "more": "More",
+    "shown": "Showing {{shown}} of {{total}}",
+    "sizeUnavailable": "No CONNECT privilege on the database",
+    "noLogin": "no login",
+    "lagHigh": "Lag is over 16 MB",
+    "unreachable": "Node is unreachable",
+    "state": {
+      "disconnected": "Not connected",
+      "connecting": "Connecting…",
+      "connected": "Connected",
+      "degraded": "Some nodes are unreachable",
+      "failed": "Could not connect"
+    }
   },
   "tabs": {
     "settings": "Settings",
@@ -268,6 +307,10 @@
       "system": "System default ({{name}})",
       "systemUnknown": "System default",
       "policy": "The language is set by your organization"
+    },
+    "showSystemObjects": "Show system objects (pg_catalog, information_schema, pg_* roles)",
+    "display": {
+      "section": "Display"
     }
   },
   "layout": {
@@ -477,6 +520,10 @@
       "pgpass": "If no password is set, ~/.pgpass is used, as in psql.",
       "environment": "Marks the connection with a color. prod connections (Pro) ask you to type the connection name before any change.",
       "readOnly": "Blocks everything that changes data or the cluster. Recommended for prod."
+    },
+    "import": {
+      "target": "Where new folders and connections go. Existing ones stay where they are.",
+      "updateExisting": "Connections that already exist get the settings from the file; your passwords and their place in the tree are kept."
     }
   }
 }

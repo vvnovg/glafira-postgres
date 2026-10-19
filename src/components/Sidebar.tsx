@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 import { useWorkspace } from "../state/workspace";
 import { useLicense } from "../lib/useLicense";
+import { ConnectionTree } from "./connections/tree/ConnectionTree";
 
 export function Sidebar() {
   const { t } = useTranslation();
@@ -9,7 +10,7 @@ export function Sidebar() {
 
   return (
     <aside className="sidebar">
-      <div className="tree" />
+      <ConnectionTree />
       <div className="sidebar-footer">
         <button type="button" className="link" onClick={() => open({ kind: "settings" })}>
           {t("sidebar.settings")}

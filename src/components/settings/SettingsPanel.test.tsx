@@ -17,6 +17,8 @@ vi.mock("../../api/client", async (importOriginal) => {
     api: {
       getLanguageSettings: vi.fn(),
       setLanguage: vi.fn(),
+      getUiSettings: vi.fn(),
+      setUiSettings: vi.fn(),
     },
   };
 });
@@ -26,6 +28,7 @@ import { SettingsPanel } from "./SettingsPanel";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(api.getUiSettings).mockResolvedValue({ showSystemObjects: false });
 });
 
 // Выбор «en» в тесте переключает глобальный язык; сброс идёт в act, пока компоненты ещё
@@ -66,5 +69,30 @@ describe("SettingsPanel", () => {
     expect(api.setLanguage).toHaveBeenCalledWith("en");
     await vi.waitFor(() => expect(i18n.language).toBe("en"));
     expect(screen.queryByText(/\bPro\b/)).not.toBeInTheDocument();
+  });
+
+  it("«Показывать системные объекты» сохраняется и отражается в флажке", async () => {
+    vi.mocked(api.getLanguageSettings).mockResolvedValue(base);
+    vi.mocked(api.setUiSettings).mockResolvedValue({ showSystemObjects: true });
+    const user = userEvent.setup();
+    renderWithClient(<SettingsPanel />);
+    const box = await screen.findByRole("checkbox", { name: /Показывать системные объекты/ });
+    await vi.waitFor(() => expect(box).toBeEnabled());
+    expect(box).not.toBeChecked();
+    await user.click(box);
+    expect(api.setUiSettings).toHaveBeenCalledWith({ showSystemObjects: true });
+    await vi.waitFor(() => expect(box).toBeChecked());
+  });
+
+  it("ошибка сохранения настройки показывается, флажок остаётся прежним", async () => {
+    vi.mocked(api.getLanguageSettings).mockResolvedValue(base);
+    vi.mocked(api.setUiSettings).mockRejectedValue({ code: "INTERNAL", message: "disk full", retryable: false });
+    const user = userEvent.setup();
+    renderWithClient(<SettingsPanel />);
+    const box = await screen.findByRole("checkbox", { name: /Показывать системные объекты/ });
+    await vi.waitFor(() => expect(box).toBeEnabled());
+    await user.click(box);
+    expect(await screen.findByRole("alert")).toHaveTextContent("disk full");
+    expect(box).not.toBeChecked();
   });
 });

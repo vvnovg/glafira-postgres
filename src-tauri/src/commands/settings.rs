@@ -40,6 +40,24 @@ pub async fn set_language(
     blocking(move || apply_language(&st, lang.as_deref())).await
 }
 
+#[tauri::command]
+pub fn get_ui_settings(state: State<'_, AppState>) -> AppResult<crate::settings::UiSettings> {
+    Ok(state.settings.ui())
+}
+
+#[tauri::command]
+pub async fn set_ui_settings(
+    state: State<'_, AppState>,
+    settings: crate::settings::UiSettings,
+) -> AppResult<crate::settings::UiSettings> {
+    let st = state.inner().clone();
+    blocking(move || {
+        st.settings.set_ui(settings.clone())?;
+        Ok(settings)
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

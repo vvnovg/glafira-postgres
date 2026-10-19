@@ -5,7 +5,9 @@ import type {
   ConnectionFolder,
   ConnectionProfile,
   DatabaseInfo,
+  ExportSummary,
   ExtensionInfo,
+  ImportPreview,
   LanguageSettings,
   LicenseStatus,
   MemberFacts,
@@ -71,6 +73,13 @@ export const api = {
   deleteFolder: (id: string) => call<void>("delete_folder", { id }),
   moveItems: (items: TreeItemRef[], parentId: string | null, before: TreeItemRef | null) =>
     call<void>("move_items", { items, parentId, before }),
+  // Команды обмена подключениями вернёт Task 19; до тех пор дерево скрывает пункты «Экспорт» и «Импорт».
+  exportConnections: (path: string, folderId: string | null) =>
+    call<ExportSummary>("export_connections", { path, folderId }),
+  previewImport: (path: string, targetFolderId: string | null, updateExisting: boolean) =>
+    call<ImportPreview>("preview_import", { path, targetFolderId, updateExisting }),
+  applyImport: (path: string, targetFolderId: string | null, updateExisting: boolean) =>
+    call<ImportPreview>("apply_import", { path, targetFolderId, updateExisting }),
 
   connect: (id: string) => call<TopologyView>("connect", { id }),
   disconnect: (id: string) => call<void>("disconnect", { id }),
@@ -89,7 +98,6 @@ export const api = {
   listExtensions: (id: string, db: string) => call<ExtensionInfo[]>("list_extensions", { id, db }),
   listRoles: (id: string, includeSystem: boolean) => call<RoleInfo[]>("list_roles", { id, includeSystem }),
 
-  // Команды появятся в Task 17 (настройки интерфейса); до тех пор их никто не вызывает.
   getUiSettings: () => call<UiSettings>("get_ui_settings"),
   setUiSettings: (settings: UiSettings) => call<UiSettings>("set_ui_settings", { settings }),
 };
