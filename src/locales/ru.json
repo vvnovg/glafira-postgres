@@ -178,7 +178,8 @@
     "help": "Справка",
     "connection": "Подключение: {{name}}",
     "newConnection": "Новое подключение",
-    "overview": "Обзор: {{conn}}"
+    "overview": "Обзор: {{conn}}",
+    "unknownConnection": "?"
   },
   "settings": {
     "title": "Настройки",

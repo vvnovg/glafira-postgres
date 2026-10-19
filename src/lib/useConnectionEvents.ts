@@ -20,28 +20,76 @@ type TopologyPayload = { connectionId: string; view: TopologyView; newEvents: To
 const ofConnection = (prefixes: string[], id: string) => (q: { queryKey: readonly unknown[] }) =>
   prefixes.includes(q.queryKey[0] as string) && q.queryKey[1] === id;
 
+const topologyKey = (id: string) => ["topology", id];
+const eventsKey = (id: string) => ["topologyEvents", id];
+
+/**
+ * Событие новее любого ответа, запрошенного до него, поэтому выполняющуюся загрузку ключа отменяем
+ * ДО записи. Иначе её запоздавший ответ перезаписал бы событие, и при `staleTime: Infinity` это
+ * осталось бы навсегда: после отключения опрос остановлен и новых событий не будет.
+ *
+ * Отмена идёт с откатом (по умолчанию): `cancel` синхронно возвращает запрос в состояние до начала
+ * загрузки, а сама отменённая загрузка в кэш уже ничего не пишет. Поэтому `setQueryData` сразу после
+ * вызова остаётся последним значением. `await` здесь не нужен — он бы ещё и переставил события местами.
+ */
+function supersede(qc: QueryClient, key: readonly unknown[]) {
+  void qc.cancelQueries({ queryKey: key, exact: true });
+}
+
+/**
+ * В кэше нет данных, а событие описывает только часть картины (смена состояния, добавка к журналу):
+ * синтезировать запись нельзя — при `staleTime: Infinity` она считалась бы свежей и полную картину
+ * (например, историю, которую Rust хранит, пока вебвью перезагружался) никто бы не загрузил. Загрузку,
+ * начатую до события, вызывающий уже отменил (`supersede`); здесь запрос помечается устаревшим:
+ * активный наблюдатель сразу перечитает, следующий — прочитает при монтировании.
+ */
+function refetchFromSource(qc: QueryClient, key: readonly unknown[]) {
+  void qc.invalidateQueries({ queryKey: key, exact: true });
+}
+
 export function applyState(qc: QueryClient, p: StatePayload) {
+  const id = p.connectionId;
   if (p.state === "disconnected") {
-    qc.setQueryData(["topology", p.connectionId], disconnectedView);
-    qc.setQueryData(["topologyEvents", p.connectionId], []);
-    qc.removeQueries({ predicate: ofConnection(["catalog", "memberFacts"], p.connectionId) });
+    // Rust при отключении удаляет запись подключения целиком: вид — «отключено», журнал пуст. Событие —
+    // полная картина, поэтому пишем его и без кэша.
+    supersede(qc, topologyKey(id));
+    supersede(qc, eventsKey(id));
+    qc.setQueryData(topologyKey(id), disconnectedView);
+    qc.setQueryData(eventsKey(id), []);
+    qc.removeQueries({ predicate: ofConnection(["catalog", "memberFacts"], id) });
     return;
   }
-  qc.setQueryData<TopologyView>(["topology", p.connectionId], (old) => ({ ...(old ?? disconnectedView), state: p.state, error: p.error }));
+  supersede(qc, topologyKey(id));
+  const old = qc.getQueryData<TopologyView>(topologyKey(id));
+  if (!old) {
+    // Топология и каталог неизвестны (например, после перезагрузки вебвью) — читаем настоящий вид.
+    refetchFromSource(qc, topologyKey(id));
+    return;
+  }
+  qc.setQueryData<TopologyView>(topologyKey(id), { ...old, state: p.state, error: p.error });
 }
 
 export function applyTopology(qc: QueryClient, p: TopologyPayload) {
-  const old = qc.getQueryData<TopologyView>(["topology", p.connectionId]);
-  qc.setQueryData(["topology", p.connectionId], p.view);
+  const id = p.connectionId;
+  supersede(qc, topologyKey(id));
+  const old = qc.getQueryData<TopologyView>(topologyKey(id));
+  // Вид в событии полный, его можно писать и без кэша.
+  qc.setQueryData(topologyKey(id), p.view);
   if (old?.catalogMember && old.catalogMember !== p.view.catalogMember) {
     // Узел каталога сменился (например, после switchover) — каталог читается заново.
-    void qc.invalidateQueries({ predicate: ofConnection(["catalog"], p.connectionId) });
+    void qc.invalidateQueries({ predicate: ofConnection(["catalog"], id) });
   }
   if (p.newEvents.length > 0) {
-    // В событии — от старых к новым, в кэше — новые сверху.
-    qc.setQueryData<TopologyEvent[]>(["topologyEvents", p.connectionId], (prev = []) =>
-      [...[...p.newEvents].reverse(), ...prev].slice(0, EVENTS_CAP),
-    );
+    supersede(qc, eventsKey(id));
+    if (qc.getQueryData<TopologyEvent[]>(eventsKey(id)) === undefined) {
+      // Есть только новые события, а история неизвестна — журнал читается целиком.
+      refetchFromSource(qc, eventsKey(id));
+    } else {
+      // В событии — от старых к новым, в кэше — новые сверху.
+      qc.setQueryData<TopologyEvent[]>(eventsKey(id), (prev = []) =>
+        [...[...p.newEvents].reverse(), ...prev].slice(0, EVENTS_CAP),
+      );
+    }
   }
 }
 

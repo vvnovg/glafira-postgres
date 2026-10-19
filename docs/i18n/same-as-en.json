@@ -1,5 +1,6 @@
 {
   "ru": [
+    "tabs.unknownConnection",
     "test.nodeOk",
     "topology.role.leader",
     "topology.role.primary",

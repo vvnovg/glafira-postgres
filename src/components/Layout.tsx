@@ -14,7 +14,7 @@ import { useHelpShortcut } from "../lib/useHelpShortcut";
 
 function tabTitle(tab: Tab, byId: Map<string, ConnectionProfile>): string {
   const connId = "connectionId" in tab ? tab.connectionId : null;
-  const conn = connId ? (byId.get(connId)?.name ?? "?") : "";
+  const conn = connId ? (byId.get(connId)?.name ?? i18n.t("tabs.unknownConnection")) : "";
   switch (tab.kind) {
     case "settings":
       return i18n.t("tabs.settings");

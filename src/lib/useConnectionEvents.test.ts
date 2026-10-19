@@ -1,8 +1,10 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { renderHook, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider, type UseQueryResult } from "@tanstack/react-query";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TopologyEvent, TopologyView } from "../api/types";
+import { api } from "../api/client";
 import { topologyView } from "../test/fixtures";
 
 // Мок событий Tauri: запоминает подписчиков, чтобы доставить им событие и проверить отписку.
@@ -19,7 +21,20 @@ vi.mock("@tauri-apps/api/event", () => ({
   }),
 }));
 
-import { applyState, applyTopology, disconnectedView, EVENTS_CAP, useConnectionEvents } from "./useConnectionEvents";
+vi.mock("../api/client", () => ({ api: { getTopology: vi.fn(), listTopologyEvents: vi.fn() } }));
+
+import {
+  applyState,
+  applyTopology,
+  disconnectedView,
+  EVENTS_CAP,
+  useConnectionEvents,
+  useTopology,
+  useTopologyEvents,
+} from "./useConnectionEvents";
+
+// Типов Node в проекте нет, а `unhandledRejection` приходит только из процесса тестов.
+const node = (globalThis as unknown as { process: { on(e: string, f: () => void): void; off(e: string, f: () => void): void } }).process;
 
 const ev = (atMs: number): TopologyEvent => ({ atMs, kind: "pauseChanged", paused: true });
 
@@ -40,6 +55,9 @@ describe("события наблюдения", () => {
     const list = qc.getQueryData<TopologyEvent[]>(["topologyEvents", "c"])!;
     expect(list).toHaveLength(EVENTS_CAP);
     expect(list[0].atMs).toBe(9999);
+    // Лишнее отбрасывается с хвоста: уходит самое старое (в кэше новые сверху), а не только что пришедшее.
+    expect(list[list.length - 1].atMs).toBe(EVENTS_CAP - 2);
+    expect(list.map((e) => e.atMs)).not.toContain(EVENTS_CAP - 1);
   });
 
   it("смена узла каталога сбрасывает кэш каталога", async () => {
@@ -80,11 +98,33 @@ describe("события наблюдения", () => {
     expect(qc.getQueryState(["catalog", "c", "databases"])!.isInvalidated).toBe(false);
   });
 
-  it("смена состояния без известной топологии даёт вид с ошибкой", () => {
+  it("смена состояния сохраняет ошибку из события", () => {
     const qc = new QueryClient();
+    qc.setQueryData(["topology", "c"], topologyView());
     const error = { code: "CONNECTION_FAILED" as const, message: "boom", retryable: true };
     applyState(qc, { connectionId: "c", state: "failed", error });
-    expect(qc.getQueryData<TopologyView>(["topology", "c"])).toEqual({ ...disconnectedView, state: "failed", error });
+    expect(qc.getQueryData<TopologyView>(["topology", "c"])).toEqual({ ...topologyView(), state: "failed", error });
+  });
+
+  it("смена состояния без кэша не синтезирует вид — его читают заново", () => {
+    const qc = new QueryClient();
+    applyState(qc, { connectionId: "c", state: "failed", error: null });
+    expect(qc.getQueryData(["topology", "c"])).toBeUndefined();
+  });
+
+  it("отключение без кэша пишет вид «отключено» и пустой журнал: событие — полная картина", () => {
+    const qc = new QueryClient();
+    applyState(qc, { connectionId: "c", state: "disconnected", error: null });
+    expect(qc.getQueryData(["topology", "c"])).toEqual(disconnectedView);
+    expect(qc.getQueryData(["topologyEvents", "c"])).toEqual([]);
+  });
+
+  it("топология без кэша журнала вид пишет, журнал не синтезирует", () => {
+    const qc = new QueryClient();
+    const view = topologyView();
+    applyTopology(qc, { connectionId: "c", view, newEvents: [ev(2)] });
+    expect(qc.getQueryData(["topology", "c"])).toEqual(view);
+    expect(qc.getQueryData(["topologyEvents", "c"])).toBeUndefined();
   });
 
   it("смена состояния сохраняет топологию", () => {
@@ -102,6 +142,7 @@ describe("useConnectionEvents", () => {
     bus.handlers.clear();
     bus.off.mockClear();
     bus.fail = false;
+    vi.mocked(listen).mockClear();
   });
 
   const setup = () => {
@@ -112,10 +153,11 @@ describe("useConnectionEvents", () => {
 
   it("события Tauri попадают в кэш запросов", async () => {
     const { qc } = setup();
+    qc.setQueryData(["topologyEvents", "c"], [ev(1)]);
     await waitFor(() => expect(bus.handlers.size).toBe(2));
     bus.handlers.get("topology://changed")!({ payload: { connectionId: "c", view: topologyView(), newEvents: [ev(5)] } });
     expect(qc.getQueryData<TopologyView>(["topology", "c"])!.state).toBe("connected");
-    expect(qc.getQueryData<TopologyEvent[]>(["topologyEvents", "c"])).toHaveLength(1);
+    expect(qc.getQueryData<TopologyEvent[]>(["topologyEvents", "c"])!.map((e) => e.atMs)).toEqual([5, 1]);
     bus.handlers.get("connection://state")!({ payload: { connectionId: "c", state: "failed", error: null } });
     expect(qc.getQueryData<TopologyView>(["topology", "c"])!.state).toBe("failed");
   });
@@ -134,9 +176,185 @@ describe("useConnectionEvents", () => {
   });
 
   it("вне Tauri подписка не удаётся — без необработанной ошибки", async () => {
-    bus.fail = true;
-    const { unmount } = setup();
-    await Promise.resolve();
-    expect(() => unmount()).not.toThrow();
+    const unhandled = vi.fn();
+    node.on("unhandledRejection", unhandled);
+    try {
+      bus.fail = true;
+      const { unmount } = setup();
+      // Отклонённая цепочка промисов разбирается за несколько макрозадач; `unhandledRejection` приходит после них.
+      for (let i = 0; i < 3; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(vi.mocked(listen)).toHaveBeenCalledTimes(2);
+      expect(bus.handlers.size).toBe(0);
+      expect(() => unmount()).not.toThrow();
+      for (let i = 0; i < 3; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      node.off("unhandledRejection", unhandled);
+    }
+  });
+});
+
+// Ответ, запрошенный до события, старее события: он не должен его затирать, а при `staleTime: Infinity`
+// исправить это было бы некому — после отключения событий больше нет.
+describe("запоздавшие ответы и события", () => {
+  const deferred = <T>() => {
+    let resolve!: (v: T) => void;
+    const promise = new Promise<T>((r) => (resolve = r));
+    return { promise, resolve };
+  };
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+  // useQuery перерисовывает компонент только при смене прочитанных полей: читаем их сразу.
+  const track = <T,>(q: UseQueryResult<T>) => ({ data: q.data, isError: q.isError, fetchStatus: q.fetchStatus, refetch: q.refetch });
+
+  const setup = () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: { children: ReactNode }) => createElement(QueryClientProvider, { client: qc }, children);
+    return { qc, wrapper };
+  };
+
+  beforeEach(() => {
+    vi.mocked(api.getTopology).mockReset();
+    vi.mocked(api.listTopologyEvents).mockReset();
+  });
+
+  it("отключение во время загрузки топологии: запоздавший «connected» его не затирает", async () => {
+    const { qc, wrapper } = setup();
+    const stale = deferred<TopologyView>();
+    vi.mocked(api.getTopology).mockReturnValueOnce(stale.promise);
+    const { result } = renderHook(() => track(useTopology("c")), { wrapper });
+    await waitFor(() => expect(api.getTopology).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      applyState(qc, { connectionId: "c", state: "disconnected", error: null });
+      stale.resolve(topologyView({ state: "connected" }));
+      await flush();
+    });
+
+    expect(qc.getQueryData(["topology", "c"])).toEqual(disconnectedView);
+    expect(result.current.data).toEqual(disconnectedView);
+    expect(result.current.isError).toBe(false);
+    expect(result.current.fetchStatus).toBe("idle");
+    expect(api.getTopology).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["первая загрузка", false],
+    ["обновление при данных в кэше", true],
+  ])("медленный getTopology (%s) не затирает более новый вид из topology://changed", async (_name, cached) => {
+    const { qc, wrapper } = setup();
+    const stale = deferred<TopologyView>();
+    if (cached) qc.setQueryData(["topology", "c"], topologyView({ catalogMember: "pg-0" }));
+    vi.mocked(api.getTopology).mockReturnValueOnce(stale.promise);
+    const { result } = renderHook(() => track(useTopology("c")), { wrapper });
+    if (cached) await act(async () => void result.current.refetch());
+    await waitFor(() => expect(api.getTopology).toHaveBeenCalledTimes(1));
+
+    const fresh = topologyView({ catalogMember: "pg-2" });
+    await act(async () => {
+      applyTopology(qc, { connectionId: "c", view: fresh, newEvents: [] });
+      stale.resolve(topologyView({ catalogMember: "pg-1" }));
+      await flush();
+    });
+
+    expect(qc.getQueryData(["topology", "c"])).toEqual(fresh);
+    expect(result.current.data).toEqual(fresh);
+    expect(result.current.isError).toBe(false);
+  });
+
+  it("смена состояния во время загрузки топологии: запоздавший ответ не затирает вид из кэша", async () => {
+    const { qc, wrapper } = setup();
+    const stale = deferred<TopologyView>();
+    qc.setQueryData(["topology", "c"], topologyView());
+    vi.mocked(api.getTopology).mockReturnValueOnce(stale.promise);
+    const { result } = renderHook(() => track(useTopology("c")), { wrapper });
+    await act(async () => void result.current.refetch());
+
+    await act(async () => {
+      applyState(qc, { connectionId: "c", state: "degraded", error: null });
+      stale.resolve(topologyView({ state: "connected" }));
+      await flush();
+    });
+
+    expect(result.current.data!.state).toBe("degraded");
+    expect(result.current.data!.topology).not.toBeNull();
+  });
+
+  it("отключение во время загрузки журнала: запоздавший список его не затирает", async () => {
+    const { qc, wrapper } = setup();
+    const stale = deferred<TopologyEvent[]>();
+    vi.mocked(api.listTopologyEvents).mockReturnValueOnce(stale.promise);
+    const { result } = renderHook(() => track(useTopologyEvents("c")), { wrapper });
+    await waitFor(() => expect(api.listTopologyEvents).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      applyState(qc, { connectionId: "c", state: "disconnected", error: null });
+      stale.resolve([ev(2), ev(1)]);
+      await flush();
+    });
+
+    expect(qc.getQueryData(["topologyEvents", "c"])).toEqual([]);
+    expect(result.current.data).toEqual([]);
+    expect(api.listTopologyEvents).toHaveBeenCalledTimes(1);
+  });
+
+  it("обновление журнала запоздало: добавленные события не теряются", async () => {
+    const { qc, wrapper } = setup();
+    const stale = deferred<TopologyEvent[]>();
+    qc.setQueryData(["topologyEvents", "c"], [ev(1)]);
+    vi.mocked(api.listTopologyEvents).mockReturnValueOnce(stale.promise);
+    const { result } = renderHook(() => track(useTopologyEvents("c")), { wrapper });
+    await act(async () => void result.current.refetch());
+
+    await act(async () => {
+      applyTopology(qc, { connectionId: "c", view: topologyView(), newEvents: [ev(2), ev(3)] });
+      stale.resolve([ev(1)]);
+      await flush();
+    });
+
+    expect(result.current.data!.map((e) => e.atMs)).toEqual([3, 2, 1]);
+  });
+
+  it("первая загрузка журнала идёт, пришло событие: без истории журнал читается заново и целиком", async () => {
+    const { qc, wrapper } = setup();
+    const stale = deferred<TopologyEvent[]>();
+    vi.mocked(api.listTopologyEvents).mockReturnValueOnce(stale.promise).mockResolvedValueOnce([ev(2), ev(1)]);
+    const { result } = renderHook(() => track(useTopologyEvents("c")), { wrapper });
+    await waitFor(() => expect(api.listTopologyEvents).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      applyTopology(qc, { connectionId: "c", view: topologyView(), newEvents: [ev(2)] });
+      await flush();
+    });
+    // Только что пришедшее событие не выдаётся за всю историю: журнал перечитан.
+    expect(api.listTopologyEvents).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(result.current.data!.map((e) => e.atMs)).toEqual([2, 1]));
+
+    await act(async () => {
+      stale.resolve([ev(1)]);
+      await flush();
+    });
+    expect(result.current.data!.map((e) => e.atMs)).toEqual([2, 1]);
+  });
+
+  it("смена состояния при неизвестной топологии (вебвью перезагружен): вид читается заново", async () => {
+    const { qc, wrapper } = setup();
+    const stale = deferred<TopologyView>();
+    const truth = topologyView({ state: "degraded" });
+    vi.mocked(api.getTopology).mockReturnValueOnce(stale.promise).mockResolvedValueOnce(truth);
+    const { result } = renderHook(() => track(useTopology("c")), { wrapper });
+    await waitFor(() => expect(api.getTopology).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      applyState(qc, { connectionId: "c", state: "degraded", error: null });
+      await flush();
+    });
+    expect(api.getTopology).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(result.current.data).toEqual(truth));
+
+    await act(async () => {
+      stale.resolve(topologyView({ state: "connected" }));
+      await flush();
+    });
+    expect(result.current.data).toEqual(truth);
   });
 });

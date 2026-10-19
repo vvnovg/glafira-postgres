@@ -19,6 +19,31 @@ describe("format", () => {
     expect(formatBytes(2 * 1024 ** 4)).toMatch(/^2[.,]0 TB$/);
   });
 
+  it("границы единиц: округление до 1024 переводит в следующую единицу", () => {
+    const re = (n: number, unit: string) => new RegExp(`^${n}[.,]0 ${unit}$`);
+    expect(formatBytes(1023)).toBe("1023 B");
+    expect(formatBytes(1024)).toMatch(re(1, "KB"));
+    // KB -> MB
+    expect(formatBytes(1024 ** 2 - 1)).toMatch(re(1, "MB"));
+    expect(formatBytes(1024 ** 2)).toMatch(re(1, "MB"));
+    // MB -> GB
+    expect(formatBytes(1024 ** 3 - 1)).toMatch(re(1, "GB"));
+    expect(formatBytes(1024 ** 3)).toMatch(re(1, "GB"));
+    // GB -> TB
+    expect(formatBytes(1024 ** 4 - 1)).toMatch(re(1, "TB"));
+    expect(formatBytes(1024 ** 4)).toMatch(re(1, "TB"));
+  });
+
+  it("у границы единица меняется только когда округление доходит до 1024", () => {
+    // 1048524 B = 1023,949 KB — ещё KB; 1048525 B = 1023,950 KB — округляется до 1024,0, значит MB.
+    expect(formatBytes(1048524)).toMatch(/^1[\s,]?023[.,]9 KB$/);
+    expect(formatBytes(1048525)).toMatch(/^1[.,]0 MB$/);
+  });
+
+  it("терабайты — последняя единица: дальше растёт число", () => {
+    expect(formatBytes(1024 ** 5)).toMatch(/^1[\s,]?024[.,]0 TB$/);
+  });
+
   it("count: загрузка и недоступно", () => {
     expect(formatCount(undefined)).toBe("…");
     expect(formatCount(null)).toBe("—");

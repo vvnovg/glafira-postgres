@@ -178,7 +178,8 @@
     "help": "Help",
     "connection": "Connection: {{name}}",
     "newConnection": "New connection",
-    "overview": "Overview: {{conn}}"
+    "overview": "Overview: {{conn}}",
+    "unknownConnection": "?"
   },
   "settings": {
     "title": "Settings",

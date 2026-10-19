@@ -20,7 +20,8 @@ export function formatBytes(n: number): string {
   const units = ["KB", "MB", "GB", "TB"];
   let v = n / 1024;
   let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
+  // Единицу выбираем по значению после округления до одного знака: 1 048 575 B — это «1,0 MB», а не «1 024,0 KB».
+  while (Number(v.toFixed(1)) >= 1024 && i < units.length - 1) {
     v /= 1024;
     i++;
   }
