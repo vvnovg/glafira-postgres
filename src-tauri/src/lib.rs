@@ -1,5 +1,6 @@
 #[macro_use]
 pub mod i18n;
+pub mod catalog;
 pub mod commands;
 pub mod conn;
 pub mod diagnostics;
@@ -46,6 +47,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::app::get_app_info,
             commands::app::export_diagnostics,
+            commands::catalog::list_databases,
+            commands::catalog::list_schemas,
+            commands::catalog::list_objects,
+            commands::catalog::list_partitions,
+            commands::catalog::list_extensions,
+            commands::catalog::list_roles,
             commands::connections::list_connections,
             commands::connections::save_connection,
             commands::connections::delete_connection,

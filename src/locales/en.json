@@ -140,6 +140,9 @@
       "notConnected": "The connection is not open",
       "noNode": "No suitable node is available",
       "unknownMember": "Node {{member}} is not part of the connection"
+    },
+    "catalog": {
+      "badPage": "Invalid page: offset {{offset}}, limit {{limit}}"
     }
   },
   "sidebar": {
