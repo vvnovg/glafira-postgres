@@ -8,6 +8,7 @@ use crate::conn::errors::chain;
 use crate::conn::profile::{ConnectionKind, PatroniSettings};
 use crate::conn::tls;
 use crate::error::{AppError, AppResult, ErrorCode};
+use crate::sync::MutexExt;
 use crate::topology::BoxFuture;
 use crate::topology::model::{Member, Role, Topology, TopologyWarning, system_id_warning};
 
@@ -23,6 +24,17 @@ pub trait PatroniHttp: Send + Sync {
 pub struct ReqwestHttp {
     client: reqwest::Client,
     auth: Option<(String, String)>,
+    /// Все адреса API в профиле — https. Тогда пароль не уходит по адресу слабее (`http://` участника, который
+    /// прислал `/cluster`): это было бы понижение защиты для учётных данных.
+    https_only: bool,
+    /// Адреса, о которых уже предупредили в журнале: опрос идёт каждые 10 с.
+    warned: std::sync::Mutex<std::collections::HashSet<String>>,
+}
+
+fn is_https(url: &str) -> bool {
+    url.trim_start()
+        .get(..8)
+        .is_some_and(|s| s.eq_ignore_ascii_case("https://"))
 }
 
 fn http_setup(e: impl std::fmt::Display) -> AppError {
@@ -69,13 +81,26 @@ impl ReqwestHttp {
                 b = b.identity(reqwest::Identity::from_pem(&pem).map_err(http_setup)?);
             }
         }
+        let mut profile_urls = settings.urls.iter().chain(
+            settings
+                .host_overrides
+                .iter()
+                .filter_map(|o| o.api_url.as_ref()),
+        );
         Ok(Self {
             client: b.build().map_err(http_setup)?,
             auth: settings
                 .username
                 .clone()
                 .map(|u| (u, password.unwrap_or_default())),
+            https_only: profile_urls.all(|u| is_https(u)),
+            warned: Default::default(),
         })
+    }
+
+    /// Пароль API не отправляется на этот адрес: профиль только https, а адрес — нет.
+    fn withholds_credentials(&self, url: &str) -> bool {
+        self.auth.is_some() && self.https_only && !is_https(url)
     }
 }
 
@@ -134,7 +159,15 @@ impl PatroniHttp for ReqwestHttp {
     fn get_json<'a>(&'a self, url: &'a str) -> BoxFuture<'a, AppResult<serde_json::Value>> {
         Box::pin(async move {
             let mut req = self.client.get(url);
-            if let Some((u, p)) = &self.auth {
+            let withheld = self.withholds_credentials(url);
+            if withheld {
+                let clean = crate::conn::profile::strip_url_credentials(url);
+                if self.warned.lock_safe().insert(clean.clone()) {
+                    tracing::warn!(
+                        "Patroni API {clean}: not https while the connection uses https only; basic auth is not sent"
+                    );
+                }
+            } else if let Some((u, p)) = &self.auth {
                 req = req.basic_auth(u, Some(p));
             }
             let resp = req.send().await.map_err(|e| request_error(url, &e))?;
@@ -145,6 +178,12 @@ impl PatroniHttp for ReqwestHttp {
                 (200..=299, Ok(v)) => Ok(v),
                 (503, Ok(v)) if is_patroni_state(url, &v) => Ok(v),
                 (200..=299, Err(e)) => Err(bad_json(url, e)),
+                (401 | 403, _) if withheld => Err(app_err!(
+                    ErrorCode::AuthFailed,
+                    "errors.patroni.credentialsWithheld",
+                    "The Patroni API at {{url}} asks for credentials over plain HTTP; they are not sent because the connection uses https: set an https API address for the member in “Node address overrides”",
+                    url = url
+                )),
                 (401 | 403, _) => Err(app_err!(
                     ErrorCode::AuthFailed,
                     "errors.patroni.unauthorized",
@@ -417,7 +456,6 @@ mod tests {
     use super::*;
     use crate::conn::profile::{ApiTls, CertFormat, ClientCert, HostOverride};
     use crate::conn::testutil;
-    use crate::sync::MutexExt;
 
     struct FakeHttp {
         answers: HashMap<String, AppResult<serde_json::Value>>,
@@ -907,6 +945,50 @@ mod tests {
             (ErrorCode::PatroniError, "errors.patroni.httpStatus")
         );
         assert_eq!(unavailable.params["status"], "503");
+    }
+
+    #[tokio::test]
+    async fn credentials_are_not_sent_to_a_weaker_scheme_than_the_profile() {
+        let base = stub_server().await;
+        // Профиль — только https; участник прислал в `/cluster` адрес http://.
+        let mut s = settings(&["https://pg-1:8008", "https://pg-2:8008"]);
+        s.username = Some("patroni".into());
+        let http = ReqwestHttp::new(&s, Some("secret".into()), None).unwrap();
+        assert_eq!(
+            http.get_json(&format!("{base}/echo")).await.unwrap()["auth"],
+            "",
+            "пароль не ушёл по http"
+        );
+        let denied = http.get_json(&format!("{base}/denied")).await.unwrap_err();
+        assert_eq!(
+            (denied.code, denied.key.as_str()),
+            (ErrorCode::AuthFailed, "errors.patroni.credentialsWithheld")
+        );
+        assert!(!format!("{denied:?}").contains("secret"));
+
+        // Подмена адреса участника на http — выбор пользователя: профиль уже не «только https».
+        s.host_overrides = vec![HostOverride {
+            member: "pg-1".into(),
+            host: None,
+            port: None,
+            api_url: Some(base.clone()),
+        }];
+        let mixed = ReqwestHttp::new(&s, Some("secret".into()), None).unwrap();
+        assert_eq!(
+            mixed.get_json(&format!("{base}/echo")).await.unwrap()["auth"],
+            "Basic cGF0cm9uaTpzZWNyZXQ="
+        );
+        // Без пользователя API и не о чем говорить: 401 — обычный отказ.
+        let anonymous = ReqwestHttp::new(&settings(&["https://pg-1:8008"]), None, None).unwrap();
+        assert_eq!(
+            anonymous
+                .get_json(&format!("{base}/denied"))
+                .await
+                .unwrap_err()
+                .key,
+            "errors.patroni.unauthorized"
+        );
+        assert!(is_https("HTTPS://x") && is_https(" https://x") && !is_https("http://x"));
     }
 
     #[tokio::test]

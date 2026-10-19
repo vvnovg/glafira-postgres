@@ -866,7 +866,8 @@ mod tests {
         let pt = p.patroni.as_mut().unwrap();
         pt.urls = vec![
             "https://admin:s3cr3t@pg-1:8008".into(),
-            "http://pg-2:8008/health?user=a@b".into(),
+            // Пароль с неэкранированным `/`: по RFC это путь, но адрес всё равно очищается.
+            "http://admin:s3/cr3t@pg-2:8008".into(),
         ];
         pt.host_overrides = vec![HostOverride {
             member: "pg-1".into(),
@@ -895,10 +896,7 @@ mod tests {
             }
         );
         let pt = out.connections[0].profile.patroni.as_ref().unwrap();
-        assert_eq!(
-            pt.urls,
-            ["https://pg-1:8008", "http://pg-2:8008/health?user=a@b"]
-        );
+        assert_eq!(pt.urls, ["https://pg-1:8008", "http://pg-2:8008"]);
         assert_eq!(
             pt.host_overrides[0].api_url.as_deref(),
             Some("https://10.0.0.1:8008")
@@ -914,14 +912,14 @@ mod tests {
     fn clean_patroni_urls_do_not_raise_needs_password() {
         let (_d, s) = store();
         let mut p = patroni_profile("p");
-        // `@` вне authority — не userinfo.
-        p.patroni.as_mut().unwrap().urls = vec!["http://pg-2:8008/health?user=a@b".into()];
+        // Экранированный `@` (`%40`) — не userinfo.
+        p.patroni.as_mut().unwrap().urls = vec!["http://pg-2:8008/health?user=a%40b".into()];
         s.upsert(p).unwrap();
         let out = build_export(&s, &MemoryStore::default(), None, "1", "now").unwrap();
         assert_eq!(out.connections[0].needs_password, NeedsPassword::default());
         assert_eq!(
             out.connections[0].profile.patroni.as_ref().unwrap().urls,
-            ["http://pg-2:8008/health?user=a@b"]
+            ["http://pg-2:8008/health?user=a%40b"]
         );
     }
 

@@ -226,6 +226,14 @@ mod tests {
         for key in ["licenseKey", "language"] {
             assert!(content.contains_key(key), "{key}");
         }
+        // Читается только политика уровня устройства (docs/admin.md): профиль ставится на всю систему.
+        assert_eq!(
+            profile
+                .as_dictionary()
+                .and_then(|d| d.get("PayloadScope"))
+                .and_then(|v| v.as_string()),
+            Some("System")
+        );
 
         let reg = std::fs::read_to_string(format!("{base}/policy.reg")).unwrap();
         assert!(reg.contains(&format!(

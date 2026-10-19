@@ -1,6 +1,8 @@
 //! Строка подключения → поля формы (спец. P1 §4): JDBC, URI `postgresql://`, conninfo `key=value`.
 //! Пароль из строки возвращается отдельно (форма отправит его в keychain), нераспознанные параметры —
-//! только именами: значения могут содержать секреты.
+//! только именами: значения могут содержать секреты. По той же причине ошибки разбора не повторяют
+//! кусков строки: в них только имена параметров, номер узла или позиция (неверно заключённый в кавычки
+//! или неэкранированный пароль сдвигает разбор, и его часть оказалась бы «портом» или «рядом с …»).
 
 use serde::Serialize;
 
@@ -27,12 +29,23 @@ pub struct ProfilePatch {
     pub connect_timeout_s: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParsedConnection {
     pub patch: ProfilePatch,
     pub password: Option<String>,
     pub ignored: Vec<String>,
+}
+
+// Пароль в отладочный вывод (журнал, сообщения тестов) не попадает.
+impl std::fmt::Debug for ParsedConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParsedConnection")
+            .field("patch", &self.patch)
+            .field("password", &self.password.as_ref().map(|_| "***"))
+            .field("ignored", &self.ignored)
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -61,11 +74,21 @@ fn unix_socket() -> AppError {
     ))
 }
 
-fn syntax(near: &str) -> AppError {
+/// Ошибка синтаксиса conninfo; `position` — номер символа (с 1).
+fn syntax(position: usize) -> AppError {
     invalid(ltext!(
         "errors.connstr.syntax",
-        "Connection string syntax error near “{{near}}”",
-        near = near
+        "Connection string syntax error at position {{position}}",
+        position = position
+    ))
+}
+
+/// Узел номер `n` (с 1) в списке хостов URI записан неверно.
+fn bad_host(n: usize) -> AppError {
+    invalid(ltext!(
+        "errors.connstr.badHost",
+        "Host {{n}} in the connection string is written incorrectly",
+        n = n
     ))
 }
 
@@ -134,23 +157,23 @@ fn parse_port(s: &str) -> AppResult<u16> {
         .ok_or_else(|| {
             invalid(ltext!(
                 "errors.connstr.badPort",
-                "Invalid port: {{port}}",
-                port = s
+                "Invalid port in the connection string: a number from 1 to 65535 is expected"
             ))
         })
 }
 
-fn parse_host_port(s: &str) -> AppResult<(String, Option<u16>)> {
+/// `host[:port]` или `[ipv6][:port]` — узел номер `n` (с 1).
+fn parse_host_port(s: &str, n: usize) -> AppResult<(String, Option<u16>)> {
     let s = s.trim();
     if s.is_empty() || s.starts_with('/') {
         return Err(unix_socket());
     }
     if let Some(rest) = s.strip_prefix('[') {
-        let (host, after) = rest.split_once(']').ok_or_else(|| syntax(s))?;
+        let (host, after) = rest.split_once(']').ok_or_else(|| bad_host(n))?;
         let port = match after.strip_prefix(':') {
             Some(p) => Some(parse_port(p)?),
             None if after.is_empty() => None,
-            None => return Err(syntax(s)),
+            None => return Err(bad_host(n)),
         };
         return Ok((host.to_string(), port));
     }
@@ -184,8 +207,8 @@ fn parse_uri_body(rest: &str) -> AppResult<Raw> {
     };
     let mut hosts = Vec::new();
     if !hostspec.is_empty() {
-        for part in hostspec.split(',') {
-            hosts.push(parse_host_port(&decode(part)?)?);
+        for (i, part) in hostspec.split(',').enumerate() {
+            hosts.push(parse_host_port(&decode(part)?, i + 1)?);
         }
     }
     let database = path.map(decode).transpose()?.filter(|d| !d.is_empty());
@@ -203,37 +226,77 @@ fn parse_uri_body(rest: &str) -> AppResult<Raw> {
     })
 }
 
+/// Символы conninfo вместе с номером последнего прочитанного (с 1) — для сообщения об ошибке.
+struct Cursor<'a> {
+    chars: std::iter::Peekable<std::str::Chars<'a>>,
+    read: usize,
+}
+
+impl Cursor<'_> {
+    fn peek(&mut self) -> Option<char> {
+        self.chars.peek().copied()
+    }
+
+    fn next(&mut self) -> Option<char> {
+        let c = self.chars.next();
+        self.read += usize::from(c.is_some());
+        c
+    }
+
+    fn next_if(&mut self, f: impl FnOnce(&char) -> bool) -> Option<char> {
+        let c = self.chars.next_if(f);
+        self.read += usize::from(c.is_some());
+        c
+    }
+
+    fn skip_whitespace(&mut self) {
+        while self.next_if(|c| c.is_whitespace()).is_some() {}
+    }
+
+    /// Ошибка у последнего прочитанного символа или, если строка кончилась, сразу за ней.
+    fn error(&self, at_end: bool) -> AppError {
+        syntax(self.read + usize::from(at_end))
+    }
+}
+
 fn parse_conninfo(s: &str) -> AppResult<Raw> {
     let mut params = Vec::new();
-    let mut chars = s.chars().peekable();
+    let mut cur = Cursor {
+        chars: s.chars().peekable(),
+        read: 0,
+    };
     loop {
-        while chars.next_if(|c| c.is_whitespace()).is_some() {}
-        if chars.peek().is_none() {
+        cur.skip_whitespace();
+        if cur.peek().is_none() {
             break;
         }
         let mut key = String::new();
-        while let Some(c) = chars.next_if(|c| *c != '=' && !c.is_whitespace()) {
+        while let Some(c) = cur.next_if(|c| *c != '=' && !c.is_whitespace()) {
             key.push(c);
         }
-        while chars.next_if(|c| c.is_whitespace()).is_some() {}
-        if chars.next() != Some('=') {
-            return Err(syntax(&key));
+        cur.skip_whitespace();
+        match cur.next() {
+            Some('=') => {}
+            other => return Err(cur.error(other.is_none())),
         }
-        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        cur.skip_whitespace();
         let mut value = String::new();
-        if chars.next_if_eq(&'\'').is_some() {
+        if cur.next_if(|c| *c == '\'').is_some() {
             loop {
-                match chars.next() {
-                    Some('\\') => value.push(chars.next().ok_or_else(|| syntax(&key))?),
+                match cur.next() {
+                    Some('\\') => match cur.next() {
+                        Some(c) => value.push(c),
+                        None => return Err(cur.error(true)),
+                    },
                     Some('\'') => break,
                     Some(c) => value.push(c),
-                    None => return Err(syntax(&key)),
+                    None => return Err(cur.error(true)),
                 }
             }
         } else {
-            while let Some(c) = chars.next_if(|c| !c.is_whitespace()) {
+            while let Some(c) = cur.next_if(|c| !c.is_whitespace()) {
                 if c == '\\' {
-                    if let Some(n) = chars.next() {
+                    if let Some(n) = cur.next() {
                         value.push(n);
                     }
                 } else {
@@ -308,8 +371,7 @@ fn parse_sslmode(v: &str) -> AppResult<SslMode> {
         "verify-full" => Ok(SslMode::VerifyFull),
         _ => Err(invalid(ltext!(
             "errors.connstr.badSslMode",
-            "Unknown sslmode: {{value}}",
-            value = v
+            "Unknown sslmode value: use disable, allow, prefer, require, verify-ca or verify-full"
         ))),
     }
 }
@@ -322,8 +384,7 @@ fn parse_target_session_attrs(v: &str) -> AppResult<TargetServerType> {
         "any" => Ok(TargetServerType::Any),
         _ => Err(invalid(ltext!(
             "errors.connstr.badTargetSessionAttrs",
-            "Unknown target_session_attrs: {{value}}",
-            value = v
+            "Unknown target_session_attrs value: use read-write, read-only, primary, standby, prefer-standby or any"
         ))),
     }
 }
@@ -336,8 +397,7 @@ fn parse_target_server_type(v: &str) -> AppResult<TargetServerType> {
         "any" => Ok(TargetServerType::Any),
         _ => Err(invalid(ltext!(
             "errors.connstr.badTargetServerType",
-            "Unknown targetServerType: {{value}}",
-            value = v
+            "Unknown targetServerType value: use primary, secondary, preferSecondary, preferPrimary or any"
         ))),
     }
 }
@@ -346,8 +406,7 @@ fn parse_timeout(v: &str) -> AppResult<Option<u64>> {
     let n: u64 = v.trim().parse().map_err(|_| {
         invalid(ltext!(
             "errors.connstr.badTimeout",
-            "Invalid connect timeout: {{value}}",
-            value = v
+            "Invalid connect timeout: a whole number of seconds is expected"
         ))
     })?;
     Ok((n > 0).then(|| n.min(MAX_TIMEOUT_S)))
@@ -708,6 +767,66 @@ mod tests {
         );
         assert_eq!(m("host=h"), None);
         assert_eq!(err_key("host=h sslmode=on"), "errors.connstr.badSslMode");
+    }
+
+    #[test]
+    fn errors_never_echo_parts_of_the_string() {
+        // Неэкранированный `/`, `?` или пробел в пароле сдвигает разбор: часть пароля оказывается «портом»,
+        // «значением sslmode» или «ключом». Ошибка называет параметр, узел или позицию, но не текст.
+        for (text, key) in [
+            (
+                "postgresql://user:s3cr/3t@host/db",
+                "errors.connstr.badPort",
+            ),
+            ("postgresql://user:s3cr?3t@host", "errors.connstr.badPort"),
+            ("host=h password=s3cr 3t", "errors.connstr.syntax"),
+            (
+                "host=h password=s3cr 3t=x sslmode=s3cr3t",
+                "errors.connstr.badSslMode",
+            ),
+            ("host=h connect_timeout=s3cr3t", "errors.connstr.badTimeout"),
+            ("host=h port=s3cr3t", "errors.connstr.badPort"),
+            (
+                "host=h target_session_attrs=s3cr3t",
+                "errors.connstr.badTargetSessionAttrs",
+            ),
+            (
+                "jdbc:postgresql://h/db?targetServerType=s3cr3t",
+                "errors.connstr.badTargetServerType",
+            ),
+            ("postgresql://h1,[s3cr3t/db", "errors.connstr.badHost"),
+            ("postgresql://[::1]s3cr3t/db", "errors.connstr.badHost"),
+            ("host='s3cr3t", "errors.connstr.syntax"),
+            ("host=h password='s3cr3t\\", "errors.connstr.syntax"),
+        ] {
+            let e = parse_connection_string(text).unwrap_err();
+            assert_eq!(e.key, key, "{text}");
+            let shown = format!("{e:?}");
+            for fragment in ["s3cr", "3t"] {
+                assert!(!shown.contains(fragment), "{text}: {shown}");
+            }
+        }
+        let e = parse_connection_string("postgresql://h1,[x/db").unwrap_err();
+        assert_eq!(e.params["n"], "2", "номер узла");
+    }
+
+    #[test]
+    fn syntax_errors_point_at_the_position() {
+        let at = |s: &str| parse_connection_string(s).unwrap_err().params["position"].clone();
+        assert_eq!(at("host h"), "6", "символ вместо «=»");
+        assert_eq!(at("host='h"), "8", "строка кончилась внутри кавычек");
+        assert_eq!(at("host=h user"), "12", "строка кончилась без «=»");
+    }
+
+    #[test]
+    fn debug_hides_the_password() {
+        let p = parse_connection_string("postgresql://u:s3cr3t@h/db").unwrap();
+        assert_eq!(p.password.as_deref(), Some("s3cr3t"));
+        let shown = format!("{p:?}");
+        assert!(
+            !shown.contains("s3cr3t") && shown.contains("***"),
+            "{shown}"
+        );
     }
 
     #[test]

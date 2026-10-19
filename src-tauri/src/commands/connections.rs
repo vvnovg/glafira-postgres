@@ -11,13 +11,13 @@ use crate::conn::profile::{
 use crate::error::AppResult;
 use crate::readiness::check::{TestEvent, TestReport};
 use crate::secrets::{
-    CONNECTION_SECRET_FIELDS, OverlayStore, PATRONI_KEY_PASSWORD, PATRONI_PASSWORD,
+    CONNECTION_SECRET_FIELDS, MemoryStore, OverlayStore, PATRONI_KEY_PASSWORD, PATRONI_PASSWORD,
     PG_KEY_PASSWORD, PG_PASSWORD, SecretStore, secret_key,
 };
 use crate::state::AppState;
 
 /// Секреты из формы. У каждого поля: `null`/нет — оставить сохранённый, `""` — удалить, иное — сохранить.
-#[derive(Debug, Default, Clone, Deserialize)]
+#[derive(Default, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SecretsInput {
     #[serde(default)]
@@ -28,6 +28,23 @@ pub struct SecretsInput {
     pub patroni_password: Option<String>,
     #[serde(default)]
     pub patroni_key_password: Option<String>,
+}
+
+/// Значения в отладочный вывод не попадают: видно только, что с полем делают (оставить, удалить, задать).
+impl std::fmt::Debug for SecretsInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let op = |v: &Option<String>| match v {
+            None => "keep",
+            Some(s) if s.is_empty() => "delete",
+            Some(_) => "***",
+        };
+        f.debug_struct("SecretsInput")
+            .field("pg_password", &op(&self.pg_password))
+            .field("pg_key_password", &op(&self.pg_key_password))
+            .field("patroni_password", &op(&self.patroni_password))
+            .field("patroni_key_password", &op(&self.patroni_key_password))
+            .finish()
+    }
 }
 
 impl SecretsInput {
@@ -63,12 +80,22 @@ impl SecretsInput {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionInput {
     pub profile: ConnectionProfile,
     #[serde(default)]
     pub secrets: SecretsInput,
+}
+
+// Профиль секретов не содержит; секреты — только отметками (см. `SecretsInput`).
+impl std::fmt::Debug for ConnectionInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectionInput")
+            .field("profile", &self.profile)
+            .field("secrets", &self.secrets)
+            .finish()
+    }
 }
 
 /// Что делать с секретом при сохранении.
@@ -151,9 +178,12 @@ fn needs_reconnect(
     secrets_changed || previous.is_none_or(|p| !same_connection_settings(p, saved))
 }
 
+/// Синхронная команда Tauri выполняется в главном потоке, а блокировку хранилища держит запись файла
+/// (с fsync): чтение ждёт её в фоновом потоке, не замораживая окно.
 #[tauri::command]
-pub fn list_connections(state: State<'_, AppState>) -> AppResult<Vec<ConnectionProfile>> {
-    Ok(state.connections.list())
+pub async fn list_connections(state: State<'_, AppState>) -> AppResult<Vec<ConnectionProfile>> {
+    let st = state.inner().clone();
+    blocking(move || Ok(st.connections.list())).await
 }
 
 #[tauri::command]
@@ -225,6 +255,26 @@ pub async fn delete_connection(state: State<'_, AppState>, id: String) -> AppRes
     blocking(move || st.delete_connection_full(&id)).await
 }
 
+/// Секреты для проверки: значения формы поверх keychain. Несохранённому профилю (`id` пуст) keychain не
+/// нужен вовсе: он получает случайный id и пустую основу — иначе проверка подхватила бы записи подключения,
+/// чей настоящий id совпал с подставленным (импорт или сохранение могут дать подключению любой id).
+fn test_secrets(
+    keychain: Arc<dyn SecretStore>,
+    profile: &mut ConnectionProfile,
+    secrets: &SecretsInput,
+) -> Arc<dyn SecretStore> {
+    let base: Arc<dyn SecretStore> = if profile.id.is_empty() {
+        profile.id = format!("unsaved-{}", uuid::Uuid::new_v4());
+        Arc::new(MemoryStore::default())
+    } else {
+        keychain
+    };
+    Arc::new(OverlayStore {
+        base,
+        overrides: secrets.overrides(&profile.id),
+    })
+}
+
 /// Проверяет и несохранённый профиль: секреты формы накладываются поверх keychain.
 #[tauri::command]
 pub async fn test_connection(
@@ -236,13 +286,7 @@ pub async fn test_connection(
         mut profile,
         secrets,
     } = input;
-    if profile.id.is_empty() {
-        profile.id = "unsaved".into();
-    }
-    let overlay: Arc<dyn SecretStore> = Arc::new(OverlayStore {
-        base: state.secrets.clone(),
-        overrides: secrets.overrides(&profile.id),
-    });
+    let overlay = test_secrets(state.secrets.clone(), &mut profile, &secrets);
     crate::readiness::check::run(profile, overlay, &|e| {
         let _ = channel.send(e);
     })
@@ -287,6 +331,76 @@ mod tests {
 
     fn input(profile: ConnectionProfile, secrets: SecretsInput) -> ConnectionInput {
         ConnectionInput { profile, secrets }
+    }
+
+    #[test]
+    fn debug_output_hides_secrets() {
+        let secrets = SecretsInput {
+            pg_password: Some("s3cr3t-pg".into()),
+            pg_key_password: Some(String::new()),
+            patroni_password: Some("s3cr3t-api".into()),
+            patroni_key_password: None,
+        };
+        let input = ConnectionInput {
+            profile: sample_profile("a"),
+            secrets: secrets.clone(),
+        };
+        for shown in [
+            format!("{secrets:?}"),
+            format!("{input:?}"),
+            format!("{input:#?}"),
+        ] {
+            assert!(!shown.contains("s3cr3t"), "{shown}");
+            assert!(
+                shown.contains("***") && shown.contains("delete") && shown.contains("keep"),
+                "{shown}"
+            );
+        }
+    }
+
+    #[test]
+    fn unsaved_profile_never_reads_saved_secrets() {
+        let keychain: Arc<dyn SecretStore> = Arc::new(MemoryStore::default());
+        // Настоящее подключение с id «unsaved» (раньше это был подставной id проверки) и его пароль.
+        keychain
+            .set(&secret_key("unsaved", PG_PASSWORD), "someone-else")
+            .unwrap();
+        let mut p = sample_profile("");
+        p.id = String::new();
+        let store = test_secrets(keychain.clone(), &mut p, &SecretsInput::default());
+        assert!(p.id.starts_with("unsaved-") && p.id.len() > "unsaved-".len());
+        assert_eq!(store.get(&secret_key(&p.id, PG_PASSWORD)).unwrap(), None);
+        assert_eq!(
+            store.get(&secret_key("unsaved", PG_PASSWORD)).unwrap(),
+            None,
+            "keychain не читается вовсе"
+        );
+        // Значение из формы используется.
+        let mut q = sample_profile("");
+        q.id = String::new();
+        let typed = SecretsInput {
+            pg_password: Some("typed".into()),
+            ..Default::default()
+        };
+        let store = test_secrets(keychain.clone(), &mut q, &typed);
+        assert_eq!(
+            store
+                .get(&secret_key(&q.id, PG_PASSWORD))
+                .unwrap()
+                .as_deref(),
+            Some("typed")
+        );
+        assert_ne!(p.id, q.id, "id случайный");
+        // Сохранённый профиль проверяется с паролем из keychain, если форма его не меняла.
+        let mut saved = sample_profile("unsaved");
+        let store = test_secrets(keychain, &mut saved, &SecretsInput::default());
+        assert_eq!(
+            store
+                .get(&secret_key("unsaved", PG_PASSWORD))
+                .unwrap()
+                .as_deref(),
+            Some("someone-else")
+        );
     }
 
     #[test]

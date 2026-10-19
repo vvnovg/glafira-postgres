@@ -312,6 +312,34 @@ mod tests {
         assert_eq!(e.key, "errors.pg.caUntrusted", "{e:?}");
     }
 
+    /// libpq: `require` с корневым сертификатом — то же, что `verify-ca`: сертификат проверяется, имя узла — нет.
+    #[tokio::test]
+    async fn require_with_ca_verifies_the_certificate_like_verify_ca() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = testutil::make_ca("test-ca");
+        let ca_path = write_pem(dir.path(), "ca.pem", &ca.cert);
+        let server = testutil::tls_server(&testutil::make_server_cert(&ca, "localhost"));
+        let spec = loopback_spec(server.port, "127.0.0.1", SslMode::Require, Some(&ca_path));
+        assert_handshake_ok(spec.connect().await.unwrap_err());
+
+        let other = testutil::make_ca("other-ca");
+        let other_path = write_pem(dir.path(), "other.pem", &other.cert);
+        let server = testutil::tls_server(&testutil::make_server_cert(&ca, "localhost"));
+        let spec = loopback_spec(
+            server.port,
+            "localhost",
+            SslMode::Require,
+            Some(&other_path),
+        );
+        let e = spec.connect().await.unwrap_err();
+        assert_eq!(e.code, ErrorCode::TlsError);
+        assert_eq!(e.key, "errors.pg.caUntrusted", "{e:?}");
+
+        let server = testutil::tls_server(&testutil::make_self_signed_server("localhost"));
+        let spec = loopback_spec(server.port, "localhost", SslMode::Require, Some(&ca_path));
+        assert_eq!(spec.connect().await.unwrap_err().code, ErrorCode::TlsError);
+    }
+
     #[tokio::test]
     async fn require_without_ca_accepts_self_signed_certificate() {
         let server = testutil::tls_server(&testutil::make_self_signed_server("localhost"));

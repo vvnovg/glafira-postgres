@@ -338,20 +338,22 @@ fn validate_tls(ca: Option<&String>, cert: Option<&ClientCert>) -> AppResult<()>
     Ok(())
 }
 
-/// Адрес без `user:password@` в authority: пароль, вписанный в URL, нельзя хранить в профиле
-/// (секреты — только в keychain), выносить в файл обмена и класть в архив диагностики.
+/// Адрес без `user:password@`: пароль, вписанный в URL, нельзя хранить в профиле (секреты — только в
+/// keychain), выносить в файл обмена и класть в архив диагностики. Правило намеренно грубое: концом userinfo
+/// считается последний `@` после `://`, даже если до него стоят `/`, `?` или `#`. Пароль с неэкранированным
+/// `/` (`https://admin:pa/ss@pg-1:8008`) по RFC читался бы как путь, и адрес с паролем остался бы в профиле.
+/// Адресов REST API Patroni с `@` в пути или запросе не бывает, поэтому ложных срабатываний не ждём.
 pub fn strip_url_credentials(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         return url.to_string();
     };
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    match rest[..end].rfind('@') {
+    match rest.rfind('@') {
         Some(at) => format!("{scheme}://{}", &rest[at + 1..]),
         None => url.to_string(),
     }
 }
 
-/// Есть ли в адресе `user:password@` или `user@` (userinfo).
+/// Может ли в адресе быть userinfo (`user:password@`, `user@`): любой `@` после `://`.
 pub fn has_url_credentials(url: &str) -> bool {
     strip_url_credentials(url) != url
 }
@@ -393,7 +395,7 @@ fn validate_http_url(url: &str) -> AppResult<()> {
     if has_url_credentials(url) {
         return Err(invalid(ltext!(
             "errors.connections.patroniUrlCredentials",
-            "The Patroni API address must not contain a user name or password: use the “API user” and “API password” fields"
+            "The Patroni API address must not contain “@”, a user name or a password: use the “API user” and “API password” fields"
         )));
     }
     Ok(())
@@ -952,22 +954,38 @@ mod tests {
         );
     }
 
+    /// Любой `@` после `://` — возможный конец userinfo: пароль с неэкранированными `/`, `?`, `#` иначе
+    /// прошёл бы проверку как «путь» и остался бы в профиле.
     #[test]
-    fn at_sign_outside_authority_is_not_userinfo() {
-        let mut p = patroni(sample_profile("a"));
-        let pt = p.patroni.as_mut().unwrap();
-        pt.urls = vec![
-            "https://pg-1:8008".into(),
-            "http://pg-2:8008/health?user=a@b".into(),
-            "http://[::1]:8008/x@y#z@w".into(),
-        ];
-        pt.host_overrides = vec![HostOverride {
-            member: "pg-1".into(),
-            host: None,
-            port: None,
-            api_url: Some("https://10.0.0.1:8008/a@b".into()),
-        }];
-        validate_profile(&p).unwrap();
+    fn any_at_sign_is_treated_as_userinfo() {
+        for url in [
+            "https://admin:pa/ss@pg-1:8008",
+            "https://admin:pa?ss@pg-1:8008",
+            "https://admin:pa#ss@pg-1:8008",
+            "https://admin:12/34@pg-1:8008/patroni",
+            "http://pg-2:8008/health?user=a@b",
+            "http://[::1]:8008/x@y#z@w",
+        ] {
+            let mut p = patroni(sample_profile("a"));
+            p.patroni.as_mut().unwrap().urls = vec!["https://pg-1:8008".into(), url.into()];
+            let err = validate_profile(&p).unwrap_err();
+            assert_eq!(err.key, "errors.connections.patroniUrlCredentials", "{url}");
+            for fragment in ["pa/ss", "pa?ss", "pa#ss", "12/34"] {
+                assert!(!format!("{err:?}").contains(fragment), "{url}: {err:?}");
+            }
+            let mut q = patroni(sample_profile("a"));
+            q.patroni.as_mut().unwrap().host_overrides = vec![HostOverride {
+                member: "pg-1".into(),
+                host: None,
+                port: None,
+                api_url: Some(url.into()),
+            }];
+            assert_eq!(
+                validate_profile(&q).unwrap_err().key,
+                "errors.connections.patroniUrlCredentials",
+                "{url}"
+            );
+        }
     }
 
     #[test]
@@ -977,8 +995,13 @@ mod tests {
             ("https://u:p@pg-1:8008", "https://pg-1:8008"),
             ("https://u@pg-1:8008/x", "https://pg-1:8008/x"),
             ("https://u:p@w@pg-1/x", "https://pg-1/x"),
-            ("http://pg-1/a@b", "http://pg-1/a@b"),
-            ("http://pg-1?x=a@b", "http://pg-1?x=a@b"),
+            // Неэкранированные `/`, `?`, `#` в пароле: адрес всё равно очищается от него.
+            ("https://u:pa/ss@pg-1:8008", "https://pg-1:8008"),
+            ("https://u:p?ss@pg-1:8008/x", "https://pg-1:8008/x"),
+            ("https://u:p#ss@pg-1", "https://pg-1"),
+            // Грубое правило: `@` в пути или запросе тоже считается концом userinfo.
+            ("http://pg-1/a@b", "http://b"),
+            ("http://pg-1?x=a@b", "http://b"),
             ("no-scheme@host", "no-scheme@host"),
         ] {
             assert_eq!(strip_url_credentials(url), clean, "{url}");
@@ -992,7 +1015,8 @@ mod tests {
         let pt = p.patroni.as_mut().unwrap();
         pt.urls = vec![
             "https://admin:s3cr3t@pg-1:8008".into(),
-            "http://pg-2:8008/health?user=a@b".into(),
+            // Пароль с неэкранированным `/`: по RFC это путь, но адрес всё равно очищается.
+            "http://admin:s3/cr3t@pg-2:8008".into(),
         ];
         pt.host_overrides = vec![HostOverride {
             member: "pg-1".into(),
@@ -1002,10 +1026,7 @@ mod tests {
         }];
         assert!(strip_patroni_url_credentials(&mut p));
         let pt = p.patroni.as_ref().unwrap();
-        assert_eq!(
-            pt.urls,
-            ["https://pg-1:8008", "http://pg-2:8008/health?user=a@b"]
-        );
+        assert_eq!(pt.urls, ["https://pg-1:8008", "http://pg-2:8008"]);
         assert_eq!(
             pt.host_overrides[0].api_url.as_deref(),
             Some("https://10.0.0.1:8008")

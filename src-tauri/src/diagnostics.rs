@@ -183,7 +183,8 @@ mod tests {
         legacy.patroni = Some(PatroniSettings {
             urls: vec![
                 "https://admin:s3cr3t@pg-1:8008".into(),
-                "http://pg-2:8008/health?user=a@b".into(),
+                // Пароль с неэкранированным `/`: по RFC это путь, но адрес всё равно очищается.
+                "http://admin:s3/cr3t@pg-2:8008".into(),
             ],
             username: Some("patroni".into()),
             tls: None,
@@ -221,10 +222,7 @@ mod tests {
         );
         let profiles: Vec<ConnectionProfile> = serde_json::from_str(&text).unwrap();
         let pt = profiles[0].patroni.as_ref().unwrap();
-        assert_eq!(
-            pt.urls,
-            ["https://pg-1:8008", "http://pg-2:8008/health?user=a@b"]
-        );
+        assert_eq!(pt.urls, ["https://pg-1:8008", "http://pg-2:8008"]);
         assert_eq!(
             pt.host_overrides[0].api_url.as_deref(),
             Some("https://10.0.0.1:8008")

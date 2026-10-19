@@ -245,8 +245,12 @@ pub fn pg_connector(
             b.add_extra_chain_cert(extra).map_err(tls_setup)?;
         }
     }
-    b.set_verify(match mode {
-        SslMode::VerifyCa | SslMode::VerifyFull => SslVerifyMode::PEER,
+    // Как в libpq: `require` с указанным корневым сертификатом проверяет сертификат сервера, как `verify-ca`
+    // (имя узла проверяет только `verify-full`, см. `ConnectSpec::connect_with_handle`).
+    b.set_verify(match (mode, ca_path) {
+        (SslMode::VerifyCa | SslMode::VerifyFull, _) | (SslMode::Require, Some(_)) => {
+            SslVerifyMode::PEER
+        }
         _ => SslVerifyMode::NONE,
     });
     Ok(Some(b.build()))
