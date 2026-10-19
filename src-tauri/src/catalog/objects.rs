@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
-use tokio_postgres::Client;
+use tokio_postgres::types::ToSql;
+use tokio_postgres::{Client, Row};
 
 use crate::catalog::{check_page, like_pattern};
 use crate::conn::errors::from_pg;
@@ -55,13 +56,44 @@ pub(crate) fn next_offset(offset: i64, got: usize, total: i64) -> Option<i64> {
     (got > 0 && end < total).then_some(end)
 }
 
+/// Столбцы строки отношения; последний — `count(*) OVER ()` (общее число для страницы).
+/// У партиционированной таблицы (`p`) оценка строк — сумма `reltuples` по листьям дерева партиций
+/// (где статистика есть), размер — сумма `pg_total_relation_size` по всему дереву: у самой родительской
+/// таблицы своих файлов нет.
 const REL_COLUMNS: &str = "c.oid::bigint, c.relname::text, n.nspname::text, c.relkind::text, \
     CASE WHEN c.relkind = 'p' THEN (SELECT count(*) FROM pg_inherits i WHERE i.inhparent = c.oid) END, \
-    CASE WHEN c.relkind IN ('r', 'p', 'm') AND c.reltuples >= 0 THEN c.reltuples::bigint END, \
-    CASE WHEN c.relkind IN ('r', 'p', 'm') THEN pg_total_relation_size(c.oid) END, \
+    CASE WHEN c.relkind = 'p' THEN \
+           (SELECT sum(l.reltuples::bigint) FROM pg_partition_tree(c.oid) t JOIN pg_class l ON l.oid = t.relid \
+            WHERE t.isleaf AND l.reltuples >= 0)::bigint \
+         WHEN c.relkind IN ('r', 'm') AND c.reltuples >= 0 THEN c.reltuples::bigint END, \
+    CASE WHEN c.relkind = 'p' THEN (SELECT sum(pg_total_relation_size(t.relid)) FROM pg_partition_tree(c.oid) t)::bigint \
+         WHEN c.relkind IN ('r', 'm') THEN pg_total_relation_size(c.oid) END, \
     count(*) OVER ()";
 
-fn rel_item(r: &tokio_postgres::Row) -> ObjectItem {
+/// `FROM … WHERE …` списка отношений схемы (`$1` — схема, `$2` — `relkind`, `$3` — шаблон `ILIKE`).
+/// Имена в каталоге имеют тип `name` (сопоставление C): без приведения к `text` с сопоставлением по
+/// умолчанию `ILIKE` не сворачивает регистр букв не из ASCII (`Заказы` не находится по `заказ`).
+const REL_FROM_WHERE: &str = "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+    WHERE n.nspname = $1 AND c.relkind::text = ANY($2) AND NOT c.relispartition \
+      AND ($3::text IS NULL OR c.relname::text COLLATE \"default\" ILIKE $3)";
+
+/// `FROM … WHERE …` партиций таблицы (`$1` — схема, `$2` — имя родителя). Только настоящие партиции:
+/// потомки по наследованию (`INHERITS`) в список не входят.
+const PARTITION_FROM_WHERE: &str = "FROM pg_inherits inh \
+    JOIN pg_class c ON c.oid = inh.inhrelid JOIN pg_namespace n ON n.oid = c.relnamespace \
+    WHERE c.relispartition \
+      AND inh.inhparent = (SELECT pc.oid FROM pg_class pc JOIN pg_namespace pn ON pn.oid = pc.relnamespace \
+                           WHERE pn.nspname = $1 AND pc.relname = $2)";
+
+const FUNC_COLUMNS: &str = "p.oid::bigint, p.proname::text, n.nspname::text, p.prokind::text, \
+    pg_get_function_identity_arguments(p.oid), count(*) OVER ()";
+
+/// `FROM … WHERE …` функций и процедур схемы (`$1` — схема, `$2` — шаблон `ILIKE`).
+const FUNC_FROM_WHERE: &str = "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+    WHERE n.nspname = $1 AND p.prokind IN ('f', 'p') \
+      AND ($2::text IS NULL OR p.proname::text COLLATE \"default\" ILIKE $2)";
+
+fn rel_item(r: &Row) -> ObjectItem {
     ObjectItem {
         oid: r.get(0),
         name: r.get(1),
@@ -74,6 +106,61 @@ fn rel_item(r: &tokio_postgres::Row) -> ObjectItem {
     }
 }
 
+fn func_item(r: &Row) -> ObjectItem {
+    ObjectItem {
+        oid: r.get(0),
+        name: r.get(1),
+        schema: r.get(2),
+        relkind: r.get(3),
+        partitions: None,
+        est_rows: None,
+        total_bytes: None,
+        signature: r.get(4),
+    }
+}
+
+type Param<'a> = &'a (dyn ToSql + Sync);
+
+/// Страница списка вместе с общим числом. Страница и счёт строятся из одного `from_where`
+/// (`params` — его параметры `$1…$n`); `limit` и `offset` встают следом. `columns` кончается на
+/// `count(*) OVER ()`: общее число приходит со строками страницы. Если страница пуста при ненулевом
+/// сдвиге (список стал короче, чем ждал вызывающий), окно считать не из чего — число берётся отдельным
+/// запросом `count(*)`, а продолжения (`next_offset`) нет.
+async fn paged(
+    c: &Client,
+    (columns, from_where, order_by): (&str, &str, &str),
+    params: &[Param<'_>],
+    (offset, limit): (i64, i64),
+    item: fn(&Row) -> ObjectItem,
+) -> AppResult<ObjectPage> {
+    let n = params.len();
+    let sql = format!(
+        "SELECT {columns} {from_where} ORDER BY {order_by} LIMIT ${} OFFSET ${}",
+        n + 1,
+        n + 2
+    );
+    let mut all = params.to_vec();
+    all.push(&limit);
+    all.push(&offset);
+    let rows = c.query(&sql, &all).await.map_err(|e| from_pg(&e))?;
+    let items: Vec<ObjectItem> = rows.iter().map(item).collect();
+    let total = match rows.first() {
+        Some(r) => r.get::<_, i64>(r.len() - 1),
+        None if offset > 0 => c
+            .query_one(&format!("SELECT count(*) {from_where}"), params)
+            .await
+            .map_err(|e| from_pg(&e))?
+            .get(0),
+        None => 0,
+    };
+    let next_offset = next_offset(offset, items.len(), total);
+    Ok(ObjectPage {
+        total,
+        items,
+        next_offset,
+    })
+}
+
 pub async fn list(
     c: &Client,
     schema: &str,
@@ -84,56 +171,28 @@ pub async fn list(
 ) -> AppResult<ObjectPage> {
     check_page(offset, limit)?;
     let pattern = like_pattern(filter);
-    let (items, total): (Vec<ObjectItem>, i64) = match kind.relkinds() {
+    match kind.relkinds() {
         Some(relkinds) => {
-            let sql = format!(
-                "SELECT {REL_COLUMNS} FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
-                 WHERE n.nspname = $1 AND c.relkind::text = ANY($2) AND NOT c.relispartition \
-                   AND ($3::text IS NULL OR c.relname ILIKE $3) \
-                 ORDER BY c.relname LIMIT $4 OFFSET $5"
-            );
-            let rows = c
-                .query(&sql, &[&schema, &relkinds, &pattern, &limit, &offset])
-                .await
-                .map_err(|e| from_pg(&e))?;
-            let total = rows.first().map(|r| r.get::<_, i64>(7)).unwrap_or(0);
-            (rows.iter().map(rel_item).collect(), total)
+            paged(
+                c,
+                (REL_COLUMNS, REL_FROM_WHERE, "c.relname"),
+                &[&schema, &relkinds, &pattern],
+                (offset, limit),
+                rel_item,
+            )
+            .await
         }
         None => {
-            let rows = c
-                .query(
-                    "SELECT p.oid::bigint, p.proname::text, n.nspname::text, p.prokind::text, \
-                       pg_get_function_identity_arguments(p.oid), count(*) OVER () \
-                     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
-                     WHERE n.nspname = $1 AND p.prokind IN ('f', 'p') AND ($2::text IS NULL OR p.proname ILIKE $2) \
-                     ORDER BY p.proname, 5 LIMIT $3 OFFSET $4",
-                    &[&schema, &pattern, &limit, &offset],
-                )
-                .await
-                .map_err(|e| from_pg(&e))?;
-            let total = rows.first().map(|r| r.get::<_, i64>(5)).unwrap_or(0);
-            let items = rows
-                .iter()
-                .map(|r| ObjectItem {
-                    oid: r.get(0),
-                    name: r.get(1),
-                    schema: r.get(2),
-                    relkind: r.get(3),
-                    partitions: None,
-                    est_rows: None,
-                    total_bytes: None,
-                    signature: r.get(4),
-                })
-                .collect();
-            (items, total)
+            paged(
+                c,
+                (FUNC_COLUMNS, FUNC_FROM_WHERE, "p.proname, 5"),
+                &[&schema, &pattern],
+                (offset, limit),
+                func_item,
+            )
+            .await
         }
-    };
-    let next_offset = next_offset(offset, items.len(), total);
-    Ok(ObjectPage {
-        total,
-        items,
-        next_offset,
-    })
+    }
 }
 
 /// Партиции таблицы (могут лежать в другой схеме — поле `schema`).
@@ -145,25 +204,14 @@ pub async fn partitions(
     limit: i64,
 ) -> AppResult<ObjectPage> {
     check_page(offset, limit)?;
-    let sql = format!(
-        "SELECT {REL_COLUMNS} FROM pg_inherits inh \
-         JOIN pg_class c ON c.oid = inh.inhrelid JOIN pg_namespace n ON n.oid = c.relnamespace \
-         WHERE inh.inhparent = (SELECT pc.oid FROM pg_class pc JOIN pg_namespace pn ON pn.oid = pc.relnamespace \
-                                WHERE pn.nspname = $1 AND pc.relname = $2) \
-         ORDER BY c.relname LIMIT $3 OFFSET $4"
-    );
-    let rows = c
-        .query(&sql, &[&schema, &table, &limit, &offset])
-        .await
-        .map_err(|e| from_pg(&e))?;
-    let total = rows.first().map(|r| r.get::<_, i64>(7)).unwrap_or(0);
-    let items: Vec<ObjectItem> = rows.iter().map(rel_item).collect();
-    let next_offset = next_offset(offset, items.len(), total);
-    Ok(ObjectPage {
-        total,
-        items,
-        next_offset,
-    })
+    paged(
+        c,
+        (REL_COLUMNS, PARTITION_FROM_WHERE, "n.nspname, c.relname"),
+        &[&schema, &table],
+        (offset, limit),
+        rel_item,
+    )
+    .await
 }
 
 #[cfg(test)]

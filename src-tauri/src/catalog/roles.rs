@@ -19,13 +19,14 @@ pub struct RoleInfo {
     pub member_of: Vec<String>,
 }
 
-/// Роли кластера; встроенные `pg_*` — только при `include_system`.
+/// Роли кластера; встроенные `pg_*` — только при `include_system`. `DISTINCT` в `member_of`: с PostgreSQL 16
+/// одну роль можно выдать дважды от разных выдавших (`grantor`) — в списке она должна быть одна.
 pub async fn list(c: &Client, include_system: bool) -> AppResult<Vec<RoleInfo>> {
     let rows = c
         .query(
             "SELECT r.rolname::text, r.rolsuper, r.rolcanlogin, r.rolcreatedb, r.rolcreaterole, \
                r.rolreplication, r.rolbypassrls, r.rolconnlimit, r.rolvaliduntil::text, \
-               ARRAY(SELECT b.rolname::text FROM pg_auth_members m JOIN pg_roles b ON b.oid = m.roleid \
+               ARRAY(SELECT DISTINCT b.rolname::text FROM pg_auth_members m JOIN pg_roles b ON b.oid = m.roleid \
                      WHERE m.member = r.oid ORDER BY 1) \
              FROM pg_roles r WHERE $1 OR r.rolname !~ '^pg_' ORDER BY r.rolname",
             &[&include_system],

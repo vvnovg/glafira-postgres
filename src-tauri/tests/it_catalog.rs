@@ -91,10 +91,25 @@ async fn demo_schema_on_every_node() {
             (Some("p"), Some(2))
         );
         assert!(tables.items[0].est_rows.is_some_and(|n| n >= 100));
+        // У партиционированной таблицы размер — сумма по партициям, а не 0 (у родителя своих файлов нет).
+        assert!(
+            events.total_bytes.is_some_and(|n| n > 0),
+            "{addr}: {events:?}"
+        );
+        assert!(events.est_rows.is_none_or(|n| n >= 0), "{addr}: {events:?}");
         let page = objects::list(&c, "shop", ObjectKind::Tables, None, 0, 2)
             .await
             .unwrap();
         assert_eq!((page.total, page.next_offset), (3, Some(2)));
+        // Страница за концом списка: общее число настоящее, а не 0, продолжения нет.
+        let past = objects::list(&c, "shop", ObjectKind::Tables, None, 10, 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            (past.total, past.items.len(), past.next_offset),
+            (3, 0, None),
+            "{addr}"
+        );
         let filtered = objects::list(&c, "shop", ObjectKind::Tables, Some("ORD"), 0, 500)
             .await
             .unwrap();
@@ -123,6 +138,32 @@ async fn demo_schema_on_every_node() {
             ["events_2026_09", "events_2026_10"]
         );
 
+        let parts_past = objects::partitions(&c, "shop", "events", 5, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                parts_past.total,
+                parts_past.items.len(),
+                parts_past.next_offset
+            ),
+            (2, 0, None),
+            "{addr}"
+        );
+
+        let funcs_past = objects::list(&c, "shop", ObjectKind::Functions, None, 100, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                funcs_past.total,
+                funcs_past.items.len(),
+                funcs_past.next_offset
+            ),
+            (3, 0, None),
+            "{addr}"
+        );
+
         let funcs = objects::list(&c, "shop", ObjectKind::Functions, None, 0, 500)
             .await
             .unwrap();
@@ -148,6 +189,12 @@ async fn demo_schema_on_every_node() {
         let rl = roles::list(&c, false).await.unwrap();
         let diag = rl.iter().find(|r| r.name == "glafira_diag").unwrap();
         assert!(diag.member_of.contains(&"pg_monitor".to_string()));
+        // Роль в `member_of` одна, даже если её выдали дважды (PostgreSQL 16+: разные выдавшие).
+        for r in roles::list(&c, true).await.unwrap() {
+            let mut unique = r.member_of.clone();
+            unique.dedup();
+            assert_eq!(unique, r.member_of, "{addr}: {}", r.name);
+        }
         assert!(!rl.iter().any(|r| r.name == "pg_monitor"));
         assert!(
             roles::list(&c, true)
