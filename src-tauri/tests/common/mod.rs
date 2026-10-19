@@ -245,3 +245,37 @@ impl<F: FnOnce()> Drop for RestoreGuard<F> {
         }
     }
 }
+
+/// Список узлов стенда без Patroni.
+pub fn host_list_profile(id: &str) -> Option<ConnectionProfile> {
+    let (primary, replica) = (env("GPG_IT_PRIMARY")?, env("GPG_IT_REPLICA")?);
+    let mut p = server_profile(id, &primary);
+    p.kind = ConnectionKind::HostList;
+    let (h, port) = host_port(&replica);
+    p.hosts.push(HostPort { host: h, port });
+    Some(p)
+}
+
+/// Возвращает пару primary/реплика стенда в исходное состояние (после promote и остановок).
+pub fn reset_replication_pair() {
+    let compose = concat!(env!("CARGO_MANIFEST_DIR"), "/../dev/docker-compose.yml");
+    docker(&[
+        "compose",
+        "-f",
+        compose,
+        "rm",
+        "-sfv",
+        "pg-primary",
+        "pg-replica",
+    ]);
+    docker(&[
+        "compose",
+        "-f",
+        compose,
+        "up",
+        "-d",
+        "pg-primary",
+        "pg-replica",
+    ]);
+    wait_stand();
+}
