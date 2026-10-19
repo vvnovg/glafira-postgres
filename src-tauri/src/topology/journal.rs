@@ -67,8 +67,7 @@ pub fn diff(prev: &Topology, next: &Topology) -> Vec<TopologyEvent> {
     if from != to {
         push(EventKind::LeaderChanged { from, to });
     }
-    let timeline = |t: &Topology| t.leader().and_then(|m| m.timeline);
-    if let (Some(a), Some(b)) = (timeline(prev), timeline(next))
+    if let (Some(a), Some(b)) = (prev.cluster_timeline(), next.cluster_timeline())
         && a != b
     {
         push(EventKind::TimelineChanged { from: a, to: b });
@@ -216,6 +215,45 @@ mod tests {
         }));
         assert!(k.contains(&EventKind::PauseChanged { paused: true }));
         assert!(diff(&prev, &prev).is_empty());
+    }
+
+    fn has_timeline_change(events: &[TopologyEvent]) -> bool {
+        events
+            .iter()
+            .any(|e| matches!(e.event, EventKind::TimelineChanged { .. }))
+    }
+
+    #[test]
+    fn timeline_change_survives_leaderless_window() {
+        // Ключ лидера истёк: на промежуточном опросе лидера нет, старый primary недоступен.
+        let prev = topo(vec![member("a", Role::Primary), member("b", Role::Replica)]);
+        let mut mid = prev.clone();
+        mid.observed_at_ms = 2_000;
+        mid.members[0].reachable = false;
+        mid.members[0].role = Role::Unknown;
+        mid.members[0].state = None;
+        let mut next = mid.clone();
+        next.observed_at_ms = 3_000;
+        next.members[1].role = Role::Primary;
+        next.members[1].timeline = Some(2);
+
+        assert!(!has_timeline_change(&diff(&prev, &mid)));
+        let ev = diff(&mid, &next);
+        assert!(kinds(&ev).contains(&&EventKind::TimelineChanged { from: 1, to: 2 }));
+    }
+
+    #[test]
+    fn stale_timeline_of_unreachable_member_is_ignored() {
+        let prev = topo(vec![member("a", Role::Primary), member("b", Role::Replica)]);
+        let mut next = prev.clone();
+        next.observed_at_ms = 2_000;
+        next.members[0].reachable = false;
+        next.members[0].role = Role::Unknown;
+        next.members[0].state = None;
+        next.members[0].timeline = Some(5);
+
+        assert_eq!(next.cluster_timeline(), Some(1));
+        assert!(!has_timeline_change(&diff(&prev, &next)));
     }
 
     #[test]

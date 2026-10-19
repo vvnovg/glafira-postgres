@@ -117,6 +117,16 @@ impl Topology {
         self.members.iter().find(|m| m.name == name)
     }
 
+    /// Таймлайн кластера: максимум по доступным узлам, у которых он известен.
+    /// Недоступный узел не учитывается: его значение может быть устаревшим.
+    pub fn cluster_timeline(&self) -> Option<i64> {
+        self.members
+            .iter()
+            .filter(|m| m.reachable)
+            .filter_map(|m| m.timeline)
+            .max()
+    }
+
     pub fn is_degraded(&self) -> bool {
         self.warnings.iter().any(|w| {
             matches!(
@@ -256,5 +266,17 @@ mod tests {
         assert!(a.same_except_time(&b));
         b.members[0].lag_bytes = Some(1);
         assert!(!a.same_except_time(&b));
+    }
+
+    #[test]
+    fn cluster_timeline_is_max_over_reachable_members() {
+        let mut t = topo(vec![member("a", Role::Replica), member("b", Role::Primary)]);
+        t.members[0].timeline = Some(1);
+        t.members[1].timeline = Some(2);
+        assert_eq!(t.cluster_timeline(), Some(2));
+        t.members[1].reachable = false;
+        assert_eq!(t.cluster_timeline(), Some(1));
+        t.members[0].timeline = None;
+        assert_eq!(t.cluster_timeline(), None);
     }
 }
