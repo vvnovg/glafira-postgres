@@ -169,7 +169,7 @@ mod tests {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>updatesEnabled</key><false/>
-  <key>licenseKey</key><string>a.b</string>
+  <key>updateUrl</key><string>https://mirror.corp/latest.json</string>
   <key>n</key><integer>3</integer>
 </dict></plist>"#,
         )
@@ -178,7 +178,10 @@ mod tests {
             panic!()
         };
         assert_eq!(v["updatesEnabled"], PolicyValue::Bool(false));
-        assert_eq!(v["licenseKey"], PolicyValue::Str("a.b".into()));
+        assert_eq!(
+            v["updateUrl"],
+            PolicyValue::Str("https://mirror.corp/latest.json".into())
+        );
         assert_eq!(v["n"], PolicyValue::Int(3));
         std::fs::write(&path, "not a plist").unwrap();
         assert!(matches!(read_plist_file(&path), RawPolicy::Unreadable(_)));
@@ -207,7 +210,11 @@ mod tests {
         let json = read_json_file(Path::new(&format!("{base}/policy.json")));
         let p = crate::policy::resolve("doc", json);
         assert!(p.status.errors.is_empty(), "{:?}", p.status.errors);
-        assert!(p.status.has_license_key);
+        assert!(!p.status.updates_enabled);
+        assert_eq!(
+            p.status.update_url.as_deref(),
+            Some("https://mirror.example.corp/glafira-postgres/latest.json")
+        );
         assert_eq!(p.status.language.as_deref(), Some("en"));
 
         // Профиль MDM: содержимое PayloadContent[0] попадает в Managed Preferences как есть.
@@ -223,7 +230,7 @@ mod tests {
             content.get("PayloadType").and_then(|v| v.as_string()),
             Some(crate::product::IDENTIFIER)
         );
-        for key in ["licenseKey", "language"] {
+        for key in ["updatesEnabled", "updateUrl", "language"] {
             assert!(content.contains_key(key), "{key}");
         }
         // Читается только политика уровня устройства (docs/admin.md): профиль ставится на всю систему.
@@ -241,5 +248,12 @@ mod tests {
             crate::product::POLICY_VENDOR,
             crate::product::POLICY_PRODUCT
         )));
+        for line in [
+            "\"updatesEnabled\"=dword:00000000",
+            "\"updateUrl\"=\"https://mirror.example.corp/glafira-postgres/latest.json\"",
+            "\"language\"=\"en\"",
+        ] {
+            assert!(reg.contains(line), "{line}");
+        }
     }
 }

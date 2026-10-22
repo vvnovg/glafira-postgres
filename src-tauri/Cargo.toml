@@ -22,7 +22,6 @@ serde_json = "1"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 thiserror = "2"
 uuid = { version = "1", features = ["v4"] }
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 time = { version = "0.3", features = ["formatting"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "macros", "sync", "io-util"] }

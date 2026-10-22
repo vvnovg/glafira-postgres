@@ -1458,7 +1458,6 @@ dependencies = [
 name = "glafira-pg"
 version = "0.1.0"
 dependencies = [
- "chrono",
  "dirs",
  "futures-util",
  "keyring",

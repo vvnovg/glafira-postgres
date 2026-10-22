@@ -51,7 +51,7 @@ pub enum LanguageReason {
     Default,
 }
 
-/// Политика → выбор → ОС → en. Все языки доступны без лицензии.
+/// Политика → выбор → ОС → en. Все языки доступны всем.
 pub fn resolve(
     system: Option<&str>,
     chosen: Option<&str>,

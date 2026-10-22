@@ -10,7 +10,6 @@ use crate::i18n::LocalizedText;
 
 pub const KEY_UPDATES_ENABLED: &str = "updatesEnabled";
 pub const KEY_UPDATE_URL: &str = "updateUrl";
-pub const KEY_LICENSE_KEY: &str = "licenseKey";
 pub const KEY_LANGUAGE: &str = "language";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -68,7 +67,6 @@ pub struct PolicyStatus {
     pub source: Option<String>,
     pub updates_enabled: bool,
     pub update_url: Option<String>,
-    pub has_license_key: bool,
     /// Язык интерфейса, заданный администратором.
     pub language: Option<String>,
     pub errors: Vec<LocalizedText>,
@@ -81,7 +79,6 @@ impl Default for PolicyStatus {
             source: None,
             updates_enabled: true,
             update_url: None,
-            has_license_key: false,
             language: None,
             errors: Vec::new(),
         }
@@ -91,8 +88,6 @@ impl Default for PolicyStatus {
 #[derive(Debug, Clone, Default)]
 pub struct Policy {
     pub status: PolicyStatus,
-    /// Ключ организации; в интерфейс не отдаётся.
-    pub license_key: Option<String>,
 }
 
 /// Политика, которую задал администратор, но которую не удалось понять, выключает обновления:
@@ -113,7 +108,6 @@ pub fn resolve(source: &str, raw: RawPolicy) -> Policy {
                     )],
                     ..PolicyStatus::default()
                 },
-                license_key: None,
             };
         }
         RawPolicy::Values(map) => map,
@@ -123,7 +117,6 @@ pub fn resolve(source: &str, raw: RawPolicy) -> Policy {
         source: Some(source.to_string()),
         ..PolicyStatus::default()
     };
-    let mut license_key = None;
     let mut broken = false;
     for (key, value) in map {
         match (key.as_str(), value) {
@@ -140,10 +133,6 @@ pub fn resolve(source: &str, raw: RawPolicy) -> Policy {
                     key = key
                 ));
             }
-            (KEY_LICENSE_KEY, PolicyValue::Str(s)) if !s.trim().is_empty() => {
-                license_key = Some(s.trim().to_string());
-                status.has_license_key = true;
-            }
             (KEY_LANGUAGE, PolicyValue::Str(s))
                 if crate::settings::LANGUAGES.contains(&s.trim()) =>
             {
@@ -157,7 +146,7 @@ pub fn resolve(source: &str, raw: RawPolicy) -> Policy {
                 value = s
             )),
             (KEY_LANGUAGE, other) => status.errors.push(other.invalid(&key)),
-            (KEY_UPDATES_ENABLED | KEY_UPDATE_URL | KEY_LICENSE_KEY, other) => {
+            (KEY_UPDATES_ENABLED | KEY_UPDATE_URL, other) => {
                 broken = true;
                 status.errors.push(other.invalid(&key));
             }
@@ -167,10 +156,7 @@ pub fn resolve(source: &str, raw: RawPolicy) -> Policy {
     if broken {
         status.updates_enabled = false;
     }
-    Policy {
-        status,
-        license_key,
-    }
+    Policy { status }
 }
 
 #[cfg(test)]
@@ -191,7 +177,6 @@ mod tests {
         let p = resolve("/etc/x/policy.json", RawPolicy::Absent);
         assert!(!p.status.managed);
         assert!(p.status.updates_enabled);
-        assert_eq!(p.license_key, None);
     }
 
     #[test]
@@ -204,7 +189,7 @@ mod tests {
                     "updateUrl",
                     PolicyValue::Str("https://mirror.corp/latest.json".into()),
                 ),
-                ("licenseKey", PolicyValue::Str(" abc.def ".into())),
+                ("language", PolicyValue::Str("en".into())),
             ]),
         );
         assert!(p.status.managed);
@@ -214,8 +199,7 @@ mod tests {
             p.status.update_url.as_deref(),
             Some("https://mirror.corp/latest.json")
         );
-        assert!(p.status.has_license_key);
-        assert_eq!(p.license_key.as_deref(), Some("abc.def"));
+        assert_eq!(p.status.language.as_deref(), Some("en"));
         assert!(p.status.errors.is_empty());
     }
 
@@ -308,13 +292,26 @@ mod tests {
     }
 
     #[test]
-    fn license_key_is_not_serialized() {
+    fn legacy_license_key_is_ignored() {
+        // Ключ политик прежних сборок: неизвестный ключ — предупреждение в лог; соседние ключи применяются,
+        // обновления не выключаются, в интерфейс значение не уходит.
         let p = resolve(
             "src",
-            values(&[("licenseKey", PolicyValue::Str("secret.key".into()))]),
+            values(&[
+                ("licenseKey", PolicyValue::Str("secret.key".into())),
+                ("language", PolicyValue::Str("en".into())),
+            ]),
         );
+        assert!(p.status.managed);
+        assert!(p.status.updates_enabled);
+        assert!(p.status.errors.is_empty());
+        assert_eq!(p.status.language.as_deref(), Some("en"));
         let json = serde_json::to_string(&p.status).unwrap();
         assert!(!json.contains("secret.key"));
-        assert!(json.contains("\"hasLicenseKey\":true"));
+        assert!(!json.to_lowercase().contains("license"));
+        // Нестроковое значение — тоже просто неизвестный ключ, а не ошибка политики.
+        let p = resolve("src", values(&[("licenseKey", PolicyValue::Bool(true))]));
+        assert!(p.status.updates_enabled);
+        assert!(p.status.errors.is_empty());
     }
 }

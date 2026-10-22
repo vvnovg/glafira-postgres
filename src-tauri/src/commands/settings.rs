@@ -20,7 +20,7 @@ fn current(st: &AppState) -> LanguageSettings {
     )
 }
 
-/// Блокирующая часть `set_language` (запись файла). Лицензия не проверяется: все языки бесплатны.
+/// Блокирующая часть `set_language` (запись файла). Все языки доступны всем.
 fn apply_language(st: &AppState, lang: Option<&str>) -> AppResult<LanguageSettings> {
     if st.policy.status.language.is_some() {
         return Err(app_err!(
@@ -119,7 +119,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_status_is_the_one_from_startup() {
+    fn with_policy_keeps_status() {
         let dir = tempfile::tempdir().unwrap();
         let mut policy = crate::policy::Policy::default();
         policy.status.managed = true;

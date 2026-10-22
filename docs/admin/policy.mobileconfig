@@ -9,7 +9,8 @@
       <key>PayloadIdentifier</key><string>io.github.vvnovg.glafira.postgres.policy</string>
       <key>PayloadUUID</key><string>00000000-0000-0000-0000-000000000011</string>
       <key>PayloadVersion</key><integer>1</integer>
-      <key>licenseKey</key><string>&lt;ключ организации&gt;</string>
+      <key>updatesEnabled</key><false/>
+      <key>updateUrl</key><string>https://mirror.example.corp/glafira-postgres/latest.json</string>
       <key>language</key><string>en</string>
     </dict>
   </array>

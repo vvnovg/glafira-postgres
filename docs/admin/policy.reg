@@ -1,5 +1,6 @@
 Windows Registry Editor Version 5.00
 
 [HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Glafira\PostgreSQL]
-"licenseKey"="<ключ организации>"
+"updatesEnabled"=dword:00000000
+"updateUrl"="https://mirror.example.corp/glafira-postgres/latest.json"
 "language"="en"
