@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- Исходник иконки Glafira for PostgreSQL: база данных и линия пульса на синем. Набор для платформ: pnpm tauri icon public/app-icon.svg -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4a8fd4"/>
+      <stop offset="1" stop-color="#1f4f82"/>
+    </linearGradient>
+    <linearGradient id="body" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#dfe9f5"/>
+      <stop offset="0.5" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#cfdcec"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+  <!-- Цилиндр с тремя «дисками» -->
+  <path d="M292 300 V700 A220 72 0 0 0 732 700 V300 Z" fill="url(#body)"/>
+  <path d="M292 433 A220 72 0 0 0 732 433 M292 566 A220 72 0 0 0 732 566" fill="none" stroke="#2c6aa8" stroke-width="16"/>
+  <ellipse cx="512" cy="300" rx="220" ry="72" fill="#eef4fb" stroke="#2c6aa8" stroke-width="16"/>
+  <!-- Пульс: тёмная подложка, чтобы линия читалась и на белом, и на синем -->
+  <path d="M180 540 H372 L424 432 L488 660 L552 380 L612 596 L652 540 H844" fill="none" stroke="#173d66" stroke-width="64" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M180 540 H372 L424 432 L488 660 L552 380 L612 596 L652 540 H844" fill="none" stroke="#ffb020" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

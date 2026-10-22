@@ -3,6 +3,7 @@ import type { ParsedConnection } from "../../api/types";
 import type { ConnectionProfile, HostPort } from "../../api/types";
 import {
   applyParsed,
+  copyProfile,
   emptyKindMemo,
   emptyPatroni,
   formatDatabases,
@@ -30,6 +31,24 @@ function walk(start: ConnectionProfile, ...kinds: ConnectionProfile["kind"][]) {
 }
 
 describe("модель формы", () => {
+  it("копия подключения — новый профиль с теми же настройками в той же папке", () => {
+    const source: ConnectionProfile = {
+      ...newProfile(),
+      id: "c1",
+      name: "billing",
+      environment: "stage",
+      kind: "hostList",
+      hosts: hp("a", "b"),
+      pg: { ...newProfile().pg, username: "glafira_diag", databases: ["orders"] },
+      folderId: "f1",
+      order: 7,
+    };
+    const copy = copyProfile(source, "billing (копия)");
+    expect(copy).toEqual({ ...source, id: "", name: "billing (копия)", order: 0 });
+    // Источник не меняется.
+    expect(source.id).toBe("c1");
+  });
+
   it("смена вида не теряет ввод", () => {
     const list = { ...withKind(newProfile(), "hostList"), hosts: [{ host: "a", port: 5432 }, { host: "b", port: 5433 }] };
     expect(withKind(list, "server").hosts).toEqual([{ host: "a", port: 5432 }]);

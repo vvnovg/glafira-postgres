@@ -159,6 +159,9 @@
     "form": {
       "titleNew": "Новое подключение",
       "titleEdit": "Подключение «{{name}}»",
+      "titleCopy": "Копия подключения «{{name}}»",
+      "copyName": "{{name}} (копия)",
+      "copyNotice": "Пароли не копируются: введите их заново.",
       "deleted": "Подключение удалено",
       "connstr": "Строка подключения",
       "connstrApply": "Заполнить",
@@ -238,6 +241,7 @@
     "connections": "Подключения",
     "newConnection": "Новое подключение",
     "editConnection": "Изменить подключение",
+    "duplicateConnection": "Дублировать подключение",
     "emptyHint": "Добавьте первое подключение. Локальный стенд: <code>docker compose -f dev/docker-compose.yml up -d</code>, сервер <code>localhost:5460</code>, пользователь <code>glafira_diag</code>.",
     "license": "Лицензия: {{tier}}",
     "help": "Справка",
@@ -316,6 +320,7 @@
     "help": "Справка",
     "connection": "Подключение: {{name}}",
     "newConnection": "Новое подключение",
+    "copyConnection": "Копия: {{name}}",
     "overview": "Обзор: {{conn}}",
     "unknownConnection": "?"
   },
@@ -450,6 +455,8 @@
     "patroniOk": "Участников: {{members}}, лидер {{leader}}",
     "discoveryOk": "Найдено узлов: {{members}}",
     "nodeOk": "{{role}}, PostgreSQL {{version}}",
+    "patroniNotUsed": "Не используется: это не кластер Patroni",
+    "readinessNoNode": "Не проверялась: ни один узел не принял подключение",
     "readinessTitle": "Готовность к диагностике",
     "roleScript": "Скрипт роли для диагностики",
     "step": {

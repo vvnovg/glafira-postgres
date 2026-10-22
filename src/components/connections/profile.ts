@@ -24,6 +24,11 @@ export function newProfile(): ConnectionProfile {
   };
 }
 
+/** Копия подключения: те же настройки и папка, но новый профиль (id выдаст Rust при сохранении). Секреты не копируются. */
+export function copyProfile(source: ConnectionProfile, name: string): ConnectionProfile {
+  return { ...source, id: "", name, order: 0 };
+}
+
 export function emptyPatroni(): PatroniSettings {
   return { urls: ["http://localhost:8008"], username: null, tls: null, hostOverrides: [] };
 }

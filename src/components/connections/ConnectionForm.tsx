@@ -17,7 +17,8 @@ import { folderPaths } from "./tree/folderTree";
 const ENVIRONMENTS: Environment[] = ["local", "dev", "test", "stage", "prod"];
 const KINDS: ConnectionKind[] = ["server", "hostList", "patroni"];
 
-export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile; tabId: string }) {
+/** copyOf — имя подключения, копия которого создаётся: заголовок и напоминание, что пароли не скопированы. */
+export function ConnectionForm({ initial, tabId, copyOf }: { initial: ConnectionProfile; tabId: string; copyOf?: string }) {
   const { t } = useTranslation();
   // Вкладки формы остаются смонтированными (скрытые), поэтому id полей и имя группы радио у каждой формы свои.
   const uid = useId();
@@ -156,8 +157,15 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
   return (
     <div className="page">
       <div className="toolbar">
-        <h2>{isNew ? t("connections.form.titleNew") : t("connections.form.titleEdit", { name: initial.name })}</h2>
+        <h2>
+          {copyOf !== undefined
+            ? t("connections.form.titleCopy", { name: copyOf })
+            : isNew
+              ? t("connections.form.titleNew")
+              : t("connections.form.titleEdit", { name: initial.name })}
+        </h2>
       </div>
+      {copyOf !== undefined && <p className="muted">{t("connections.form.copyNotice")}</p>}
       <div className="form">
         <span className="field-label">
           <label htmlFor={`${uid}-connstr`}>{t("connections.form.connstr")}</label>
@@ -205,7 +213,8 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
           }}
         >
           {ENVIRONMENTS.map((env) => {
-            const proOnly = env === "prod" && locked && initial.environment !== "prod";
+            // Создать prod-подключение во Free нельзя, в том числе копией prod-подключения.
+            const proOnly = env === "prod" && locked && (isNew || initial.environment !== "prod");
             return (
               <option key={env} value={env} disabled={proOnly}>
                 {proOnly ? t("connections.form.prodPro") : env}

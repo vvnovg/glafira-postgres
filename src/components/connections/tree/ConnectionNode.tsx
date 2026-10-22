@@ -70,6 +70,10 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
   const menu: FolderMenuItem[] = [
     { label: t("sidebar.overview"), onSelect: () => open({ kind: "overview", connectionId: c.id }) },
     { label: t("sidebar.editConnection"), onSelect: () => open({ kind: "connection-form", connectionId: c.id }) },
+    {
+      label: t("sidebar.duplicateConnection"),
+      onSelect: () => open({ kind: "connection-form", connectionId: null, copyOf: c.id, folderId: c.folderId ?? null }),
+    },
     ...(live && c.kind !== "server"
       ? [
           { label: t("sidebar.catalogDefault"), onSelect: () => pickCatalogMember(null) },

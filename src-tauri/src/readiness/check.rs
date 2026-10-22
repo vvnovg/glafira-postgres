@@ -248,7 +248,10 @@ pub async fn run(
             TestStep::Patroni,
             None,
             StepStatus::Skipped,
-            None,
+            Some(ltext!(
+                "test.patroniNotUsed",
+                "Not used: this is not a Patroni cluster"
+            )),
             None,
         );
         observe_hosts(&profile.id, profile.kind, &profile.hosts, &nodes, now_ms()).await
@@ -338,7 +341,10 @@ pub async fn run(
             TestStep::Readiness,
             None,
             StepStatus::Skipped,
-            None,
+            Some(ltext!(
+                "test.readinessNoNode",
+                "Not checked: no node accepted the connection"
+            )),
             None,
         );
         return Ok(failed(Some(topology)));
@@ -407,6 +413,43 @@ mod tests {
         assert_eq!(e.key, "errors.pg.noAnswer");
         assert!(started.elapsed() < Duration::from_secs(3));
         assert!(server.wait_closed(1, WAIT).await, "сокет закрыт");
+    }
+
+    /// Пропущенный шаг объясняет причину: у сервера Patroni не используется, без доступного узла готовность не проверить.
+    #[tokio::test]
+    async fn skipped_steps_say_why() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut profile = sample_profile("c");
+        profile.hosts[0].host = "127.0.0.1".into();
+        profile.hosts[0].port = port;
+        profile.pg.ssl_mode = SslMode::Disable;
+        profile.pg.connect_timeout_s = 1;
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::default());
+        let events = std::sync::Mutex::new(Vec::new());
+        let emit = |e: TestEvent| events.lock().unwrap().push(e);
+        let report = run(profile, secrets, &emit).await.unwrap();
+        assert!(!report.ok);
+        let skipped: Vec<(TestStep, Option<String>)> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e.status == StepStatus::Skipped)
+            .map(|e| (e.step, e.message.as_ref().map(|m| m.key.clone())))
+            .collect();
+        assert_eq!(
+            skipped,
+            [
+                (TestStep::Patroni, Some("test.patroniNotUsed".to_string())),
+                (
+                    TestStep::Readiness,
+                    Some("test.readinessNoNode".to_string())
+                ),
+            ]
+        );
     }
 
     #[tokio::test]

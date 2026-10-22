@@ -159,6 +159,9 @@
     "form": {
       "titleNew": "New connection",
       "titleEdit": "Connection “{{name}}”",
+      "titleCopy": "Copy of connection “{{name}}”",
+      "copyName": "{{name}} (copy)",
+      "copyNotice": "Passwords are not copied: enter them again.",
       "deleted": "The connection was deleted",
       "connstr": "Connection string",
       "connstrApply": "Fill form",
@@ -238,6 +241,7 @@
     "connections": "Connections",
     "newConnection": "New connection",
     "editConnection": "Edit connection",
+    "duplicateConnection": "Duplicate connection",
     "emptyHint": "Add your first connection. Local test bench: <code>docker compose -f dev/docker-compose.yml up -d</code>, server <code>localhost:5460</code>, user <code>glafira_diag</code>.",
     "license": "License: {{tier}}",
     "help": "Help",
@@ -314,6 +318,7 @@
     "help": "Help",
     "connection": "Connection: {{name}}",
     "newConnection": "New connection",
+    "copyConnection": "Copy: {{name}}",
     "overview": "Overview: {{conn}}",
     "unknownConnection": "?"
   },
@@ -434,6 +439,8 @@
     "patroniOk": "{{members}} members, leader {{leader}}",
     "discoveryOk": "{{members}} nodes found",
     "nodeOk": "{{role}}, PostgreSQL {{version}}",
+    "patroniNotUsed": "Not used: this is not a Patroni cluster",
+    "readinessNoNode": "Not checked: no node accepted the connection",
     "readinessTitle": "Readiness for diagnostics",
     "roleScript": "Role script for diagnostics",
     "step": {

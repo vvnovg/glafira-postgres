@@ -44,7 +44,7 @@ export function TabContent({ tab, active = true }: { tab: Tab; active?: boolean 
     case "license":
       return <LicensePanel />;
     case "connection-form":
-      return <ConnectionFormTab connectionId={tab.connectionId} folderId={tab.folderId ?? null} tabId={tab.id} />;
+      return <ConnectionFormTab connectionId={tab.connectionId} folderId={tab.folderId ?? null} copyOf={tab.copyOf} tabId={tab.id} />;
     case "overview":
       return <Overview connectionId={tab.connectionId} member={tab.member} active={active} />;
   }

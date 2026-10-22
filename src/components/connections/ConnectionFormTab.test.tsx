@@ -29,6 +29,34 @@ describe("ConnectionFormTab", () => {
     await waitFor(() => expect(screen.getByLabelText("Папка")).toHaveValue("f1"));
   });
 
+  it("копия: настройки источника, новое имя, пароли пустые, удалять нечего", async () => {
+    vi.mocked(api.listConnections).mockResolvedValue([
+      { ...newProfile(), id: "c1", name: "dev-1", environment: "dev", hosts: [{ host: "pg-1", port: 5460 }], folderId: "f1" },
+    ]);
+    renderWithClient(<ConnectionFormTab connectionId={null} copyOf="c1" tabId="connection-form:copy:c1" />);
+    expect(await screen.findByRole("heading", { name: "Копия подключения «dev-1»" })).toBeInTheDocument();
+    expect(screen.getByText("Пароли не копируются: введите их заново.")).toBeInTheDocument();
+    expect(screen.getByLabelText("Имя")).toHaveValue("dev-1 (копия)");
+    expect(screen.getByLabelText("Хост")).toHaveValue("pg-1");
+    expect(screen.getByLabelText("Пароль")).toHaveValue("");
+    expect(screen.queryByRole("button", { name: "Удалить" })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText("Папка")).toHaveValue("f1"));
+  });
+
+  it("копия prod-подключения во Free: prod выбрать нельзя (создание prod — Pro)", async () => {
+    vi.mocked(api.getLicenseStatus).mockResolvedValueOnce({ tier: "free", state: "none" } as Awaited<ReturnType<typeof api.getLicenseStatus>>);
+    vi.mocked(api.listConnections).mockResolvedValue([{ ...newProfile(), id: "p1", name: "billing", environment: "prod", readOnly: true }]);
+    renderWithClient(<ConnectionFormTab connectionId={null} copyOf="p1" tabId="connection-form:copy:p1" />);
+    expect(await screen.findByRole("heading", { name: "Копия подключения «billing»" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("option", { name: "prod — Pro" })).toBeDisabled());
+  });
+
+  it("копия удалённого подключения — сообщение", async () => {
+    vi.mocked(api.listConnections).mockResolvedValue([]);
+    renderWithClient(<ConnectionFormTab connectionId={null} copyOf="gone" tabId="connection-form:copy:gone" />);
+    expect(await screen.findByText("Подключение удалено")).toBeInTheDocument();
+  });
+
   it("существующее подключение загружается в форму, удалённое — сообщение", async () => {
     vi.mocked(api.listConnections).mockResolvedValue([{ ...newProfile(), id: "c1", name: "dev-1", environment: "dev" }]);
     const { unmount } = renderWithClient(<ConnectionFormTab connectionId="c1" tabId="connection-form:c1" />);

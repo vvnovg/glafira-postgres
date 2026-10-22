@@ -80,6 +80,7 @@ describe("Layout tabs", () => {
         { kind: "connection-form", connectionId: "c1", id: "connection-form:c1" },
         { kind: "connection-form", connectionId: "gone", id: "connection-form:gone" },
         { kind: "connection-form", connectionId: null, id: "connection-form:new" },
+        { kind: "connection-form", connectionId: null, copyOf: "c1", id: "connection-form:copy:c1" },
       ],
       activeId: "connection-form:new",
     });
@@ -88,6 +89,7 @@ describe("Layout tabs", () => {
     expect(await within(list).findByRole("tab", { name: "Подключение: prod-1" })).toBeInTheDocument();
     expect(within(list).getByRole("tab", { name: "Подключение: ?" })).toBeInTheDocument();
     expect(within(list).getByRole("tab", { name: "Новое подключение" })).toBeInTheDocument();
+    expect(within(list).getByRole("tab", { name: "Копия: prod-1" })).toBeInTheDocument();
     // Активна вкладка без подключения: полоса прозрачна.
     expect(container.querySelector<HTMLElement>(".env-stripe")!.style.background).toBe("transparent");
   });

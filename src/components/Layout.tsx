@@ -25,6 +25,7 @@ function tabTitle(tab: Tab, byId: Map<string, ConnectionProfile>): string {
     case "help":
       return i18n.t("tabs.help");
     case "connection-form":
+      if (tab.copyOf) return i18n.t("tabs.copyConnection", { name: byId.get(tab.copyOf)?.name ?? i18n.t("tabs.unknownConnection") });
       return tab.connectionId ? i18n.t("tabs.connection", { name: conn }) : i18n.t("tabs.newConnection");
     case "overview":
       return i18n.t("tabs.overview", { conn });

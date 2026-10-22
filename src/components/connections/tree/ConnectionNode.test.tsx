@@ -130,6 +130,7 @@ describe("ConnectionNode", () => {
     expect(within(menu).getAllByRole("menuitem").map((m) => m.textContent)).toEqual([
       "Обзор",
       "Изменить подключение",
+      "Дублировать подключение",
       "Каталог — с узла по умолчанию",
       "Каталог — с узла pg-1",
       "Каталог — с узла pg-2",
@@ -141,6 +142,18 @@ describe("ConnectionNode", () => {
     expect(client.getQueryState(["catalog", "c", "databases"])?.isInvalidated).toBe(true);
     // Каталог другого подключения не затронут.
     expect(client.getQueryState(["catalog", "other", "databases"])?.isInvalidated).toBe(false);
+  });
+
+  it("меню: «Дублировать подключение» открывает копию в той же папке", async () => {
+    const user = userEvent.setup();
+    renderNode({ ...conn, folderId: "f1" });
+    await screen.findByRole("img", { name: "Не подключено" });
+    await user.click(screen.getByRole("button", { name: "Действия с подключением billing" }));
+    await user.click(screen.getByRole("menuitem", { name: "Дублировать подключение" }));
+    const { tabs, activeId } = useWorkspace.getState();
+    expect(tabs).toEqual([{ kind: "connection-form", connectionId: null, copyOf: "c", folderId: "f1", id: "connection-form:copy:c" }]);
+    expect(activeId).toBe("connection-form:copy:c");
+    expect(api.connect).not.toHaveBeenCalled();
   });
 
   it("меню: отключение сворачивает узел", async () => {
@@ -163,7 +176,7 @@ describe("ConnectionNode", () => {
     await screen.findByRole("img", { name: "Подключено" });
     await user.click(screen.getByRole("button", { name: "Действия с подключением billing" }));
     const items = within(screen.getByRole("menu")).getAllByRole("menuitem");
-    expect(items.map((m) => m.textContent)).toEqual(["Обзор", "Изменить подключение", "Отключиться"]);
+    expect(items.map((m) => m.textContent)).toEqual(["Обзор", "Изменить подключение", "Дублировать подключение", "Отключиться"]);
     expect(within(screen.getByRole("menu")).queryByRole("menuitem", { name: /Каталог/ })).not.toBeInTheDocument();
   });
 
@@ -195,6 +208,7 @@ describe("ConnectionNode", () => {
     expect(within(menu).getAllByRole("menuitem").map((m) => m.textContent)).toEqual([
       "Обзор",
       "Изменить подключение",
+      "Дублировать подключение",
       "Повторить подключение",
       "Отключиться",
     ]);
