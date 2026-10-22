@@ -18,7 +18,7 @@
 - Нерусские термины в ru не склоняются: ставьте перед ними родовое слово («роль Leader», «режим prod», «после switchover»).
 
 ## Не переводится
-Glafira, Pro, Free, PostgreSQL, Patroni, WAL, LSN, DCS, REST API, DNS, TCP, TLS, SSL, mTLS, PEM, JSON, CSV, SQL, ID;
+Glafira, PostgreSQL, Patroni, WAL, LSN, DCS, REST API, DNS, TCP, TLS, SSL, mTLS, PEM, JSON, CSV, SQL, ID;
 `psql`, `patronictl`, `~/.pgpass`; имена параметров и объектов PostgreSQL и Patroni (`wal_level`, `max_connections`,
 `pg_stat_replication`, `pg_monitor`, `pg_catalog`); команды, пути, адреса (`localhost:5432`, `patronictl switchover`);
 названия ОС и хранилищ: Keychain, Credential Manager, Secret Service;
@@ -77,7 +77,6 @@ Glafira, Pro, Free, PostgreSQL, Patroni, WAL, LSN, DCS, REST API, DNS, TCP, TLS,
 |---|---|---|
 | folder | папка | Группа подключений в дереве |
 | license | лицензия | |
-| plan | тариф | Free / Pro |
 | settings | настройки | |
 | help / guide | справка / руководство | Меню — «Справка»; документ — «Руководство Glafira» |
 | about | о программе | |

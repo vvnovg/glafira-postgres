@@ -1,4 +1,4 @@
-export const GUIDE_CHAPTERS = ["getting-started"] as const;
+export const GUIDE_CHAPTERS = ["getting-started", "updates"] as const;
 
 export type ChapterId = (typeof GUIDE_CHAPTERS)[number];
 
