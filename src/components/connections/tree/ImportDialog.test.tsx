@@ -10,7 +10,6 @@ vi.mock("../../../api/client", async (importOriginal) => {
   return {
     ...orig,
     api: {
-      getLicenseStatus: vi.fn(() => new Promise(() => {})),
       listFolders: vi.fn(),
       previewImport: vi.fn(),
       applyImport: vi.fn(),
@@ -39,7 +38,7 @@ const PREVIEW: ImportPreview = {
       reason: { key: "errors.import.unsupportedConnection", params: { error: "oops" }, text: "Unsupported: oops" },
     },
   ],
-  warnings: [{ key: "warnings.import.prodReadOnly", params: { count: "2" }, text: "2 prod connections will be read-only" }],
+  warnings: [{ key: "warnings.import.missingFiles", params: { count: "2" }, text: "Certificate files of 2 connections are not found on this computer — check the paths" }],
   needsPasswords: 3,
 };
 
@@ -94,7 +93,7 @@ describe("ImportDialog", () => {
 
   it("показывает предупреждения и строку о паролях", async () => {
     renderDialog();
-    expect(await screen.findByText(/2 prod-подключения будут только для чтения/)).toBeInTheDocument();
+    expect(await screen.findByText(/Файлы сертификатов 2 подключений не найдены/)).toBeInTheDocument();
     expect(screen.getByText("После импорта введите пароли для 3 подключений")).toBeInTheDocument();
   });
 

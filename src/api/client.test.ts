@@ -20,22 +20,12 @@ describe("api client", () => {
     expect(invoke).toHaveBeenLastCalledWith("set_language", { lang: null });
   });
 
-  it("setLicenseKey передаёт ключ", async () => {
-    invoke.mockResolvedValue({ tier: "pro" });
-    await api.setLicenseKey("a.b");
-    expect(invoke).toHaveBeenCalledWith("set_license_key", { key: "a.b" });
-  });
-
   it("команды без аргументов вызываются по имени", async () => {
     invoke.mockResolvedValue({});
     await api.getAppInfo();
     expect(invoke).toHaveBeenLastCalledWith("get_app_info", undefined);
     await api.getPolicyStatus();
     expect(invoke).toHaveBeenLastCalledWith("get_policy_status", undefined);
-    await api.getLicenseStatus();
-    expect(invoke).toHaveBeenLastCalledWith("get_license_status", undefined);
-    await api.removeLicenseKey();
-    expect(invoke).toHaveBeenLastCalledWith("remove_license_key", undefined);
     await api.getLanguageSettings();
     expect(invoke).toHaveBeenLastCalledWith("get_language_settings", undefined);
   });

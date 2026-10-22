@@ -11,7 +11,6 @@ vi.mock("../../../api/client", async (importOriginal) => {
   return {
     ...orig,
     api: {
-      getLicenseStatus: vi.fn(() => new Promise(() => {})),
       // Топология подключений не нужна дереву папок: запрос остаётся в ожидании.
       getTopology: vi.fn(() => new Promise(() => {})),
       listFolders: vi.fn(),

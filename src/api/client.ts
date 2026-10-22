@@ -9,7 +9,6 @@ import type {
   ExtensionInfo,
   ImportPreview,
   LanguageSettings,
-  LicenseStatus,
   MemberFacts,
   ObjectKind,
   ObjectPage,
@@ -49,9 +48,6 @@ export const api = {
   getAppInfo: () => call<AppInfo>("get_app_info"),
   getLanguageSettings: () => call<LanguageSettings>("get_language_settings"),
   setLanguage: (lang: string | null) => call<LanguageSettings>("set_language", { lang }),
-  getLicenseStatus: () => call<LicenseStatus>("get_license_status"),
-  setLicenseKey: (key: string) => call<LicenseStatus>("set_license_key", { key }),
-  removeLicenseKey: () => call<LicenseStatus>("remove_license_key"),
   getPolicyStatus: () => call<PolicyStatus>("get_policy_status"),
   exportDiagnostics: (path: string) => call<void>("export_diagnostics", { path }),
 

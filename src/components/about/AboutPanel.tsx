@@ -10,7 +10,6 @@ import { ErrorBanner } from "../common/ErrorBanner";
 export function AboutPanel() {
   const { t } = useTranslation();
   const info = useQuery({ queryKey: ["app-info"], queryFn: api.getAppInfo });
-  const license = useQuery({ queryKey: ["license"], queryFn: api.getLicenseStatus });
   const policy = useQuery({ queryKey: ["policy"], queryFn: api.getPolicyStatus });
   const [saved, setSaved] = useState<string | null>(null);
   const diag = useMutation({
@@ -47,7 +46,6 @@ export function AboutPanel() {
         <div><dt>{t("about.version")}</dt><dd>{i.version}</dd></div>
         <div><dt>{t("about.build")}</dt><dd>{i.commit}</dd></div>
         <div><dt>{t("about.system")}</dt><dd>{i.os} / {i.arch}</dd></div>
-        <div><dt>{t("about.tier")}</dt><dd>{license.data ? (license.data.tier === "pro" ? "Pro" : "Free") : "…"}</dd></div>
         <div><dt>{t("about.policy")}</dt><dd>{policy.data ? (policy.data.managed ? t("about.policySet") : t("about.policyNone")) : "…"}</dd></div>
       </dl>
       {policy.data?.errors.map((e, i) => (

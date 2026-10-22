@@ -5,7 +5,6 @@ export type TabSpec =
   | { kind: "connection-form"; connectionId: string | null; folderId?: string | null; copyOf?: string }
   /** Обзор подключения; member — узел, выбранный в дереве (одна вкладка на подключение). */
   | { kind: "overview"; connectionId: string; member?: string }
-  | { kind: "license" }
   | { kind: "about" }
   /** Справка: глава и раздел руководства (F1, ссылки). */
   | { kind: "help"; chapter?: string; anchor?: string }
@@ -20,8 +19,6 @@ export function tabId(spec: TabSpec): string {
       return `connection-form:${spec.connectionId ?? "new"}`;
     case "overview":
       return `overview:${spec.connectionId}`;
-    case "license":
-      return "license";
     case "about":
       return "about";
     case "help":

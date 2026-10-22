@@ -6,7 +6,6 @@ export type ErrorCode =
   | "TIMEOUT"
   | "INVALID_INPUT"
   | "NOT_FOUND"
-  | "PRO_REQUIRED"
   | "PATRONI_ERROR"
   | "NODE_UNAVAILABLE"
   | "INTERNAL";
@@ -298,25 +297,11 @@ export interface UiSettings {
   showSystemObjects: boolean;
 }
 
-export type Tier = "free" | "pro";
-export type LicenseState = "none" | "valid" | "expiring" | "expired" | "invalid";
-export interface LicenseStatus {
-  tier: Tier;
-  state: LicenseState;
-  source: "policy" | "user" | null;
-  licensee: string | null;
-  kind: "personal" | "organization" | null;
-  expires: string | null;
-  daysLeft: number | null;
-  /** Почему ключ недействителен — полная фраза. */
-  error: LocalizedText | null;
-}
 export interface PolicyStatus {
   managed: boolean;
   source: string | null;
   updatesEnabled: boolean;
   updateUrl: string | null;
-  hasLicenseKey: boolean;
   language: string | null;
   errors: LocalizedText[];
 }

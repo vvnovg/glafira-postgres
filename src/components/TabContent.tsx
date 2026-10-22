@@ -5,7 +5,6 @@ import { AboutPanel } from "./about/AboutPanel";
 import { ConnectionFormTab } from "./connections/ConnectionFormTab";
 import { Overview } from "./overview/Overview";
 import { SettingsPanel } from "./settings/SettingsPanel";
-import { LicensePanel } from "./license/LicensePanel";
 
 // Справка (react-markdown и главы) грузится отдельным чанком при первом открытии.
 const HelpPanel = lazy(() => import("./help/HelpPanel").then((m) => ({ default: m.HelpPanel })));
@@ -41,8 +40,6 @@ export function TabContent({ tab, active = true }: { tab: Tab; active?: boolean 
       return <LazyHelp tab={tab} />;
     case "settings":
       return <SettingsPanel />;
-    case "license":
-      return <LicensePanel />;
     case "connection-form":
       return <ConnectionFormTab connectionId={tab.connectionId} folderId={tab.folderId ?? null} copyOf={tab.copyOf} tabId={tab.id} />;
     case "overview":

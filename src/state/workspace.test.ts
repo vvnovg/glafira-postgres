@@ -36,7 +36,6 @@ describe("workspace", () => {
     // Копия — своя вкладка на каждое исходное подключение, не занимает вкладку «Новое подключение».
     expect(tabId({ kind: "connection-form", connectionId: null, copyOf: "c" })).toBe("connection-form:copy:c");
     expect(tabId({ kind: "settings" })).toBe("settings");
-    expect(tabId({ kind: "license" })).toBe("license");
     expect(tabId({ kind: "about" })).toBe("about");
     expect(tabId({ kind: "help", chapter: "getting-started" })).toBe("help");
   });

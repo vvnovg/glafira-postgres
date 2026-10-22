@@ -40,9 +40,9 @@ describe("ErrorBanner", () => {
     expect(screen.getByText("Подробности")).toBeInTheDocument();
   });
 
-  it("ошибка без ключа (старый формат) — message", () => {
-    render(<ErrorBanner error={{ code: "PRO_REQUIRED", message: "Нужна Pro", retryable: false }} />);
-    expect(screen.getByText("Нужна Pro")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Открыть «Лицензия»" })).toBeInTheDocument();
+  it("ошибка без ключа (старый формат) — message, кнопок нет", () => {
+    render(<ErrorBanner error={{ code: "INVALID_INPUT", message: "Нужно имя", retryable: false }} />);
+    expect(screen.getByText("Нужно имя")).toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 });

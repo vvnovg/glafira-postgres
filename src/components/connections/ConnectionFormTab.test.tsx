@@ -10,7 +10,6 @@ vi.mock("../../api/client", async (importOriginal) => {
     api: {
       listConnections: vi.fn(),
       listFolders: vi.fn(() => Promise.resolve([{ id: "f1", name: "Прод", parentId: null, order: 0 }])),
-      getLicenseStatus: vi.fn(() => Promise.resolve({ tier: "pro", state: "valid" })),
     },
   };
 });
@@ -43,12 +42,12 @@ describe("ConnectionFormTab", () => {
     await waitFor(() => expect(screen.getByLabelText("Папка")).toHaveValue("f1"));
   });
 
-  it("копия prod-подключения во Free: prod выбрать нельзя (создание prod — Pro)", async () => {
-    vi.mocked(api.getLicenseStatus).mockResolvedValueOnce({ tier: "free", state: "none" } as Awaited<ReturnType<typeof api.getLicenseStatus>>);
+  it("копия prod-подключения: prod доступен, «Только чтение» как у источника", async () => {
     vi.mocked(api.listConnections).mockResolvedValue([{ ...newProfile(), id: "p1", name: "billing", environment: "prod", readOnly: true }]);
     renderWithClient(<ConnectionFormTab connectionId={null} copyOf="p1" tabId="connection-form:copy:p1" />);
     expect(await screen.findByRole("heading", { name: "Копия подключения «billing»" })).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole("option", { name: "prod — Pro" })).toBeDisabled());
+    expect(screen.getByRole("option", { name: "prod" })).toBeEnabled();
+    expect(screen.getByLabelText("Только чтение")).toBeChecked();
   });
 
   it("копия удалённого подключения — сообщение", async () => {

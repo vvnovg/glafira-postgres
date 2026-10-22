@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AppError, ConnectionFolder, ConnectionProfile, LicenseStatus, TestReport } from "../../api/types";
+import type { AppError, ConnectionFolder, ConnectionProfile, TestReport } from "../../api/types";
 import { useWorkspace } from "../../state/workspace";
 import { topologyView } from "../../test/fixtures";
 import { renderWithClient } from "../../test/render";
@@ -13,7 +13,6 @@ vi.mock("../../api/client", async (importOriginal) => {
     ...orig,
     api: {
       listFolders: vi.fn(),
-      getLicenseStatus: vi.fn(),
       parseConnectionString: vi.fn(),
       saveConnection: vi.fn(),
       deleteConnection: vi.fn(),
@@ -26,8 +25,6 @@ vi.mock("../../api/client", async (importOriginal) => {
 import { api } from "../../api/client";
 import { ConnectionForm } from "./ConnectionForm";
 
-const FREE = { tier: "free", state: "none" } as LicenseStatus;
-const PRO = { tier: "pro", state: "valid" } as LicenseStatus;
 const FOLDERS: ConnectionFolder[] = [
   { id: "f1", name: "Прод", parentId: null, order: 0 },
   { id: "f2", name: "Тест", parentId: null, order: 1 },
@@ -47,7 +44,6 @@ function deferred<T>() {
 beforeEach(() => {
   vi.resetAllMocks(); // сбрасывает и реализации: тарифы и ответы не перетекают между тестами
   vi.mocked(api.listFolders).mockResolvedValue([]);
-  vi.mocked(api.getLicenseStatus).mockResolvedValue(FREE);
   useWorkspace.setState({ tabs: [], activeId: null });
 });
 
@@ -83,10 +79,12 @@ describe("ConnectionForm", () => {
     expect(screen.getByRole("radio", { name: "Кластер Patroni" })).toBeChecked();
   });
 
-  it("prod недоступен во Free", async () => {
+  it("prod доступен новому подключению и подписан просто «prod»", async () => {
     renderWithClient(<ConnectionForm initial={newProfile()} tabId="t" />);
-    const prod = await screen.findByRole("option", { name: /prod/ });
-    await waitFor(() => expect(prod).toBeDisabled());
+    const prod = await screen.findByRole("option", { name: "prod" });
+    expect(prod).toBeEnabled();
+    expect(screen.queryByRole("option", { name: /Pro/ })).not.toBeInTheDocument();
+    expect(screen.queryByText("🔒 Pro")).not.toBeInTheDocument();
   });
 
   it("проверка: шаги и чек-лист приходят по мере выполнения, секреты уходят из формы", async () => {
@@ -126,14 +124,14 @@ describe("ConnectionForm", () => {
     expect(vi.mocked(api.saveConnection).mock.calls[0][1].pgPassword).toBe("");
   });
 
-  it("prod, только чтение и Free: флаг заблокирован, пока окружение остаётся prod", async () => {
+  it("у существующего prod-подключения «Только чтение» доступно и снимается", async () => {
     const user = userEvent.setup();
     renderWithClient(<ConnectionForm initial={{ ...newProfile(), id: "c1", name: "p", environment: "prod", readOnly: true }} tabId="t" />);
     const ro = screen.getByLabelText("Только чтение");
-    await waitFor(() => expect(ro).toBeDisabled());
     expect(ro).toBeChecked();
-    await user.selectOptions(screen.getByLabelText("Окружение"), "dev");
     expect(ro).toBeEnabled();
+    await user.click(ro);
+    expect(ro).not.toBeChecked();
   });
 
   it("после разбора строка подключения очищается (пароль не остаётся открытым), список пропущенного виден", async () => {
@@ -603,14 +601,12 @@ describe("ConnectionForm", () => {
     expect(secrets).toMatchObject({ patroniPassword: "", patroniKeyPassword: "", pgPassword: null });
   });
 
-  describe("Pro и prod", () => {
-    it("Pro: prod доступен, при выборе для нового подключения «только чтение» включается, но его можно снять", async () => {
+  describe("prod", () => {
+    it("при выборе prod для нового подключения «только чтение» включается, но его можно снять", async () => {
       const user = userEvent.setup();
-      vi.mocked(api.getLicenseStatus).mockResolvedValue(PRO);
       vi.mocked(api.saveConnection).mockResolvedValue(saved("n"));
       renderWithClient(<ConnectionForm initial={{ ...newProfile(), name: "n" }} tabId="t" />);
-      const prod = screen.getByRole("option", { name: "prod" });
-      await waitFor(() => expect(prod).toBeEnabled());
+      expect(screen.getByRole("option", { name: "prod" })).toBeEnabled();
       await user.selectOptions(screen.getByLabelText("Окружение"), "prod");
       const ro = screen.getByLabelText("Только чтение");
       expect(ro).toBeChecked();
@@ -622,37 +618,23 @@ describe("ConnectionForm", () => {
       expect(profile).toMatchObject({ environment: "prod", readOnly: false });
     });
 
-    it("Pro: у существующего подключения prod переход в prod не навязывает «только чтение»", async () => {
+    it("у существующего подключения переход в prod не навязывает «только чтение»", async () => {
       const user = userEvent.setup();
-      vi.mocked(api.getLicenseStatus).mockResolvedValue(PRO);
       renderWithClient(<ConnectionForm initial={existing()} tabId="t" />);
-      await waitFor(() => expect(screen.getByRole("option", { name: "prod" })).toBeEnabled());
       await user.selectOptions(screen.getByLabelText("Окружение"), "prod");
       expect(screen.getByLabelText("Только чтение")).not.toBeChecked();
     });
 
-    it("Pro: prod с «только чтение» разблокирован — флаг можно снять", async () => {
+    it("у существующего подключения возврат в prod не трогает снятый флажок", async () => {
       const user = userEvent.setup();
-      vi.mocked(api.getLicenseStatus).mockResolvedValue(PRO);
       renderWithClient(<ConnectionForm initial={existing({ environment: "prod", readOnly: true })} tabId="t" />);
-      await waitFor(() => expect(screen.getByRole("option", { name: "prod" })).toBeEnabled());
       const ro = screen.getByLabelText("Только чтение");
-      expect(ro).toBeEnabled();
+      await user.selectOptions(screen.getByLabelText("Окружение"), "dev");
       await user.click(ro);
       expect(ro).not.toBeChecked();
-    });
-
-    it("Free: prod-подключение с «только чтение» при возврате в prod снова получает флаг и блокировку", async () => {
-      const user = userEvent.setup();
-      renderWithClient(<ConnectionForm initial={existing({ environment: "prod", readOnly: true })} tabId="t" />);
-      const ro = screen.getByLabelText("Только чтение");
-      await waitFor(() => expect(ro).toBeDisabled());
-      await user.selectOptions(screen.getByLabelText("Окружение"), "dev");
-      await user.click(ro); // снимаем в dev (доступно)
-      expect(ro).not.toBeChecked();
       await user.selectOptions(screen.getByLabelText("Окружение"), "prod");
-      expect(ro).toBeChecked();
-      expect(ro).toBeDisabled();
+      expect(ro).not.toBeChecked();
+      expect(ro).toBeEnabled();
     });
   });
 });

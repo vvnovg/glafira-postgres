@@ -5,7 +5,6 @@ import type { ConnectionProfile } from "../api/types";
 import { ENV_COLORS } from "../lib/env";
 import { type Tab, useWorkspace } from "../state/workspace";
 import { EnvBadge } from "./common/EnvBadge";
-import { LicenseNotice } from "./license/LicenseNotice";
 import { Sidebar } from "./Sidebar";
 import { i18n } from "../i18n";
 import { TabContent } from "./TabContent";
@@ -18,8 +17,6 @@ function tabTitle(tab: Tab, byId: Map<string, ConnectionProfile>): string {
   switch (tab.kind) {
     case "settings":
       return i18n.t("tabs.settings");
-    case "license":
-      return i18n.t("tabs.license");
     case "about":
       return i18n.t("tabs.about");
     case "help":
@@ -48,7 +45,6 @@ export function Layout() {
       <Sidebar />
       <main className="workspace">
         <div className="env-stripe" style={{ background: activeConn ? ENV_COLORS[activeConn.environment] : "transparent" }} />
-        <LicenseNotice />
         <nav className="tabbar" role="tablist">
           {tabs.map((tab) => {
             const tConnId = "connectionId" in tab ? tab.connectionId : null;

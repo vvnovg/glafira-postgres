@@ -9,7 +9,6 @@ vi.mock("../api/client", async (importOriginal) => {
   return {
     ...orig,
     api: {
-      getLicenseStatus: vi.fn(() => new Promise(() => {})),
       getTopology: vi.fn(() => new Promise(() => {})),
       listFolders: vi.fn(() => Promise.resolve([])),
       listConnections: vi.fn(() => Promise.resolve([{ ...newProfile(), id: "c", name: "billing" }])),
@@ -31,6 +30,7 @@ describe("Sidebar", () => {
     renderWithClient(<Sidebar />);
     expect(await screen.findByRole("button", { name: "billing" })).toBeInTheDocument();
     expect(screen.getByText("Подключения")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Лицензия/ })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Настройки" }));
     expect(useWorkspace.getState().activeId).toBe("settings");
   });
