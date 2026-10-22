@@ -49,6 +49,8 @@ describe("SettingsPanel", () => {
     expect(screen.getByRole("option", { name: /Как в системе/ })).toBeInTheDocument();
     await user.selectOptions(select, "en");
     expect(api.setLanguage).toHaveBeenCalledWith("en");
+    // Выбранный язык применяется к интерфейсу (onSuccess вызывает setLanguage(st.effective)).
+    await vi.waitFor(() => expect(i18n.language).toBe("en"));
   });
 
   it("язык задан организацией", async () => {

@@ -179,11 +179,12 @@ describe("useAppMenu", () => {
     expect(useWorkspace.getState().activeId).toBe("about");
     expect(useDiagnosticsRequest.getState().pending).toBe(false);
 
+    // «Поддержать проект» открывает браузер и не создаёт вкладок.
+    useWorkspace.setState({ tabs: [], activeId: null });
     click("support");
     expect(openUrl).toHaveBeenCalledWith(SUPPORT_URL);
-    expect(useWorkspace.getState().activeId).toBe("about");
+    expect(useWorkspace.getState().tabs).toEqual([]);
 
-    useWorkspace.setState({ tabs: [], activeId: null });
     click("diagnostics");
     expect(useWorkspace.getState().activeId).toBe("about");
     expect(useDiagnosticsRequest.getState().pending).toBe(true);

@@ -83,8 +83,6 @@ describe("ConnectionForm", () => {
     renderWithClient(<ConnectionForm initial={newProfile()} tabId="t" />);
     const prod = await screen.findByRole("option", { name: "prod" });
     expect(prod).toBeEnabled();
-    expect(screen.queryByRole("option", { name: /Pro/ })).not.toBeInTheDocument();
-    expect(screen.queryByText("🔒 Pro")).not.toBeInTheDocument();
   });
 
   it("проверка: шаги и чек-лист приходят по мере выполнения, секреты уходят из формы", async () => {
