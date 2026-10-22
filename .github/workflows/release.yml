@@ -77,13 +77,15 @@ jobs:
           - os: macos-15-intel
             target: x86_64-apple-darwin
             arch: x64
-          - os: windows-latest
+          # windows-2022: vendored OpenSSL проверен на этом образе (Perl, nmake), как в ci.yml
+          - os: windows-2022
             target: x86_64-pc-windows-msvc
             arch: x64
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             arch: amd64
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     env:
       BUNDLE: src-tauri/target/${{ matrix.target }}/release/bundle
       VERSION: ${{ needs.check.outputs.version }}
@@ -130,6 +132,9 @@ jobs:
             if [ -n "${!name}" ]; then set=$((set + 1)); else missing="$missing $name"; fi
           done
           if [ "$set" -eq 0 ]; then
+            if [ "${GITHUB_REF#refs/tags/}" != "$GITHUB_REF" ]; then
+              echo "::error::релиз по тегу требует подписи Apple: секреты APPLE_* не заданы"; exit 1
+            fi
             echo "::warning::macOS-сборка без подписи и нотаризации"
             echo "signing=false" >> "$GITHUB_OUTPUT"
           elif [ -n "$missing" ]; then
@@ -255,7 +260,7 @@ jobs:
           ls -la release/assets
       - name: Описание и latest.json
         run: |
-          awk -v v="## $VERSION" '$0==v{f=1;next} /^## /{f=0} f' CHANGELOG.md > release/notes.md
+          awk -v v="## $VERSION" '$0 ~ ("^" v "[[:space:]]*$"){f=1;next} /^## /{f=0} f' CHANGELOG.md > release/notes.md
           if [ ! -s release/notes.md ]; then echo "::error::пустой раздел CHANGELOG для $VERSION"; exit 1; fi
           node scripts/make-latest-json.mjs --version "$VERSION" --notes-file release/notes.md \
             --base-url "https://github.com/${RELEASES_REPO}/releases/download/${TAG}" --dir release/assets \
