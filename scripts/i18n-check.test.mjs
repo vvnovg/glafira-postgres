@@ -328,7 +328,7 @@ test("подсказки: ключи есть, все используются, 
   assert.deepEqual(checkHints([], flatten({ hints: { label: "Hint: {{name}}" } })), [], "hints.label не требует использования в <Hint>");
 });
 
-test("руководство продукта: пока одна глава", () => {
+test("руководство продукта: список глав", () => {
   assert.deepEqual(GUIDE_CHAPTERS, ["getting-started", "updates"]);
 });
 
