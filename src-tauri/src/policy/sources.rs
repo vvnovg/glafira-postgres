@@ -233,6 +233,18 @@ mod tests {
         for key in ["updatesEnabled", "updateUrl", "language"] {
             assert!(content.contains_key(key), "{key}");
         }
+        assert_eq!(
+            content.get("updatesEnabled").and_then(|v| v.as_boolean()),
+            Some(false)
+        );
+        assert_eq!(
+            content.get("updateUrl").and_then(|v| v.as_string()),
+            Some("https://mirror.example.corp/glafira-postgres/latest.json")
+        );
+        assert_eq!(
+            content.get("language").and_then(|v| v.as_string()),
+            Some("en")
+        );
         // Читается только политика уровня устройства (docs/admin.md): профиль ставится на всю систему.
         assert_eq!(
             profile

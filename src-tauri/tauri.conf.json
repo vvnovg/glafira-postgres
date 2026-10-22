@@ -29,11 +29,19 @@
     "active": true,
     "targets": ["app", "dmg", "msi", "deb", "rpm", "appimage"],
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "createUpdaterArtifacts": true,
     "publisher": "Glafira for PostgreSQL",
     "category": "DeveloperTool",
     "shortDescription": "Glafira for PostgreSQL — diagnostics for PostgreSQL and Patroni clusters",
     "copyright": "© 2026 Viacheslav Novgorodtsev",
     "linux": { "deb": { "depends": ["libsecret-1-0"] }, "rpm": { "depends": ["libsecret"] } },
-    "macOS": { "minimumSystemVersion": "11.0" }
+    "macOS": { "minimumSystemVersion": "11.0" },
+    "windows": { "wix": { "upgradeCode": "a5dce14e-dd43-4ce6-9144-8437d8df8476", "language": ["en-US"] } }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "REPLACE_WITH_UPDATER_PUBKEY",
+      "endpoints": ["https://github.com/vvnovg/glafira-postgres-releases/releases/latest/download/latest.json"]
+    }
   }
 }

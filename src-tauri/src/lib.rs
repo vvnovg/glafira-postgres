@@ -29,12 +29,17 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             crate::logging::init(&app.path().app_log_dir()?);
             tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting");
             let dir = app.path().app_data_dir()?;
             let policy = crate::policy::sources::load();
-            tracing::info!(managed = policy.status.managed, "policy");
+            tracing::info!(
+                managed = policy.status.managed,
+                updates = policy.status.updates_enabled,
+                "policy"
+            );
             let st = AppState::new(&dir, Arc::new(KeyringStore::default()))?.with_policy(policy);
             st.runtimes
                 .set_sink(Arc::new(crate::commands::topology::TauriSink(
@@ -46,6 +51,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::app::get_app_info,
             commands::app::export_diagnostics,
+            commands::app::check_update,
+            commands::app::install_update,
             commands::catalog::list_databases,
             commands::catalog::list_schemas,
             commands::catalog::list_objects,

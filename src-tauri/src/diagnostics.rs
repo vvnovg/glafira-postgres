@@ -133,12 +133,12 @@ mod tests {
             .read_to_string(&mut info_json)
             .unwrap();
         assert!(info_json.contains("\"version\": \"0.2.0\"") && info_json.contains("\"policy\""));
-        // Подсистемы ключей нет: в info.json только app и policy. Проверяется набор верхних ключей,
-        // а не подстрока: `policy.hasLicenseKey` уйдёт вместе с ключом политики (задача 2).
+        // Подсистемы ключей нет: в info.json только app и policy.
         let info_value: serde_json::Value = serde_json::from_str(&info_json).unwrap();
         let mut top_keys: Vec<_> = info_value.as_object().unwrap().keys().collect();
         top_keys.sort();
         assert_eq!(top_keys, ["app", "policy"], "{info_json}");
+        assert!(!info_json.to_lowercase().contains("license"), "{info_json}");
         let mut connections_json = String::new();
         zip.by_name("connections.json")
             .unwrap()

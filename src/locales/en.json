@@ -28,6 +28,18 @@
       "httpsRequired": "{{key}}: an https:// address is required — updates are not downloaded over http",
       "badLanguage": "{{key}}: unknown language “{{value}}”"
     },
+    "updates": {
+      "managed": "Updates are managed by your organization",
+      "notConfigured": "Updates are not configured in this build",
+      "badPolicyUrl": "Invalid update address in the policy: {{url}}",
+      "unavailable": "Updates are unavailable",
+      "noRelease": "The update server has no published versions (or it is temporarily unavailable)",
+      "checkFailed": "Failed to check for updates",
+      "downloadInterrupted": "The update download was interrupted — check your network and try again",
+      "badSignature": "The update signature failed verification — the update was not installed",
+      "installFailed": "Failed to install the update",
+      "none": "No updates available"
+    },
     "settings": {
       "unknownLanguage": "Unknown language “{{code}}”",
       "languageByPolicy": "The language is set by your organization"
