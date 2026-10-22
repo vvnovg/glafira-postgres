@@ -26,6 +26,10 @@ use crate::state::AppState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Один провайдер TLS на процесс: плагин updater при первой проверке ставит `ring`, а reqwest
+    // (клиенты Patroni) без провайдера берёт `aws-lc-rs`. Иначе поведение TLS зависело бы от того,
+    // была ли проверка обновлений. Повторная установка (например, в тестах) безвредна.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())

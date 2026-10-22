@@ -38,6 +38,7 @@ tokio-postgres = "0.7"
 postgres-openssl = "0.5"
 openssl = { version = "0.10", features = ["vendored"] }
 rustls-native-certs = "0.8"
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 futures-util = "0.3"
 pg-advisor = { path = "../crates/pg-advisor" }

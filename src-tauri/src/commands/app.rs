@@ -132,7 +132,7 @@ fn updater(app: &AppHandle, url: Option<String>) -> AppResult<tauri_plugin_updat
             not_configured(),
         ));
     }
-    // На Windows `download_and_install` запускает установщик и вызывает `process::exit(0)`,
+    // На Windows `install` запускает установщик и вызывает `process::exit(0)`,
     // минуя `RunEvent::Exit`: без хука открытые подключения не закрылись бы штатно. Хук заменяет
     // стандартный хук плагина, поэтому `cleanup_before_exit` вызываем сами. На macOS/Linux хук
     // не используется: там после установки `app.restart()` проходит Exit.
@@ -268,10 +268,7 @@ async fn download_with_retry(update: &tauri_plugin_updater::Update) -> AppResult
                 }
                 DownloadErrorKind::Transient => {
                     tracing::warn!(attempt, "update download failed, retrying");
-                    let pause = backoff(attempt);
-                    tauri::async_runtime::spawn_blocking(move || std::thread::sleep(pause))
-                        .await
-                        .ok();
+                    tokio::time::sleep(backoff(attempt)).await;
                     attempt += 1;
                 }
             },
