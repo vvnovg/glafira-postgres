@@ -1,0 +1,5 @@
+# Все текстовые файлы — с LF при любом checkout: скрипты .mjs и .sh ломаются от CRLF
+# (vitest не разбирает hashbang с CRLF на Windows-раннере).
+* text=auto eol=lf
+# Файл реестра Windows читается regedit — оставляем CRLF.
+*.reg text eol=crlf

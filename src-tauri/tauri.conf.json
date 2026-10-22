@@ -32,7 +32,7 @@
     "publisher": "Glafira for PostgreSQL",
     "category": "DeveloperTool",
     "shortDescription": "Glafira for PostgreSQL — diagnostics for PostgreSQL and Patroni clusters",
-    "copyright": "© 2026 Glafira for PostgreSQL",
+    "copyright": "© 2026 Viacheslav Novgorodtsev",
     "linux": { "deb": { "depends": ["libsecret-1-0"] }, "rpm": { "depends": ["libsecret"] } },
     "macOS": { "minimumSystemVersion": "11.0" }
   }

@@ -15,3 +15,6 @@ license-signing.key
 
 # Внутренний обзор лицензирования — не публикуется
 docs/licensing-review-2026-10-19.md
+
+# Экспорты подключений (без паролей, но с адресами реальных кластеров)
+*.glafira-postgres-connections.json

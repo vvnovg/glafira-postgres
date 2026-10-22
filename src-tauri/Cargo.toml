@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "Glafira for PostgreSQL — диагностика PostgreSQL и кластеров Patroni"
 authors = ["Glafira for PostgreSQL contributors"]
 edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/vvnovg/glafira-postgres"
 
 [lib]
 # Суффикс _lib нужен, чтобы имя библиотеки не совпало с именем бинаря (Windows, cargo#8519).
