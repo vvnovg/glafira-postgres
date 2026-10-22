@@ -234,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn priority_without_license() {
+    fn language_priority() {
         use LanguageReason::*;
         assert_eq!(resolve(Some("ru-RU"), None, None), ("ru".into(), System));
         assert_eq!(resolve(Some("ru"), Some("en"), None), ("en".into(), User));

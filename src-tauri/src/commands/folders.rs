@@ -7,7 +7,6 @@ use time::format_description::well_known::Rfc3339;
 use super::blocking;
 use super::connections::delete_stale_secrets;
 use crate::error::{AppError, AppResult, ErrorCode};
-use crate::license::Tier;
 use crate::state::AppState;
 use crate::storage::connections::{ConnectionFolder, ConnectionProfile};
 use crate::storage::exchange::{
@@ -189,9 +188,6 @@ fn import_from_file(
     let opts = ImportOptions {
         target,
         update_existing,
-        // Те же правила Pro, что при сохранении формы: без лицензии prod-подключение
-        // приходит только для чтения.
-        is_pro: st.license.status().tier == Tier::Pro,
     };
     // Диск проверяется здесь, до блокировки хранилища: пути берутся из недоверенного файла, и
     // обращение к ним (особенно к сетевым) может быть долгим. Планировщик диск не трогает.
@@ -283,13 +279,6 @@ mod tests {
     };
     use crate::state::tests::Closed;
 
-    /// Состояние с бессрочной Pro-лицензией (для проверки импорта без ограничений Free).
-    fn pro_state(dir: &Path) -> AppState {
-        let mut st = AppState::new(dir, Arc::new(MemoryStore::default())).unwrap();
-        st.license = Arc::new(crate::license::pro_for_tests(dir));
-        st
-    }
-
     #[test]
     fn export_writes_file_without_secrets() {
         let dir = tempfile::tempdir().unwrap();
@@ -363,15 +352,9 @@ mod tests {
         assert_eq!(preview.added.len(), 1);
         // Новое подключение с паролем у отправителя и обновлённое с новым адресом.
         assert_eq!(preview.needs_passwords, 2);
-        // Free: prod-подключение станет только для чтения; у `a` меняется адрес.
+        // У `a` меняется адрес: пароль получателя будет удалён.
         let keys: Vec<_> = preview.warnings.iter().map(|w| w.key.as_str()).collect();
-        assert_eq!(
-            keys,
-            [
-                "warnings.import.prodReadOnly",
-                "warnings.import.passwordsReset"
-            ]
-        );
+        assert_eq!(keys, ["warnings.import.passwordsReset"]);
         assert_eq!(std::fs::read(&conns).unwrap(), before);
         // Предпросмотр секреты не трогает.
         assert_eq!(
@@ -385,7 +368,10 @@ mod tests {
         let applied = import_from_file(&st, &path, None, true, true).unwrap();
         assert_eq!(applied, preview);
         assert_eq!(st.connections.get("a").unwrap().hosts[0].host, "changed");
-        assert!(st.connections.get("n").unwrap().read_only);
+        assert!(
+            !st.connections.get("n").unwrap().read_only,
+            "readOnly как в файле"
+        );
         let reopened = crate::storage::connections::ConnectionStore::open(dir.path()).unwrap();
         assert_eq!(reopened.list().len(), 2);
         // Файл поменял адрес `a`: пароль получателя не должен уйти на новый адрес. Для нового
@@ -395,37 +381,42 @@ mod tests {
     }
 
     #[test]
-    fn pro_keeps_prod_writable_on_import() {
-        let dir = tempfile::tempdir().unwrap();
-        let st = pro_state(dir.path());
-        let input = tempfile::tempdir().unwrap();
-        let path = write_file(input.path(), "changed");
-        let preview = import_from_file(&st, &path, None, true, true).unwrap();
-        assert!(preview.warnings.is_empty());
-        assert!(!st.connections.get("n").unwrap().read_only);
-    }
-
-    #[test]
-    fn free_cannot_lift_read_only_of_imported_prod_profile() {
-        // Во Free импорт кладёт prod только для чтения, а сохранение формы снять защиту не даёт.
+    fn imported_prod_profile_keeps_read_only_from_file_and_can_change_it() {
         let dir = tempfile::tempdir().unwrap();
         let st = AppState::new(dir.path(), Arc::new(MemoryStore::default())).unwrap();
         let input = tempfile::tempdir().unwrap();
         let path = write_file(input.path(), "changed");
-        import_from_file(&st, &path, None, true, true).unwrap();
+        let preview = import_from_file(&st, &path, None, true, true).unwrap();
+        assert!(
+            preview
+                .warnings
+                .iter()
+                .all(|w| w.key != "warnings.import.prodReadOnly")
+        );
         let mut imported = st.connections.get("n").unwrap();
-        assert!(imported.read_only);
-        imported.read_only = false;
-        let err = crate::commands::connections::save_connection_blocking(
+        assert!(!imported.read_only, "readOnly как в файле");
+        // Флажок можно поставить и снять: тарифов нет.
+        imported.read_only = true;
+        crate::commands::connections::save_connection_blocking(
             &st,
             crate::commands::connections::ConnectionInput {
                 profile: imported,
                 secrets: Default::default(),
             },
         )
-        .unwrap_err();
-        assert_eq!(err.code, crate::error::ErrorCode::ProRequired);
+        .unwrap();
         assert!(st.connections.get("n").unwrap().read_only);
+        let mut back = st.connections.get("n").unwrap();
+        back.read_only = false;
+        crate::commands::connections::save_connection_blocking(
+            &st,
+            crate::commands::connections::ConnectionInput {
+                profile: back,
+                secrets: Default::default(),
+            },
+        )
+        .unwrap();
+        assert!(!st.connections.get("n").unwrap().read_only);
     }
 
     #[test]

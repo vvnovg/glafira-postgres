@@ -1,3 +1,0 @@
-# license-format берётся git-зависимостью из kafka-explorer: системный git знает учётные данные.
-[net]
-git-fetch-with-cli = true

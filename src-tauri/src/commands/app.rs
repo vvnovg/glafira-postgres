@@ -56,7 +56,6 @@ pub async fn export_diagnostics(
             &info,
             &st.connections.list(),
             &st.policy.status,
-            &st.license.status(),
             &crate::logging::log_files(&log_dir),
         )
     })

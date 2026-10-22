@@ -5,9 +5,7 @@ use serde::Deserialize;
 use tauri::State;
 
 use super::blocking;
-use crate::conn::profile::{
-    ConnectionProfile, Environment, normalize_profile, same_connection_settings,
-};
+use crate::conn::profile::{ConnectionProfile, normalize_profile, same_connection_settings};
 use crate::error::AppResult;
 use crate::readiness::check::{TestEvent, TestReport};
 use crate::secrets::{
@@ -210,16 +208,6 @@ pub fn save_connection_blocking(
     }
     normalize_profile(&mut profile);
     let previous = st.connections.get(&profile.id).ok();
-    // Перевод в prod и снятие read-only с prod — функции Pro (как в Glafira for Kafka).
-    let was_prod = previous.as_ref().map(|p| p.environment) == Some(Environment::Prod);
-    let becomes_prod = profile.environment == Environment::Prod && !was_prod;
-    let becomes_writable = profile.environment == Environment::Prod
-        && was_prod
-        && previous.as_ref().is_some_and(|p| p.read_only)
-        && !profile.read_only;
-    if becomes_prod || becomes_writable {
-        st.license.require_pro()?;
-    }
     let saved = st.connections.upsert(profile)?;
     let ops = secret_ops(&saved, &secrets);
     let secrets_changed = secrets_changed(&saved, &ops);
@@ -299,7 +287,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::conn::profile::{CertFormat, ClientCert, sample_profile};
+    use crate::conn::profile::{CertFormat, ClientCert, Environment, sample_profile};
     use crate::error::{AppError, ErrorCode};
     use crate::secrets::{MemoryStore, SecretStore};
     use crate::state::tests::Closed;
@@ -543,13 +531,21 @@ mod tests {
     }
 
     #[test]
-    fn prod_requires_pro() {
+    fn prod_is_saved_and_made_writable_without_a_key() {
         let (_d, st) = state_with(Arc::new(MemoryStore::default()));
         let mut p = sample_profile("a");
         p.environment = Environment::Prod;
         p.read_only = true;
-        let err = save_connection_blocking(&st, input(p, SecretsInput::default())).unwrap_err();
-        assert_eq!(err.code, ErrorCode::ProRequired);
+        let saved = save_connection_blocking(&st, input(p, SecretsInput::default())).unwrap();
+        assert_eq!(saved.environment, Environment::Prod);
+        assert!(saved.read_only);
+        // Снять «только чтение» с prod можно: тарифов нет.
+        let mut writable = saved;
+        writable.read_only = false;
+        let saved =
+            save_connection_blocking(&st, input(writable, SecretsInput::default())).unwrap();
+        assert!(!saved.read_only);
+        assert!(!st.connections.get("a").unwrap().read_only);
     }
 
     #[test]

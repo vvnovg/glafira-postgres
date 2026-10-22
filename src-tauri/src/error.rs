@@ -14,7 +14,6 @@ pub enum ErrorCode {
     Timeout,
     InvalidInput,
     NotFound,
-    ProRequired,
     /// Patroni REST API ответил ошибкой или неожиданным ответом.
     PatroniError,
     /// Узел не отвечает или пока не принимает соединения (запускается, в восстановлении).

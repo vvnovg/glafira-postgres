@@ -2,8 +2,15 @@ use tauri::State;
 
 use super::blocking;
 use crate::error::{AppResult, ErrorCode};
+use crate::policy::PolicyStatus;
 use crate::settings::{LanguageSettings, language_settings, system_locale};
 use crate::state::AppState;
+
+/// Состояние политики администратора: прочитано один раз при запуске (`lib.rs`).
+#[tauri::command]
+pub fn get_policy_status(state: State<'_, AppState>) -> AppResult<PolicyStatus> {
+    Ok(state.policy.status.clone())
+}
 
 fn current(st: &AppState) -> LanguageSettings {
     language_settings(
@@ -74,7 +81,7 @@ mod tests {
     }
 
     #[test]
-    fn free_can_pick_any_language() {
+    fn user_can_pick_any_language() {
         let dir = tempfile::tempdir().unwrap();
         let st = state(dir.path());
         let r = apply_language(&st, Some("ru")).unwrap();
@@ -90,18 +97,6 @@ mod tests {
         assert_eq!(st.settings.language().as_deref(), Some("en"));
         let r = apply_language(&st, None).unwrap();
         assert_eq!(r.chosen, None);
-    }
-
-    #[test]
-    fn pro_can_pick_any_language() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut st = state(dir.path());
-        st.license = Arc::new(crate::license::pro_for_tests(dir.path()));
-        let r = apply_language(&st, Some("ru")).unwrap();
-        assert_eq!(
-            (r.effective.as_str(), r.reason),
-            ("ru", LanguageReason::User)
-        );
     }
 
     #[test]
@@ -121,5 +116,16 @@ mod tests {
             (s.effective.as_str(), s.reason),
             ("en", LanguageReason::Policy)
         );
+    }
+
+    #[test]
+    fn policy_status_is_the_one_from_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut policy = crate::policy::Policy::default();
+        policy.status.managed = true;
+        policy.status.source = Some("src".into());
+        let st = state(dir.path()).with_policy(policy);
+        assert!(st.policy.status.managed);
+        assert_eq!(st.policy.status.source.as_deref(), Some("src"));
     }
 }

@@ -5,8 +5,8 @@ pub mod commands;
 pub mod conn;
 pub mod diagnostics;
 pub mod error;
-pub mod license;
 pub mod logging;
+pub mod migrate;
 pub mod policy;
 pub mod product;
 pub mod readiness;
@@ -36,7 +36,6 @@ pub fn run() {
             let policy = crate::policy::sources::load();
             tracing::info!(managed = policy.status.managed, "policy");
             let st = AppState::new(&dir, Arc::new(KeyringStore::default()))?.with_policy(policy);
-            tracing::info!(tier = ?st.license.status().tier, "license");
             st.runtimes
                 .set_sink(Arc::new(crate::commands::topology::TauriSink(
                     app.handle().clone(),
@@ -66,10 +65,7 @@ pub fn run() {
             commands::folders::export_connections,
             commands::folders::preview_import,
             commands::folders::apply_import,
-            commands::license::get_policy_status,
-            commands::license::get_license_status,
-            commands::license::set_license_key,
-            commands::license::remove_license_key,
+            commands::settings::get_policy_status,
             commands::settings::get_language_settings,
             commands::settings::set_language,
             commands::settings::get_ui_settings,
