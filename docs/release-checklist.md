@@ -5,7 +5,9 @@
    `plugins.updater.pubkey` вместо заглушки `REPLACE_WITH_UPDATER_PUBKEY`, отдельным коммитом в `main`.
 2. Публичный репозиторий `vvnovg/glafira-postgres-releases`: README из `docs/releases-repo/README.md`, `SUPPORT.md` из
    `docs/releases-repo/SUPPORT.md`, `LICENSE`, `NOTICE` и `.github/FUNDING.yml` (как в этом репозитории). Каждый релиз
-   обновляет README, SUPPORT.md, LICENSE, NOTICE и `guide/` сам (`release.yml`).
+   обновляет README, SUPPORT.md, LICENSE, NOTICE и `guide/` сам (`release.yml`). `LICENSE` и `NOTICE` в корне этого
+   репозитория должны быть закоммичены до первого тега: иначе шаг публикации руководства (`continue-on-error`) молча
+   пропустит обновление репозитория релизов.
 3. Секреты репозитория `vvnovg/glafira-postgres` (Settings → Secrets and variables → Actions):
    `TAURI_SIGNING_PRIVATE_KEY` (содержимое файла ключа), `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`,
    `RELEASES_TOKEN` (fine-grained PAT: только `vvnovg/glafira-postgres-releases`, Contents: Read and write).
@@ -48,8 +50,9 @@
 
 ## Смоук установщиков
 Стенд: `docker compose -f dev/docker-compose.yml up -d` и `scripts/wait-stand.sh` (README → «Стенд»).
-- [ ] macOS (`.dmg` и `.pkg`): установка, запуск без предупреждений Gatekeeper (сборка подписана и нотаризована),
-      подключение к серверу `localhost:5460` (`glafira_diag` / `glafira-secret`) и к кластеру Patroni (`http://localhost:8011`), «О программе» — версия.
+- [ ] macOS (`.dmg` и `.pkg`): установка; из `.dmg` запуск без предупреждений Gatekeeper (сборка подписана и нотаризована),
+      `.pkg` без отдельной нотаризации может предупредить; подключение к серверу `localhost:5460` (`glafira_diag` / `glafira-secret`)
+      и к кластеру Patroni (`http://localhost:8011`), «О программе» — версия.
 - [ ] Windows (`.msi`, `msiexec /qn` из администраторской консоли): то же; в «Программах и компонентах» одна запись.
 - [ ] Linux (`.deb`, `.rpm`, `.AppImage`): то же; бинарь `/usr/bin/glafira-pg`.
 - [ ] Политика `updatesEnabled = false` (по `docs/admin.md`): «Обновления управляются вашей организацией», в логе нет запросов к серверу обновлений.

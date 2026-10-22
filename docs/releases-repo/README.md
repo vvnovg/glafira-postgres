@@ -5,7 +5,9 @@ Desktop app for diagnosing PostgreSQL servers and Patroni clusters. Download the
 User guide: [English](guide/en/getting-started.md) · [Русский](guide/ru/getting-started.md)
 
 ## First launch
-macOS builds are signed with an Apple Developer ID and notarized: the app opens without extra steps.
+**macOS** — the `.dmg` build is signed with an Apple Developer ID and notarized: the app opens without extra steps.
+The `.pkg` installer is meant for managed deployment (MDM); it is signed when an installer certificate is configured
+and is not notarized separately, so Gatekeeper may warn if you run it by hand.
 
 **Windows** — the installer is not signed yet, so SmartScreen warns on first launch: click "More info" → "Run anyway",
 or unblock the installer in PowerShell:

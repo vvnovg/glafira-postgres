@@ -1,23 +1,77 @@
 # Glafira for PostgreSQL: руководство администратора
 
+## Установка
+| ОС | Файл | Тихая установка |
+|---|---|---|
+| macOS | `Glafira_for_PostgreSQL_<версия>_aarch64.pkg` / `_x64.pkg` | `sudo installer -pkg <файл>.pkg -target /` (Jamf, Intune, Kandji) |
+| Windows | `Glafira_for_PostgreSQL_<версия>_x64_en-US.msi` | `msiexec /i <файл>.msi /qn` (SCCM, Intune) — установка на машину |
+| Linux | `Glafira_for_PostgreSQL_<версия>_amd64.deb`, `Glafira_for_PostgreSQL-<версия>-1.x86_64.rpm`, `Glafira_for_PostgreSQL_<версия>_amd64.AppImage` | `sudo apt install ./<файл>.deb`, `sudo dnf install ./<файл>.rpm` |
+
+Установщики — в разделе релизов `https://github.com/vvnovg/glafira-postgres-releases/releases`.
+Пробелы в именах файлов заменены на `_` при публикации; точные имена смотрите в релизе.
+Исполняемый файл приложения — `glafira-pg` (`glafira-pg.exe` на Windows, `/usr/bin/glafira-pg` на Linux).
+
+### Обновление установленного приложения
+Встроенное обновление («О программе» → «Проверить обновления») скачивает установщик того же типа, что установлен:
+
+| Установлено из | Что делает обновление | Права |
+|---|---|---|
+| `.pkg` / `.dmg` (macOS) | заменяет `.app` на месте | если `.app` принадлежит root (установка из `.pkg` в `/Applications`) — запрос пароля администратора |
+| `.msi` (Windows, на машину) | запускает новый MSI | UAC; у пользователя без прав администратора обновление не установится |
+| `.deb` / `.rpm` (Linux) | ставит новый пакет через `dpkg -i` / `rpm -U` | пароль администратора (pkexec, иначе zenity/kdialog + sudo) |
+| `.AppImage` | заменяет файл AppImage | запись в каталог с AppImage |
+
+**Управляемые парки** (SCCM, Intune, Jamf, Kandji, репозиторий пакетов): обычные пользователи без прав
+администратора не смогут установить обновление сами. Рекомендуется политика `updatesEnabled = false` и раздача
+новых версий теми же средствами, что и установка (на Linux — через свой репозиторий apt/dnf или `apt install ./<файл>.deb`).
+
 ## Политика
+Приложение читает политику при запуске. Пользователь не может её изменить.
+
 | ОС | Где |
 |---|---|
-| macOS | профиль конфигурации MDM, домен `io.github.vvnovg.glafira.postgres` — пример `admin/policy.mobileconfig` |
-| Windows | `HKLM\SOFTWARE\Policies\Glafira\PostgreSQL` — пример `admin/policy.reg` |
+| macOS | профиль конфигурации MDM, домен `io.github.vvnovg.glafira.postgres` (файл попадает в `/Library/Managed Preferences/io.github.vvnovg.glafira.postgres.plist`) — пример `admin/policy.mobileconfig` |
+| Windows | `HKLM\SOFTWARE\Policies\Glafira\PostgreSQL` (GPO, Intune) — пример `admin/policy.reg` |
 | Linux | `/etc/io.github.vvnovg.glafira.postgres/policy.json` — пример `admin/policy.json` |
 
 | Ключ | Тип | По умолчанию | Смысл |
 |---|---|---|---|
-| `licenseKey` | строка | — | ключ организации: Pro у всех пользователей |
-| `language` | строка: `en`, `ru` | язык ОС или выбор пользователя | язык интерфейса для всех; пользователь его не меняет. Неизвестный код — ошибка политики |
+| `updatesEnabled` | bool (`dword` 0/1 в реестре) | `true` | `false` — приложение не обращается к серверу обновлений |
+| `updateUrl` | строка, только `https://` | публичный `latest.json` | зеркало с одобренными версиями (формат — `latest.json` Tauri). Адрес `http://` считается ошибкой политики: обновления выключаются |
+| `language` | строка: `en`, `ru` | язык ОС или выбор пользователя | язык интерфейса для всех; пользователь его не меняет. Неизвестный код — ошибка политики (показывается в «О программе»), язык не задаётся, обновления не выключаются |
+
+Ключ `licenseKey` прежних сборок больше не используется: все функции бесплатны, ключ игнорируется, как любой
+неизвестный, с предупреждением в логе.
 
 Политика читается один раз при запуске: после изменения перезапустите приложение. Неизвестные ключи игнорируются.
 На macOS читается только политика уровня устройства: профиль должен быть установлен на устройство (канал устройства MDM,
 `PayloadScope` = `System`), тогда он окажется в `/Library/Managed Preferences/io.github.vvnovg.glafira.postgres.plist`.
 Профиль уровня пользователя (`/Library/Managed Preferences/<пользователь>/…`) приложение не читает.
-Значения в реестре Windows — строки (`REG_SZ`). Состояние политики и её ошибки
+Значения в реестре Windows — строки (`REG_SZ`), флаги — `dword` 0/1. Состояние политики и её ошибки
 (нечитаемый файл, неверный тип значения, неизвестный язык) видны в окне «О программе».
+
+### Проверка политики вручную (macOS)
+`defaults write` в `/Library/Managed Preferences` на современной macOS не работает (туда пишет только MDM).
+Для проверки соберите plist и скопируйте его от имени администратора:
+
+```bash
+rm -f /tmp/policy.plist && plutil -create xml1 /tmp/policy.plist
+plutil -insert updatesEnabled -bool NO /tmp/policy.plist
+sudo mkdir -p "/Library/Managed Preferences"
+sudo cp /tmp/policy.plist "/Library/Managed Preferences/io.github.vvnovg.glafira.postgres.plist"
+sudo chmod 644 "/Library/Managed Preferences/io.github.vvnovg.glafira.postgres.plist"
+plutil -p "/Library/Managed Preferences/io.github.vvnovg.glafira.postgres.plist"
+```
+Удалить: `sudo rm "/Library/Managed Preferences/io.github.vvnovg.glafira.postgres.plist"`.
+
+## Внутреннее зеркало обновлений
+Скопируйте из релиза установщики, `*.sig` и `latest.json`, замените в `latest.json` адреса `url` на адреса зеркала
+и укажите адрес `latest.json` в `updateUrl`. Подписи остаются прежними: приложение проверяет их встроенным ключом.
+Зеркало должно отдаваться по `https://` (по `http` приложение обновления не загружает).
+
+В `latest.json` по записи на каждый тип установки: `darwin-aarch64`, `darwin-x86_64`, `windows-x86_64`,
+`linux-x86_64-deb`, `linux-x86_64-rpm`, `linux-x86_64-appimage` и `linux-x86_64` (тоже AppImage — запасная запись).
+Сохраните все записи: установка из `.deb` скачивает только `.deb`, из `.rpm` — только `.rpm`.
 
 ## Роль для диагностики
 ```sql
@@ -58,6 +112,7 @@ Patroni (`patronictl edit-config`, затем `patronictl restart` для `share
 |---|---|---|
 | Каждый узел PostgreSQL | 5432 (или ваш) | каталог, топология списка узлов, проверка подключения |
 | REST API Patroni каждого узла | 8008 (или ваш) | обнаружение участников (`GET /cluster`, `GET /patroni`) |
+| Сервер обновлений | 443 | `github.com` и хосты, куда GitHub перенаправляет загрузку ассетов релизов (`release-assets.githubusercontent.com`, `objects.githubusercontent.com`), — или хост из `updateUrl`; только если обновления не выключены политикой |
 
 Приложение вызывает только `GET /cluster` и `GET /patroni`; basic auth передаётся, если задан в профиле. В Patroni
 (проверено на 4.1.5) `restapi.allowlist`, обязательная basic auth для небезопасных вызовов и `restapi.verify_client: optional`
@@ -69,8 +124,8 @@ Patroni (`patronictl edit-config`, затем `patronictl restart` для `share
 кластера задаётся подмена адресов участников.
 SSH-туннели через бастион — в следующей версии.
 
-Приложение не отправляет телеметрию и не загружает удалённое содержимое: сетевые соединения — только с серверами PostgreSQL
-и REST API Patroni из профилей подключений.
+Приложение не отправляет телеметрию и отчёты о сбоях и не загружает удалённое содержимое: сетевые соединения — только с серверами PostgreSQL
+и REST API Patroni из профилей подключений и с сервером обновлений.
 
 ### Как приложение выглядит на сервере
 - Соединения идут с `application_name = glafira-pg`: по нему их видно в `pg_stat_activity`.
@@ -87,7 +142,7 @@ SSH-туннели через бастион — в следующей верс�
 | Логи | `~/Library/Logs/io.github.vvnovg.glafira.postgres` | `%LOCALAPPDATA%\io.github.vvnovg.glafira.postgres\logs` | `~/.local/share/io.github.vvnovg.glafira.postgres/logs` |
 | Пароли | Keychain, сервис `glafira-postgres` | Credential Manager | Secret Service |
 
-В каталоге данных лежат `connections.json` (профили без паролей), `settings.json` и, если ключ введён вручную, `license.json`.
+В каталоге данных лежат `connections.json` (профили без паролей) и `settings.json`.
 Если пароль в хранилище не сохранён, используется `~/.pgpass` (Windows: `%APPDATA%\postgresql\pgpass.conf`) или файл из `PGPASSFILE`.
 На Unix у такого файла должны быть права 0600 (`chmod 0600 ~/.pgpass`): как в libpq, файл, доступный группе или всем
 (`mode & 0o077`), игнорируется, и в журнале остаётся только предупреждение.

@@ -10,8 +10,6 @@ src-tauri/gen
 .vscode/*
 !.vscode/extensions.json
 .idea
-# Закрытые ключи лицензий
-license-signing.key
 
 # Внутренний обзор лицензирования — не публикуется
 docs/licensing-review-2026-10-19.md
