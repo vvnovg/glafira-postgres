@@ -4,6 +4,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { save } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api/client";
 import { tr } from "../../i18n/text";
+import { openLicense, openSupport } from "../../lib/links";
 import { useDiagnosticsRequest } from "../../state/diagnosticsRequest";
 import { ErrorBanner } from "../common/ErrorBanner";
 
@@ -46,6 +47,14 @@ export function AboutPanel() {
         <div><dt>{t("about.version")}</dt><dd>{i.version}</dd></div>
         <div><dt>{t("about.build")}</dt><dd>{i.commit}</dd></div>
         <div><dt>{t("about.system")}</dt><dd>{i.os} / {i.arch}</dd></div>
+        <div>
+          <dt>{t("about.license")}</dt>
+          <dd>
+            <button type="button" className="link" onClick={openLicense}>
+              Apache 2.0
+            </button>
+          </dd>
+        </div>
         <div><dt>{t("about.policy")}</dt><dd>{policy.data ? (policy.data.managed ? t("about.policySet") : t("about.policyNone")) : "…"}</dd></div>
       </dl>
       {policy.data?.errors.map((e, i) => (
@@ -53,6 +62,12 @@ export function AboutPanel() {
           {t("about.policyError", { error: tr(e) })}
         </p>
       ))}
+      <p>
+        <button type="button" className="link" onClick={openSupport}>
+          {t("support.title")}
+        </button>{" "}
+        <span className="muted">{t("support.hint")}</span>
+      </p>
       <p className="muted">{t("about.dataDir")} <code>{i.dataDir}</code></p>
       <p className="muted">{t("about.logDir")} <code>{i.logDir}</code></p>
       <UpdatesSection />

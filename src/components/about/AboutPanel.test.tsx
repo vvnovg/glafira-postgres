@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { renderWithClient } from "../../test/render";
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: vi.fn().mockResolvedValue("/tmp/diag.zip") }));
+vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 vi.mock("../../api/client", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../../api/client")>();
   return {
@@ -19,7 +20,9 @@ vi.mock("../../api/client", async (importOriginal) => {
 });
 
 import { save } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { api } from "../../api/client";
+import { LICENSE_URL, SUPPORT_URL } from "../../lib/links";
 import { useDiagnosticsRequest } from "../../state/diagnosticsRequest";
 import { AboutPanel } from "./AboutPanel";
 
@@ -33,6 +36,19 @@ describe("AboutPanel", () => {
     expect(screen.getByText("/l")).toBeInTheDocument();
     expect(screen.queryByText("Тариф")).not.toBeInTheDocument();
     expect(screen.getByText("нет")).toBeInTheDocument();
+  });
+
+  it("строка лицензии и кнопка поддержки открывают страницы в браузере", async () => {
+    vi.mocked(openUrl).mockClear();
+    const user = userEvent.setup();
+    renderWithClient(<AboutPanel />);
+    expect(await screen.findByText("Лицензия")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Apache 2.0" }));
+    expect(openUrl).toHaveBeenCalledWith(LICENSE_URL);
+    await user.click(screen.getByRole("button", { name: "Поддержать проект" }));
+    expect(openUrl).toHaveBeenCalledWith(SUPPORT_URL);
+    expect(screen.getByText(/пожертвования помогают/)).toBeInTheDocument();
+    expect(screen.queryByText("Тариф")).not.toBeInTheDocument();
   });
 
   it("диагностика: диалог сохранения, экспорт в выбранный файл и путь архива", async () => {

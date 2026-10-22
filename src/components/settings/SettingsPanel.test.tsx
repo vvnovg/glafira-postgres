@@ -36,7 +36,7 @@ beforeEach(() => {
 afterEach(() => act(() => i18n.changeLanguage("ru")));
 
 describe("SettingsPanel", () => {
-  it("выбор языка; без лицензии доступны все языки", async () => {
+  it("выбор языка; доступны все языки", async () => {
     vi.mocked(api.getLanguageSettings).mockResolvedValue(base);
     vi.mocked(api.setLanguage).mockResolvedValue({ ...base, chosen: "en", effective: "en", reason: "user" });
     const user = userEvent.setup();
@@ -45,7 +45,6 @@ describe("SettingsPanel", () => {
     for (const name of ["English", "Русский"]) {
       const option = screen.getByRole("option", { name });
       expect(option).toBeEnabled();
-      expect(option.textContent).not.toMatch(/Pro/);
     }
     expect(screen.getByRole("option", { name: /Как в системе/ })).toBeInTheDocument();
     await user.selectOptions(select, "en");
@@ -57,18 +56,6 @@ describe("SettingsPanel", () => {
     renderWithClient(<SettingsPanel />);
     expect(await screen.findByLabelText("Язык интерфейса")).toBeDisabled();
     expect(screen.getByText(/задан вашей организацией/)).toBeInTheDocument();
-  });
-
-  it("Free выбирает English — язык применяется, подсказки о Pro нет", async () => {
-    vi.mocked(api.getLanguageSettings).mockResolvedValue(base);
-    vi.mocked(api.setLanguage).mockResolvedValue({ ...base, chosen: "en", effective: "en", reason: "user" });
-    const user = userEvent.setup();
-    renderWithClient(<SettingsPanel />);
-    const select = await screen.findByLabelText("Язык интерфейса");
-    await user.selectOptions(select, "en");
-    expect(api.setLanguage).toHaveBeenCalledWith("en");
-    await vi.waitFor(() => expect(i18n.language).toBe("en"));
-    expect(screen.queryByText(/\bPro\b/)).not.toBeInTheDocument();
   });
 
   it("«Показывать системные объекты» сохраняется и отражается в флажке", async () => {

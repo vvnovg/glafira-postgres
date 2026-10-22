@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { Menu, MenuItem, PredefinedMenuItem, Submenu } from "@tauri-apps/api/menu";
 import { i18n } from "../i18n";
+import { openSupport } from "./links";
 import { useDiagnosticsRequest } from "../state/diagnosticsRequest";
 import { useWorkspace } from "../state/workspace";
 
@@ -44,6 +45,7 @@ async function buildAppMenu(): Promise<BuiltMenu> {
     // ⌘? — на раскладке US это ⇧⌘/; символ «?» как клавишу Tauri не принимает.
     await MenuItem.new({ id: id("guide"), text: t("menu.guide"), accelerator: "CmdOrCtrl+Shift+/", action: () => open({ kind: "help" }) }),
     await PredefinedMenuItem.new({ item: "Separator" }),
+    await MenuItem.new({ id: id("support"), text: t("support.title"), action: openSupport }),
     await MenuItem.new({ id: id("about"), text: t("menu.about"), action: () => open({ kind: "about" }) }),
     await MenuItem.new({
       id: id("diagnostics"),

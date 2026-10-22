@@ -42,7 +42,7 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
-  vi.resetAllMocks(); // сбрасывает и реализации: тарифы и ответы не перетекают между тестами
+  vi.resetAllMocks(); // сбрасывает и реализации: ответы не перетекают между тестами
   vi.mocked(api.listFolders).mockResolvedValue([]);
   useWorkspace.setState({ tabs: [], activeId: null });
 });

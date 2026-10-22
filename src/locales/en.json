@@ -342,6 +342,7 @@
     "version": "Version",
     "build": "Build",
     "system": "System",
+    "license": "License",
     "policy": "Organization policy",
     "policySet": "set",
     "policyNone": "none",
@@ -406,6 +407,10 @@
     "guide": "Glafira Guide",
     "about": "About Glafira",
     "diagnostics": "Collect Diagnostics…"
+  },
+  "support": {
+    "title": "Support the project",
+    "hint": "Glafira is free and open source; donations keep it going."
   },
   "test": {
     "patroniOk": "{{members}} members, leader {{leader}}",
