@@ -6,8 +6,8 @@
 2. Публичный репозиторий `vvnovg/glafira-postgres-releases`: README из `docs/releases-repo/README.md`, `SUPPORT.md` из
    `docs/releases-repo/SUPPORT.md`, `LICENSE`, `NOTICE` и `.github/FUNDING.yml` (как в этом репозитории). Каждый релиз
    обновляет README, SUPPORT.md, LICENSE, NOTICE и `guide/` сам (`release.yml`). `LICENSE` и `NOTICE` в корне этого
-   репозитория должны быть закоммичены до первого тега: иначе шаг публикации руководства (`continue-on-error`) молча
-   пропустит обновление репозитория релизов.
+   репозитория должны быть закоммичены до первого тега: иначе шаг публикации руководства (`continue-on-error`) пропустит с ошибкой шага, не останавливающей релиз,
+   обновление репозитория релизов.
 3. Секреты репозитория `vvnovg/glafira-postgres` (Settings → Secrets and variables → Actions):
    `TAURI_SIGNING_PRIVATE_KEY` (содержимое файла ключа), `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`,
    `RELEASES_TOKEN` (fine-grained PAT: только `vvnovg/glafira-postgres-releases`, Contents: Read and write).
@@ -18,6 +18,9 @@
    `APPLE_ID`, `APPLE_PASSWORD` (app-specific), `APPLE_TEAM_ID` (`JHWW538CH9`); при наличии — `APPLE_INSTALLER_IDENTITY`
    (Developer ID Installer) для подписи `.pkg`.
 4. Резервная копия закрытого ключа updater вне компьютера разработки.
+5. В настройках репозитория `vvnovg/glafira-postgres` после публикации: Settings → Code security → включить «Private vulnerability reporting»
+   (это обещает `SECURITY.md`); установить приложение DCO (https://github.com/apps/dco) — проверка `Signed-off-by` в PR,
+   которую обещает `CONTRIBUTING.md`.
 
 ## Пробный прогон
 Нужен `release.yml` в ветке `main`. `gh workflow run release -f dry_run=true` собирает все платформы и `latest.json`
@@ -29,7 +32,8 @@
    покрывает всё с прошлого тега — из него собирается описание релиза.
 2. `cargo update -w --offline --manifest-path src-tauri/Cargo.toml` — новая версия попадает в `Cargo.lock`
    (без этого `cargo metadata --locked` в скрипте ниже падает), затем `node scripts/third-party.mjs` →
-   обновлённый `THIRD_PARTY.md` (лицензии зависимостей); закоммитить.
+   обновлённый `THIRD_PARTY.md` (лицензии зависимостей); закоммитить. При обновлении зависимостей сверить список
+   C-библиотек в `scripts/third-party.mjs` (OpenSSL 3 от `openssl-src`, AWS-LC от `aws-lc-sys`).
 3. `node scripts/check-release.mjs vX.Y.Z` → «можно выпускать».
 4. `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z` → workflow `release`. Релиз создаётся черновиком со всеми ассетами
    и публикуется атомарно (`--draft=false --latest`); updater читает `releases/latest/download/latest.json`
@@ -47,6 +51,8 @@
 ## Известные ограничения
 - `.pkg` подписывается Developer ID Installer, если задан `APPLE_INSTALLER_IDENTITY`, но отдельно не нотаризуется.
 - Установщик Windows не подписан: SmartScreen предупреждает при первом запуске.
+- Локальный `pnpm tauri build` с `createUpdaterArtifacts` требует `TAURI_SIGNING_PRIVATE_KEY`: без него не подписан только `.app.tar.gz`,
+  а `.app` и `.dmg` в `src-tauri/target/release/bundle/` годны для смоука.
 
 ## Смоук установщиков
 Стенд: `docker compose -f dev/docker-compose.yml up -d` и `scripts/wait-stand.sh` (README → «Стенд»).

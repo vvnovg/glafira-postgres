@@ -66,6 +66,7 @@ pnpm test:scripts && pnpm i18n:check                     # скрипты, сл�
 cargo test --manifest-path crates/pg-advisor/Cargo.toml  # правила
 cargo test --manifest-path src-tauri/Cargo.toml --lib    # Rust unit
 cargo deny --manifest-path src-tauri/Cargo.toml --config deny.toml check licenses   # лицензии зависимостей
+cargo deny --manifest-path crates/pg-advisor/Cargo.toml --config deny.toml check licenses
 GPG_IT_SINGLE=localhost:5460 GPG_IT_PRIMARY=localhost:5451 GPG_IT_REPLICA=localhost:5452 \
 GPG_IT_PATRONI=http://localhost:8011,http://localhost:8012,http://localhost:8013 GPG_IT_DOCKER=1 \
   cargo test --manifest-path src-tauri/Cargo.toml --tests -- --test-threads=1   # интеграционные (нужен стенд)

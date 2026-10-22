@@ -5,7 +5,7 @@ Thank you for your interest in Glafira for PostgreSQL.
 ## Before you start
 
 - Open an issue first for anything bigger than a small fix, so that the approach can be agreed on.
-- The working language of the repository is Russian: comments, commit messages and `docs/` are written in Russian.
+- The working language of the repository is Russian: comments, commit messages and `docs/` are written in Russian (except the English guide in `docs/guide/en/` and the files for the releases repository in `docs/releases-repo/`).
   Issues and pull requests in English are welcome.
 
 ## Building and testing
