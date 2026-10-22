@@ -347,7 +347,10 @@ mod tests {
             let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             l.local_addr().unwrap().port()
         };
-        let nodes = pooled(SslMode::Disable);
+        // На Windows отказ на закрытый loopback-порт приходит примерно через секунду: с пределом
+        // `connect_timeout_s = 1` из `pooled()` вместо tcpFailed был бы connectTimeout.
+        let mut nodes = pooled(SslMode::Disable);
+        nodes.profile.pg.connect_timeout_s = 5;
         let e = nodes
             .facts_within("m", "127.0.0.1", port, LIMIT)
             .await
