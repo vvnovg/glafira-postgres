@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useWorkspace } from "../../state/workspace";
@@ -35,13 +35,14 @@ describe("UpdateNotice", () => {
       reason: { key: "errors.updates.notConfigured", params: {}, text: "Updates are not configured in this build" },
     });
     const first = renderWithClient(<UpdateNotice />);
-    await vi.waitFor(() => expect(api.checkUpdate).toHaveBeenCalled());
+    // Ждём завершения запроса, а не только его вызова: иначе пустой DOM — это просто состояние загрузки.
+    await waitFor(() => expect(first.client.getQueryState(["update-check"])?.status).toBe("success"));
     expect(first.container).toBeEmptyDOMElement();
     first.unmount();
 
     vi.mocked(api.checkUpdate).mockRejectedValue({ code: "CONNECTION_FAILED", message: "Не удалось проверить обновления", retryable: true });
     const second = renderWithClient(<UpdateNotice />);
-    await vi.waitFor(() => expect(api.checkUpdate).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(second.client.getQueryState(["update-check"])?.status).toBe("error"));
     expect(second.container).toBeEmptyDOMElement();
   });
 });

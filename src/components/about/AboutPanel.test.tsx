@@ -90,6 +90,7 @@ describe("AboutPanel", () => {
   });
 
   it("обновление доступно: описание и установка", async () => {
+    vi.mocked(api.installUpdate).mockClear();
     vi.mocked(api.checkUpdate).mockResolvedValueOnce({ status: "available", version: "0.2.0", notes: "Исправления", date: null });
     const user = userEvent.setup();
     renderWithClient(<AboutPanel />);
@@ -132,6 +133,33 @@ describe("AboutPanel", () => {
     await user.click(await screen.findByRole("button", { name: "Проверить обновления" }));
     await user.click(await screen.findByRole("button", { name: "Установить и перезапустить" }));
     expect(await screen.findByText("Не удалось установить обновление")).toBeInTheDocument();
+  });
+
+  it("установка идёт: кнопки заблокированы, виден статус", async () => {
+    vi.mocked(api.checkUpdate).mockResolvedValueOnce({ status: "available", version: "0.2.0", notes: null, date: null });
+    vi.mocked(api.installUpdate).mockImplementationOnce(() => new Promise(() => {}));
+    const user = userEvent.setup();
+    renderWithClient(<AboutPanel />);
+    await user.click(await screen.findByRole("button", { name: "Проверить обновления" }));
+    await user.click(await screen.findByRole("button", { name: "Установить и перезапустить" }));
+    expect(await screen.findByText("Загрузка и установка обновления…")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Установить и перезапустить" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Проверить обновления" })).toBeDisabled();
+  });
+
+  it("новая проверка убирает ошибку установки", async () => {
+    vi.mocked(api.checkUpdate)
+      .mockResolvedValueOnce({ status: "available", version: "0.2.0", notes: null, date: null })
+      .mockResolvedValueOnce({ status: "available", version: "0.2.0", notes: null, date: null });
+    vi.mocked(api.installUpdate).mockRejectedValueOnce({ code: "INTERNAL", message: "Не удалось установить обновление", retryable: false });
+    const user = userEvent.setup();
+    renderWithClient(<AboutPanel />);
+    await user.click(await screen.findByRole("button", { name: "Проверить обновления" }));
+    await user.click(await screen.findByRole("button", { name: "Установить и перезапустить" }));
+    expect(await screen.findByText("Не удалось установить обновление")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Проверить обновления" }));
+    expect(await screen.findByText("Доступна версия 0.2.0")).toBeInTheDocument();
+    expect(screen.queryByText("Не удалось установить обновление")).not.toBeInTheDocument();
   });
 
   it("ошибки политики видны в «О программе»", async () => {
