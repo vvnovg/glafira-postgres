@@ -30,6 +30,14 @@ describe("api client", () => {
     expect(invoke).toHaveBeenLastCalledWith("get_language_settings", undefined);
   });
 
+  it("команды updater вызываются по имени", async () => {
+    invoke.mockResolvedValue({ status: "upToDate" });
+    await api.checkUpdate();
+    expect(invoke).toHaveBeenLastCalledWith("check_update", undefined);
+    await api.installUpdate();
+    expect(invoke).toHaveBeenLastCalledWith("install_update", undefined);
+  });
+
   it("пробрасывает AppError как есть", async () => {
     const err = { code: "NOT_FOUND", message: "нет", retryable: false };
     invoke.mockRejectedValue(err);

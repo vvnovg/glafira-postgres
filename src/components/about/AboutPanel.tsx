@@ -55,6 +55,7 @@ export function AboutPanel() {
       ))}
       <p className="muted">{t("about.dataDir")} <code>{i.dataDir}</code></p>
       <p className="muted">{t("about.logDir")} <code>{i.logDir}</code></p>
+      <UpdatesSection />
       <section className="panel">
         <h3>{t("about.diagnostics.title")}</h3>
         <p className="muted">{t("about.diagnostics.hint")}</p>
@@ -67,5 +68,46 @@ export function AboutPanel() {
         {diag.error && <ErrorBanner error={diag.error} />}
       </section>
     </div>
+  );
+}
+
+/** Ручная проверка и установка обновлений; подтверждения нет — длительных операций у приложения нет. */
+function UpdatesSection() {
+  const { t } = useTranslation();
+  const check = useMutation({ mutationFn: api.checkUpdate });
+  const install = useMutation({ mutationFn: api.installUpdate });
+  const r = check.data;
+  return (
+    <section className="panel">
+      <h3>{t("about.updates.title")}</h3>
+      <div className="toolbar">
+        <button
+          type="button"
+          disabled={check.isPending || install.isPending}
+          onClick={() => {
+            install.reset();
+            check.mutate();
+          }}
+        >
+          {t("about.updates.check")}
+        </button>
+      </div>
+      {check.error && <ErrorBanner error={check.error} onRetry={() => check.mutate()} />}
+      {r?.status === "disabled" && <p className="muted">{tr(r.reason)}</p>}
+      {r?.status === "upToDate" && <p role="status">{t("about.updates.upToDate")}</p>}
+      {r?.status === "available" && (
+        <>
+          <p role="status">{t("about.updates.available", { version: r.version })}</p>
+          {r.notes && <pre>{r.notes}</pre>}
+          <div className="toolbar">
+            <button type="button" disabled={install.isPending} onClick={() => install.mutate()}>
+              {t("about.updates.install")}
+            </button>
+          </div>
+          {install.isPending && <p className="muted">{t("about.updates.installing")}</p>}
+          {install.error && <ErrorBanner error={install.error} />}
+        </>
+      )}
+    </section>
   );
 }

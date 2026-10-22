@@ -306,6 +306,12 @@ export interface PolicyStatus {
   errors: LocalizedText[];
 }
 
+/** Результат `check_update`. */
+export type UpdateCheck =
+  | { status: "disabled"; reason: LocalizedText }
+  | { status: "upToDate" }
+  | { status: "available"; version: string; notes: string | null; date: string | null };
+
 export interface AppInfo {
   name: string;
   version: string;

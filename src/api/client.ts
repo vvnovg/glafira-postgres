@@ -23,6 +23,7 @@ import type {
   TopologyView,
   TreeItemRef,
   UiSettings,
+  UpdateCheck,
 } from "./types";
 
 export function isAppError(e: unknown): e is AppError {
@@ -50,6 +51,8 @@ export const api = {
   setLanguage: (lang: string | null) => call<LanguageSettings>("set_language", { lang }),
   getPolicyStatus: () => call<PolicyStatus>("get_policy_status"),
   exportDiagnostics: (path: string) => call<void>("export_diagnostics", { path }),
+  checkUpdate: () => call<UpdateCheck>("check_update"),
+  installUpdate: () => call<void>("install_update"),
 
   listConnections: () => call<ConnectionProfile[]>("list_connections"),
   saveConnection: (profile: ConnectionProfile, secrets: SecretsInput) =>

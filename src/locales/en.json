@@ -353,6 +353,19 @@
       "hint": "An archive with logs, the version and connection profiles without passwords. Attach it to your support request — the app itself sends nothing.",
       "collect": "Collect diagnostics",
       "saved": "Archive saved: {{path}}"
+    },
+    "updates": {
+      "title": "Updates",
+      "check": "Check for updates",
+      "upToDate": "You have the latest version",
+      "available": "Version {{version}} is available",
+      "install": "Install and restart",
+      "installing": "Downloading and installing the update…"
+    },
+    "notice": {
+      "available": "Version {{version}} is available.",
+      "more": "Details",
+      "hideAria": "Dismiss notification"
     }
   },
   "warnings": {

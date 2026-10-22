@@ -4,6 +4,7 @@ import { api } from "../api/client";
 import type { ConnectionProfile } from "../api/types";
 import { ENV_COLORS } from "../lib/env";
 import { type Tab, useWorkspace } from "../state/workspace";
+import { UpdateNotice } from "./about/UpdateNotice";
 import { EnvBadge } from "./common/EnvBadge";
 import { Sidebar } from "./Sidebar";
 import { i18n } from "../i18n";
@@ -45,6 +46,7 @@ export function Layout() {
       <Sidebar />
       <main className="workspace">
         <div className="env-stripe" style={{ background: activeConn ? ENV_COLORS[activeConn.environment] : "transparent" }} />
+        <UpdateNotice />
         <nav className="tabbar" role="tablist">
           {tabs.map((tab) => {
             const tConnId = "connectionId" in tab ? tab.connectionId : null;

@@ -12,6 +12,8 @@ vi.mock("../../api/client", async (importOriginal) => {
       getAppInfo: vi.fn().mockResolvedValue({ name: "X", version: "0.1.0", commit: "abc123", os: "macos", arch: "aarch64", dataDir: "/d", logDir: "/l" }),
       getPolicyStatus: vi.fn().mockResolvedValue({ managed: false, source: null, updatesEnabled: true, updateUrl: null, language: null, errors: [] }),
       exportDiagnostics: vi.fn().mockResolvedValue(undefined),
+      checkUpdate: vi.fn().mockResolvedValue({ status: "upToDate" }),
+      installUpdate: vi.fn().mockResolvedValue(undefined),
     },
   };
 });
@@ -85,6 +87,51 @@ describe("AboutPanel", () => {
     resolveSave("/tmp/diag.zip");
     expect(await screen.findByText(/Архив сохранён/)).toBeInTheDocument();
     expect(save).toHaveBeenCalledTimes(1);
+  });
+
+  it("обновление доступно: описание и установка", async () => {
+    vi.mocked(api.checkUpdate).mockResolvedValueOnce({ status: "available", version: "0.2.0", notes: "Исправления", date: null });
+    const user = userEvent.setup();
+    renderWithClient(<AboutPanel />);
+    await user.click(await screen.findByRole("button", { name: "Проверить обновления" }));
+    expect(await screen.findByText("Доступна версия 0.2.0")).toBeInTheDocument();
+    expect(screen.getByText("Исправления")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Установить и перезапустить" }));
+    expect(api.installUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it("политика выключила обновления", async () => {
+    vi.mocked(api.checkUpdate).mockResolvedValueOnce({
+      status: "disabled",
+      reason: { key: "errors.updates.managed", params: {}, text: "Updates are managed by your organization" },
+    });
+    const user = userEvent.setup();
+    renderWithClient(<AboutPanel />);
+    await user.click(await screen.findByRole("button", { name: "Проверить обновления" }));
+    expect(await screen.findByText("Обновления управляются вашей организацией")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Установить и перезапустить" })).not.toBeInTheDocument();
+  });
+
+  it("последняя версия; ошибка сети — баннер с повтором", async () => {
+    vi.mocked(api.checkUpdate)
+      .mockRejectedValueOnce({ code: "CONNECTION_FAILED", message: "Не удалось проверить обновления", retryable: true })
+      .mockResolvedValueOnce({ status: "upToDate" });
+    const user = userEvent.setup();
+    renderWithClient(<AboutPanel />);
+    await user.click(await screen.findByRole("button", { name: "Проверить обновления" }));
+    expect(await screen.findByText("Не удалось проверить обновления")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Повторить" }));
+    expect(await screen.findByText("Установлена последняя версия")).toBeInTheDocument();
+  });
+
+  it("ошибка установки — баннер", async () => {
+    vi.mocked(api.checkUpdate).mockResolvedValueOnce({ status: "available", version: "0.2.0", notes: null, date: null });
+    vi.mocked(api.installUpdate).mockRejectedValueOnce({ code: "INTERNAL", message: "Не удалось установить обновление", retryable: false });
+    const user = userEvent.setup();
+    renderWithClient(<AboutPanel />);
+    await user.click(await screen.findByRole("button", { name: "Проверить обновления" }));
+    await user.click(await screen.findByRole("button", { name: "Установить и перезапустить" }));
+    expect(await screen.findByText("Не удалось установить обновление")).toBeInTheDocument();
   });
 
   it("ошибки политики видны в «О программе»", async () => {
