@@ -84,7 +84,7 @@ crates/
 **Технические решения:**
 - Драйвер PG — `tokio-postgres` + `postgres-openssl` (OpenSSL vendored, как в Glafira): `sslmode` от `disable`
   до `verify-full`, клиентские сертификаты PEM / PKCS#12, password / md5 / SCRAM. Пулы — `deadpool-postgres`,
-  не больше 3 соединений на пару (узел, БД). Kerberos/GSSAPI драйвер не поддерживает — вне объёма.
+  не больше 3 соединений на пару (узел, БД) для каталога и вкладок плюс одно для опроса топологии. Kerberos/GSSAPI драйвер не поддерживает — вне объёма.
 - Patroni — `reqwest`, basic auth, TLS / mTLS.
 - SSH — системный `ssh` (учитывает `~/.ssh/config`, ProxyJump, агент, аппаратные ключи); пароли и пассфразы отдаёт
   режим `askpass` нашего бинаря из keychain.
