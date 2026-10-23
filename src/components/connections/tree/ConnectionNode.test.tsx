@@ -158,7 +158,7 @@ describe("ConnectionNode", () => {
     expect(api.connect).not.toHaveBeenCalled();
   });
 
-  it("меню живого подключения: «Переподключить» закрывает и открывает заново, узел остаётся раскрытым", async () => {
+  it("меню живого подключения: «Переподключить» оставляет подключение открытым, вид — из ответа, узел остаётся раскрытым", async () => {
     vi.mocked(api.getTopology).mockResolvedValue(topologyView({ state: "degraded" }));
     vi.mocked(api.reconnect).mockResolvedValue(topologyView());
     const user = userEvent.setup();
@@ -173,14 +173,14 @@ describe("ConnectionNode", () => {
     expect(api.reconnect).toHaveBeenCalledWith("c");
     expect(await screen.findByRole("img", { name: "Подключено" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: toggleName })).toHaveAttribute("aria-expanded", "true");
-    // Каталог и факты этого подключения перечитываются (событие Disconnected больше не приходит), чужие — нет.
+    // Пулы и секреты в Rust перечитаны, события Disconnected нет: каталог и факты этого подключения перечитываются, чужие — нет.
     await waitFor(() => expect(client.getQueryState(["catalog", "c", "databases"])?.isInvalidated).toBe(true));
     expect(client.getQueryState(["memberFacts", "c", "pg-1"])?.isInvalidated).toBe(true);
     expect(client.getQueryState(["catalog", "other", "databases"])?.isInvalidated).toBe(false);
   });
 
   it("меню: пока идёт подключение (connecting), «Переподключить» не предлагается", async () => {
-    // reconnect не сериализован с идущим connect: два открытия подряд оставили бы лишнее соединение.
+    // Переподключать ещё нечего: подключение только открывается.
     vi.mocked(api.getTopology).mockResolvedValue(topologyView({ state: "connecting" }));
     const user = userEvent.setup();
     renderNode();
@@ -189,6 +189,30 @@ describe("ConnectionNode", () => {
     const items = within(screen.getByRole("menu")).getAllByRole("menuitem");
     expect(items.map((m) => m.textContent)).not.toContain("Переподключить");
     expect(api.reconnect).not.toHaveBeenCalled();
+  });
+
+  it("меню: пока идёт переподключение, «Переподключить» не предлагается — повторные нажатия не копятся", async () => {
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView({ state: "degraded" }));
+    let finish: (v: ReturnType<typeof topologyView>) => void = () => {};
+    vi.mocked(api.reconnect).mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    const user = userEvent.setup();
+    renderNode();
+    await screen.findByRole("img", { name: "Часть узлов недоступна" });
+    const menuButton = screen.getByRole("button", { name: "Действия с подключением billing" });
+    await user.click(menuButton);
+    await user.click(screen.getByRole("menuitem", { name: "Переподключить" }));
+    expect(api.reconnect).toHaveBeenCalledTimes(1);
+
+    await user.click(menuButton);
+    const busyItems = within(screen.getByRole("menu")).getAllByRole("menuitem");
+    expect(busyItems.map((m) => m.textContent)).not.toContain("Переподключить");
+    await user.click(menuButton);
+
+    await act(async () => finish(topologyView()));
+    expect(await screen.findByRole("img", { name: "Подключено" })).toBeInTheDocument();
+    await user.click(menuButton);
+    expect(within(screen.getByRole("menu")).getByRole("menuitem", { name: "Переподключить" })).toBeInTheDocument();
+    expect(api.reconnect).toHaveBeenCalledTimes(1);
   });
 
   it("ошибка переподключения показывается под узлом", async () => {

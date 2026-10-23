@@ -17,7 +17,14 @@ export const disconnectedView: TopologyView = {
 type StatePayload = { connectionId: string; state: ConnState; error: AppError | null };
 type TopologyPayload = { connectionId: string; view: TopologyView; newEvents: TopologyEvent[] };
 
-const ofConnection = (prefixes: string[], id: string) => (q: { queryKey: readonly unknown[] }) =>
+/**
+ * Запросы подключения, которые читают PostgreSQL: после отключения удаляются, после переподключения перечитываются.
+ * Новый такой ключ добавляется сюда — и отключение, и переподключение (дерево, обзор) его учтут.
+ */
+export const PG_QUERY_KEYS = ["catalog", "memberFacts"] as const;
+
+/** Предикат запросов подключения `id`, у которых первый элемент ключа — один из `prefixes`. */
+export const ofConnection = (prefixes: readonly string[], id: string) => (q: { queryKey: readonly unknown[] }) =>
   prefixes.includes(q.queryKey[0] as string) && q.queryKey[1] === id;
 
 const topologyKey = (id: string) => ["topology", id];
@@ -64,7 +71,7 @@ export function applyState(qc: QueryClient, p: StatePayload) {
     supersede(qc, eventsKey(id));
     qc.setQueryData(topologyKey(id), disconnectedView);
     qc.setQueryData(eventsKey(id), []);
-    qc.removeQueries({ predicate: ofConnection(["catalog", "memberFacts"], id) });
+    qc.removeQueries({ predicate: ofConnection(PG_QUERY_KEYS, id) });
     return;
   }
   supersede(qc, topologyKey(id));

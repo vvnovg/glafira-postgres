@@ -7,7 +7,7 @@ import { i18n, currentLocale } from "../../i18n";
 import { tr } from "../../i18n/text";
 import { formatBytes, formatCount, formatTimestamp } from "../../lib/format";
 import { roleLabel } from "../../lib/topology";
-import { useTopology, useTopologyEvents } from "../../lib/useConnectionEvents";
+import { PG_QUERY_KEYS, ofConnection, useTopology, useTopologyEvents } from "../../lib/useConnectionEvents";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { Glyph } from "../common/Glyph";
 import { warningText } from "../connections/TestPanel";
@@ -305,7 +305,7 @@ export function Overview({ connectionId, member, active = true }: { connectionId
     try {
       qc.setQueryData(["topology", connectionId], await api.reconnect(connectionId));
       // Подключение то же, события Disconnected нет: факты узлов и каталог после отказа во входе перечитываются сами.
-      void qc.invalidateQueries({ predicate: (q) => (q.queryKey[0] === "catalog" || q.queryKey[0] === "memberFacts") && q.queryKey[1] === connectionId });
+      void qc.invalidateQueries({ predicate: ofConnection(PG_QUERY_KEYS, connectionId) });
     } catch (e) {
       setError(toAppError(e));
     } finally {

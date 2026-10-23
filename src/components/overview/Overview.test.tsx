@@ -128,23 +128,33 @@ describe("Overview", () => {
       renderWithClient(<Overview connectionId="c" />);
       expect(await screen.findByText(label)).toBeInTheDocument();
       expect(api.connect).not.toHaveBeenCalled();
-      // reconnect не сериализован с идущим connect, поэтому при connecting кнопки быть не должно.
+      // При connecting переподключать ещё нечего: подключение только открывается.
       expect(screen.queryByRole("button", { name: "Переподключить" }) !== null).toBe(reopen);
     });
 
-    it("часть узлов недоступна: кнопка «Переподключить» закрывает и открывает подключение заново", async () => {
+    it("часть узлов недоступна: кнопка «Переподключить» оставляет подключение открытым, каталог и факты узлов перечитываются", async () => {
       vi.mocked(api.getTopology).mockResolvedValue(topologyView({ state: "degraded" }));
       vi.mocked(api.reconnect).mockResolvedValue(topologyView());
       const user = userEvent.setup();
       const { client } = renderWithClient(<Overview connectionId="c" />);
       client.setQueryData(["catalog", "c", "databases"], []);
+      client.setQueryData(["catalog", "other", "databases"], []);
+      client.setQueryData(["memberFacts", "other", "pg-1"], { startedAtMs: 0, connections: 1, maxConnections: 100, databases: 1 });
+      const factsOf = (member: string) => vi.mocked(api.getMemberFacts).mock.calls.filter(([id, m]) => id === "c" && m === member).length;
+      // Факты узлов показаны: их первое чтение позади.
+      await waitFor(() => expect(screen.getAllByText("12 / 100")).toHaveLength(2));
+      const factsBefore = factsOf("pg-1");
       await user.click(await screen.findByRole("button", { name: "Переподключить" }));
       expect(api.reconnect).toHaveBeenCalledWith("c");
       expect(await screen.findByText("Подключено")).toBeInTheDocument();
       expect(api.connect).not.toHaveBeenCalled();
       expect(screen.queryByRole("button", { name: "Переподключить" })).not.toBeInTheDocument();
-      // Каталог подключения перечитывается: события Disconnected при переподключении нет.
+      // Пулы и секреты в Rust перечитаны, события Disconnected нет: каталог и факты узлов этого подключения
+      // перечитываются (факты — показанные запросы: перечитываются сразу), чужие — нет.
       await waitFor(() => expect(client.getQueryState(["catalog", "c", "databases"])?.isInvalidated).toBe(true));
+      await waitFor(() => expect(factsOf("pg-1")).toBeGreaterThan(factsBefore));
+      expect(client.getQueryState(["catalog", "other", "databases"])?.isInvalidated).toBe(false);
+      expect(client.getQueryState(["memberFacts", "other", "pg-1"])?.isInvalidated).toBe(false);
     });
 
     it("ошибка переподключения показывается баннером, кнопка снова доступна", async () => {

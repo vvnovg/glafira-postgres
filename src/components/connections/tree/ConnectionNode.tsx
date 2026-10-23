@@ -5,7 +5,7 @@ import { api, toAppError } from "../../../api/client";
 import type { AppError, ConnectionProfile, TopologyView } from "../../../api/types";
 import { tr } from "../../../i18n/text";
 import { roleLabel } from "../../../lib/topology";
-import { disconnectedView, useTopology } from "../../../lib/useConnectionEvents";
+import { PG_QUERY_KEYS, disconnectedView, ofConnection, useTopology } from "../../../lib/useConnectionEvents";
 import { useWorkspace } from "../../../state/workspace";
 import { EnvBadge } from "../../common/EnvBadge";
 import { Glyph } from "../../common/Glyph";
@@ -48,6 +48,26 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
     }
   };
 
+  /**
+   * Переподключение живого подключения на месте. Пока оно идёт, узел занят (`busy`): пункт меню не предлагается,
+   * и повторные нажатия не ставят переподключения в очередь одно за другим.
+   */
+  const reconnect = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      setView(await api.reconnect(c.id));
+      // Подключение осталось тем же (журнал и узел каталога сохранены), события Disconnected не было:
+      // списки каталога и факты узлов, упавшие на отказе во входе, перечитываются сами.
+      void qc.invalidateQueries({ predicate: ofConnection(PG_QUERY_KEYS, c.id) });
+    } catch (e) {
+      setError(toAppError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   /** Смена узла, с которого читается каталог: новый вид в кэш, каталог — перечитать заново. */
   const pickCatalogMember = (member: string | null) => {
     setError(null);
@@ -55,7 +75,7 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
       .setCatalogMember(c.id, member)
       .then((v) => {
         setView(v);
-        void qc.invalidateQueries({ predicate: (q) => q.queryKey[0] === "catalog" && q.queryKey[1] === c.id });
+        void qc.invalidateQueries({ predicate: ofConnection(["catalog"], c.id) });
       })
       .catch((e: unknown) => setError(toAppError(e)));
   };
@@ -97,24 +117,8 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
       : []),
     // Живое подключение можно переподключить на месте: после смены пароля на сервере или сбоя LDAP отказ во входе
     // запоминается до переподключения (errors.pg.loginNotRetried); журнал и узел каталога при этом остаются. Пока идёт
-    // подключение (connecting), пункта нет: переподключать ещё нечего.
-    ...(live
-      ? [
-          {
-            label: t("sidebar.reopen"),
-            onSelect: () =>
-              void api
-                .reconnect(c.id)
-                .then((v) => {
-                  setView(v);
-                  // Подключение осталось тем же (журнал и узел каталога сохранены), события Disconnected не было:
-                  // списки каталога и факты узлов, упавшие на отказе во входе, перечитываются сами.
-                  void qc.invalidateQueries({ predicate: (q) => (q.queryKey[0] === "catalog" || q.queryKey[0] === "memberFacts") && q.queryKey[1] === c.id });
-                })
-                .catch((e: unknown) => setError(toAppError(e))),
-          },
-        ]
-      : []),
+    // подключение (connecting), пункта нет: переподключать ещё нечего; пока идёт само переподключение (busy) — тоже.
+    ...(live && !busy ? [{ label: t("sidebar.reopen"), onSelect: () => void reconnect() }] : []),
     ...(live || view.state === "failed"
       ? [
           {
