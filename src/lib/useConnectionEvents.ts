@@ -37,7 +37,9 @@ function supersede(qc: QueryClient, key: readonly unknown[]) {
 }
 
 /** Каноническая запись события: порядок ключей не зависит от источника (ответ команды или событие). */
-const signature = (e: TopologyEvent) => JSON.stringify(e, Object.keys(e).sort());
+// Массив-replacer у JSON.stringify не сортирует, а фильтрует ключи на всех уровнях (вложенное содержимое пропало бы
+// и разные события склеились бы): сортируются пары верхнего уровня, значения сериализуются целиком.
+const signature = (e: TopologyEvent) => JSON.stringify(Object.entries(e).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 /** Сколько верхних записей кэша сверяются с новыми событиями (ответ `list_topology_events` мог опередить событие). */
 const DEDUPE_WINDOW = 50;
 

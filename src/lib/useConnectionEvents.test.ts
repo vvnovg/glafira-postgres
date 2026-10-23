@@ -58,6 +58,16 @@ describe("события наблюдения", () => {
     expect(qc.getQueryData(["topologyEvents", "c"])).toEqual([e3, e2, e1]);
   });
 
+  it("события с разным вложенным содержимым — не дубли, а порядок ключей верхнего уровня не важен", () => {
+    const qc = new QueryClient();
+    // Сегодня события плоские; проверка на случай будущих событий с вложенными полями.
+    const nested = (tags: Record<string, unknown>, kind = "memberRoleChanged") => ({ atMs: 1_000, kind, name: "pg-1", tags }) as unknown as TopologyEvent;
+    const swapped = { kind: "pauseChanged", atMs: 2_000, paused: true } as TopologyEvent;
+    qc.setQueryData(["topologyEvents", "c"], [swapped, nested({ a: 1 })]);
+    applyTopology(qc, { connectionId: "c", view: topologyView(), newEvents: [nested({ a: 2 }), { atMs: 2_000, kind: "pauseChanged", paused: true }] });
+    expect(qc.getQueryData(["topologyEvents", "c"])).toEqual([nested({ a: 2 }), swapped, nested({ a: 1 })]);
+  });
+
   it("журнал ограничен", () => {
     const qc = new QueryClient();
     qc.setQueryData(["topologyEvents", "c"], Array.from({ length: EVENTS_CAP }, (_, i) => ev(i)));
