@@ -69,8 +69,9 @@ pub async fn connect(state: State<'_, AppState>, id: String) -> AppResult<Topolo
     state.runtimes.connect(profile).await
 }
 
-/// Закрыть и открыть подключение заново (меню «Переподключить»): после смены пароля на сервере или сбоя
-/// LDAP запомненный отказ во входе сбрасывается и секреты читаются заново.
+/// «Переподключить»: после смены пароля на сервере или сбоя LDAP запомненный отказ во входе сбрасывается,
+/// секреты читаются заново, узлы опрашиваются сразу; журнал и узел каталога открытого подключения остаются
+/// (`Runtimes::reconnect`).
 #[tauri::command]
 pub async fn reconnect(state: State<'_, AppState>, id: String) -> AppResult<TopologyView> {
     let profile = state.profile(&id)?;

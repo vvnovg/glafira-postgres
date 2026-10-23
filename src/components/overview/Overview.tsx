@@ -294,7 +294,11 @@ export function Overview({ connectionId, member, active = true }: { connectionId
     }
   };
 
-  /** Закрыть живое подключение и открыть заново: отказ во входе запоминается до переоткрытия, а кнопка «Подключиться» его не снимает. */
+  /**
+   * «Переподключить» живое подключение: пулы с запомненным отказом во входе сбрасываются, узлы опрашиваются сразу,
+   * журнал и узел каталога остаются. «Подключиться» у живого подключения ничего не меняет, а у failed/disconnected
+   * и так сбрасывает пулы и открывает подключение заново — поэтому эта кнопка только у живого.
+   */
   const reopen = async () => {
     setBusy(true);
     setError(null);
@@ -360,7 +364,7 @@ export function Overview({ connectionId, member, active = true }: { connectionId
             {t("sidebar.connect")}
           </button>
         )}
-        {/* Только при частичной недоступности: при connecting переоткрытие не сериализовано с идущим connect. */}
+        {/* Только при частичной недоступности: у connected повода нет, при connecting подключение ещё открывается. */}
         {v.state === "degraded" && (
           <button type="button" disabled={busy} onClick={() => void reopen()}>
             {t("sidebar.reopen")}

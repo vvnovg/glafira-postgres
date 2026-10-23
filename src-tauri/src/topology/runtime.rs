@@ -289,14 +289,26 @@ impl Runtimes {
     /// Открывает подключение. Уже открытое с теми же настройками соединения возвращается как есть
     /// (журнал, узел каталога и пулы сохраняются), оформление профиля — имя, цвет, папка — обновляется.
     pub async fn connect(self: &Arc<Self>, profile: ConnectionProfile) -> AppResult<TopologyView> {
-        let id = profile.id.clone();
-        let lock = self
-            .connect_locks
-            .lock_safe()
-            .entry(id.clone())
-            .or_default()
-            .clone();
+        let lock = self.connect_lock(&profile.id);
         let _guard = lock.lock().await;
+        self.connect_locked(profile).await
+    }
+
+    /// Замок подключения `id`: открытия и переподключения одного подключения идут по очереди.
+    fn connect_lock(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.connect_locks
+            .lock_safe()
+            .entry(id.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// `connect` под уже взятым замком подключения.
+    async fn connect_locked(
+        self: &Arc<Self>,
+        profile: ConnectionProfile,
+    ) -> AppResult<TopologyView> {
+        let id = profile.id.clone();
         let generation = {
             let mut entries = self.entries.lock_safe();
             if let Some(e) = entries.get_mut(&id)
@@ -388,6 +400,14 @@ impl Runtimes {
 
     /// Один опрос открытия `generation`; `false` — оно закрыто или заменено, опрос прекращается.
     async fn poll_once(&self, id: &str, generation: u64) -> bool {
+        self.observe_entry(id, generation, false).await
+    }
+
+    /// Опрос открытия `generation` — общий для фонового опроса и «Переподключить»: те же переходы
+    /// состояний (`connected`/`degraded`; неудача опроса — `degraded`, а не `failed`). С `announce`
+    /// вид объявляется и без изменений: переподключение — действие пользователя, интерфейс получает
+    /// итог целиком. `false` — открытие закрыто или заменено.
+    async fn observe_entry(&self, id: &str, generation: u64, announce: bool) -> bool {
         let (profile, previous) = {
             let entries = self.entries.lock_safe();
             let Some(e) = entries.get(id).filter(|e| e.generation == generation) else {
@@ -430,7 +450,7 @@ impl Runtimes {
                 if state_changed {
                     self.emit_state(id, state, None);
                 }
-                if changed || !events.is_empty() {
+                if changed || !events.is_empty() || announce {
                     self.emit_topology(id, &view, &events);
                 }
             }
@@ -461,14 +481,46 @@ impl Runtimes {
         self.emit_state(id, ConnState::Disconnected, None);
     }
 
-    /// «Переподключить»: закрыть и открыть заново. Пулы (и запомненный отказ во входе) сбрасываются,
-    /// секреты читаются из keychain заново — без ручного «Отключиться» и раскрытия узла.
+    /// «Переподключить» (пароль сменили на сервере, LDAP отказал и снова работает). Открытое подключение
+    /// остаётся тем же: журнал, выбранный узел каталога, номер открытия и фоновый опрос сохраняются —
+    /// журнал хранит историю переключений, ради которой подключение и держат открытым. Сбрасывается только
+    /// то, что держит прежний вход: пулы подключения (с запомненным отказом во входе) и клиент HTTP
+    /// Patroni, — и сразу идёт один опрос тем же путём, что и фоновый: секреты читаются из keychain заново.
+    /// Неудача этого опроса, как и любого, оставляет подключение `degraded` с опросом, который вернёт его
+    /// сам, а не `failed` без опроса. Не открытое (`disconnected`, `failed`) или открытое с другими
+    /// настройками соединения подключение закрывается и открывается заново. Под замком подключения:
+    /// переподключение не пересекается с идущим `connect`, а дожидается его.
     pub async fn reconnect(
         self: &Arc<Self>,
         profile: ConnectionProfile,
     ) -> AppResult<TopologyView> {
-        self.disconnect(&profile.id);
-        self.connect(profile).await
+        let id = profile.id.clone();
+        let lock = self.connect_lock(&id);
+        let _guard = lock.lock().await;
+        let live = {
+            let mut entries = self.entries.lock_safe();
+            match entries.get_mut(&id) {
+                Some(e)
+                    if matches!(e.state, ConnState::Connected | ConnState::Degraded)
+                        && same_connection_settings(&e.profile, &profile) =>
+                {
+                    e.profile = profile.clone();
+                    self.pools.evict_connection(&id);
+                    self.source.forget(&id);
+                    Some(e.generation)
+                }
+                _ => None,
+            }
+        };
+        let Some(generation) = live else {
+            // Замок не теряется: `disconnect` оставляет замок, который кто-то держит.
+            self.disconnect(&id);
+            return self.connect_locked(profile).await;
+        };
+        if !self.observe_entry(&id, generation, true).await {
+            return Err(not_connected());
+        }
+        Ok(self.view(&id))
     }
 
     /// Профиль сохранён с правкой, не затрагивающей соединение (имя, цвет, папка…): открытое подключение
@@ -841,14 +893,109 @@ mod tests {
         );
     }
 
-    /// «Переподключить»: закрыть и открыть заново — пулы (с отметкой об отказе во входе) сброшены, состояния
-    /// прошли через Disconnected, замок подключения после отключения не копится.
+    fn forgets(src: &Scripted) -> usize {
+        src.log
+            .lock_safe()
+            .iter()
+            .filter(|&&what| what == "forget")
+            .count()
+    }
+
+    fn is_leader_change(e: &TopologyEvent) -> bool {
+        matches!(e.event, EventKind::LeaderChanged { .. })
+    }
+
+    /// «Переподключить» живое подключение: журнал, выбранный узел каталога, номер открытия и фоновый опрос
+    /// остаются; пулы с отметкой об отказе во входе и клиент HTTP сброшены, узлы опрошены сразу заново.
     #[tokio::test]
-    async fn reconnect_closes_and_reopens_the_connection() {
-        let (rt, _src, rec, pools) = manual(vec![Ok(two("a")), Ok(two("a"))]);
+    async fn reconnect_of_a_live_connection_keeps_journal_catalog_member_and_polling() {
+        let (rt, src, rec, pools) = setup(vec![Ok(two("a")), Ok(two("b"))]);
         rt.connect(patroni_profile()).await.unwrap();
+        eventually("переключение в журнале", || {
+            rt.events("c").iter().any(is_leader_change)
+        })
+        .await;
+        // Узел каталога выбран вручную: не лидер.
+        rt.set_catalog_member("c", Some("a".into())).unwrap();
+        let (journal, generation) = (rt.events("c"), generation_of(&rt, "c"));
         add_pool(&pools, "a");
-        assert!(!pools.keys().is_empty());
+        pools
+            .get(&pool_key("a"))
+            .unwrap()
+            .remember_auth_failure(err());
+        let (calls, forgot) = (src.calls(), forgets(&src));
+        let announced = rec.topologies.lock_safe().len();
+
+        let view = rt.reconnect(patroni_profile()).await.unwrap();
+        assert_eq!(view.state, ConnState::Connected);
+        assert_eq!(view.catalog_member.as_deref(), Some("a"));
+        assert!(!view.catalog_fallback);
+        assert_eq!(rt.events("c"), journal, "журнал не потерян");
+        assert_eq!(generation_of(&rt, "c"), generation, "открытие то же");
+        assert!(src.calls() > calls, "узлы опрошены заново");
+        assert!(
+            pools.get(&pool_key("a")).is_none(),
+            "пул с запомненным отказом во входе сброшен"
+        );
+        assert!(forgets(&src) > forgot, "клиент HTTP забыт");
+        assert!(
+            rec.topologies.lock_safe().len() > announced,
+            "итог объявлен, хотя топология не менялась"
+        );
+        assert!(
+            !rec.states.lock_safe().contains(&ConnState::Disconnected),
+            "подключение не закрывалось: интерфейс не стирает журнал"
+        );
+        let after = src.calls();
+        eventually("фоновый опрос продолжается", || {
+            src.calls() >= after + 2
+        })
+        .await;
+        rt.shutdown();
+    }
+
+    /// Узлы недоступны в момент переподключения (Patroni API не отвечает; сервер отверг вход): подключение
+    /// остаётся `degraded` с фоновым опросом и возвращается само, а не становится `failed` без опроса, как
+    /// при первом открытии.
+    #[tokio::test]
+    async fn failed_observation_during_reconnect_stays_degraded_and_keeps_polling() {
+        let server_up = hosts_topology(ConnectionKind::Server, vec![member("a", Role::Primary)]);
+        let server_down = hosts_topology(ConnectionKind::Server, vec![refused("a")]);
+        for (kind, up, down) in [
+            (ConnectionKind::Patroni, two("a"), Err(err())),
+            (ConnectionKind::Server, server_up, Ok(server_down)),
+        ] {
+            let (rt, src, rec, _) = setup(vec![Ok(up.clone())]);
+            rt.connect(profile_of(kind)).await.unwrap();
+            let generation = generation_of(&rt, "c");
+            // Отказ повторяется, пока тест не подставит следующий ответ.
+            src.then(vec![down]);
+
+            let view = rt.reconnect(profile_of(kind)).await.unwrap();
+            assert_eq!(view.state, ConnState::Degraded, "{kind:?}");
+            assert!(view.topology.is_some(), "{kind:?}: топология остаётся");
+            assert_eq!(generation_of(&rt, "c"), generation, "{kind:?}");
+
+            src.then(vec![Ok(up)]);
+            eventually("Connected", || rt.view("c").state == ConnState::Connected).await;
+            assert!(rt.view("c").error.is_none(), "{kind:?}");
+            let states = rec.states.lock_safe().clone();
+            assert!(
+                !states.contains(&ConnState::Failed) && !states.contains(&ConnState::Disconnected),
+                "{kind:?}: {states:?}"
+            );
+            rt.shutdown();
+        }
+    }
+
+    /// Не открытое подключение (`failed`) «Переподключить» закрывает и открывает заново, как прежде:
+    /// пулы сброшены, состояния прошли через Disconnected, замок подключения после отключения не копится.
+    #[tokio::test]
+    async fn reconnect_of_a_failed_connection_reopens_it() {
+        let (rt, src, rec, pools) = manual(vec![Err(err())]);
+        rt.connect(patroni_profile()).await.unwrap_err();
+        add_pool(&pools, "a");
+        src.then(vec![Ok(two("a"))]);
 
         let view = rt.reconnect(patroni_profile()).await.unwrap();
         assert_eq!(view.state, ConnState::Connected);
@@ -857,7 +1004,7 @@ mod tests {
             *rec.states.lock_safe(),
             vec![
                 ConnState::Connecting,
-                ConnState::Connected,
+                ConnState::Failed,
                 ConnState::Disconnected,
                 ConnState::Connecting,
                 ConnState::Connected
@@ -869,6 +1016,53 @@ mod tests {
             rt.connect_locks.lock_safe().is_empty(),
             "замок удалён вместе с подключением"
         );
+    }
+
+    /// Открытое с другими настройками соединения (профиль сохранён, подключение ещё не закрыто) —
+    /// переоткрывается: журнал прежнего адреса к новому не относится.
+    #[tokio::test]
+    async fn reconnect_with_changed_settings_reopens_the_connection() {
+        let (rt, src, _rec, _) = manual(vec![Ok(two("a"))]);
+        rt.connect(patroni_profile()).await.unwrap();
+        let generation = generation_of(&rt, "c");
+        src.then(vec![Ok(two("b"))]);
+        assert!(rt.poll_once("c", generation).await);
+        assert!(!rt.events("c").is_empty());
+
+        rt.reconnect(relocated()).await.unwrap();
+        assert_ne!(generation_of(&rt, "c"), generation);
+        assert!(rt.events("c").is_empty(), "журнал новый");
+        assert_eq!(rt.target("c", None).unwrap().1.hosts[0].host, "elsewhere");
+        rt.shutdown();
+    }
+
+    /// Переподключение, нажатое во время открытия, дожидается его и опрашивает уже открытое подключение,
+    /// а не закрывает его на середине.
+    #[tokio::test]
+    async fn reconnect_waits_for_a_connect_in_progress() {
+        let src = Scripted::with_delay(vec![Ok(two("a"))], Duration::from_millis(100));
+        let rt = Runtimes::with_interval(
+            src.clone(),
+            Arc::new(PoolRegistry::default()),
+            Duration::from_secs(60),
+        );
+        let rec = Arc::new(Recorder::default());
+        rt.set_sink(rec.clone());
+        let connect = tokio::spawn({
+            let rt = rt.clone();
+            async move { rt.connect(patroni_profile()).await }
+        });
+        eventually("опрос начался", || src.calls() == 1).await;
+
+        let view = rt.reconnect(patroni_profile()).await.unwrap();
+        assert_eq!(view.state, ConnState::Connected);
+        connect.await.unwrap().unwrap();
+        assert_eq!(src.calls(), 2, "открытие и один опрос переподключения");
+        assert_eq!(
+            *rec.states.lock_safe(),
+            vec![ConnState::Connecting, ConnState::Connected]
+        );
+        rt.shutdown();
     }
 
     /// Замок, который держит идущее открытие, отключение не удаляет: иначе следующее открытие взяло бы новый

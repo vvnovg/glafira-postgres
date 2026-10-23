@@ -291,6 +291,13 @@ impl PgPool {
     pub fn idle_count(&self) -> usize {
         self.idle.lock_safe().len()
     }
+
+    /// Отметка «сервер отверг вход», как после настоящего отказа: тесты других модулей проверяют, что
+    /// переподключение её сбрасывает.
+    #[cfg(test)]
+    pub(crate) fn remember_auth_failure(&self, e: AppError) {
+        self.auth_failure.lock_safe().get_or_insert(e);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
