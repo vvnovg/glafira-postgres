@@ -1,29 +1,46 @@
 //! Пароль из `~/.pgpass` (или файла `PGPASSFILE`) по правилам libpq: первая подходящая строка
-//! `host:port:database:user:password`, `*` — любое значение, `\:` и `\\` — экранирование.
+//! `host:port:database:user:password`, `*` — любое значение, `\:`, `\\` и `\*` — экранирование.
 
 use std::path::{Path, PathBuf};
 
+/// Поле строки .pgpass: `*` без экранирования — любое значение, `\*` — буквальная звёздочка (как в libpq).
+struct Field {
+    text: String,
+    wildcard: bool,
+}
+
 /// Делит строку по неэкранированным `:`, снимая экранирование.
-fn split_fields(line: &str) -> Vec<String> {
-    let mut fields = vec![String::new()];
+fn split_fields(line: &str) -> Vec<Field> {
+    // (текст, был ли в нём экранированный символ)
+    let mut fields: Vec<(String, bool)> = vec![(String::new(), false)];
     let mut chars = line.chars();
     while let Some(c) = chars.next() {
+        let last = fields.last_mut().expect("at least one field");
         match c {
-            '\\' => {
-                if let Some(n) = chars.next() {
-                    fields.last_mut().expect("at least one field").push(n);
+            '\\' => match chars.next() {
+                Some(n) => {
+                    last.0.push(n);
+                    last.1 = true;
                 }
-            }
-            ':' => fields.push(String::new()),
-            c => fields.last_mut().expect("at least one field").push(c),
+                // Одинокий обратный слеш в конце строки libpq оставляет как есть.
+                None => last.0.push('\\'),
+            },
+            ':' => fields.push((String::new(), false)),
+            c => last.0.push(c),
         }
     }
     fields
+        .into_iter()
+        .map(|(text, escaped)| Field {
+            wildcard: text == "*" && !escaped,
+            text,
+        })
+        .collect()
 }
 
 pub fn lookup(content: &str, host: &str, port: u16, database: &str, user: &str) -> Option<String> {
     let port = port.to_string();
-    let matches = |pattern: &str, value: &str| pattern == "*" || pattern == value;
+    let matches = |f: &Field, value: &str| f.wildcard || f.text == value;
     content
         .lines()
         .map(|l| l.trim_end_matches('\r'))
@@ -36,11 +53,16 @@ pub fn lookup(content: &str, host: &str, port: u16, database: &str, user: &str) 
                 && matches(&f[2], database)
                 && matches(&f[3], user)
         })
-        .map(|f| f[4].clone())
+        .map(|f| f[4].text.clone())
 }
 
 pub fn default_path() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("PGPASSFILE") {
+    default_path_from(std::env::var_os("PGPASSFILE"))
+}
+
+/// `PGPASSFILE`: пустое значение — как не заданное (libpq берёт файл по умолчанию).
+fn default_path_from(env: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    if let Some(p) = env.filter(|p| !p.is_empty()) {
         return Some(PathBuf::from(p));
     }
     #[cfg(windows)]
@@ -78,8 +100,9 @@ pub fn find_password_in(
             return None;
         }
     }
-    let content = std::fs::read_to_string(path).ok()?;
-    lookup(&content, host, port, database, user)
+    // Байты не в UTF-8 (например, в комментарии) не прячут файл целиком: libpq читает его побайтно.
+    let bytes = std::fs::read(path).ok()?;
+    lookup(&String::from_utf8_lossy(&bytes), host, port, database, user)
 }
 
 #[cfg(test)]
@@ -148,6 +171,42 @@ short:line
         );
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert_eq!(find_password_in(&path, "h", 1, "d", "u"), None);
+    }
+
+    /// libpq: `\*` — буквальная звёздочка, а не любое значение; одинокий обратный слеш в конце остаётся.
+    #[test]
+    fn escaped_star_is_literal_and_trailing_backslash_is_kept() {
+        let file = "\\*:5432:db:u:star-host\n*:*:*:u:x\\";
+        assert_eq!(
+            lookup(file, "*", 5432, "db", "u").as_deref(),
+            Some("star-host")
+        );
+        assert_eq!(lookup(file, "h", 5432, "db", "u").as_deref(), Some("x\\"));
+    }
+
+    #[test]
+    fn non_utf8_bytes_do_not_hide_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pgpass");
+        std::fs::write(&path, b"# \xff\xfe comment\nh:5432:db:u:secret\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert_eq!(
+            find_password_in(&path, "h", 5432, "db", "u").as_deref(),
+            Some("secret")
+        );
+    }
+
+    #[test]
+    fn empty_pgpassfile_means_the_default_location() {
+        assert_eq!(default_path_from(Some("".into())), default_path_from(None));
+        assert_eq!(
+            default_path_from(Some("/x/pgpass".into())),
+            Some(PathBuf::from("/x/pgpass"))
+        );
     }
 
     #[test]

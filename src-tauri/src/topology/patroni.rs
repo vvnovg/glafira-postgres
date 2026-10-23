@@ -13,6 +13,9 @@ use crate::topology::BoxFuture;
 use crate::topology::model::{Member, Role, Topology, TopologyWarning, system_id_warning};
 
 pub const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Общий предел обнаружения кластера: адресов API может быть много (профиль плюс прежние участники),
+/// и каждый ждёт до `HTTP_TIMEOUT` — без общего срока один опрос мог бы длиться дольше минуты.
+pub const DISCOVER_TIMEOUT: Duration = Duration::from_secs(20);
 /// Сколько текста ответа с ошибкой сохраняется в `details`.
 const BODY_SNIPPET: usize = 500;
 
@@ -387,7 +390,21 @@ pub async fn discover(
     previous: Option<&Topology>,
     now_ms: i64,
 ) -> AppResult<Topology> {
-    let cluster = match fetch_cluster(http, &cluster_bases(settings, previous)).await {
+    let fetched = match tokio::time::timeout(
+        DISCOVER_TIMEOUT,
+        fetch_cluster(http, &cluster_bases(settings, previous)),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(_) => Err(app_err!(
+            ErrorCode::PatroniError,
+            "errors.patroni.discoverTimeout",
+            "Patroni API did not answer within {{secs}} s",
+            secs = DISCOVER_TIMEOUT.as_secs()
+        )),
+    };
+    let cluster = match fetched {
         Ok(c) => c,
         Err(e) => {
             // Первое подключение — ошибка; дальше — прошлые участники как недоступные.
@@ -660,6 +677,59 @@ mod tests {
         assert_eq!(t.observed_at_ms, 2);
         // Опрос начался с лидера прошлой топологии.
         assert_eq!(http.calls.lock_safe()[0], "http://10.0.0.1:8008/cluster");
+    }
+
+    /// На каждый запрос «думает» `delay` и отвечает отказом.
+    struct SlowHttp {
+        delay: Duration,
+    }
+
+    impl PatroniHttp for SlowHttp {
+        fn get_json<'a>(&'a self, url: &'a str) -> BoxFuture<'a, AppResult<serde_json::Value>> {
+            Box::pin(async move {
+                tokio::time::sleep(self.delay).await;
+                Err(unreachable_err(url))
+            })
+        }
+    }
+
+    /// Адресов много, каждый ждёт до HTTP_TIMEOUT: обнаружение ограничено общим сроком.
+    #[tokio::test(start_paused = true)]
+    async fn discover_has_an_overall_deadline() {
+        let urls: Vec<String> = (1..=8).map(|i| format!("http://pg-{i}:8008")).collect();
+        let s = settings(&urls.iter().map(String::as_str).collect::<Vec<_>>());
+        let http = SlowHttp {
+            delay: HTTP_TIMEOUT,
+        };
+        let started = tokio::time::Instant::now();
+        let e = discover(&http, &s, "c", None, 0).await.unwrap_err();
+        assert_eq!(e.key, "errors.patroni.discoverTimeout");
+        assert_eq!(e.code, ErrorCode::PatroniError);
+        assert_eq!(
+            started.elapsed(),
+            DISCOVER_TIMEOUT,
+            "а не 8 × {HTTP_TIMEOUT:?}"
+        );
+
+        // С прежней топологией — как при любом отказе API: участники недоступны, предупреждение одно.
+        let prev = discover(
+            &FakeHttp::new(vec![("http://s:8008/cluster", Ok(cluster_v3()))]),
+            &settings(&["http://s:8008"]),
+            "c",
+            None,
+            0,
+        )
+        .await
+        .unwrap();
+        let started = tokio::time::Instant::now();
+        let t = discover(&http, &s, "c", Some(&prev), 1).await.unwrap();
+        assert_eq!(started.elapsed(), DISCOVER_TIMEOUT);
+        assert_eq!(t.warnings, vec![TopologyWarning::PatroniUnreachable]);
+        assert_eq!(t.members.len(), 3);
+        assert!(
+            t.members.iter().all(|m| !m.reachable
+                && m.error.as_ref().unwrap().key == "errors.patroni.discoverTimeout")
+        );
     }
 
     /// Кластер из трёх участников, лидер — второй (не первый в списке).

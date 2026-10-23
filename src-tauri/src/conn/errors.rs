@@ -1,5 +1,6 @@
 //! Ошибки PostgreSQL → `AppError` (таблица §13 спеки P1).
 
+use openssl::x509::X509VerifyResult;
 use tokio_postgres::error::SqlState;
 
 use crate::error::{AppError, ErrorCode};
@@ -66,6 +67,22 @@ pub(crate) fn classify_sqlstate(code: &SqlState) -> (ErrorCode, LocalizedText) {
             ltext!(
                 "errors.pg.cannotConnectNow",
                 "The server is starting up or in recovery"
+            ),
+        )
+    } else if *code == SqlState::ADMIN_SHUTDOWN || *code == SqlState::CRASH_SHUTDOWN {
+        (
+            ErrorCode::NodeUnavailable,
+            ltext!(
+                "errors.pg.serverShutdown",
+                "The server is shutting down or restarting"
+            ),
+        )
+    } else if *code == SqlState::LOCK_NOT_AVAILABLE {
+        (
+            ErrorCode::Timeout,
+            ltext!(
+                "errors.pg.lockTimeout",
+                "The query waited for a lock longer than lock_timeout"
             ),
         )
     } else {
@@ -142,6 +159,44 @@ pub fn from_pg(e: &tokio_postgres::Error) -> AppError {
         return AppError::localized(error_code, text).with_details(details);
     }
     classify_text(&chain(e), e.is_closed())
+}
+
+/// Ошибка рукопожатия TLS с причиной отказа проверки сертификата (`verify` — из обратного вызова, см.
+/// `ConnectSpec::connect_with_handle`); без неё — обычная классификация по тексту. Ответ сервера
+/// (`ErrorResponse`) важнее: раз он пришёл, рукопожатие прошло.
+pub fn from_handshake(e: &tokio_postgres::Error, verify: Option<X509VerifyResult>) -> AppError {
+    let Some(v) = verify.filter(|_| e.as_db_error().is_none()) else {
+        return from_pg(e);
+    };
+    // Причину крейт openssl обычно уже дописывает в текст ошибки; если нет — добавляем сами.
+    let text = chain(e);
+    let reason = v.error_string();
+    let details = if text.contains(reason) {
+        text
+    } else {
+        format!("{text}: {reason}")
+    };
+    let detailed = |err: AppError| err.with_details(details);
+    match v.as_raw() {
+        openssl_sys::X509_V_ERR_CERT_HAS_EXPIRED => detailed(app_err!(
+            ErrorCode::TlsError,
+            "errors.pg.certExpired",
+            "The server certificate has expired"
+        )),
+        openssl_sys::X509_V_ERR_CERT_NOT_YET_VALID => detailed(app_err!(
+            ErrorCode::TlsError,
+            "errors.pg.certNotYetValid",
+            "The server certificate is not valid yet"
+        )),
+        openssl_sys::X509_V_ERR_HOSTNAME_MISMATCH | openssl_sys::X509_V_ERR_IP_ADDRESS_MISMATCH => {
+            detailed(app_err!(
+                ErrorCode::TlsError,
+                "errors.pg.hostnameMismatch",
+                "The server host name does not match its certificate"
+            ))
+        }
+        _ => from_pg(e),
+    }
 }
 
 /// Можно ли доверять соединению после ошибки. Ответ сервера (`ErrorResponse`) соединение не портит;
@@ -278,6 +333,23 @@ mod tests {
         assert_eq!(t.key, "errors.pg.serverError");
         assert_eq!(t.params["code"], "23505");
         assert_eq!(t.text, "PostgreSQL error 23505");
+    }
+
+    #[test]
+    fn shutdown_and_lock_timeout_sqlstates_are_classified() {
+        use tokio_postgres::error::SqlState;
+        for code in [SqlState::ADMIN_SHUTDOWN, SqlState::CRASH_SHUTDOWN] {
+            let (c, t) = classify_sqlstate(&code);
+            assert_eq!(
+                (c, t.key.as_str()),
+                (ErrorCode::NodeUnavailable, "errors.pg.serverShutdown")
+            );
+        }
+        let (c, t) = classify_sqlstate(&SqlState::LOCK_NOT_AVAILABLE);
+        assert_eq!(
+            (c, t.key.as_str()),
+            (ErrorCode::Timeout, "errors.pg.lockTimeout")
+        );
     }
 
     #[test]

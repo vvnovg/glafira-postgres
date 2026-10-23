@@ -38,6 +38,21 @@ fn unix_now() -> i64 {
 
 /// `issuer == None` — самоподписанный. `ca` — сертификат удостоверяющего центра; `dns` — SAN.
 fn issue(cn: &str, issuer: Option<&Issued>, ca: bool, dns: Option<&str>, serial: u32) -> Issued {
+    // Начало — с запасом назад: часы тестовой машины могут чуть расходиться.
+    let now = unix_now();
+    issue_with_validity(cn, issuer, ca, dns, serial, now - 3600, now + 2 * 86_400)
+}
+
+/// Как `issue`, но со сроком действия `[not_before, not_after]` (секунды Unix).
+fn issue_with_validity(
+    cn: &str,
+    issuer: Option<&Issued>,
+    ca: bool,
+    dns: Option<&str>,
+    serial: u32,
+    not_before: i64,
+    not_after: i64,
+) -> Issued {
     let key = new_key();
     let mut name = X509NameBuilder::new().unwrap();
     name.append_entry_by_text("CN", cn).unwrap();
@@ -52,10 +67,9 @@ fn issue(cn: &str, issuer: Option<&Issued>, ca: bool, dns: Option<&str>, serial:
         None => b.set_issuer_name(&name).unwrap(),
     }
     b.set_pubkey(&key).unwrap();
-    // Начало — с запасом назад: часы тестовой машины могут чуть расходиться.
-    b.set_not_before(&Asn1Time::from_unix(unix_now() - 3600).unwrap())
+    b.set_not_before(&Asn1Time::from_unix(not_before).unwrap())
         .unwrap();
-    b.set_not_after(&Asn1Time::days_from_now(2).unwrap())
+    b.set_not_after(&Asn1Time::from_unix(not_after).unwrap())
         .unwrap();
     if ca {
         b.append_extension(BasicConstraints::new().critical().ca().build().unwrap())
@@ -93,6 +107,18 @@ pub fn make_ca(cn: &str) -> Issued {
 /// Сертификат сервера, подписанный `ca`, с единственным SAN `DNS:<dns>`.
 pub fn make_server_cert(ca: &Issued, dns: &str) -> Issued {
     issue(dns, Some(ca), false, Some(dns), 2)
+}
+
+/// Сертификат сервера, подписанный `ca`, срок действия которого истёк час назад.
+pub fn make_expired_server_cert(ca: &Issued, dns: &str) -> Issued {
+    let now = unix_now();
+    issue_with_validity(dns, Some(ca), false, Some(dns), 4, now - 7200, now - 3600)
+}
+
+/// Сертификат сервера, подписанный `ca`, который вступит в силу только через час.
+pub fn make_not_yet_valid_server_cert(ca: &Issued, dns: &str) -> Issued {
+    let now = unix_now();
+    issue_with_validity(dns, Some(ca), false, Some(dns), 5, now + 3600, now + 7200)
 }
 
 /// Самоподписанный сертификат сервера (не CA) с SAN `DNS:<dns>`.

@@ -25,11 +25,16 @@ use crate::topology::probe::{COLLECT_TIMEOUT, no_answer};
 /// (`PooledClient::discard`), а не возвращают в пул. Функции каталога отдают уже `AppError`, поэтому
 /// признак восстанавливается по коду: ошибки без ответа сервера (`conn::errors::connection_suspect`)
 /// всегда становятся `CONNECTION_FAILED` или `TLS_ERROR`, а ответы сервера (SQLSTATE) — другими кодами,
-/// кроме 53300 (`too_many_connections` → `CONNECTION_FAILED`): оно возможно лишь при подключении.
+/// кроме 53300 (`too_many_connections` → `CONNECTION_FAILED`) и 57P03 (`cannot_connect_now` →
+/// `NODE_UNAVAILABLE`): они возможны лишь при подключении. `NODE_UNAVAILABLE` посреди запроса — остановка
+/// сервера (57P01, 57P02): после неё соединение всё равно мертво, его закрывают сразу.
 /// Лишнее закрытие здорового соединения дешевле, чем возврат негодного в пул. Это допущение закреплено
 /// тестом `server_errors_never_look_like_a_lost_connection` против `classify_sqlstate`.
 fn connection_lost(e: &AppError) -> bool {
-    matches!(e.code, ErrorCode::ConnectionFailed | ErrorCode::TlsError)
+    matches!(
+        e.code,
+        ErrorCode::ConnectionFailed | ErrorCode::TlsError | ErrorCode::NodeUnavailable
+    )
 }
 
 /// Выполняет `fut` до `deadline`. Второй элемент ответа — нужно ли закрыть соединение, на котором шёл запрос:
@@ -197,7 +202,12 @@ mod tests {
 
     #[test]
     fn only_silent_or_broken_connections_are_discarded() {
-        for code in [ErrorCode::ConnectionFailed, ErrorCode::TlsError] {
+        // Остановка сервера (57P01, 57P02) — `NodeUnavailable`: соединение после неё всё равно мертво.
+        for code in [
+            ErrorCode::ConnectionFailed,
+            ErrorCode::TlsError,
+            ErrorCode::NodeUnavailable,
+        ] {
             assert!(connection_lost(&err(code)), "{code:?}");
         }
         // Ответ сервера (в том числе statement_timeout, SQLSTATE 57014) соединение не портит.
@@ -271,17 +281,21 @@ mod tests {
 
     #[test]
     fn server_errors_never_look_like_a_lost_connection() {
-        // Допущение `connection_lost`: ответ сервера (SQLSTATE) не выглядит обрывом, кроме 53300.
-        // Тест сверяет его с `classify_sqlstate`: появится другое соответствие — он упадёт.
+        // Допущение `connection_lost`: ответ сервера (SQLSTATE) выглядит обрывом только для 53300
+        // (возможно лишь при подключении), остановки сервера 57P01 и 57P02 (после неё соединение
+        // мертво) и 57P03 (`NodeUnavailable`, тоже лишь при подключении). Тест сверяет допущение
+        // с `classify_sqlstate`: появится другое соответствие — он упадёт.
+        const LOST: [&str; 4] = ["53300", "57P01", "57P02", "57P03"];
         let named = [
-            "28P01", "28000", "3D000", "42501", "57014", "53300", "57P03",
+            "28P01", "28000", "3D000", "42501", "57014", "53300", "57P01", "57P02", "57P03",
+            "55P03",
         ];
-        // Несколько кодов, которых классификатор не знает, в том числе из классов подключения (08)
-        // и остановки сервера (57P0x): они приходят от сервера и должны оставаться `Internal`.
+        // Несколько кодов, которых классификатор не знает, в том числе из класса подключения (08):
+        // они приходят от сервера и должны оставаться `Internal`.
         let others = [
             "08000", "08003", "08006", "0A000", "22012", "23505", "25006", "40001", "40P01",
-            "42601", "42P01", "53100", "53200", "53400", "54000", "55P03", "57000", "57P01",
-            "57P02", "58030", "P0001", "XX000", "ZZZZZ",
+            "42601", "42P01", "53100", "53200", "53400", "54000", "57000", "58030", "P0001",
+            "XX000", "ZZZZZ",
         ];
         // Все классы SQLSTATE стандарта и PostgreSQL с общими кодами `…000` и `…001`.
         let classes = [
@@ -303,7 +317,7 @@ mod tests {
         {
             let (code, text) = classify_sqlstate(&SqlState::from_code(sqlstate));
             let lost = connection_lost(&AppError::localized(code, text));
-            assert_eq!(lost, sqlstate == "53300", "{sqlstate}: {code:?}");
+            assert_eq!(lost, LOST.contains(&sqlstate), "{sqlstate}: {code:?}");
             seen += 1;
         }
         assert!(seen > 100, "{seen}");

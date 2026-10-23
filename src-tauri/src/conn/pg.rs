@@ -1,8 +1,10 @@
 //! Соединение с PostgreSQL: параметры из профиля и keychain, TCP, TLS, таймаут (спец. P1 §7).
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use openssl::ssl::SslConnector;
+use openssl::ssl::{SslConnector, SslVerifyMode};
+use openssl::x509::X509VerifyResult;
 use tokio::net::TcpStream;
 use tokio::task::AbortHandle;
 use tokio_postgres::{Client, NoTls};
@@ -11,10 +13,27 @@ use crate::conn::profile::{ConnectionProfile, SslMode};
 use crate::conn::{errors, pgpass, tls};
 use crate::error::AppResult;
 use crate::secrets::{PG_KEY_PASSWORD, PG_PASSWORD, SecretStore, secret_key};
+use crate::sync::MutexExt;
 
 /// Параметры сессии диагностики: только чтение и короткие таймауты.
 pub const SESSION_OPTIONS: &str =
     "-c default_transaction_read_only=on -c statement_timeout=5000 -c lock_timeout=1000";
+
+/// Отсечка молчащего соединения на уровне TCP: после 60 с тишины зонды раз в 10 с. После failover
+/// полуоткрытое соединение иначе живёт в пуле, пока его не попробуют использовать.
+const KEEPALIVE_IDLE: Duration = Duration::from_secs(60);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+
+/// TCP-соединение с узлом: без задержки Нейгла и с keepalive (ошибки настройки сокета не фатальны).
+pub(crate) async fn tcp_connect(host: &str, port: u16) -> std::io::Result<TcpStream> {
+    let stream = TcpStream::connect((host, port)).await?;
+    let _ = stream.set_nodelay(true);
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(KEEPALIVE_IDLE)
+        .with_interval(KEEPALIVE_INTERVAL);
+    let _ = socket2::SockRef::from(&stream).set_tcp_keepalive(&keepalive);
+    Ok(stream)
+}
 
 /// Всё для нового соединения с узлом. Собирается один раз на пул: keychain, ~/.pgpass, файлы TLS.
 #[derive(Clone)]
@@ -108,10 +127,9 @@ impl ConnectSpec {
     /// а соединение с неотвеченным запросом после drop остаётся открытым.
     pub async fn connect_with_handle(&self) -> AppResult<(Client, AbortHandle)> {
         let attempt = async {
-            let stream = TcpStream::connect((self.tcp_host.as_str(), self.tcp_port))
+            let stream = tcp_connect(&self.tcp_host, self.tcp_port)
                 .await
                 .map_err(|e| errors::tcp_error(&e, &self.host, self.port))?;
-            let _ = stream.set_nodelay(true);
             let cfg = self.pg_config();
             match &self.connector {
                 None => {
@@ -126,11 +144,27 @@ impl ConnectSpec {
                     if self.ssl_mode != SslMode::VerifyFull {
                         ssl.set_verify_hostname(false);
                     }
+                    // Причину отказа разбирать по тексту ненадёжно: OpenSSL пишет общее «certificate verify
+                    // failed», пояснение крейт openssl дописывает в свободной форме. Код причины берём из
+                    // обратного вызова проверки, чтобы отличить просроченный сертификат от чужого CA. Режим
+                    // проверки не меняется. Без проверки (`prefer`, `require` без файла CA) отказ не
+                    // прерывает рукопожатие и ни о чём не говорит: там не запоминаем.
+                    let verify_error: Arc<Mutex<Option<X509VerifyResult>>> = Arc::default();
+                    let mode = ssl.verify_mode();
+                    if mode.contains(SslVerifyMode::PEER) {
+                        let slot = verify_error.clone();
+                        ssl.set_verify_callback(mode, move |ok, ctx| {
+                            if !ok {
+                                *slot.lock_safe() = Some(ctx.error());
+                            }
+                            ok
+                        });
+                    }
                     let tls = postgres_openssl::TlsConnector::new(ssl, &self.host);
                     let (client, conn) = cfg
                         .connect_raw(stream, tls)
                         .await
-                        .map_err(|e| errors::from_pg(&e))?;
+                        .map_err(|e| errors::from_handshake(&e, verify_error.lock_safe().take()))?;
                     Ok((client, spawn_connection(conn)))
                 }
             }
@@ -338,6 +372,80 @@ mod tests {
         let server = testutil::tls_server(&testutil::make_self_signed_server("localhost"));
         let spec = loopback_spec(server.port, "localhost", SslMode::Require, Some(&ca_path));
         assert_eq!(spec.connect().await.unwrap_err().code, ErrorCode::TlsError);
+    }
+
+    #[tokio::test]
+    async fn tcp_connection_has_keepalive_and_nodelay() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stream = tcp_connect("127.0.0.1", port).await.unwrap();
+        assert!(socket2::SockRef::from(&stream).keepalive().unwrap());
+        assert!(stream.nodelay().unwrap());
+    }
+
+    /// Просроченный сертификат отличается от чужого CA по коду причины из обратного вызова проверки,
+    /// а не по тексту ошибки.
+    #[tokio::test]
+    async fn expired_server_certificate_is_reported_as_expired() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = testutil::make_ca("test-ca");
+        let ca_path = write_pem(dir.path(), "ca.pem", &ca.cert);
+        let server = testutil::tls_server(&testutil::make_expired_server_cert(&ca, "localhost"));
+        let spec = loopback_spec(server.port, "localhost", SslMode::VerifyCa, Some(&ca_path));
+        let e = spec.connect().await.unwrap_err();
+        assert_eq!(e.code, ErrorCode::TlsError);
+        assert_eq!(e.key, "errors.pg.certExpired", "{e:?}");
+        let details = e.details.unwrap();
+        assert_eq!(
+            details.matches("certificate has expired").count(),
+            1,
+            "причина в подробностях ровно один раз: {details}"
+        );
+
+        // Чужой CA по-прежнему «недоверенный», а не «просроченный»: цепочка не строится раньше проверки срока.
+        let other = testutil::make_ca("other-ca");
+        let other_path = write_pem(dir.path(), "other.pem", &other.cert);
+        let server = testutil::tls_server(&testutil::make_expired_server_cert(&ca, "localhost"));
+        let e = loopback_spec(
+            server.port,
+            "localhost",
+            SslMode::VerifyCa,
+            Some(&other_path),
+        )
+        .connect()
+        .await
+        .unwrap_err();
+        assert_eq!(e.key, "errors.pg.caUntrusted", "{e:?}");
+    }
+
+    #[tokio::test]
+    async fn certificate_from_the_future_is_reported_as_not_yet_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = testutil::make_ca("test-ca");
+        let ca_path = write_pem(dir.path(), "ca.pem", &ca.cert);
+        let server =
+            testutil::tls_server(&testutil::make_not_yet_valid_server_cert(&ca, "localhost"));
+        let spec = loopback_spec(
+            server.port,
+            "localhost",
+            SslMode::VerifyFull,
+            Some(&ca_path),
+        );
+        let e = spec.connect().await.unwrap_err();
+        assert_eq!(e.code, ErrorCode::TlsError);
+        assert_eq!(e.key, "errors.pg.certNotYetValid", "{e:?}");
+    }
+
+    /// `prefer` сертификат не проверяет даже с файлом CA: отказ проверки, которого не было, не подменяет
+    /// настоящую ошибку (здесь — ответ сервера после рукопожатия).
+    #[tokio::test]
+    async fn prefer_with_ca_ignores_an_expired_certificate() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = testutil::make_ca("test-ca");
+        let ca_path = write_pem(dir.path(), "ca.pem", &ca.cert);
+        let server = testutil::tls_server(&testutil::make_expired_server_cert(&ca, "localhost"));
+        let spec = loopback_spec(server.port, "localhost", SslMode::Prefer, Some(&ca_path));
+        assert_handshake_ok(spec.connect().await.unwrap_err());
     }
 
     #[tokio::test]
