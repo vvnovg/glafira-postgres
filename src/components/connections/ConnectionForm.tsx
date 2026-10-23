@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useId, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../api/client";
-import type { AppError, ConnectionKind, ConnectionProfile, Environment, SecretsInput, TestEvent, TestReport } from "../../api/types";
+import type { AppError, ConnectionKind, ConnectionProfile, Environment, SecretsInput, SecretsSet, TestEvent, TestReport } from "../../api/types";
 import { useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { Hint } from "../common/Hint";
@@ -14,6 +14,8 @@ import { folderPaths } from "./tree/folderTree";
 
 const ENVIRONMENTS: Environment[] = ["local", "dev", "test", "stage", "prod"];
 const KINDS: ConnectionKind[] = ["server", "hostList", "patroni"];
+/** Ничего не сохранено: у нового подключения и копии, пока ответ не пришёл и если keychain не прочитался. */
+const NO_SECRETS: SecretsSet = { pgPassword: false, pgKeyPassword: false, patroniPassword: false, patroniKeyPassword: false };
 
 /** copyOf — имя подключения, копия которого создаётся: заголовок и напоминание, что пароли не скопированы. */
 export function ConnectionForm({ initial, tabId, copyOf }: { initial: ConnectionProfile; tabId: string; copyOf?: string }) {
@@ -47,12 +49,21 @@ export function ConnectionForm({ initial, tabId, copyOf }: { initial: Connection
   const close = useWorkspace((s) => s.close);
   const closeForConnection = useWorkspace((s) => s.closeForConnection);
   const isNew = initial.id === "";
+  // Какие секреты сохранены: у нового и копии — никаких (запрос не нужен). Если keychain не прочитался, форма остаётся
+  // пригодной: поля как у подключения без секретов, сохранение не блокируется (пустое поле — «не менять»).
+  const savedSecrets = useQuery({
+    queryKey: ["connectionSecrets", initial.id],
+    queryFn: () => api.connectionSecrets(initial.id),
+    enabled: !isNew,
+  });
+  const saved = savedSecrets.data ?? NO_SECRETS;
 
   const current = (): ConnectionProfile => visibleProfile({ ...profile, folderId });
   const secrets = (): SecretsInput => ({
     pgPassword: secretValue(pgSecrets.password),
-    // Без TLS (sslmode=disable) пароль ключа не нужен: поля сертификата скрыты и в профиль не уходят.
-    pgKeyPassword: profile.pg.sslMode === "disable" ? null : secretValue(pgSecrets.keyPassword),
+    // При sslmode=disable сертификат из профиля убирается (visibleProfile), и Rust удаляет пароль ключа вместе
+    // с ним: значение поля здесь роли не играет, оно уходит как есть.
+    pgKeyPassword: secretValue(pgSecrets.keyPassword),
     patroniPassword: secretValue(apiSecrets.password),
     patroniKeyPassword: secretValue(apiSecrets.keyPassword),
   });
@@ -111,27 +122,29 @@ export function ConnectionForm({ initial, tabId, copyOf }: { initial: Connection
     run(async () => {
       const bad = portProblem(current());
       if (bad) throw bad;
-      const saved = await api.saveConnection(current(), secrets());
+      const stored = await api.saveConnection(current(), secrets());
       // Смена папки — отдельная команда; её сбой не должен оставить кэш устаревшим: профиль уже сохранён.
       let moveError: unknown = null;
       try {
         if (!isNew && folderTouched && folderId !== knownFolder(loadedFolderId)) {
-          await api.moveItems([{ kind: "connection", id: saved.id }], folderId, null);
+          await api.moveItems([{ kind: "connection", id: stored.id }], folderId, null);
         }
       } catch (e) {
         moveError = e;
       }
       await queryClient.invalidateQueries({ queryKey: ["connections"] });
+      // Секреты могли измениться (новый пароль, удаление, сброс при смене настроек): вид «сохранён ли» перечитывается.
+      void queryClient.invalidateQueries({ queryKey: ["connectionSecrets", stored.id], exact: true });
       // Правка оформления (имя, цвет, папка) открытое подключение не закрывает: Rust только обновляет в нём
       // профиль, поэтому вид подключения и журнал перечитываются, а не удаляются (удаление оторвало бы
       // наблюдателей дерева и обзора от кэша и свернуло бы раскрытый каталог). Если изменились настройки
       // соединения или секреты, Rust закрывает подключение, и событие Disconnected само чистит каталог и факты.
-      void queryClient.invalidateQueries({ queryKey: ["topology", saved.id], exact: true });
-      void queryClient.invalidateQueries({ queryKey: ["topologyEvents", saved.id], exact: true });
+      void queryClient.invalidateQueries({ queryKey: ["topology", stored.id], exact: true });
+      void queryClient.invalidateQueries({ queryKey: ["topologyEvents", stored.id], exact: true });
       // Папка не сменилась: остаёмся на форме и показываем ошибку (повторное сохранение повторит перенос).
       if (moveError !== null) throw moveError;
       close(tabId);
-      open({ kind: "overview", connectionId: saved.id });
+      open({ kind: "overview", connectionId: stored.id });
     });
 
   const changeKind = (kind: ConnectionKind) => {
@@ -243,9 +256,9 @@ export function ConnectionForm({ initial, tabId, copyOf }: { initial: Connection
           ))}
         </span>
 
-        <NodesSection idPrefix={uid} profile={profile} onChange={setProfile} onKind={changeKind} secrets={apiSecrets} onSecrets={setApiSecrets} isNew={isNew} />
+        <NodesSection idPrefix={uid} profile={profile} onChange={setProfile} onKind={changeKind} secrets={apiSecrets} onSecrets={setApiSecrets} saved={saved} />
         <h3 className="full">PostgreSQL</h3>
-        <PgSection idPrefix={uid} profile={profile} onChange={setProfile} secrets={pgSecrets} onSecrets={setPgSecrets} isNew={isNew} />
+        <PgSection idPrefix={uid} profile={profile} onChange={setProfile} secrets={pgSecrets} onSecrets={setPgSecrets} saved={saved} />
       </div>
 
       <div className="toolbar">

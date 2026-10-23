@@ -190,11 +190,19 @@ describe("модель формы", () => {
     const p: ConnectionProfile = { ...newProfile(), pg: { ...newProfile().pg, sslMode: "disable", tls: { caPath: "/ca.pem", clientCert: cert } } };
     expect(visibleProfile(p).pg.tls).toEqual({ caPath: null, clientCert: null });
     expect(visibleProfile(p).pg.sslMode).toBe("disable");
-    // Другие режимы — без изменений (тот же объект).
+    // Другие режимы — без изменений.
     const prefer = { ...p, pg: { ...p.pg, sslMode: "prefer" as const } };
-    expect(visibleProfile(prefer)).toBe(prefer);
+    expect(visibleProfile(prefer)).toEqual(prefer);
     // Исходный профиль формы не меняется: при возврате на другой режим ввод цел.
     expect(p.pg.tls.clientCert).toBe(cert);
+  });
+
+  it("у профиля Patroni скрытые узлы в Rust не уходят: порт из прежнего вида не ломает сохранение", () => {
+    const p: ConnectionProfile = { ...withKind(newProfile(), "patroni"), hosts: [{ host: "h", port: 70000 }] };
+    expect(visibleProfile(p).hosts).toEqual([]);
+    expect(portProblem(visibleProfile(p))).toBeNull();
+    // Сама форма узлы помнит: исходный профиль не меняется.
+    expect(p.hosts).toEqual([{ host: "h", port: 70000 }]);
   });
 
   it("фильтр баз и форматы", () => {

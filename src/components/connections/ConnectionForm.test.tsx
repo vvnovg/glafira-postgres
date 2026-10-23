@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AppError, ConnectionFolder, ConnectionProfile, TestReport } from "../../api/types";
+import type { AppError, ConnectionFolder, ConnectionProfile, SecretsSet, TestReport } from "../../api/types";
 import { useWorkspace } from "../../state/workspace";
 import { topologyView } from "../../test/fixtures";
 import { renderWithClient } from "../../test/render";
@@ -18,6 +18,7 @@ vi.mock("../../api/client", async (importOriginal) => {
       deleteConnection: vi.fn(),
       testConnection: vi.fn(),
       moveItems: vi.fn(),
+      connectionSecrets: vi.fn(),
     },
   };
 });
@@ -35,6 +36,9 @@ const saved = (id: string): ConnectionProfile => ({ ...newProfile(), id });
 /** Существующее подключение (id задан), по умолчанию dev. */
 const existing = (patch: Partial<ConnectionProfile> = {}): ConnectionProfile => ({ ...newProfile(), id: "c1", name: "dev-1", environment: "dev", ...patch });
 
+const NO_SECRETS: SecretsSet = { pgPassword: false, pgKeyPassword: false, patroniPassword: false, patroniKeyPassword: false };
+const ALL_SECRETS: SecretsSet = { pgPassword: true, pgKeyPassword: true, patroniPassword: true, patroniKeyPassword: true };
+
 function deferred<T>() {
   let resolve!: (v: T) => void;
   const promise = new Promise<T>((r) => (resolve = r));
@@ -44,6 +48,7 @@ function deferred<T>() {
 beforeEach(() => {
   vi.resetAllMocks(); // сбрасывает и реализации: ответы не перетекают между тестами
   vi.mocked(api.listFolders).mockResolvedValue([]);
+  vi.mocked(api.connectionSecrets).mockResolvedValue(NO_SECRETS);
   useWorkspace.setState({ tabs: [], activeId: null });
 });
 
@@ -111,12 +116,13 @@ describe("ConnectionForm", () => {
     expect(secrets).toEqual({ pgPassword: "s3cret", pgKeyPassword: null, patroniPassword: null, patroniKeyPassword: null });
   });
 
-  it("существующее подключение: пароль можно оставить или удалить", async () => {
+  it("существующее подключение: сохранённый пароль можно оставить или удалить", async () => {
     const user = userEvent.setup();
+    vi.mocked(api.connectionSecrets).mockResolvedValue({ ...NO_SECRETS, pgPassword: true });
     vi.mocked(api.saveConnection).mockResolvedValue({ ...newProfile(), id: "c1" });
     renderWithClient(<ConnectionForm initial={{ ...newProfile(), id: "c1", name: "dev-1", environment: "dev" }} tabId="t" />);
-    expect(screen.getByLabelText("Пароль")).toHaveAttribute("placeholder", "оставить сохранённый");
-    await user.click(screen.getByLabelText("Удалить сохранённый"));
+    await waitFor(() => expect(screen.getByLabelText("Пароль")).toHaveAttribute("placeholder", "оставить сохранённый"));
+    await user.click(screen.getByLabelText("Удалить сохранённый: Пароль"));
     expect(screen.getByLabelText("Пароль")).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "Сохранить" }));
     expect(vi.mocked(api.saveConnection).mock.calls[0][1].pgPassword).toBe("");
@@ -232,7 +238,8 @@ describe("ConnectionForm", () => {
     });
   });
 
-  it("доступные имена в одной форме различимы: группы TLS, выбор файла, удаление сохранённого", () => {
+  it("доступные имена в одной форме различимы: группы TLS, выбор файла, удаление сохранённого", async () => {
+    vi.mocked(api.connectionSecrets).mockResolvedValue(ALL_SECRETS);
     const cert = { format: "pem" as const, certificatePath: "/c.pem", keyPath: "/k.pem" };
     renderWithClient(
       <ConnectionForm
@@ -261,6 +268,8 @@ describe("ConnectionForm", () => {
     expect(new Set(picks).size).toBe(6);
     expect(picks).toContain("Выбрать файл: Доверенный CA (TLS для API)");
     expect(picks).toContain("Выбрать файл: Ключ (TLS PostgreSQL)");
+    // Флажки «Удалить сохранённый» появляются, когда ответ о сохранённых секретах получен.
+    await waitFor(() => expect(screen.getAllByRole("checkbox", { name: /^Удалить сохранённый/ })).toHaveLength(4));
     const clears = names(/^Удалить сохранённый/, "checkbox");
     expect(clears).toHaveLength(4);
     expect(new Set(clears).size).toBe(4);
@@ -315,7 +324,8 @@ describe("ConnectionForm", () => {
     const [profile, secrets] = vi.mocked(api.saveConnection).mock.calls[0];
     expect(profile.pg.sslMode).toBe("disable");
     expect(profile.pg.tls).toEqual({ caPath: null, clientCert: null });
-    expect(secrets.pgKeyPassword).toBeNull();
+    // Значение поля уходит как есть: у профиля без сертификата Rust удаляет пароль ключа сам.
+    expect(secrets.pgKeyPassword).toBe("kp");
   });
 
   it("sslmode=disable: введённое в TLS не пропадает при возврате на другой режим, а проверка получает тот же профиль, что и сохранение", async () => {
@@ -584,6 +594,7 @@ describe("ConnectionForm", () => {
 
   it("Patroni: «удалить сохранённый» пароль API и ключа API уходит как пустая строка", async () => {
     const user = userEvent.setup();
+    vi.mocked(api.connectionSecrets).mockResolvedValue({ ...NO_SECRETS, patroniPassword: true, patroniKeyPassword: true });
     vi.mocked(api.saveConnection).mockResolvedValue(saved("c1"));
     const cert = { format: "pem" as const, certificatePath: "/c.pem", keyPath: "/k.pem" };
     renderWithClient(
@@ -592,11 +603,98 @@ describe("ConnectionForm", () => {
         tabId="t"
       />,
     );
-    await user.click(screen.getByRole("checkbox", { name: "Удалить сохранённый: Пароль API" }));
+    await user.click(await screen.findByRole("checkbox", { name: "Удалить сохранённый: Пароль API" }));
     await user.click(screen.getByRole("checkbox", { name: "Удалить сохранённый: Пароль ключа (TLS для API)" }));
     await user.click(screen.getByRole("button", { name: "Сохранить" }));
     const secrets = vi.mocked(api.saveConnection).mock.calls[0][1];
     expect(secrets).toMatchObject({ patroniPassword: "", patroniKeyPassword: "", pgPassword: null });
+  });
+
+  it("«оставить сохранённый» и «Удалить сохранённый» показываются только у сохранённых секретов", async () => {
+    vi.mocked(api.connectionSecrets).mockResolvedValue({ pgPassword: true, pgKeyPassword: false, patroniPassword: false, patroniKeyPassword: false });
+    renderWithClient(<ConnectionForm initial={existing()} tabId="t" />);
+    await waitFor(() => expect(screen.getByLabelText("Пароль")).toHaveAttribute("placeholder", "оставить сохранённый"));
+    expect(screen.getByRole("checkbox", { name: /Удалить сохранённый.*Пароль/ })).toBeInTheDocument();
+    expect(api.connectionSecrets).toHaveBeenCalledWith("c1");
+  });
+
+  it("у подключения без сохранённых секретов поле пароля — как у нового", async () => {
+    renderWithClient(<ConnectionForm initial={existing()} tabId="t" />);
+    await waitFor(() => expect(api.connectionSecrets).toHaveBeenCalledWith("c1"));
+    expect(screen.getByLabelText("Пароль")).toHaveAttribute("placeholder", "");
+    expect(screen.queryByRole("checkbox", { name: /Удалить сохранённый/ })).not.toBeInTheDocument();
+  });
+
+  it("у нового подключения и копии сохранённые секреты не запрашиваются", () => {
+    renderWithClient(<ConnectionForm initial={newProfile()} tabId="t" />);
+    renderWithClient(<ConnectionForm initial={{ ...existing(), id: "" }} copyOf="dev-1" tabId="t2" />);
+    expect(api.connectionSecrets).not.toHaveBeenCalled();
+  });
+
+  it("keychain не прочитался: форма открывается как у подключения без секретов и сохраняется", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.connectionSecrets).mockRejectedValue(appError("INTERNAL", "keychain unavailable"));
+    vi.mocked(api.saveConnection).mockResolvedValue(saved("c1"));
+    renderWithClient(<ConnectionForm initial={existing()} tabId="t" />);
+    await waitFor(() => expect(api.connectionSecrets).toHaveBeenCalledWith("c1"));
+    expect(screen.getByLabelText("Пароль")).toHaveAttribute("placeholder", "");
+    expect(screen.queryByRole("checkbox", { name: /Удалить сохранённый/ })).not.toBeInTheDocument();
+    const save = screen.getByRole("button", { name: "Сохранить" });
+    expect(save).toBeEnabled();
+    await user.click(save);
+    await waitFor(() => expect(api.saveConnection).toHaveBeenCalled());
+    expect(vi.mocked(api.saveConnection).mock.calls[0][1]).toEqual({ pgPassword: null, pgKeyPassword: null, patroniPassword: null, patroniKeyPassword: null });
+  });
+
+  it("после сохранения ответ о сохранённых секретах запрашивается заново", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.saveConnection).mockResolvedValue(saved("c1"));
+    renderWithClient(<ConnectionForm initial={existing()} tabId="t" />);
+    await waitFor(() => expect(api.connectionSecrets).toHaveBeenCalledTimes(1));
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(api.connectionSecrets).toHaveBeenCalledTimes(2));
+  });
+
+  it("секрет перестал быть сохранённым после отметки «удалить»: флажок скрыт, а поле пароля снова доступно", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.connectionSecrets).mockResolvedValue({ ...NO_SECRETS, pgPassword: true });
+    const { client } = renderWithClient(<ConnectionForm initial={existing()} tabId="t" />);
+    await user.click(await screen.findByRole("checkbox", { name: "Удалить сохранённый: Пароль" }));
+    expect(screen.getByLabelText("Пароль")).toBeDisabled();
+    // Сохранение не закрыло форму (например, не удался перенос в папку), а секрет уже удалён.
+    vi.mocked(api.connectionSecrets).mockResolvedValue(NO_SECRETS);
+    await client.invalidateQueries({ queryKey: ["connectionSecrets", "c1"] });
+    await waitFor(() => expect(screen.queryByRole("checkbox", { name: /Удалить сохранённый/ })).not.toBeInTheDocument());
+    expect(screen.getByLabelText("Пароль")).toBeEnabled();
+    await user.type(screen.getByLabelText("Пароль"), "new");
+    expect(screen.getByLabelText("Пароль")).toHaveValue("new");
+  });
+
+  it("sslmode=disable при заданном CA предупреждает, что настройки TLS будут удалены", async () => {
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionForm initial={{ ...newProfile(), pg: { ...newProfile().pg, tls: { caPath: "/etc/ca.pem", clientCert: null } } }} tabId="t" />);
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText("sslmode"), "disable");
+    expect(screen.getByRole("note")).toHaveTextContent("Настройки TLS (CA, клиентский сертификат) при сохранении будут удалены — верните sslmode, чтобы их оставить");
+  });
+
+  it("sslmode=disable без CA и сертификата ничего не удаляет — предупреждения нет", async () => {
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionForm initial={newProfile()} tabId="t" />);
+    await user.selectOptions(screen.getByLabelText("sslmode"), "disable");
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
+  });
+
+  it("Patroni: узлы прежнего вида в Rust не уходят, даже если порт из него некорректен", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.saveConnection).mockResolvedValue(saved("c1"));
+    renderWithClient(<ConnectionForm initial={{ ...newProfile(), kind: "hostList", hosts: [{ host: "a", port: 70000 }, { host: "b", port: 5432 }] }} tabId="t" />);
+    await user.click(screen.getByLabelText("Узлы под управлением Patroni"));
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(api.saveConnection).toHaveBeenCalled());
+    const profile = vi.mocked(api.saveConnection).mock.calls[0][0];
+    expect(profile.kind).toBe("patroni");
+    expect(profile.hosts).toEqual([]);
   });
 
   describe("prod", () => {

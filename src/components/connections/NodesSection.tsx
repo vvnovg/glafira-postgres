@@ -1,5 +1,5 @@
 import { useTranslation } from "react-i18next";
-import type { ConnectionKind, ConnectionProfile, HostOverride, HostPort, PatroniSettings, TargetServerType } from "../../api/types";
+import type { ConnectionKind, ConnectionProfile, HostOverride, HostPort, PatroniSettings, SecretsSet, TargetServerType } from "../../api/types";
 import { Hint } from "../common/Hint";
 import { ClientCertRows, FieldGroup, PathRow, RowLabel, SecretRow } from "./fields";
 import { emptyPatroni, isValidPort, type SecretField } from "./profile";
@@ -17,7 +17,8 @@ export function NodesSection(props: {
   onKind: (kind: ConnectionKind) => void;
   secrets: PatroniSecrets;
   onSecrets: (s: PatroniSecrets) => void;
-  isNew: boolean;
+  /** Какие секреты уже сохранены в keychain (у нового подключения — никакие). */
+  saved: SecretsSet;
 }) {
   const { t } = useTranslation();
   const { profile: p, onChange, idPrefix: id } = props;
@@ -119,7 +120,7 @@ export function NodesSection(props: {
       <label htmlFor={`${id}-api-user`}>{t("connections.form.patroniUser")}</label>
       <input id={`${id}-api-user`} value={pt.username ?? ""} onChange={(e) => setPatroni({ username: e.target.value || null })} />
       {pt.username && (
-        <SecretRow id={`${id}-api-pass`} label={t("connections.form.patroniPassword")} isNew={props.isNew} value={props.secrets.password} onChange={(password) => props.onSecrets({ ...props.secrets, password })} />
+        <SecretRow id={`${id}-api-pass`} label={t("connections.form.patroniPassword")} saved={props.saved.patroniPassword} value={props.secrets.password} onChange={(password) => props.onSecrets({ ...props.secrets, password })} />
       )}
 
       <label htmlFor={`${id}-api-tls`}>{t("connections.form.apiTls")}</label>
@@ -140,7 +141,7 @@ export function NodesSection(props: {
             onChange={(clientCert) => setPatroni({ tls: { ...tls, clientCert } })}
             keyPassword={props.secrets.keyPassword}
             onKeyPassword={(keyPassword) => props.onSecrets({ ...props.secrets, keyPassword })}
-            isNew={props.isNew}
+            saved={props.saved.patroniKeyPassword}
           />
         </FieldGroup>
       )}

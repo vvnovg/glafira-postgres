@@ -52,7 +52,7 @@ export function PathRow(props: { id: string; label: string; scope?: string; hint
   );
 }
 
-export function SecretRow(props: { id: string; label: string; scope?: string; hint?: ReactNode; isNew: boolean; value: SecretField; onChange: (v: SecretField) => void }) {
+export function SecretRow(props: { id: string; label: string; scope?: string; hint?: ReactNode; saved: boolean; value: SecretField; onChange: (v: SecretField) => void }) {
   const { t } = useTranslation();
   const scoped = useScopedLabel(props.label, props.scope);
   return (
@@ -63,12 +63,14 @@ export function SecretRow(props: { id: string; label: string; scope?: string; hi
           id={props.id}
           type="password"
           autoComplete="off"
-          disabled={props.value.clear}
-          placeholder={props.isNew ? "" : t("connections.form.passwordKeep")}
+          // Отметка «удалить» значима, только пока секрет сохранён: если его уже нет (удалён при сохранении, сброшен
+          // импортом), поле остаётся доступным, хотя флажок скрыт.
+          disabled={props.saved && props.value.clear}
+          placeholder={props.saved ? t("connections.form.passwordKeep") : ""}
           value={props.value.text}
           onChange={(e) => props.onChange({ text: e.target.value, clear: false })}
         />
-        {!props.isNew && (
+        {props.saved && (
           <label className="inline">
             <input type="checkbox" aria-label={t("connections.form.passwordClearAria", { label: scoped })} checked={props.value.clear} onChange={(e) => props.onChange({ text: "", clear: e.target.checked })} />
             {t("connections.form.passwordClear")}
@@ -88,7 +90,8 @@ export function ClientCertRows(props: {
   onChange: (c: ClientCert | null) => void;
   keyPassword: SecretField;
   onKeyPassword: (v: SecretField) => void;
-  isNew: boolean;
+  /** Сохранён ли в keychain пароль ключа. */
+  saved: boolean;
 }) {
   const { t } = useTranslation();
   const { cert, idPrefix: p } = props;
@@ -124,7 +127,7 @@ export function ClientCertRows(props: {
           {cert.format === "pem" && (
             <PathRow id={`${p}-key`} label={t("connections.form.keyPath")} scope={props.scope} value={cert.keyPath} onChange={(v) => props.onChange({ ...cert, keyPath: v })} />
           )}
-          <SecretRow id={`${p}-kpw`} label={t("connections.form.keyPassword")} scope={props.scope} isNew={props.isNew} value={props.keyPassword} onChange={props.onKeyPassword} />
+          <SecretRow id={`${p}-kpw`} label={t("connections.form.keyPassword")} scope={props.scope} saved={props.saved} value={props.keyPassword} onChange={props.onKeyPassword} />
         </>
       )}
     </>

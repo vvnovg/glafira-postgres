@@ -77,6 +77,8 @@ export function ImportDialog({ path, initialTargetId, onClose, onImported }: Pro
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["folders"] }),
         queryClient.invalidateQueries({ queryKey: ["connections"] }),
+        // Импорт обновляет или сбрасывает секреты подключений: открытые формы перечитают, что сохранено.
+        queryClient.invalidateQueries({ queryKey: ["connectionSecrets"] }),
       ]);
       onImported(result);
     } catch (err) {

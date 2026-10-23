@@ -226,6 +226,7 @@
       "passwordKeep": "keep the saved one",
       "passwordClear": "Remove the saved one",
       "passwordClearAria": "Remove the saved one: {{label}}",
+      "tlsDroppedOnDisable": "TLS settings (CA, client certificate) will be removed on save — switch sslmode back to keep them",
       "pgDatabase": "Default database",
       "timeout": "Connection timeout, s",
       "databases": "Only databases",
@@ -419,8 +420,10 @@
     "hint": "Glafira is free and open source; donations keep it going."
   },
   "test": {
-    "patroniOk": "{{members}} members, leader {{leader}}",
-    "discoveryOk": "{{members}} nodes found",
+    "patroniOk_one": "{{count}} member, leader {{leader}}",
+    "patroniOk_other": "{{count}} members, leader {{leader}}",
+    "discoveryOk_one": "{{count}} node found",
+    "discoveryOk_other": "{{count}} nodes found",
     "nodeOk": "{{role}}, PostgreSQL {{version}}",
     "patroniNotUsed": "Not used: this is not a Patroni cluster",
     "readinessNoNode": "Not checked: no node accepted the connection",

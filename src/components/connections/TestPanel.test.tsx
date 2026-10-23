@@ -42,6 +42,20 @@ describe("TestPanel", () => {
     expect(items[2]).toHaveTextContent("Аутентификация не прошла");
   });
 
+  it("шаги с числом узлов склоняются: 1 узел, 5 узлов; участников 3, лидер назван", () => {
+    const one = ev({ step: "discovery", status: "ok", message: { key: "test.discoveryOk", params: { count: "1" }, text: "1 nodes found" } });
+    const five = ev({ step: "discovery", status: "ok", message: { key: "test.discoveryOk", params: { count: "5" }, text: "5 nodes found" } });
+    const members = ev({ step: "patroni", status: "ok", message: { key: "test.patroniOk", params: { count: "3", leader: "pg-1" }, text: "3 members, leader pg-1" } });
+    const { unmount } = render(<TestPanel events={[one]} report={null} />);
+    expect(screen.getByRole("listitem")).toHaveTextContent("Найден 1 узел");
+    unmount();
+    const second = render(<TestPanel events={[five]} report={null} />);
+    expect(screen.getByRole("listitem")).toHaveTextContent("Найдено 5 узлов");
+    second.unmount();
+    render(<TestPanel events={[members]} report={null} />);
+    expect(screen.getByRole("listitem")).toHaveTextContent("3 участника, лидер pg-1");
+  });
+
   it("чек-лист с командами для исправления", () => {
     const report: TestReport = {
       ok: true,

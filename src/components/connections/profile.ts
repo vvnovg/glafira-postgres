@@ -118,13 +118,15 @@ export function applyParsed(p: ConnectionProfile, parsed: ParsedConnection): Con
 
 /**
  * Профиль в том виде, в каком его видит пользователь: при sslmode=disable поля CA и клиентского сертификата
- * скрыты, и в профиль они не попадают. Rust при `disable` TLS не использует (`pg_connector` → `None`), но
- * `validate_tls` проверил бы и скрытые пути, а `uses_secret(pgKeyPassword)` считал бы сертификат «в работе».
- * Сама форма поля помнит — при возврате на другой режим они не теряются.
+ * скрыты и в профиль не попадают, а у Patroni нет узлов (Rust их всё равно очищает, а порт из прежнего вида
+ * формы иначе ломал бы разбор аргументов команды). Rust при `disable` TLS не использует (`pg_connector` → `None`),
+ * но `validate_tls` проверил бы и скрытые пути, а `uses_secret(pgKeyPassword)` считал бы сертификат «в работе».
+ * Сама форма скрытое помнит — при возврате на другой режим или вид ввод не теряется.
  */
 export function visibleProfile(p: ConnectionProfile): ConnectionProfile {
-  if (p.pg.sslMode !== "disable" || (p.pg.tls.caPath === null && p.pg.tls.clientCert === null)) return p;
-  return { ...p, pg: { ...p.pg, tls: { caPath: null, clientCert: null } } };
+  const hosts = p.kind === "patroni" ? [] : p.hosts;
+  const tls = p.pg.sslMode === "disable" ? { caPath: null, clientCert: null } : p.pg.tls;
+  return { ...p, hosts, pg: { ...p.pg, tls } };
 }
 
 /** Фильтр баз «orders, billing» → список; пусто — все базы. */

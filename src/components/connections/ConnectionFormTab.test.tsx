@@ -10,6 +10,7 @@ vi.mock("../../api/client", async (importOriginal) => {
     api: {
       listConnections: vi.fn(),
       listFolders: vi.fn(() => Promise.resolve([{ id: "f1", name: "Прод", parentId: null, order: 0 }])),
+      connectionSecrets: vi.fn(() => Promise.resolve({ pgPassword: false, pgKeyPassword: false, patroniPassword: false, patroniKeyPassword: false })),
     },
   };
 });
@@ -40,6 +41,8 @@ describe("ConnectionFormTab", () => {
     expect(screen.getByLabelText("Пароль")).toHaveValue("");
     expect(screen.queryByRole("button", { name: "Удалить" })).not.toBeInTheDocument();
     await waitFor(() => expect(screen.getByLabelText("Папка")).toHaveValue("f1"));
+    // У копии сохранённых секретов нет: keychain источника не читается.
+    expect(api.connectionSecrets).not.toHaveBeenCalled();
   });
 
   it("копия prod-подключения: prod доступен, «Только чтение» как у источника", async () => {
@@ -61,6 +64,7 @@ describe("ConnectionFormTab", () => {
     const { unmount } = renderWithClient(<ConnectionFormTab connectionId="c1" tabId="connection-form:c1" />);
     expect(await screen.findByRole("heading", { name: "Подключение «dev-1»" })).toBeInTheDocument();
     expect(screen.getByLabelText("Имя")).toHaveValue("dev-1");
+    await waitFor(() => expect(api.connectionSecrets).toHaveBeenCalledWith("c1"));
     unmount();
     renderWithClient(<ConnectionFormTab connectionId="gone" tabId="connection-form:gone" />);
     expect(await screen.findByText("Подключение удалено")).toBeInTheDocument();

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { ConnectionProfile, PgSettings, SslMode } from "../../api/types";
+import type { ConnectionProfile, PgSettings, SecretsSet, SslMode } from "../../api/types";
 import { Hint } from "../common/Hint";
 import { ClientCertRows, FieldGroup, PathRow, RowLabel, SecretRow } from "./fields";
 import { formatDatabases, parseDatabases, type SecretField } from "./profile";
@@ -16,7 +16,8 @@ export function PgSection(props: {
   onChange: (p: ConnectionProfile) => void;
   secrets: PgSecrets;
   onSecrets: (s: PgSecrets) => void;
-  isNew: boolean;
+  /** Какие секреты уже сохранены в keychain (у нового подключения — никакие). */
+  saved: SecretsSet;
 }) {
   const { t } = useTranslation();
   const id = props.idPrefix;
@@ -32,7 +33,7 @@ export function PgSection(props: {
         id={`${id}-pg-pass`}
         label={t("connections.form.pgPassword")}
         hint={<Hint k="hints.connections.pgpass" label={t("connections.form.pgPassword")} />}
-        isNew={props.isNew}
+        saved={props.saved.pgPassword}
         value={props.secrets.password}
         onChange={(password) => props.onSecrets({ ...props.secrets, password })}
       />
@@ -46,6 +47,11 @@ export function PgSection(props: {
           </option>
         ))}
       </select>
+      {pg.sslMode === "disable" && (pg.tls.caPath !== null || pg.tls.clientCert !== null) && (
+        <p className="muted" role="note">
+          {t("connections.form.tlsDroppedOnDisable")}
+        </p>
+      )}
       {pg.sslMode !== "disable" && (
         <FieldGroup legend={tlsScope}>
           <PathRow id={`${id}-pg-ca`} label={t("connections.form.caPath")} scope={tlsScope} value={pg.tls.caPath} onChange={(caPath) => set({ tls: { ...pg.tls, caPath } })} />
@@ -56,7 +62,7 @@ export function PgSection(props: {
             onChange={(clientCert) => set({ tls: { ...pg.tls, clientCert } })}
             keyPassword={props.secrets.keyPassword}
             onKeyPassword={(keyPassword) => props.onSecrets({ ...props.secrets, keyPassword })}
-            isNew={props.isNew}
+            saved={props.saved.pgKeyPassword}
           />
         </FieldGroup>
       )}

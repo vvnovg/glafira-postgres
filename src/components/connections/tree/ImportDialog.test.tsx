@@ -108,6 +108,8 @@ describe("ImportDialog", () => {
     await waitFor(() => expect(onImported).toHaveBeenCalledWith(PREVIEW));
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["connections"] });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["folders"] });
+    // Импорт мог обновить или сбросить секреты — открытые формы перечитывают, что сохранено.
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["connectionSecrets"] });
   });
 
   it("«Отмена» закрывает диалог без импорта", async () => {

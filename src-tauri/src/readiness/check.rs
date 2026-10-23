@@ -222,8 +222,8 @@ pub async fn run(
                     StepStatus::Ok,
                     Some(ltext!(
                         "test.patroniOk",
-                        "{{members}} members, leader {{leader}}",
-                        members = t.members.len(),
+                        "{{count}} members, leader {{leader}}",
+                        count = t.members.len(),
                         leader = leader
                     )),
                     None,
@@ -263,8 +263,8 @@ pub async fn run(
         StepStatus::Ok,
         Some(ltext!(
             "test.discoveryOk",
-            "{{members}} nodes found",
-            members = topology.members.len()
+            "{{count}} nodes found",
+            count = topology.members.len()
         )),
         None,
     );
@@ -433,6 +433,17 @@ mod tests {
         let emit = |e: TestEvent| events.lock().unwrap().push(e);
         let report = run(profile, secrets, &emit).await.unwrap();
         assert!(!report.ok);
+        // Число узлов уходит параметром `count` (по нему фронтенд выбирает форму слова), а не `members`.
+        let discovery = events
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|e| e.step == TestStep::Discovery)
+            .and_then(|e| e.message.clone())
+            .expect("шаг обнаружения сообщает число узлов");
+        assert_eq!(discovery.key, "test.discoveryOk");
+        assert_eq!(discovery.params.get("count").map(String::as_str), Some("1"));
+        assert!(!discovery.params.contains_key("members"));
         let skipped: Vec<(TestStep, Option<String>)> = events
             .lock()
             .unwrap()
