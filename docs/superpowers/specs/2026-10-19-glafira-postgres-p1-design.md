@@ -323,7 +323,9 @@ TopologyWarning = noPrimary | multiplePrimaries { members } | systemIdMismatch {
    `database_system_identifier`. Не ответил → `memberUnreachable` (данные из `/cluster` остаются). Разные
    `database_system_identifier` → `systemIdMismatch`.
 
-**Опрос:** раз в 10 с `GET /cluster` — сначала у лидера, затем у остальных участников, затем по `urls`.
+**Опрос:** раз в 10 с `GET /cluster` — сначала у лидера, затем у остальных участников, затем по `urls`. Участники,
+чей API в прошлый раз не ответил (после `patroniUnreachable` — все), идут после `urls`. Обход `/cluster` ограничен
+общим сроком 20 с (`discoverTimeout`, в `details` — адреса по порядку обхода).
 
 ### 6.3 Список узлов и сервер
 
@@ -555,6 +557,8 @@ CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 | `57014` | `TIMEOUT` | Запрос каталога прерван `statement_timeout` |
 | `53300` | `CONNECTION_FAILED` | Исчерпан `max_connections` |
 | `57P03` | `NODE_UNAVAILABLE` | Узел запускается или в восстановлении; `retryable` |
+| `57P01`, `57P02` | `NODE_UNAVAILABLE` | Сервер останавливается или перезапускается, либо администратор завершил сеанс (`pg_terminate_backend`); соединение закрывается, `retryable` |
+| `55P03` | `TIMEOUT` | Запрос ждал блокировку дольше `lock_timeout` |
 | Ошибка TLS-рукопожатия, несовпадение имени | `TLS_ERROR` | Конкретная причина OpenSSL |
 | TCP: отказ, таймаут, DNS | `CONNECTION_FAILED` | При туннеле — «бастион не видит хост» |
 
