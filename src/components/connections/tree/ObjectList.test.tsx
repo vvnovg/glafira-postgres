@@ -1,5 +1,4 @@
-import { QueryClientProvider } from "@tanstack/react-query";
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ObjectItem, ObjectPage } from "../../../api/types";
@@ -51,7 +50,7 @@ function renderList(count: number) {
 
 /** Повторная отрисовка с тем же клиентом: окно виртуализатора в тесте читается при каждом рендере. */
 function rerenderList(r: ReturnType<typeof renderList>, count: number) {
-  r.rerender(<QueryClientProvider client={r.client}>{listEl(count)}</QueryClientProvider>);
+  r.rerender(listEl(count));
 }
 
 beforeEach(() => {
@@ -210,15 +209,24 @@ describe("ObjectList", () => {
 
   it("смена фильтра возвращает прокрутку виртуального списка в начало", async () => {
     vi.mocked(api.listObjects).mockResolvedValue(page(0, 300, 600));
-    const user = userEvent.setup();
     renderList(600);
+    // Список загружается на настоящих таймерах (react-query отдаёт результат через setTimeout), фейковые — только на задержку фильтра.
     const scroller = await screen.findByRole("group", { name: "Список: Таблицы (orders.shop)" });
     scroller.scrollTop = 400;
-    await user.type(screen.getByLabelText("Фильтр: Таблицы (orders.shop)"), "a");
-    // До истечения задержки фильтр не применён и прокрутка на месте.
-    expect(scroller.scrollTop).toBe(400);
-    await waitFor(() => expect(api.listObjects).toHaveBeenLastCalledWith("c", "orders", "shop", "tables", "a", 0, PAGE));
-    expect(scroller.scrollTop).toBe(0);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      // Не user.type: asyncWrapper Testing Library ждёт setTimeout(0) и продвигает его только под jest, под vitest он завис бы.
+      fireEvent.change(screen.getByLabelText("Фильтр: Таблицы (orders.shop)"), { target: { value: "a" } });
+      // Задержка фильтра — 300 мс от последнего нажатия: за миллисекунду до неё фильтр не применён и прокрутка на месте.
+      await act(() => vi.advanceTimersByTimeAsync(299));
+      expect(scroller.scrollTop).toBe(400);
+      expect(api.listObjects).toHaveBeenCalledTimes(1);
+      await act(() => vi.advanceTimersByTimeAsync(1));
+      expect(api.listObjects).toHaveBeenLastCalledWith("c", "orders", "shop", "tables", "a", 0, PAGE);
+      expect(scroller.scrollTop).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("партиция из другой схемы подписана схемой, из той же — нет", async () => {

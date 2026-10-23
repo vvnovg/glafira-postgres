@@ -18,6 +18,7 @@ vi.mock("../../api/client", async (importOriginal) => {
       listTopologyEvents: vi.fn(() => Promise.resolve([{ atMs: 1_000, kind: "leaderChanged", from: "pg-2", to: "pg-1" }])),
       getMemberFacts: vi.fn(() => Promise.resolve({ startedAtMs: Date.now() - 3_600_000, connections: 12, maxConnections: 100, databases: 3 })),
       connect: vi.fn(),
+      reconnect: vi.fn(),
     },
   };
 });
@@ -74,13 +75,15 @@ describe("Overview", () => {
       expect(api.connect).toHaveBeenCalledWith("c");
 
       // Пользователь отключил подключение при открытой вкладке (событие Rust): само оно не возвращается.
+      vi.mocked(api.connect).mockClear();
       act(() => applyState(client, { connectionId: "c", state: "disconnected", error: null }));
+      expect(api.connect).not.toHaveBeenCalled();
       const button = await screen.findByRole("button", { name: "Подключиться" });
       expect(screen.queryByText("Подключено")).not.toBeInTheDocument();
-      expect(api.connect).toHaveBeenCalledTimes(1);
+      expect(api.connect).not.toHaveBeenCalled();
 
       await user.click(button);
-      expect(api.connect).toHaveBeenCalledTimes(2);
+      expect(api.connect).toHaveBeenCalledTimes(1);
       expect(await screen.findByText("Подключено")).toBeInTheDocument();
     });
 
@@ -114,17 +117,41 @@ describe("Overview", () => {
     });
 
     it.each([
-      ["connecting", "Подключение…"],
-      ["connected", "Подключено"],
-      ["degraded", "Часть узлов недоступна"],
-      ["failed", "Не удалось подключиться"],
-    ] as const)("состояние %s само подключение не запускает", async (state, label) => {
+      ["connecting", "Подключение…", false],
+      ["connected", "Подключено", false],
+      ["degraded", "Часть узлов недоступна", true],
+      ["failed", "Не удалось подключиться", false],
+    ] as const)("состояние %s само подключение не запускает; кнопка «Переподключить» — только при частичной недоступности", async (state, label, reopen) => {
       vi.mocked(api.getTopology).mockResolvedValue(
         topologyView({ state, error: state === "failed" ? { code: "CONNECTION_FAILED", message: "gone", retryable: true } : null }),
       );
       renderWithClient(<Overview connectionId="c" />);
       expect(await screen.findByText(label)).toBeInTheDocument();
       expect(api.connect).not.toHaveBeenCalled();
+      // reconnect не сериализован с идущим connect, поэтому при connecting кнопки быть не должно.
+      expect(screen.queryByRole("button", { name: "Переподключить" }) !== null).toBe(reopen);
+    });
+
+    it("часть узлов недоступна: кнопка «Переподключить» закрывает и открывает подключение заново", async () => {
+      vi.mocked(api.getTopology).mockResolvedValue(topologyView({ state: "degraded" }));
+      vi.mocked(api.reconnect).mockResolvedValue(topologyView());
+      const user = userEvent.setup();
+      renderWithClient(<Overview connectionId="c" />);
+      await user.click(await screen.findByRole("button", { name: "Переподключить" }));
+      expect(api.reconnect).toHaveBeenCalledWith("c");
+      expect(await screen.findByText("Подключено")).toBeInTheDocument();
+      expect(api.connect).not.toHaveBeenCalled();
+      expect(screen.queryByRole("button", { name: "Переподключить" })).not.toBeInTheDocument();
+    });
+
+    it("ошибка переподключения показывается баннером, кнопка снова доступна", async () => {
+      vi.mocked(api.getTopology).mockResolvedValue(topologyView({ state: "degraded" }));
+      vi.mocked(api.reconnect).mockRejectedValue({ code: "CONNECTION_FAILED", message: "reopen refused", retryable: true });
+      const user = userEvent.setup();
+      renderWithClient(<Overview connectionId="c" />);
+      await user.click(await screen.findByRole("button", { name: "Переподключить" }));
+      expect(await screen.findByText("reopen refused")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Переподключить" })).toBeEnabled();
     });
 
     it("сбой автоподключения: ошибка баннером, таблицы и фактов нет, кнопка повторяет попытку", async () => {
@@ -515,10 +542,17 @@ describe("Overview: доступность", () => {
     const dup: TopologyEvent = { atMs: 5_000, kind: "memberUnreachable", name: "pg-3" };
     vi.mocked(api.listTopologyEvents).mockResolvedValue([dup, dup, { atMs: 1_000, kind: "pauseChanged", paused: true }]);
     vi.mocked(api.getTopology).mockResolvedValue(topologyView());
-    renderWithClient(<Overview connectionId="c" />);
-    const journal = await screen.findByRole("region", { name: "Журнал событий" });
-    expect(within(journal).getAllByRole("listitem")).toHaveLength(3);
-    expect(within(journal).getAllByText(/Узел pg-3 недоступен/)).toHaveLength(2);
+    // React 19 сообщает о повторных ключах через console.error: склейка строк иначе прошла бы незамеченной.
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      renderWithClient(<Overview connectionId="c" />);
+      const journal = await screen.findByRole("region", { name: "Журнал событий" });
+      expect(within(journal).getAllByRole("listitem")).toHaveLength(3);
+      expect(within(journal).getAllByText(/Узел pg-3 недоступен/)).toHaveLength(2);
+      expect(errors.mock.calls.flat().join(" ")).not.toMatch(/same key/);
+    } finally {
+      errors.mockRestore();
+    }
   });
 });
 
@@ -575,16 +609,12 @@ describe("Overview: опрос фактов и устаревшие данные
 
   it("скрытая вкладка узлы по таймеру не опрашивает, видимая — опрашивает снова", async () => {
     vi.mocked(api.getTopology).mockResolvedValue(onePrimary());
-    const { rerender, client } = renderWithClient(<Overview connectionId="c" active={false} />);
+    const { rerender } = renderWithClient(<Overview connectionId="c" active={false} />);
     await settle();
     expect(callsFor("pg-1")).toBe(1);
     await tick(60_000);
     expect(callsFor("pg-1")).toBe(1);
-    rerender(
-      <QueryClientProvider client={client}>
-        <Overview connectionId="c" active />
-      </QueryClientProvider>,
-    );
+    rerender(<Overview connectionId="c" active />);
     await tick(10_000);
     expect(callsFor("pg-1")).toBe(2);
   });
@@ -611,8 +641,10 @@ describe("Overview: опрос фактов и устаревшие данные
     await tick(10_000);
     expect(callsFor("pg-1")).toBe(resumed + 1);
     act(() => applyState(client, { connectionId: "c", state: "disconnected", error: null }));
+    expect(api.connect).not.toHaveBeenCalled();
     await tick(60_000);
     expect(callsFor("pg-1")).toBe(resumed + 1);
+    expect(api.connect).not.toHaveBeenCalled();
   });
 
   it("узел, ставший недоступным, больше не опрашивается, остальные — продолжают", async () => {

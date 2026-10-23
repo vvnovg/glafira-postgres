@@ -14,6 +14,7 @@ vi.mock("../../../api/client", async (importOriginal) => {
       getTopology: vi.fn(),
       connect: vi.fn(),
       disconnect: vi.fn(),
+      reconnect: vi.fn(),
       setCatalogMember: vi.fn(),
       getUiSettings: vi.fn(() => Promise.resolve({ showSystemObjects: false })),
       listDatabases: vi.fn(() => Promise.resolve([])),
@@ -134,6 +135,7 @@ describe("ConnectionNode", () => {
       "Каталог — с узла по умолчанию",
       "Каталог — с узла pg-1",
       "Каталог — с узла pg-2",
+      "Переподключить",
       "Отключиться",
     ]);
     await user.click(within(menu).getByRole("menuitem", { name: "Каталог — с узла pg-2" }));
@@ -156,6 +158,44 @@ describe("ConnectionNode", () => {
     expect(api.connect).not.toHaveBeenCalled();
   });
 
+  it("меню живого подключения: «Переподключить» закрывает и открывает заново, узел остаётся раскрытым", async () => {
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView({ state: "degraded" }));
+    vi.mocked(api.reconnect).mockResolvedValue(topologyView());
+    const user = userEvent.setup();
+    renderNode();
+    await screen.findByRole("img", { name: "Часть узлов недоступна" });
+    await user.click(screen.getByRole("button", { name: toggleName }));
+    await user.click(screen.getByRole("button", { name: "Действия с подключением billing" }));
+    await user.click(screen.getByRole("menuitem", { name: "Переподключить" }));
+    expect(api.reconnect).toHaveBeenCalledWith("c");
+    expect(await screen.findByRole("img", { name: "Подключено" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: toggleName })).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("меню: пока идёт подключение (connecting), «Переподключить» не предлагается", async () => {
+    // reconnect не сериализован с идущим connect: два открытия подряд оставили бы лишнее соединение.
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView({ state: "connecting" }));
+    const user = userEvent.setup();
+    renderNode();
+    await screen.findByRole("img", { name: "Подключение…" });
+    await user.click(screen.getByRole("button", { name: "Действия с подключением billing" }));
+    const items = within(screen.getByRole("menu")).getAllByRole("menuitem");
+    expect(items.map((m) => m.textContent)).not.toContain("Переподключить");
+    expect(api.reconnect).not.toHaveBeenCalled();
+  });
+
+  it("ошибка переподключения показывается под узлом", async () => {
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView({ state: "degraded" }));
+    vi.mocked(api.reconnect).mockRejectedValue({ code: "CONNECTION_FAILED", message: "reopen refused", retryable: true });
+    const user = userEvent.setup();
+    renderNode();
+    await screen.findByRole("img", { name: "Часть узлов недоступна" });
+    await user.click(screen.getByRole("button", { name: toggleName }));
+    await user.click(screen.getByRole("button", { name: "Действия с подключением billing" }));
+    await user.click(screen.getByRole("menuitem", { name: "Переподключить" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("reopen refused");
+  });
+
   it("меню: отключение сворачивает узел", async () => {
     vi.mocked(api.getTopology).mockResolvedValue(topologyView());
     vi.mocked(api.disconnect).mockResolvedValue(undefined);
@@ -176,7 +216,7 @@ describe("ConnectionNode", () => {
     await screen.findByRole("img", { name: "Подключено" });
     await user.click(screen.getByRole("button", { name: "Действия с подключением billing" }));
     const items = within(screen.getByRole("menu")).getAllByRole("menuitem");
-    expect(items.map((m) => m.textContent)).toEqual(["Обзор", "Изменить подключение", "Дублировать подключение", "Отключиться"]);
+    expect(items.map((m) => m.textContent)).toEqual(["Обзор", "Изменить подключение", "Дублировать подключение", "Переподключить", "Отключиться"]);
     expect(within(screen.getByRole("menu")).queryByRole("menuitem", { name: /Каталог/ })).not.toBeInTheDocument();
   });
 

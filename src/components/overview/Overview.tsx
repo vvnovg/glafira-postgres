@@ -294,6 +294,19 @@ export function Overview({ connectionId, member, active = true }: { connectionId
     }
   };
 
+  /** Закрыть живое подключение и открыть заново: отказ во входе запоминается до переоткрытия, а кнопка «Подключиться» его не снимает. */
+  const reopen = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      qc.setQueryData(["topology", connectionId], await api.reconnect(connectionId));
+    } catch (e) {
+      setError(toAppError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const state = view.data?.state;
   // Спец. P1 §7: подключение открывается при открытии вкладки. Решает первый загруженный вид, один раз на подключение
   // вкладки (ref переживает двойной монтаж StrictMode): явное «Отключиться» при открытой вкладке подключение не
@@ -345,6 +358,12 @@ export function Overview({ connectionId, member, active = true }: { connectionId
         {(v.state === "disconnected" || v.state === "failed") && (
           <button type="button" className="primary" disabled={busy} onClick={() => void connect()}>
             {t("sidebar.connect")}
+          </button>
+        )}
+        {/* Только при частичной недоступности: при connecting переоткрытие не сериализовано с идущим connect. */}
+        {v.state === "degraded" && (
+          <button type="button" disabled={busy} onClick={() => void reopen()}>
+            {t("sidebar.reopen")}
           </button>
         )}
       </div>

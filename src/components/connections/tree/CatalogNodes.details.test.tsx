@@ -165,11 +165,28 @@ describe("CatalogNodes: детали", () => {
     expect(useWorkspace.getState().tabs).toEqual([{ kind: "overview", connectionId: "c", member: "pg-2", id: "overview:c" }]);
   });
 
-  it("нет узла для каталога — сообщение вместо баз и ролей", () => {
+  it("нет узла для каталога — сообщение, группы остаются, но без запросов", async () => {
+    const user = userEvent.setup();
     renderWithClient(<CatalogNodes connection={conn} view={topologyView({ catalogMember: null })} />);
     expect(screen.getByText("Нет доступного узла для каталога")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Базы данных/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Роли" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Базы данных/ }));
+    expect(screen.getAllByText("Нет доступного узла для каталога")).toHaveLength(2);
+    await user.click(screen.getByRole("button", { name: "Роли" }));
+    expect(screen.getAllByText("Нет доступного узла для каталога")).toHaveLength(3);
+    expect(api.listDatabases).not.toHaveBeenCalled();
+    expect(api.listRoles).not.toHaveBeenCalled();
+  });
+
+  it("раскрытые группы переживают пропажу и возврат узла каталога (перезапуск сервера)", async () => {
+    const user = userEvent.setup();
+    const { rerender } = renderWithClient(<CatalogNodes connection={conn} view={topologyView()} />);
+    await user.click(screen.getByRole("button", { name: /Базы данных/ }));
+    expect(await screen.findByRole("button", { name: /^orders/ })).toBeInTheDocument();
+    rerender(<CatalogNodes connection={conn} view={topologyView({ catalogMember: null })} />);
+    expect(screen.getByRole("button", { name: /Базы данных/ })).toHaveAttribute("aria-expanded", "true");
+    rerender(<CatalogNodes connection={conn} view={topologyView()} />);
+    expect(await screen.findByRole("button", { name: /^orders/ })).toBeInTheDocument();
+    expect(api.listDatabases).toHaveBeenCalledTimes(2);
   });
 
   it("ошибка списка баз показывается с повтором", async () => {

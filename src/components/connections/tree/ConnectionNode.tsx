@@ -95,6 +95,21 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
           },
         ]
       : []),
+    // Живое подключение можно закрыть и открыть заново на месте: после смены пароля на сервере или сбоя LDAP
+    // отказ во входе запоминается до переоткрытия (errors.pg.loginNotRetried). Пока идёт подключение (connecting),
+    // пункта нет: переоткрытие не сериализовано с идущим connect.
+    ...(live
+      ? [
+          {
+            label: t("sidebar.reopen"),
+            onSelect: () =>
+              void api
+                .reconnect(c.id)
+                .then(setView)
+                .catch((e: unknown) => setError(toAppError(e))),
+          },
+        ]
+      : []),
     ...(live || view.state === "failed"
       ? [
           {

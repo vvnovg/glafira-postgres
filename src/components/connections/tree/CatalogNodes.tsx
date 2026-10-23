@@ -225,14 +225,19 @@ export function CatalogNodes({ connection, view }: { connection: ConnectionProfi
         </TreeGroup>
       )}
       {view.catalogFallback && member && <li className="tree-notice">{t("sidebar.catalogFallback", { member })}</li>}
-      {member ? (
-        <TreeGroup label={connection.kind === "server" ? t("sidebar.databases") : t("sidebar.databasesFrom", { member })}>
-          {() => <DatabaseList connectionId={connection.id} />}
-        </TreeGroup>
-      ) : (
-        <li className="tree-notice">{t("sidebar.noCatalogNode")}</li>
+      {!member && <li className="tree-notice">{t("sidebar.noCatalogNode")}</li>}
+      {/* Группы не размонтируются, когда узел каталога пропал (например, на время перезапуска сервера): */}
+      {/* раскрытое состояние переживает один неудачный опрос. Без узла внутри — то же сообщение, запросов нет. */}
+      {topo && (
+        <>
+          <TreeGroup label={member && connection.kind !== "server" ? t("sidebar.databasesFrom", { member }) : t("sidebar.databases")}>
+            {() => (member ? <DatabaseList connectionId={connection.id} /> : <li className="tree-notice">{t("sidebar.noCatalogNode")}</li>)}
+          </TreeGroup>
+          <TreeGroup label={t("sidebar.roles")}>
+            {() => (member ? <RoleList connectionId={connection.id} /> : <li className="tree-notice">{t("sidebar.noCatalogNode")}</li>)}
+          </TreeGroup>
+        </>
       )}
-      {member && <TreeGroup label={t("sidebar.roles")}>{() => <RoleList connectionId={connection.id} />}</TreeGroup>}
     </ul>
   );
 }

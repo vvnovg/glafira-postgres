@@ -48,6 +48,16 @@ describe("события наблюдения", () => {
     expect(qc.getQueryData<TopologyEvent[]>(["topologyEvents", "c"])!.map((e) => e.atMs)).toEqual([3, 2, 1]);
   });
 
+  it("событие, которое ответ журнала уже принёс, второй раз не добавляется", () => {
+    const qc = new QueryClient();
+    const e1: TopologyEvent = { atMs: 1_000, kind: "pauseChanged", paused: true };
+    const e2: TopologyEvent = { atMs: 2_000, kind: "memberUnreachable", name: "pg-3" };
+    const e3: TopologyEvent = { atMs: 3_000, kind: "memberReachable", name: "pg-3" };
+    qc.setQueryData(["topologyEvents", "c"], [e2, e1]);
+    applyTopology(qc, { connectionId: "c", view: topologyView(), newEvents: [e1, e2, e3] });
+    expect(qc.getQueryData(["topologyEvents", "c"])).toEqual([e3, e2, e1]);
+  });
+
   it("журнал ограничен", () => {
     const qc = new QueryClient();
     qc.setQueryData(["topologyEvents", "c"], Array.from({ length: EVENTS_CAP }, (_, i) => ev(i)));

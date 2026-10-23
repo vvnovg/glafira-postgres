@@ -36,6 +36,11 @@ function supersede(qc: QueryClient, key: readonly unknown[]) {
   void qc.cancelQueries({ queryKey: key, exact: true });
 }
 
+/** Каноническая запись события: порядок ключей не зависит от источника (ответ команды или событие). */
+const signature = (e: TopologyEvent) => JSON.stringify(e, Object.keys(e).sort());
+/** Сколько верхних записей кэша сверяются с новыми событиями (ответ `list_topology_events` мог опередить событие). */
+const DEDUPE_WINDOW = 50;
+
 /**
  * В кэше нет данных, а событие описывает только часть картины (смена состояния, добавка к журналу):
  * синтезировать запись нельзя — при `staleTime: Infinity` она считалась бы свежей и полную картину
@@ -86,9 +91,13 @@ export function applyTopology(qc: QueryClient, p: TopologyPayload) {
       refetchFromSource(qc, eventsKey(id));
     } else {
       // В событии — от старых к новым, в кэше — новые сверху.
-      qc.setQueryData<TopologyEvent[]>(eventsKey(id), (prev = []) =>
-        [...[...p.newEvents].reverse(), ...prev].slice(0, EVENTS_CAP),
-      );
+      qc.setQueryData<TopologyEvent[]>(eventsKey(id), (prev = []) => {
+        // Ответ list_topology_events, посчитанный в Rust после записи события, мог прийти раньше самого
+        // события: такое событие в кэше уже есть и второй раз не добавляется.
+        const seen = new Set(prev.slice(0, DEDUPE_WINDOW).map(signature));
+        const fresh = p.newEvents.filter((e) => !seen.has(signature(e)));
+        return [...[...fresh].reverse(), ...prev].slice(0, EVENTS_CAP);
+      });
     }
   }
 }
