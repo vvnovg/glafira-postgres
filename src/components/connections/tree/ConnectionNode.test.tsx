@@ -162,7 +162,10 @@ describe("ConnectionNode", () => {
     vi.mocked(api.getTopology).mockResolvedValue(topologyView({ state: "degraded" }));
     vi.mocked(api.reconnect).mockResolvedValue(topologyView());
     const user = userEvent.setup();
-    renderNode();
+    const { client } = renderNode();
+    client.setQueryData(["catalog", "c", "databases"], []);
+    client.setQueryData(["memberFacts", "c", "pg-1"], { startedAtMs: 0, connections: 1, maxConnections: 100, databases: 1 });
+    client.setQueryData(["catalog", "other", "databases"], []);
     await screen.findByRole("img", { name: "Часть узлов недоступна" });
     await user.click(screen.getByRole("button", { name: toggleName }));
     await user.click(screen.getByRole("button", { name: "Действия с подключением billing" }));
@@ -170,6 +173,10 @@ describe("ConnectionNode", () => {
     expect(api.reconnect).toHaveBeenCalledWith("c");
     expect(await screen.findByRole("img", { name: "Подключено" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: toggleName })).toHaveAttribute("aria-expanded", "true");
+    // Каталог и факты этого подключения перечитываются (событие Disconnected больше не приходит), чужие — нет.
+    await waitFor(() => expect(client.getQueryState(["catalog", "c", "databases"])?.isInvalidated).toBe(true));
+    expect(client.getQueryState(["memberFacts", "c", "pg-1"])?.isInvalidated).toBe(true);
+    expect(client.getQueryState(["catalog", "other", "databases"])?.isInvalidated).toBe(false);
   });
 
   it("меню: пока идёт подключение (connecting), «Переподключить» не предлагается", async () => {

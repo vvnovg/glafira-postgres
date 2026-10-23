@@ -105,7 +105,12 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
             onSelect: () =>
               void api
                 .reconnect(c.id)
-                .then(setView)
+                .then((v) => {
+                  setView(v);
+                  // Подключение осталось тем же (журнал и узел каталога сохранены), события Disconnected не было:
+                  // списки каталога и факты узлов, упавшие на отказе во входе, перечитываются сами.
+                  void qc.invalidateQueries({ predicate: (q) => (q.queryKey[0] === "catalog" || q.queryKey[0] === "memberFacts") && q.queryKey[1] === c.id });
+                })
                 .catch((e: unknown) => setError(toAppError(e))),
           },
         ]

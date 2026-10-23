@@ -304,6 +304,8 @@ export function Overview({ connectionId, member, active = true }: { connectionId
     setError(null);
     try {
       qc.setQueryData(["topology", connectionId], await api.reconnect(connectionId));
+      // Подключение то же, события Disconnected нет: факты узлов и каталог после отказа во входе перечитываются сами.
+      void qc.invalidateQueries({ predicate: (q) => (q.queryKey[0] === "catalog" || q.queryKey[0] === "memberFacts") && q.queryKey[1] === connectionId });
     } catch (e) {
       setError(toAppError(e));
     } finally {

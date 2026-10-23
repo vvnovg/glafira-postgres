@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -136,12 +136,15 @@ describe("Overview", () => {
       vi.mocked(api.getTopology).mockResolvedValue(topologyView({ state: "degraded" }));
       vi.mocked(api.reconnect).mockResolvedValue(topologyView());
       const user = userEvent.setup();
-      renderWithClient(<Overview connectionId="c" />);
+      const { client } = renderWithClient(<Overview connectionId="c" />);
+      client.setQueryData(["catalog", "c", "databases"], []);
       await user.click(await screen.findByRole("button", { name: "Переподключить" }));
       expect(api.reconnect).toHaveBeenCalledWith("c");
       expect(await screen.findByText("Подключено")).toBeInTheDocument();
       expect(api.connect).not.toHaveBeenCalled();
       expect(screen.queryByRole("button", { name: "Переподключить" })).not.toBeInTheDocument();
+      // Каталог подключения перечитывается: события Disconnected при переподключении нет.
+      await waitFor(() => expect(client.getQueryState(["catalog", "c", "databases"])?.isInvalidated).toBe(true));
     });
 
     it("ошибка переподключения показывается баннером, кнопка снова доступна", async () => {
