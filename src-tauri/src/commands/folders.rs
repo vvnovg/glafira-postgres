@@ -7,6 +7,7 @@ use time::format_description::well_known::Rfc3339;
 use super::blocking;
 use super::connections::delete_stale_secrets;
 use crate::error::{AppError, AppResult, ErrorCode};
+use crate::secrets::{CONNECTION_SECRET_FIELDS, secret_key};
 use crate::state::AppState;
 use crate::storage::connections::{ConnectionFolder, ConnectionProfile};
 use crate::storage::exchange::{
@@ -164,7 +165,7 @@ fn ids_to_clear(plan: &ImportPlan) -> Vec<String> {
 }
 
 /// Импорт записан не будет, но пароли части подключений уже удалены: пользователю остаётся ввести их заново.
-/// `reset` — сколько ОБНОВЛЯЕМЫХ подключений лишились паролей (у добавляемых удалять было нечего).
+/// `reset` — сколько ОБНОВЛЯЕМЫХ подключений лишились паролей, хотя бы части (у добавляемых удалять было нечего).
 fn not_saved(error: AppError, reset: usize) -> AppError {
     tracing::warn!(
         "import not saved after the secrets of {reset} connections were removed: {}",
@@ -234,18 +235,17 @@ fn apply_import_attempts(
             if cleared.contains(&id) {
                 continue;
             }
-            let profile = plan
-                .next
-                .connections
-                .iter()
-                .find(|c| c.id == id)
-                .expect("planned connection exists");
-            // Ошибка keychain прерывает импорт до записи: хранилище не изменилось.
-            delete_stale_secrets(st.secrets.as_ref(), profile, true)?;
-            cleared.insert(id.clone());
-            if plan.secrets_reset.contains(&id) {
-                reset.insert(id);
+            let updated = plan.secrets_reset.contains(&id);
+            // Все секреты подключения, по одному полю. Ошибка keychain прерывает импорт до записи: хранилище
+            // не изменилось. Если отказ пришёлся не на первое поле, часть паролей обновляемого подключения уже
+            // удалена: оно попадает в `reset` сразу после первого удалённого поля, и ошибка скажет о нём.
+            for field in CONNECTION_SECRET_FIELDS {
+                st.secrets.delete(&secret_key(&id, field))?;
+                if updated {
+                    reset.insert(id.clone());
+                }
             }
+            cleared.insert(id);
         }
         // План пересчитывается на свежих данных под блокировкой записи. Если хранилище успело измениться и
         // секреты нужно удалить ещё у кого-то, запись откладывается: удаление — снова вне блокировки.
@@ -864,6 +864,33 @@ mod tests {
         assert_eq!(
             secrets_left(&secrets.inner, "b").len(),
             CONNECTION_SECRET_FIELDS.len()
+        );
+    }
+
+    /// Keychain отказал на втором поле единственного перенаправляемого подключения: первое поле уже удалено,
+    /// и ошибка говорит об этом подключении, а не только передаёт ошибку keychain.
+    #[test]
+    fn keychain_failure_inside_one_connection_reports_it_as_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(DeleteFailsAt {
+            inner: MemoryStore::default(),
+            fail_at: 2,
+            deletes: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let st = AppState::new(&dir.path().join("data"), secrets.clone()).unwrap();
+        st.connections.upsert(sample_profile("a")).unwrap();
+        set_all_secrets(&secrets.inner, "a");
+        let path = write_file(dir.path(), "changed");
+
+        let err = import_from_file(&st, &path, None, true, true).unwrap_err();
+        assert_eq!(err.key, "errors.import.notSaved");
+        assert_eq!(err.params["count"], "1");
+        assert_eq!(err.details.as_deref(), Some("keychain unavailable"));
+        // Хранилище не тронуто; первое поле удалено, остальные на месте.
+        assert_eq!(st.connections.get("a").unwrap().hosts[0].host, "localhost");
+        assert_eq!(
+            secrets_left(&secrets.inner, "a"),
+            CONNECTION_SECRET_FIELDS[1..]
         );
     }
 
