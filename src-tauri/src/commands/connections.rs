@@ -13,6 +13,7 @@ use crate::secrets::{
     PG_KEY_PASSWORD, PG_PASSWORD, SecretStore, secret_key,
 };
 use crate::state::AppState;
+use crate::sync::MutexExt;
 
 /// Секреты из формы. У каждого поля: `null`/нет — оставить сохранённый, `""` — удалить, иное — сохранить.
 #[derive(Default, Clone, Deserialize)]
@@ -141,8 +142,47 @@ pub(crate) fn apply_secret_ops(
     })
 }
 
+/// Прежние значения полей, которые операции изменят: при сбое keychain на середине уже применённые
+/// записи возвращаются назад, и профиль с секретами остаются согласованными.
+fn remember_before(
+    store: &dyn SecretStore,
+    id: &str,
+    ops: &[(&'static str, SecretOp)],
+) -> AppResult<Vec<(&'static str, Option<String>)>> {
+    ops.iter()
+        .filter(|(_, op)| !matches!(op, SecretOp::Keep))
+        .map(|(field, _)| Ok((*field, store.get(&secret_key(id, field))?)))
+        .collect()
+}
+
+/// Применяет операции; если keychain отказал посреди набора, возвращает уже изменённые поля к прежним
+/// значениям (сбой отката только пишется в журнал: лучше, чем ничего не вернуть).
+pub(crate) fn apply_secret_ops_undoable(
+    store: &dyn SecretStore,
+    id: &str,
+    ops: Vec<(&'static str, SecretOp)>,
+) -> AppResult<()> {
+    let before = remember_before(store, id, &ops)?;
+    if let Err(e) = apply_secret_ops(store, id, ops) {
+        for (field, prev) in before {
+            let key = secret_key(id, field);
+            let restored = match prev {
+                Some(v) => store.set(&key, &v),
+                None => store.delete(&key),
+            };
+            if let Err(r) = restored {
+                tracing::error!(
+                    "failed to restore secret {field} of {id} after a keychain error: {r}"
+                );
+            }
+        }
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// Удаляет из keychain секреты, которые подключению не нужны; с `reset` — все секреты подключения
-/// (импорт файла поменял его адрес или настройки безопасности, пароли получателя за новым адресом
+/// (импорт файла поменял его настройки соединения, пароли получателя за новым адресом
 /// оставлять нельзя). Остальное не трогает.
 pub(crate) fn delete_stale_secrets(
     store: &dyn SecretStore,
@@ -194,11 +234,13 @@ pub async fn save_connection(
 }
 
 /// Сохраняет профиль и секреты согласованно: если keychain не принял изменение,
-/// профиль возвращается к прежнему состоянию (или удаляется, если он новый).
+/// профиль возвращается к прежнему состоянию (или удаляется, если он новый), и уже применённые
+/// изменения keychain возвращаются назад. Идёт под `AppState::secrets_lock`.
 pub fn save_connection_blocking(
     st: &AppState,
     input: ConnectionInput,
 ) -> AppResult<ConnectionProfile> {
+    let _secrets = st.secrets_lock.lock_safe();
     let ConnectionInput {
         mut profile,
         secrets,
@@ -211,7 +253,7 @@ pub fn save_connection_blocking(
     let saved = st.connections.upsert(profile)?;
     let ops = secret_ops(&saved, &secrets);
     let secrets_changed = secrets_changed(&saved, &ops);
-    let result = apply_secret_ops(st.secrets.as_ref(), &saved.id, ops);
+    let result = apply_secret_ops_undoable(st.secrets.as_ref(), &saved.id, ops);
     if let Err(e) = result {
         let rollback = match previous {
             Some(p) => st.connections.upsert(p).map(|_| ()),
@@ -287,7 +329,9 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::conn::profile::{CertFormat, ClientCert, Environment, sample_profile};
+    use crate::conn::profile::{
+        CertFormat, ClientCert, ConnectionKind, Environment, PatroniSettings, sample_profile,
+    };
     use crate::error::{AppError, ErrorCode};
     use crate::secrets::{MemoryStore, SecretStore};
     use crate::state::tests::Closed;
@@ -308,6 +352,69 @@ mod tests {
         }
         fn delete(&self, _: &str) -> AppResult<()> {
             Err(AppError::internal_with("keychain unavailable"))
+        }
+    }
+
+    /// Keychain отказывает ровно на `fail_at`-м обращении на запись (считая с 1), остальные принимает:
+    /// сбой посреди набора операций, после которого откат должен пройти.
+    struct FailsOnce {
+        inner: MemoryStore,
+        fail_at: usize,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FailsOnce {
+        fn write_slot(&self) -> AppResult<()> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if n == self.fail_at {
+                Err(AppError::internal_with("keychain unavailable"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl SecretStore for FailsOnce {
+        fn get(&self, key: &str) -> AppResult<Option<String>> {
+            self.inner.get(key)
+        }
+        fn set(&self, key: &str, value: &str) -> AppResult<()> {
+            self.write_slot()?;
+            self.inner.set(key, value)
+        }
+        fn delete(&self, key: &str) -> AppResult<()> {
+            self.write_slot()?;
+            self.inner.delete(key)
+        }
+    }
+
+    /// Keychain, который проверяет, что каждое обращение на запись идёт под `AppState::secrets_lock`.
+    /// `try_lock` занятого замка возвращает `WouldBlock` и для своего потока (std::sync::Mutex не реентерабелен).
+    struct AssertsLocked {
+        inner: MemoryStore,
+        lock: std::sync::OnceLock<Arc<std::sync::Mutex<()>>>,
+    }
+
+    impl AssertsLocked {
+        fn assert_locked(&self) {
+            assert!(
+                self.lock.get().unwrap().try_lock().is_err(),
+                "обращение к keychain вне блокировки секретов"
+            );
+        }
+    }
+
+    impl SecretStore for AssertsLocked {
+        fn get(&self, key: &str) -> AppResult<Option<String>> {
+            self.inner.get(key)
+        }
+        fn set(&self, key: &str, value: &str) -> AppResult<()> {
+            self.assert_locked();
+            self.inner.set(key, value)
+        }
+        fn delete(&self, key: &str) -> AppResult<()> {
+            self.assert_locked();
+            self.inner.delete(key)
         }
     }
 
@@ -528,6 +635,85 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.code, ErrorCode::Internal);
         assert!(st.connections.get("a").is_err(), "новый профиль удалён");
+    }
+
+    #[test]
+    fn keychain_failure_midway_restores_the_secrets_already_changed() {
+        let store = Arc::new(FailsOnce {
+            inner: MemoryStore::default(),
+            fail_at: 3,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        store
+            .inner
+            .set(&secret_key("a", PG_PASSWORD), "old")
+            .unwrap();
+        let (_d, st) = state_with(store.clone());
+        // Профиль Patroni использует пароль PG и пароль API; два поля ключей не используются и удаляются.
+        let mut p = sample_profile("a");
+        p.kind = ConnectionKind::Patroni;
+        p.hosts.clear();
+        p.patroni = Some(PatroniSettings {
+            urls: vec!["http://h:8008".into()],
+            username: Some("u".into()),
+            tls: None,
+            host_overrides: vec![],
+        });
+        // Операции идут в порядке CONNECTION_SECRET_FIELDS: set pgPassword (1), delete pgKeyPassword (2)
+        // приняты, set patroniPassword (3) — отказ.
+        let err = save_connection_blocking(
+            &st,
+            input(
+                p,
+                SecretsInput {
+                    pg_password: Some("new".into()),
+                    patroni_password: Some("pw".into()),
+                    ..Default::default()
+                },
+            ),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert_eq!(
+            store
+                .inner
+                .get(&secret_key("a", PG_PASSWORD))
+                .unwrap()
+                .as_deref(),
+            Some("old"),
+            "применённая запись возвращена к прежнему значению"
+        );
+        assert!(
+            store
+                .inner
+                .get(&secret_key("a", PATRONI_PASSWORD))
+                .unwrap()
+                .is_none()
+        );
+        assert!(st.connections.get("a").is_err(), "новый профиль удалён");
+    }
+
+    #[test]
+    fn keychain_calls_of_save_and_delete_run_under_the_secrets_lock() {
+        let store = Arc::new(AssertsLocked {
+            inner: MemoryStore::default(),
+            lock: std::sync::OnceLock::new(),
+        });
+        let (_d, st) = state_with(store.clone());
+        store.lock.set(st.secrets_lock.clone()).unwrap();
+        save_connection_blocking(
+            &st,
+            input(
+                sample_profile("a"),
+                SecretsInput {
+                    pg_password: Some("pw".into()),
+                    ..Default::default()
+                },
+            ),
+        )
+        .unwrap();
+        st.delete_connection_full("a").unwrap();
+        assert!(st.connections.get("a").is_err());
     }
 
     #[test]

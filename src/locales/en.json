@@ -373,8 +373,8 @@
     "import": {
       "missingFiles_one": "Certificate files of {{count}} connection are not found on this computer — check the paths",
       "missingFiles_other": "Certificate files of {{count}} connections are not found on this computer — check the paths",
-      "passwordsReset_one": "Saved passwords of {{count}} connection will be removed because its address or security settings change — enter them again",
-      "passwordsReset_other": "Saved passwords of {{count}} connections will be removed because their address or security settings change — enter them again"
+      "passwordsReset_one": "Saved passwords of {{count}} connection will be removed because its connection settings (address, user, database, TLS, Patroni) change — enter them again",
+      "passwordsReset_other": "Saved passwords of {{count}} connections will be removed because their connection settings (address, user, database, TLS, Patroni) change — enter them again"
     }
   },
   "exchange": {
@@ -580,7 +580,7 @@
     },
     "import": {
       "target": "Where new folders and connections go. Existing ones stay where they are.",
-      "updateExisting": "Existing connections get the settings from the file and keep their place in the tree. Saved passwords are kept only if the address and security settings do not change."
+      "updateExisting": "Existing connections get the settings from the file and keep their place in the tree. Saved passwords are kept only if the connection settings (address, user, database, TLS, Patroni) do not change."
     }
   }
 }

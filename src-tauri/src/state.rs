@@ -6,6 +6,7 @@ use crate::error::AppResult;
 use crate::secrets::SecretStore;
 use crate::settings::SettingsStore;
 use crate::storage::connections::{ConnectionProfile, ConnectionStore};
+use crate::sync::MutexExt;
 use crate::topology::runtime::{LiveSource, Runtimes};
 
 #[derive(Clone)]
@@ -18,6 +19,11 @@ pub struct AppState {
     pub pools: Arc<PoolRegistry>,
     /// Открытые подключения: топология, журнал событий, узел каталога.
     pub runtimes: Arc<Runtimes>,
+    /// Операции с секретами подключений (сохранение формы, импорт, удаление) идут по одной. Иначе импорт,
+    /// удаливший пароли подключения, мог бы записать адрес из файла после того, как параллельное сохранение
+    /// положило в keychain новый пароль. Берётся в блокирующем потоке и держится вокруг обращений к keychain
+    /// и хранилищу; блокировка хранилища берётся внутри неё (порядок один везде — взаимной блокировки нет).
+    pub secrets_lock: Arc<std::sync::Mutex<()>>,
 }
 
 impl AppState {
@@ -36,6 +42,7 @@ impl AppState {
             settings: Arc::new(SettingsStore::open(data_dir)),
             pools,
             runtimes,
+            secrets_lock: Arc::new(std::sync::Mutex::new(())),
         })
     }
 
@@ -71,8 +78,9 @@ impl AppState {
     /// Удаляет подключение и все его секреты (блокирующий вызов: keychain). Сначала секреты, потом профиль:
     /// если keychain откажет, подключение останется в дереве и удаление можно повторить, а не останутся
     /// «ничьи» пароли, которые подхватило бы подключение с тем же id из импортируемого файла. Отсутствующая
-    /// запись keychain ошибкой не считается.
+    /// запись keychain ошибкой не считается. Идёт под `secrets_lock`, как сохранение формы и импорт.
     pub fn delete_connection_full(&self, id: &str) -> AppResult<()> {
+        let _secrets = self.secrets_lock.lock_safe();
         self.runtimes.disconnect(id);
         for field in crate::secrets::CONNECTION_SECRET_FIELDS {
             self.secrets

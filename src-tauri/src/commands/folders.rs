@@ -10,11 +10,12 @@ use crate::error::{AppError, AppResult, ErrorCode};
 use crate::state::AppState;
 use crate::storage::connections::{ConnectionFolder, ConnectionProfile};
 use crate::storage::exchange::{
-    ExportSummary, ImportOptions, ImportPlan, ImportPreview, build_export,
+    ExportSummary, ImportOptions, ImportPlan, ImportPreview, ParsedExchange, build_export,
     existing_certificate_files, parse_exchange, plan_import, read_import_file,
 };
 use crate::storage::fs::write_json;
 use crate::storage::tree::{TreeItemKind, TreeItemRef};
+use crate::sync::MutexExt;
 
 /// Как `list_connections`: блокировку хранилища ждёт фоновый поток, а не главный.
 #[tauri::command]
@@ -124,7 +125,7 @@ pub async fn preview_import(
 
 /// Применяет импорт: план пересчитывается на свежих данных и пишется одной записью.
 /// Секреты из файла не читаются и не пишутся: пароли новых подключений вводит пользователь,
-/// а у обновлённых подключений с новым адресом или настройками безопасности сохранённые пароли удаляются
+/// а у обновлённых подключений с другими настройками соединения сохранённые пароли удаляются
 /// (до записи хранилища — см. `import_from_file`).
 #[tauri::command]
 pub async fn apply_import(
@@ -162,17 +163,18 @@ fn ids_to_clear(plan: &ImportPlan) -> Vec<String> {
     plan.secrets_reset.iter().cloned().chain(added).collect()
 }
 
-/// Импорт записан, но пароли части подключений уже удалены: пользователю остаётся ввести их заново.
-fn not_saved(error: AppError, cleared: usize) -> AppError {
+/// Импорт записан не будет, но пароли части подключений уже удалены: пользователю остаётся ввести их заново.
+/// `reset` — сколько ОБНОВЛЯЕМЫХ подключений лишились паролей (у добавляемых удалять было нечего).
+fn not_saved(error: AppError, reset: usize) -> AppError {
     tracing::warn!(
-        "import not saved after the secrets of {cleared} connections were removed: {}",
+        "import not saved after the secrets of {reset} connections were removed: {}",
         error.message
     );
     app_err!(
         ErrorCode::Internal,
         "errors.import.notSaved",
         "The import was not saved. Saved passwords of {{count}} connections it would change have already been removed — enter them again",
-        count = cleared
+        count = reset
     )
     .with_details(error.details.clone().unwrap_or(error.message))
 }
@@ -200,9 +202,34 @@ fn import_from_file(
     // в хранилище появится новый адрес: ни подключение в промежутке, ни падение процесса, ни сбой записи
     // не свяжут сохранённый пароль с адресом из файла. Неудача в обратную сторону безопасна: пароли уже
     // удалены, профиль ещё прежний — пользователь вводит пароли заново. Keychain — вне блокировки хранилища.
+    // Секреты и хранилище — под блокировкой секретов: параллельное сохранение формы не положит новый пароль
+    // под адрес из файла. Keychain при этом вне блокировки записи хранилища (см. `apply_import_attempts`).
+    let _secrets = st.secrets_lock.lock_safe();
     let mut cleared: HashSet<String> = HashSet::new();
+    // Обновляемые подключения, уже лишившиеся паролей: о них говорит любая последующая ошибка.
+    let mut reset: HashSet<String> = HashSet::new();
+    apply_import_attempts(st, &parsed, &opts, &file_exists, &mut cleared, &mut reset).map_err(|e| {
+        if reset.is_empty() {
+            e
+        } else {
+            not_saved(e, reset.len())
+        }
+    })
+}
+
+/// Удаляет секреты перенаправляемых и новых подключений и пишет импорт; при изменении хранилища
+/// в промежутке план пересчитывается (до `IMPORT_ATTEMPTS` раз). `cleared` — подключения, чьи секреты уже
+/// удалены, `reset` — те из них, что обновляются (их пароли пользователь терял по-настоящему).
+fn apply_import_attempts(
+    st: &AppState,
+    parsed: &ParsedExchange,
+    opts: &ImportOptions,
+    file_exists: &dyn Fn(&str) -> bool,
+    cleared: &mut HashSet<String>,
+    reset: &mut HashSet<String>,
+) -> AppResult<ImportPreview> {
     for _ in 0..IMPORT_ATTEMPTS {
-        let plan = plan_import(&st.connections.snapshot(), &parsed, &opts, &file_exists)?;
+        let plan = plan_import(&st.connections.snapshot(), parsed, opts, file_exists)?;
         for id in ids_to_clear(&plan) {
             if cleared.contains(&id) {
                 continue;
@@ -215,12 +242,15 @@ fn import_from_file(
                 .expect("planned connection exists");
             // Ошибка keychain прерывает импорт до записи: хранилище не изменилось.
             delete_stale_secrets(st.secrets.as_ref(), profile, true)?;
-            cleared.insert(id);
+            cleared.insert(id.clone());
+            if plan.secrets_reset.contains(&id) {
+                reset.insert(id);
+            }
         }
         // План пересчитывается на свежих данных под блокировкой записи. Если хранилище успело измениться и
         // секреты нужно удалить ещё у кого-то, запись откладывается: удаление — снова вне блокировки.
         let written = st.connections.update_if(|data| {
-            let plan = plan_import(data, &parsed, &opts, &file_exists)?;
+            let plan = plan_import(data, parsed, opts, file_exists)?;
             if !ids_to_clear(&plan).iter().all(|id| cleared.contains(id)) {
                 return Ok(None);
             }
@@ -236,14 +266,11 @@ fn import_from_file(
             *data = plan.next;
             Ok(Some((plan.preview, updated)))
         });
-        let (preview, updated) = match written {
-            Ok(Some(done)) => done,
-            Ok(None) => continue,
-            Err(e) if cleared.is_empty() => return Err(e),
-            Err(e) => return Err(not_saved(e, cleared.len())),
+        let Some((preview, updated)) = written? else {
+            continue;
         };
-        for (after, reset) in &updated {
-            if *reset {
+        for (after, was_reset) in &updated {
+            if *was_reset {
                 // Как при сохранении формы: открытое подключение переоткроется уже без паролей.
                 st.runtimes.disconnect(&after.id);
             } else {
@@ -482,7 +509,10 @@ mod tests {
         // Профили прежние; пароли подключения, которое файл перенаправлял, уже удалены — безопасная сторона:
         // пользователю остаётся ввести их заново, и ошибка говорит об этом.
         assert_eq!(err.key, "errors.import.notSaved");
-        assert_eq!(err.params["count"], "2", "`a` с новым адресом и новое `n`");
+        assert_eq!(
+            err.params["count"], "1",
+            "только `a` с новым адресом: у нового `n` паролей не было"
+        );
         assert!(err.details.is_some());
         assert_eq!(std::fs::read(&conns).unwrap(), before);
         assert_eq!(st.connections.list().len(), 1);
@@ -768,6 +798,111 @@ mod tests {
         }
     }
 
+    /// Keychain, отказывающий ровно на `fail_at`-м удалении (считая с 1).
+    struct DeleteFailsAt {
+        inner: MemoryStore,
+        fail_at: usize,
+        deletes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl SecretStore for DeleteFailsAt {
+        fn get(&self, key: &str) -> AppResult<Option<String>> {
+            self.inner.get(key)
+        }
+        fn set(&self, key: &str, value: &str) -> AppResult<()> {
+            self.inner.set(key, value)
+        }
+        fn delete(&self, key: &str) -> AppResult<()> {
+            let n = self
+                .deletes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            if n == self.fail_at {
+                return Err(AppError::internal_with("keychain unavailable"));
+            }
+            self.inner.delete(key)
+        }
+    }
+
+    /// Файл перенаправляет оба существующих подключения; keychain падает на первом удалении второго.
+    /// Пароли первого уже удалены — ошибка говорит об этом и считает только его.
+    #[test]
+    fn keychain_failure_on_the_second_connection_reports_the_first_as_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(DeleteFailsAt {
+            inner: MemoryStore::default(),
+            fail_at: CONNECTION_SECRET_FIELDS.len() + 1,
+            deletes: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let st = AppState::new(&dir.path().join("data"), secrets.clone()).unwrap();
+        for id in ["a", "b"] {
+            st.connections.upsert(sample_profile(id)).unwrap();
+            set_all_secrets(&secrets.inner, id);
+        }
+        let mut a = serde_json::to_value(sample_profile("a")).unwrap();
+        a["hosts"] = serde_json::json!([{"host": "evil-a", "port": 5432}]);
+        let mut b = serde_json::to_value(sample_profile("b")).unwrap();
+        b["hosts"] = serde_json::json!([{"host": "evil-b", "port": 5432}]);
+        let path = dir.path().join("in.glafira-postgres-connections.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "format": "glafira-postgres-connections", "version": 1,
+                "folders": [], "connections": [a, b],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let err = import_from_file(&st, &path, None, true, true).unwrap_err();
+        assert_eq!(err.key, "errors.import.notSaved");
+        assert_eq!(err.params["count"], "1");
+        // Хранилище не тронуто; у `a` паролей нет, у `b` — все на месте.
+        assert_eq!(st.connections.get("a").unwrap().hosts[0].host, "localhost");
+        assert_eq!(st.connections.get("b").unwrap().hosts[0].host, "localhost");
+        assert!(secrets_left(&secrets.inner, "a").is_empty());
+        assert_eq!(
+            secrets_left(&secrets.inner, "b").len(),
+            CONNECTION_SECRET_FIELDS.len()
+        );
+    }
+
+    /// Удаление секретов импорта идёт под `AppState::secrets_lock` (см. `AssertsLocked` в commands/connections.rs).
+    #[test]
+    fn import_deletes_secrets_under_the_secrets_lock() {
+        struct Locked {
+            inner: MemoryStore,
+            lock: std::sync::OnceLock<Arc<std::sync::Mutex<()>>>,
+        }
+        impl SecretStore for Locked {
+            fn get(&self, key: &str) -> AppResult<Option<String>> {
+                self.inner.get(key)
+            }
+            fn set(&self, key: &str, value: &str) -> AppResult<()> {
+                self.inner.set(key, value)
+            }
+            fn delete(&self, key: &str) -> AppResult<()> {
+                assert!(
+                    self.lock.get().unwrap().try_lock().is_err(),
+                    "удаление вне блокировки секретов"
+                );
+                self.inner.delete(key)
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(Locked {
+            inner: MemoryStore::default(),
+            lock: std::sync::OnceLock::new(),
+        });
+        let st = AppState::new(&dir.path().join("data"), secrets.clone()).unwrap();
+        secrets.lock.set(st.secrets_lock.clone()).unwrap();
+        st.connections.upsert(sample_profile("a")).unwrap();
+        set_all_secrets(&secrets.inner, "a");
+        let path = write_file(dir.path(), "changed");
+        import_from_file(&st, &path, None, true, true).unwrap();
+        assert!(secrets_left(&secrets.inner, "a").is_empty());
+    }
+
     #[test]
     fn keychain_delete_failure_stops_the_import_before_the_store_is_written() {
         let dir = tempfile::tempdir().unwrap();
@@ -1003,7 +1138,16 @@ mod tests {
         }));
         let before = std::fs::read(dir.path().join("connections.json")).unwrap();
         let err = import_from_file(&st, &path, None, true, true).unwrap_err();
-        assert_eq!(err.key, "errors.import.storeChanged");
+        // Импорт сдался, но пароли перенаправляемых `a`, `c0` и `c1` уже удалены: ошибка говорит об этом,
+        // а причина (хранилище менялось) — в подробностях.
+        assert_eq!(err.key, "errors.import.notSaved");
+        assert_eq!(err.params["count"], "3", "`a`, `c0`, `c1`");
+        assert!(
+            err.details
+                .as_deref()
+                .is_some_and(|d| d.contains("changed while the import")),
+            "{err:?}"
+        );
         assert_eq!(st.connections.get("a").unwrap().hosts[0].host, "localhost");
         // Файл менялся только «чужими» сохранениями, импорт его не писал: `a` прежний.
         assert_ne!(
