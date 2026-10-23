@@ -188,7 +188,7 @@ mod tests {
 
     use super::*;
     use crate::conn::errors::classify_sqlstate;
-    use crate::conn::pool::{MAX_CONNECTIONS, PoolKey, PoolRegistry};
+    use crate::conn::pool::{MAX_CONNECTIONS, PoolKey, PoolPurpose, PoolRegistry};
     use crate::conn::profile::{SslMode, sample_profile};
     use crate::conn::testutil;
     use crate::secrets::MemoryStore;
@@ -345,6 +345,7 @@ mod tests {
             connection_id: "c".into(),
             member: "m".into(),
             database: "postgres".into(),
+            purpose: PoolPurpose::Catalog,
         }
     }
 
@@ -358,6 +359,7 @@ mod tests {
             "127.0.0.1",
             port,
             "postgres",
+            PoolPurpose::Catalog,
         )
         .await
     }

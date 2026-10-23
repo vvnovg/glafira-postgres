@@ -94,6 +94,13 @@ export interface SecretsInput {
   patroniPassword?: string | null;
   patroniKeyPassword?: string | null;
 }
+/** Какие секреты подключения сохранены в keychain (значения не передаются). */
+export interface SecretsSet {
+  pgPassword: boolean;
+  pgKeyPassword: boolean;
+  patroniPassword: boolean;
+  patroniKeyPassword: boolean;
+}
 export interface ProfilePatch {
   kind: ConnectionKind;
   hosts: HostPort[];

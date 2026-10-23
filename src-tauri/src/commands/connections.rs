@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use super::blocking;
@@ -283,6 +283,39 @@ pub fn parse_connection_string(text: String) -> AppResult<crate::conn::connstr::
 pub async fn delete_connection(state: State<'_, AppState>, id: String) -> AppResult<()> {
     let st = state.inner().clone();
     blocking(move || st.delete_connection_full(&id)).await
+}
+
+/// Какие секреты подключения сохранены (значения не возвращаются): форма показывает «оставить
+/// сохранённый» только там, где есть что оставить.
+#[derive(Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretsSet {
+    pub pg_password: bool,
+    pub pg_key_password: bool,
+    pub patroni_password: bool,
+    pub patroni_key_password: bool,
+}
+
+/// Пустая запись keychain сохранённым секретом не считается: оставлять в ней нечего.
+fn secrets_set(store: &dyn SecretStore, id: &str) -> AppResult<SecretsSet> {
+    let has = |field: &str| -> AppResult<bool> {
+        Ok(store
+            .get(&secret_key(id, field))?
+            .is_some_and(|v| !v.is_empty()))
+    };
+    Ok(SecretsSet {
+        pg_password: has(PG_PASSWORD)?,
+        pg_key_password: has(PG_KEY_PASSWORD)?,
+        patroni_password: has(PATRONI_PASSWORD)?,
+        patroni_key_password: has(PATRONI_KEY_PASSWORD)?,
+    })
+}
+
+/// Keychain читается в блокирующем потоке, как при сохранении формы.
+#[tauri::command]
+pub async fn connection_secrets(state: State<'_, AppState>, id: String) -> AppResult<SecretsSet> {
+    let st = state.inner().clone();
+    blocking(move || secrets_set(st.secrets.as_ref(), &id)).await
 }
 
 /// Секреты для проверки: значения формы поверх keychain. Несохранённому профилю (`id` пуст) keychain не
@@ -927,5 +960,47 @@ mod tests {
         assert_eq!(o.get("id/pgPassword").map(String::as_str), Some(""));
         assert_eq!(o.get("id/patroniPassword").map(String::as_str), Some("x"));
         assert!(!o.contains_key("id/pgKeyPassword"));
+    }
+
+    #[test]
+    fn connection_secrets_report_which_fields_are_saved() {
+        let store = Arc::new(MemoryStore::default());
+        store.set(&secret_key("a", PG_PASSWORD), "pw").unwrap();
+        store
+            .set(&secret_key("a", PATRONI_KEY_PASSWORD), "kp")
+            .unwrap();
+        store.set(&secret_key("a", PG_KEY_PASSWORD), "").unwrap();
+        assert_eq!(
+            secrets_set(store.as_ref(), "a").unwrap(),
+            SecretsSet {
+                pg_password: true,
+                pg_key_password: false,
+                patroni_password: false,
+                patroni_key_password: true
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(secrets_set(store.as_ref(), "a").unwrap()).unwrap()["pgKeyPassword"],
+            false
+        );
+    }
+
+    /// Keychain не читается: ошибка, а не «ничего не сохранено» — иначе форма предложила бы ввести пароль
+    /// заново.
+    #[test]
+    fn connection_secrets_propagate_keychain_errors() {
+        struct Unreadable;
+        impl SecretStore for Unreadable {
+            fn get(&self, _: &str) -> AppResult<Option<String>> {
+                Err(AppError::internal_with("keychain unavailable"))
+            }
+            fn set(&self, _: &str, _: &str) -> AppResult<()> {
+                Ok(())
+            }
+            fn delete(&self, _: &str) -> AppResult<()> {
+                Ok(())
+            }
+        }
+        assert!(secrets_set(&Unreadable, "a").is_err());
     }
 }

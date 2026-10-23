@@ -454,7 +454,21 @@ impl Runtimes {
         }
         self.pools.evict_connection(id);
         self.source.forget(id);
+        // Замок подключения нужен только пока кто-то подключается: иначе карта росла бы с каждым id.
+        self.connect_locks
+            .lock_safe()
+            .retain(|k, l| k != id || Arc::strong_count(l) > 1);
         self.emit_state(id, ConnState::Disconnected, None);
+    }
+
+    /// «Переподключить»: закрыть и открыть заново. Пулы (и запомненный отказ во входе) сбрасываются,
+    /// секреты читаются из keychain заново — без ручного «Отключиться» и раскрытия узла.
+    pub async fn reconnect(
+        self: &Arc<Self>,
+        profile: ConnectionProfile,
+    ) -> AppResult<TopologyView> {
+        self.disconnect(&profile.id);
+        self.connect(profile).await
     }
 
     /// Профиль сохранён с правкой, не затрагивающей соединение (имя, цвет, папка…): открытое подключение
@@ -545,7 +559,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::conn::pool::PoolKey;
+    use crate::conn::pool::{PoolKey, PoolPurpose};
     use crate::conn::profile::{ConnectionKind, sample_profile};
     use crate::error::ErrorCode;
     use crate::topology::journal::EventKind;
@@ -716,6 +730,7 @@ mod tests {
             connection_id: "c".into(),
             member: member.into(),
             database: "postgres".into(),
+            purpose: PoolPurpose::Catalog,
         }
     }
 
@@ -803,6 +818,7 @@ mod tests {
                 connection_id: "c".into(),
                 member: "a".into(),
                 database: "postgres".into(),
+                purpose: PoolPurpose::Catalog,
             },
             crate::conn::pg::ConnectSpec::build(
                 &sample_profile("c"),
@@ -823,6 +839,63 @@ mod tests {
             rec.states.lock_safe().last(),
             Some(&ConnState::Disconnected)
         );
+    }
+
+    /// «Переподключить»: закрыть и открыть заново — пулы (с отметкой об отказе во входе) сброшены, состояния
+    /// прошли через Disconnected, замок подключения после отключения не копится.
+    #[tokio::test]
+    async fn reconnect_closes_and_reopens_the_connection() {
+        let (rt, _src, rec, pools) = manual(vec![Ok(two("a")), Ok(two("a"))]);
+        rt.connect(patroni_profile()).await.unwrap();
+        add_pool(&pools, "a");
+        assert!(!pools.keys().is_empty());
+
+        let view = rt.reconnect(patroni_profile()).await.unwrap();
+        assert_eq!(view.state, ConnState::Connected);
+        assert!(pools.keys().is_empty(), "пулы вытеснены");
+        assert_eq!(
+            *rec.states.lock_safe(),
+            vec![
+                ConnState::Connecting,
+                ConnState::Connected,
+                ConnState::Disconnected,
+                ConnState::Connecting,
+                ConnState::Connected
+            ]
+        );
+
+        rt.disconnect("c");
+        assert!(
+            rt.connect_locks.lock_safe().is_empty(),
+            "замок удалён вместе с подключением"
+        );
+    }
+
+    /// Замок, который держит идущее открытие, отключение не удаляет: иначе следующее открытие взяло бы новый
+    /// замок и пошло бы параллельно с ним.
+    #[tokio::test]
+    async fn disconnect_keeps_the_lock_of_a_connect_in_progress() {
+        let src = Scripted::with_delay(vec![Ok(two("a"))], Duration::from_millis(150));
+        let rt = Runtimes::with_interval(
+            src.clone(),
+            Arc::new(PoolRegistry::default()),
+            Duration::from_secs(60),
+        );
+        let connect = tokio::spawn({
+            let rt = rt.clone();
+            async move { rt.connect(patroni_profile()).await }
+        });
+        eventually("опрос начался", || src.calls() == 1).await;
+        rt.disconnect("c");
+        assert_eq!(
+            rt.connect_locks.lock_safe().len(),
+            1,
+            "замок идущего открытия остался"
+        );
+        connect.await.unwrap().unwrap_err();
+        rt.disconnect("c");
+        assert!(rt.connect_locks.lock_safe().is_empty());
+        rt.shutdown();
     }
 
     /// Узел, который не ответил: отказ во входе.

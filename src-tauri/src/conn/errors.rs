@@ -236,7 +236,7 @@ pub fn login_not_retried(original: &AppError) -> AppError {
     app_err!(
         ErrorCode::AuthFailed,
         "errors.pg.loginNotRetried",
-        "Authentication failed; the login is not retried until the connection is reopened: check the user, the password and pg_hba.conf, then connect again"
+        "Authentication failed; the login is not retried until the connection is reopened: check the user, the password and pg_hba.conf, then choose “Reconnect” in the connection menu"
     )
     .with_details(
         original

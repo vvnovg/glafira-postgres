@@ -1,5 +1,6 @@
-//! Пул соединений по ключу (подключение, участник, БД): не больше 3 соединений, проверка при выдаче,
-//! закрытие простаивающих (спец. P1 §7). Свой пул вместо deadpool-postgres — см. «Отступления» плана P1a.
+//! Пул соединений по ключу (подключение, участник, БД, назначение): не больше 3 соединений (у пула опроса
+//! топологии — одно), проверка при выдаче, закрытие простаивающих (спец. P1 §7). Свой пул вместо
+//! deadpool-postgres — см. «Отступления» плана P1a.
 
 use std::collections::HashMap;
 use std::ops::Deref;
@@ -20,6 +21,23 @@ pub const MAX_CONNECTIONS: usize = 3;
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Соединение, простоявшее дольше, перед выдачей проверяется пустым запросом.
 const VALIDATE_AFTER: Duration = Duration::from_secs(30);
+
+/// Назначение пула. Опрос топологии получает свой пул из одного соединения: иначе страницы каталога
+/// занимали бы все три места, и опрос ждал бы их дольше своего предела — ложное `memberUnreachable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PoolPurpose {
+    Catalog,
+    Probe,
+}
+
+impl PoolPurpose {
+    fn max_connections(self) -> usize {
+        match self {
+            Self::Catalog => MAX_CONNECTIONS,
+            Self::Probe => 1,
+        }
+    }
+}
 
 /// Соединение вместе с задачей, которая его обслуживает.
 ///
@@ -144,19 +162,30 @@ impl PgPool {
         Self::with_validate_after(spec, VALIDATE_AFTER)
     }
 
+    /// Пул не больше чем на `max` соединений (пул опроса топологии — на одно).
+    pub fn with_max(spec: ConnectSpec, max: usize) -> Arc<Self> {
+        let close_grace = spec.timeout;
+        Self::build(spec, VALIDATE_AFTER, close_grace, max)
+    }
+
     /// Только для тестов: пул с другим порогом проверки при выдаче (`Duration::ZERO` — проверять всегда).
     /// Рабочий код использует `new` с порогом в 30 с.
     #[doc(hidden)]
     pub fn with_validate_after(spec: ConnectSpec, validate_after: Duration) -> Arc<Self> {
         let close_grace = spec.timeout;
-        Self::build(spec, validate_after, close_grace)
+        Self::build(spec, validate_after, close_grace, MAX_CONNECTIONS)
     }
 
-    fn build(spec: ConnectSpec, validate_after: Duration, close_grace: Duration) -> Arc<Self> {
+    fn build(
+        spec: ConnectSpec,
+        validate_after: Duration,
+        close_grace: Duration,
+        max: usize,
+    ) -> Arc<Self> {
         Arc::new(Self {
             spec,
             idle: Mutex::new(Vec::new()),
-            permits: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+            permits: Arc::new(Semaphore::new(max)),
             validate_after,
             close_grace,
             auth_failure: Mutex::new(None),
@@ -177,8 +206,9 @@ impl PgPool {
         self.auth_failure.lock_safe().clone()
     }
 
-    /// Свободное соединение или новое; при занятых трёх — ждёт освобождения. Если сервер уже отверг вход,
-    /// новое соединение не открывается (`auth_failure`); уже открытые, пока живы, выдаются как обычно.
+    /// Свободное соединение или новое; когда все места заняты (три, у пула опроса — одно), ждёт освобождения.
+    /// Если сервер уже отверг вход, новое соединение не открывается (`auth_failure`); уже открытые, пока
+    /// живы, выдаются как обычно.
     pub async fn get(self: &Arc<Self>) -> AppResult<PooledClient> {
         if let Some(e) = self.auth_failure()
             && self.idle_count() == 0
@@ -268,8 +298,12 @@ pub struct PoolKey {
     pub connection_id: String,
     pub member: String,
     pub database: String,
+    pub purpose: PoolPurpose,
 }
 
+/// Пулы приложения по ключу (подключение, участник, БД, назначение). У страниц каталога — до
+/// `MAX_CONNECTIONS` соединений на узел и БД; опрос топологии держит рядом свой пул из одного соединения
+/// (`PoolPurpose::Probe`), так что на узел приходится одно соединение сверх трёх каталожных.
 #[derive(Default)]
 pub struct PoolRegistry {
     pools: Mutex<HashMap<PoolKey, Arc<PgPool>>>,
@@ -290,7 +324,7 @@ impl PoolRegistry {
         {
             return p.clone();
         }
-        let pool = PgPool::new(spec);
+        let pool = PgPool::with_max(spec, key.purpose.max_connections());
         pools.insert(key, pool.clone());
         pool
     }
@@ -348,6 +382,7 @@ mod tests {
             connection_id: c.into(),
             member: m.into(),
             database: d.into(),
+            purpose: PoolPurpose::Catalog,
         }
     }
 
@@ -453,6 +488,37 @@ mod tests {
         assert_eq!(reuse_decision(IDLE_TIMEOUT, s(600)), Reuse::Discard);
     }
 
+    #[tokio::test]
+    async fn probe_pool_has_a_single_permit() {
+        let pool = PgPool::with_max(spec(), 1);
+        assert_eq!(pool.permits.available_permits(), 1);
+        assert_eq!(
+            PgPool::new(spec()).permits.available_permits(),
+            MAX_CONNECTIONS
+        );
+    }
+
+    /// Пул опроса и пул каталога одного узла и БД — разные пулы: у опроса одно место, у каталога три.
+    #[test]
+    fn registry_sizes_pools_by_purpose() {
+        let r = PoolRegistry::default();
+        let catalog = r.insert_if_absent(key("c", "m", "d"), spec());
+        let probe_key = PoolKey {
+            purpose: PoolPurpose::Probe,
+            ..key("c", "m", "d")
+        };
+        let probe = r.insert_if_absent(probe_key.clone(), spec());
+        assert!(!Arc::ptr_eq(&catalog, &probe));
+        assert_eq!(catalog.permits.available_permits(), MAX_CONNECTIONS);
+        assert_eq!(probe.permits.available_permits(), 1);
+        // Вытеснение участника и подключения убирает оба.
+        r.evict_member("c", "m");
+        assert!(r.keys().is_empty());
+        r.insert_if_absent(probe_key, spec());
+        r.evict_connection("c");
+        assert!(r.keys().is_empty());
+    }
+
     #[test]
     fn new_uses_default_validate_after() {
         assert_eq!(PgPool::new(spec()).validate_after, Duration::from_secs(30));
@@ -485,6 +551,7 @@ mod tests {
             stalling_spec(port, Duration::from_millis(300)),
             validate_after,
             LONG_GRACE,
+            MAX_CONNECTIONS,
         )
     }
 

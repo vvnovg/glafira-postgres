@@ -71,6 +71,7 @@ impl AppState {
             &m.host,
             m.port,
             &db,
+            crate::conn::pool::PoolPurpose::Catalog,
         )
         .await
     }

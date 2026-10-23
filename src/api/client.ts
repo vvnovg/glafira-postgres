@@ -17,6 +17,7 @@ import type {
   RoleInfo,
   SchemaInfo,
   SecretsInput,
+  SecretsSet,
   TestEvent,
   TestReport,
   TopologyEvent,
@@ -57,6 +58,8 @@ export const api = {
   listConnections: () => call<ConnectionProfile[]>("list_connections"),
   saveConnection: (profile: ConnectionProfile, secrets: SecretsInput) =>
     call<ConnectionProfile>("save_connection", { input: { profile, secrets } }),
+  /** Какие секреты сохранены (без значений): «оставить сохранённый» — только там, где он есть. */
+  connectionSecrets: (id: string) => call<SecretsSet>("connection_secrets", { id }),
   deleteConnection: (id: string) => call<void>("delete_connection", { id }),
   parseConnectionString: (text: string) => call<ParsedConnection>("parse_connection_string", { text }),
   /** Шаги проверки приходят в `onEvent` по мере выполнения; итог — отчёт. */
@@ -81,6 +84,8 @@ export const api = {
     call<ImportPreview>("apply_import", { path, targetFolderId, updateExisting }),
 
   connect: (id: string) => call<TopologyView>("connect", { id }),
+  /** Закрыть и открыть заново: запомненный отказ во входе сбрасывается, секреты читаются заново. */
+  reconnect: (id: string) => call<TopologyView>("reconnect", { id }),
   disconnect: (id: string) => call<void>("disconnect", { id }),
   getTopology: (id: string) => call<TopologyView>("get_topology", { id }),
   listTopologyEvents: (id: string) => call<TopologyEvent[]>("list_topology_events", { id }),

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use glafira_pg_lib::commands::topology::{member_facts, member_facts_within};
-use glafira_pg_lib::conn::pool::{PoolKey, PoolRegistry};
+use glafira_pg_lib::conn::pool::{PoolKey, PoolPurpose, PoolRegistry};
 use glafira_pg_lib::conn::profile::{ConnectionKind, HostPort, SslMode};
 use glafira_pg_lib::error::ErrorCode;
 use glafira_pg_lib::secrets::{PATRONI_PASSWORD, PG_PASSWORD, SecretStore, secret_key};
@@ -139,12 +139,13 @@ async fn host_list_uses_pooled_connections_and_default_member() {
         "цель — primary"
     );
 
-    // Каждый узел опрошен через свой пул, исправное соединение вернулось в пул.
+    // Каждый узел опрошен через свой пул опроса, исправное соединение вернулось в пул.
     for m in [primary, replica] {
         let key = PoolKey {
             connection_id: "rt-list".into(),
             member: m.name.clone(),
             database: "postgres".into(),
+            purpose: PoolPurpose::Probe,
         };
         assert_eq!(
             pools.get(&key).expect("пул узла").idle_count(),
@@ -255,17 +256,24 @@ async fn stalled_member_facts_close_the_connection() {
         .connect(st.profile("rt-stall").unwrap())
         .await
         .unwrap();
-    let key = PoolKey {
+    let probe = PoolKey {
         connection_id: "rt-stall".into(),
         member: member.clone(),
         database: "postgres".into(),
+        purpose: PoolPurpose::Probe,
     };
     assert_eq!(
-        st.pools.get(&key).unwrap().idle_count(),
+        st.pools.get(&probe).unwrap().idle_count(),
         1,
-        "опрос оставил соединение в пуле"
+        "опрос оставил соединение в своём пуле"
     );
     member_facts(&st, "rt-stall", &member).await.unwrap();
+    // Сведения об узле идут через пул каталога: соединение опроса ему не выдаётся.
+    let key = PoolKey {
+        purpose: PoolPurpose::Catalog,
+        ..probe
+    };
+    assert_eq!(st.pools.get(&key).unwrap().idle_count(), 1);
 
     proxy.freeze_existing();
     let started = Instant::now();

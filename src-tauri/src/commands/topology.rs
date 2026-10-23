@@ -69,6 +69,14 @@ pub async fn connect(state: State<'_, AppState>, id: String) -> AppResult<Topolo
     state.runtimes.connect(profile).await
 }
 
+/// Закрыть и открыть подключение заново (меню «Переподключить»): после смены пароля на сервере или сбоя
+/// LDAP запомненный отказ во входе сбрасывается и секреты читаются заново.
+#[tauri::command]
+pub async fn reconnect(state: State<'_, AppState>, id: String) -> AppResult<TopologyView> {
+    let profile = state.profile(&id)?;
+    state.runtimes.reconnect(profile).await
+}
+
 #[tauri::command]
 pub fn disconnect(state: State<'_, AppState>, id: String) -> AppResult<()> {
     state.runtimes.disconnect(&id);
@@ -212,7 +220,7 @@ mod tests {
     /// Все места пула заняты: ожидание соединения входит в тот же предел, что и запрос.
     #[tokio::test]
     async fn waiting_for_a_pool_permit_is_bounded_by_the_facts_limit() {
-        use crate::conn::pool::{MAX_CONNECTIONS, PoolRegistry};
+        use crate::conn::pool::{MAX_CONNECTIONS, PoolPurpose, PoolRegistry};
         use crate::conn::profile::{SslMode, sample_profile};
         use crate::conn::testutil;
         use crate::secrets::MemoryStore;
@@ -233,6 +241,7 @@ mod tests {
                 "127.0.0.1",
                 server.port,
                 "postgres",
+                PoolPurpose::Catalog,
             )
         };
         let mut held = Vec::new();

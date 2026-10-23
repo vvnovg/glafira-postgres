@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::conn::pg::ConnectSpec;
-use crate::conn::pool::{PoolKey, PoolRegistry, PooledClient};
+use crate::conn::pool::{PoolKey, PoolPurpose, PoolRegistry, PooledClient};
 use crate::conn::profile::ConnectionProfile;
 use crate::conn::run_blocking;
 use crate::error::{AppResult, ErrorCode};
@@ -64,7 +64,8 @@ impl NodeConnector for AdhocConnector {
 /// Соединение из пула приложения. При ошибке TLS пул вытесняется — следующая попытка перечитает файлы
 /// сертификатов. Отказ во входе пул запоминает и новых попыток входа не делает (`PgPool::auth_failure`):
 /// keychain не перечитывается, пароль не перебирается каждые 10 с. Пул, открытый на другой адрес узла,
-/// заменяется.
+/// заменяется. `purpose` выбирает пул: опрос топологии не стоит в очереди за страницами каталога.
+#[allow(clippy::too_many_arguments)]
 pub async fn pooled_client(
     pools: &PoolRegistry,
     profile: &ConnectionProfile,
@@ -73,11 +74,13 @@ pub async fn pooled_client(
     host: &str,
     port: u16,
     database: &str,
+    purpose: PoolPurpose,
 ) -> AppResult<PooledClient> {
     let key = PoolKey {
         connection_id: profile.id.clone(),
         member: member.into(),
         database: database.into(),
+        purpose,
     };
     let pool = match pools.get(&key).filter(|p| p.looks_at(host, port)) {
         Some(p) => p,
@@ -102,7 +105,8 @@ pub struct PooledConnector {
 }
 
 impl PooledConnector {
-    /// Опрос узла соединением из пула. Получение соединения (ожидание свободного места в пуле, проверка
+    /// Опрос узла соединением из пула опроса (`PoolPurpose::Probe`, одно соединение на узел: страницы
+    /// каталога его не занимают). Получение соединения (ожидание свободного места в пуле, проверка
     /// простоявшего соединения, подключение) и `collect` укладываются в один предел:
     /// таймаут подключения профиля + `limit`; иначе опрос не завершился бы, пока пул занят другими.
     /// Если опрос не удался (узел молчит, обрыв, ошибка запроса, предел вышел), соединение закрывается,
@@ -128,6 +132,7 @@ impl PooledConnector {
                     host,
                     port,
                     &self.profile.pg.database,
+                    PoolPurpose::Probe,
                 )
                 .await?,
             );
@@ -185,6 +190,15 @@ mod tests {
             connection_id: "c".into(),
             member: member.into(),
             database: "postgres".into(),
+            purpose: PoolPurpose::Catalog,
+        }
+    }
+
+    /// Пул опроса топологии того же узла и БД.
+    fn probe_key(member: &str) -> PoolKey {
+        PoolKey {
+            purpose: PoolPurpose::Probe,
+            ..key(member)
         }
     }
 
@@ -197,7 +211,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(e.key, "errors.pg.noAnswer");
-        let pool = nodes.pools.get(&key("m")).expect("пул создан");
+        let pool = nodes.pools.get(&probe_key("m")).expect("пул создан");
         assert_eq!(
             pool.idle_count(),
             0,
@@ -275,7 +289,7 @@ mod tests {
         assert_eq!(reads(), 1, "keychain прочитан один раз");
         assert_eq!(
             nodes.pools.keys(),
-            vec![key("m")],
+            vec![probe_key("m")],
             "пул с отметкой остаётся"
         );
 
@@ -315,6 +329,7 @@ mod tests {
                 "127.0.0.1",
                 server.port,
                 db,
+                PoolPurpose::Catalog,
             )
             .await
             .err()
@@ -356,7 +371,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(e.key, "errors.pg.tcpFailed");
-        assert_eq!(nodes.pools.keys(), vec![key("m")]);
+        assert_eq!(nodes.pools.keys(), vec![probe_key("m")]);
     }
 
     #[tokio::test]
@@ -374,7 +389,7 @@ mod tests {
         assert!(server.wait_closed(1, WAIT).await, "сокет закрыт");
     }
 
-    async fn client_of(nodes: &PooledConnector, port: u16) -> PooledClient {
+    async fn client_for(nodes: &PooledConnector, port: u16, purpose: PoolPurpose) -> PooledClient {
         pooled_client(
             &nodes.pools,
             &nodes.profile,
@@ -383,9 +398,15 @@ mod tests {
             "127.0.0.1",
             port,
             "postgres",
+            purpose,
         )
         .await
         .unwrap()
+    }
+
+    /// Соединение для страниц каталога.
+    async fn client_of(nodes: &PooledConnector, port: u16) -> PooledClient {
+        client_for(nodes, port, PoolPurpose::Catalog).await
     }
 
     #[tokio::test]
@@ -417,11 +438,8 @@ mod tests {
     async fn waiting_for_a_pool_permit_is_bounded_by_the_limit() {
         let server = testutil::stalling_pg_server();
         let nodes = pooled(SslMode::Disable);
-        // Все три места пула заняты: опрос ждал бы освобождения бесконечно.
-        let mut held = Vec::new();
-        for _ in 0..crate::conn::pool::MAX_CONNECTIONS {
-            held.push(client_of(&nodes, server.port).await);
-        }
+        // Единственное место пула опроса занято: опрос ждал бы освобождения бесконечно.
+        let held = client_for(&nodes, server.port, PoolPurpose::Probe).await;
         let started = std::time::Instant::now();
         let e = tokio::time::timeout(
             Duration::from_secs(5),
@@ -438,17 +456,49 @@ mod tests {
         drop(held);
     }
 
-    /// Предел вышел, пока опрос уже шёл (соединения пришлось ждать): соединение с неотвеченными запросами
-    /// закрывается, а не возвращается в пул.
+    /// Опрос топологии не ждёт, пока страницы каталога освободят пул: у него свой пул из одного соединения.
     #[tokio::test]
-    async fn limit_expiring_during_collect_discards_the_connection() {
+    async fn probe_has_its_own_pool_and_is_not_blocked_by_catalog_clients() {
         let server = testutil::stalling_pg_server();
         let nodes = pooled(SslMode::Disable);
         let mut held = Vec::new();
         for _ in 0..crate::conn::pool::MAX_CONNECTIONS {
             held.push(client_of(&nodes, server.port).await);
         }
-        let pool = nodes.pools.get(&key("m")).unwrap();
+        assert_eq!(server.accepted(), 3);
+        // Молчащий сервер: опрос заканчивается своим пределом, но соединение он открыл — четвёртое.
+        let e = nodes
+            .facts_within("m", "127.0.0.1", server.port, Duration::from_millis(300))
+            .await
+            .unwrap_err();
+        assert_eq!(e.key, "errors.pg.noAnswer");
+        assert_eq!(
+            server.accepted(),
+            4,
+            "опрос не стоял в очереди за местами каталога"
+        );
+        let mut keys = nodes.pools.keys();
+        keys.sort_by_key(|k| k.purpose == PoolPurpose::Probe);
+        assert_eq!(
+            keys.iter().map(|k| k.purpose).collect::<Vec<_>>(),
+            [PoolPurpose::Catalog, PoolPurpose::Probe]
+        );
+        drop(held);
+    }
+
+    /// Предел вышел, пока опрос уже шёл (соединения пришлось ждать): соединение с неотвеченными запросами
+    /// закрывается, а не возвращается в пул.
+    #[tokio::test]
+    async fn limit_expiring_during_collect_discards_the_connection() {
+        let server = testutil::stalling_pg_server();
+        let nodes = pooled(SslMode::Disable);
+        // Место пула опроса занято; страницы каталога держат свои три соединения — их опрос не трогает.
+        let mut held = vec![client_for(&nodes, server.port, PoolPurpose::Probe).await];
+        let mut catalog = Vec::new();
+        for _ in 0..crate::conn::pool::MAX_CONNECTIONS {
+            catalog.push(client_of(&nodes, server.port).await);
+        }
+        let pool = nodes.pools.get(&probe_key("m")).unwrap();
         // Предел: 1 с (подключение) + 1 с. Место освобождается через 1,5 с — опрос начнётся, но до
         // собственного таймаута `collect` (2,5 с) общий предел (2 с) уже выйдет.
         let facts = nodes.facts_within("m", "127.0.0.1", server.port, Duration::from_secs(1));
@@ -465,11 +515,7 @@ mod tests {
             "зависшее соединение не вернулось в пул"
         );
         assert!(server.wait_closed(1, WAIT).await, "и его сокет закрыт");
-        assert_eq!(
-            server.closed(),
-            1,
-            "остальные два соединения заняты и открыты"
-        );
-        drop(held);
+        assert_eq!(server.closed(), 1, "соединения каталога заняты и открыты");
+        drop((held, catalog));
     }
 }
