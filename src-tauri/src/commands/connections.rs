@@ -47,16 +47,6 @@ impl std::fmt::Debug for SecretsInput {
 }
 
 impl SecretsInput {
-    /// «Удалить все сохранённые секреты»: пустое значение у каждого поля.
-    pub(crate) fn clear_all() -> Self {
-        Self {
-            pg_password: Some(String::new()),
-            pg_key_password: Some(String::new()),
-            patroni_password: Some(String::new()),
-            patroni_key_password: Some(String::new()),
-        }
-    }
-
     fn get(&self, field: &str) -> Option<&String> {
         match field {
             PG_PASSWORD => self.pg_password.as_ref(),
@@ -181,20 +171,17 @@ pub(crate) fn apply_secret_ops_undoable(
     Ok(())
 }
 
-/// Удаляет из keychain секреты, которые подключению не нужны; с `reset` — все секреты подключения
-/// (импорт файла поменял его настройки соединения, пароли получателя за новым адресом
-/// оставлять нельзя). Остальное не трогает.
+/// Удаляет из keychain секреты, которые подключению не нужны (уборка после импорта, как при сохранении
+/// формы); используемые не трогает. Все секреты перенаправленного импортом подключения удаляет сам импорт.
 pub(crate) fn delete_stale_secrets(
     store: &dyn SecretStore,
     profile: &ConnectionProfile,
-    reset: bool,
 ) -> AppResult<()> {
-    let input = if reset {
-        SecretsInput::clear_all()
-    } else {
-        SecretsInput::default()
-    };
-    apply_secret_ops(store, &profile.id, secret_ops(profile, &input))
+    apply_secret_ops(
+        store,
+        &profile.id,
+        secret_ops(profile, &SecretsInput::default()),
+    )
 }
 
 /// Менял ли сохранённый секрет хоть одно используемое профилем поле (`Set` или `Delete`): тогда открытое
@@ -633,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_secrets_cleanup_keeps_used_and_reset_removes_all() {
+    fn stale_secrets_cleanup_keeps_used_secrets() {
         let store = MemoryStore::default();
         let p = sample_profile("a");
         for f in CONNECTION_SECRET_FIELDS {
@@ -646,10 +633,8 @@ mod tests {
                 .collect()
         };
         // Сервер без Patroni и сертификата использует только пароль PG.
-        delete_stale_secrets(&store, &p, false).unwrap();
+        delete_stale_secrets(&store, &p).unwrap();
         assert_eq!(left(&store), [PG_PASSWORD]);
-        delete_stale_secrets(&store, &p, true).unwrap();
-        assert!(left(&store).is_empty());
     }
 
     #[test]

@@ -276,7 +276,7 @@ fn apply_import_attempts(
             } else {
                 // Уборка, как при сохранении формы: ненужные профилю секреты. Безопасности она не касается,
                 // поэтому ошибка keychain только пишется в журнал.
-                if let Err(e) = delete_stale_secrets(st.secrets.as_ref(), after, false) {
+                if let Err(e) = delete_stale_secrets(st.secrets.as_ref(), after) {
                     tracing::warn!("failed to delete unused secrets of {}: {e}", after.id);
                 }
                 // Правка оформления обновляет профиль в открытом подключении.
