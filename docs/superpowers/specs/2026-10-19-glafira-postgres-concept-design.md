@@ -83,7 +83,8 @@ crates/
 
 **Технические решения:**
 - Драйвер PG — `tokio-postgres` + `postgres-openssl` (OpenSSL vendored, как в Glafira): `sslmode` от `disable`
-  до `verify-full`, клиентские сертификаты PEM / PKCS#12, password / md5 / SCRAM. Пулы — `deadpool-postgres`,
+  до `verify-full`, клиентские сертификаты PEM / PKCS#12, password / md5 / SCRAM. Пулы — свои (`conn/pool.rs`,
+  вместо `deadpool-postgres`: P1b нужен `connect_raw` к порту туннеля с проверкой TLS по исходному имени хоста),
   не больше 3 соединений на пару (узел, БД) для каталога и вкладок плюс одно для опроса топологии. Kerberos/GSSAPI драйвер не поддерживает — вне объёма.
 - Patroni — `reqwest`, basic auth, TLS / mTLS.
 - SSH — системный `ssh` (учитывает `~/.ssh/config`, ProxyJump, агент, аппаратные ключи); пароли и пассфразы отдаёт

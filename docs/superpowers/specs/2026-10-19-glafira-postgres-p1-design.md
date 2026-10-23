@@ -383,8 +383,12 @@ error }` (то же, что возвращают `connect` и `get_topology`).
   проверкой TLS по исходному имени) на ключ (подключение, участник, БД, назначение): максимум 3 соединения для каталога и вкладок
   плюс одно для опроса топологии (свой пул, чтобы страницы каталога не задерживали опрос), проверка соединения
   при выдаче, закрытие после 5 мин простоя. Участник исчез из топологии → его пулы закрываются. `disconnect` → все
-  пулы и туннели закрываются. Отказ во входе (`AUTH_FAILED`) пул запоминает: новых попыток входа нет, пока
-  подключение не откроют заново (сохранение профиля или секретов, импорт, «Подключиться»).
+  пулы и туннели закрываются. Отказ во входе (`AUTH_FAILED`) каждый пул (каталога и опроса) запоминает сам: новых
+  попыток входа нет, пока подключение не откроют заново (сохранение профиля или секретов, импорт, «Подключиться»)
+  или не выберут «Переподключить». «Переподключить» (`reconnect`) у открытого подключения сбрасывает его пулы
+  с запомненным отказом во входе и клиент Patroni API и сразу опрашивает узлы заново, не теряя журнал и выбранный
+  узел каталога; неудача этого опроса оставляет `degraded` с фоновым опросом. Не открытое подключение
+  (`disconnected`, `failed`) «Переподключить» закрывает и открывает заново.
 - **Узел каталога:** у подключения в памяти — `catalogMember`: по умолчанию лидер / primary (для `hostList` — узел по
   умолчанию, §6.3). Контекстное меню «Читать каталог с узла…» выбирает участника. Выбранный участник пропал или
   недоступен → возврат к узлу по умолчанию и уведомление в дереве.
@@ -515,7 +519,7 @@ CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 
 | Группа | Команды |
 |---|---|
-| Подключения | `list_connections`, `save_connection(profile, secrets)`, `delete_connection`, `parse_connection_string(text)`, `test_connection(profile, secrets, channel)`, `trust_ssh_host_key(connectionId \| profile, fingerprint)`, `connect(id) -> TopologyView`, `disconnect(id)` |
+| Подключения | `list_connections`, `save_connection(profile, secrets)`, `delete_connection`, `parse_connection_string(text)`, `test_connection(profile, secrets, channel)`, `trust_ssh_host_key(connectionId \| profile, fingerprint)`, `connect(id) -> TopologyView`, `reconnect(id) -> TopologyView`, `disconnect(id)`, `connection_secrets(id) -> SecretsSet` |
 | Топология | `get_topology(id)`, `list_topology_events(id)`, `set_catalog_member(id, member \| null)`, `get_member_facts(id, member)` |
 | Каталог | `list_databases(id)`, `list_schemas(id, db)`, `list_objects(id, db, schema, kind, filter?, offset, limit)`, `list_partitions(id, db, schema, table)`, `get_table(id, db, schema, name)`, `get_view(id, db, schema, name)`, `get_function(id, db, oid)`, `get_sequence(id, db, schema, name)`, `list_extensions(id, db)`, `list_roles(id)` |
 | Папки | как в Glafira Kafka: `list_folders`, `create_folder`, `rename_folder`, `delete_folder`, `move_items`, `export_connections`, `preview_import`, `apply_import` |
