@@ -13,8 +13,9 @@ use crate::topology::BoxFuture;
 use crate::topology::model::{Member, Role, Topology, TopologyWarning, system_id_warning};
 
 pub const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
-/// Общий предел обнаружения кластера: адресов API может быть много (профиль плюс прежние участники),
-/// и каждый ждёт до `HTTP_TIMEOUT` — без общего срока один опрос мог бы длиться дольше минуты.
+/// Общий предел обхода адресов `/cluster`: адресов API может быть много (профиль плюс прежние участники),
+/// и каждый ждёт до `HTTP_TIMEOUT` — без общего срока один опрос мог бы длиться дольше минуты. Запросы
+/// `/patroni` к участникам после обхода идут параллельно, и каждый ограничен своим `HTTP_TIMEOUT`.
 pub const DISCOVER_TIMEOUT: Duration = Duration::from_secs(20);
 /// Сколько текста ответа с ошибкой сохраняется в `details`.
 const BODY_SNIPPET: usize = 500;
@@ -336,7 +337,13 @@ pub fn members_from_cluster(c: &ClusterJson, settings: &PatroniSettings) -> Vec<
         .collect()
 }
 
-/// Порядок опроса `/cluster`: лидер прошлого опроса, остальные участники, адреса профиля — без повторов.
+/// Порядок опроса `/cluster` без повторов. Обычно (спец. P1 §6.2) — лидер прошлого опроса, остальные участники,
+/// затем адреса профиля. Участники, чей API в прошлый раз не ответил (`reachable == false`), идут после адресов
+/// профиля. После `PatroniUnreachable` недоступны все участники, и первыми идут адреса профиля. `api_url` из
+/// `/cluster` бывают недоступны снаружи (адреса подов за NAT или в Kubernetes без подмены). Если обходить такие
+/// адреса первыми, они съедают весь `DISCOVER_TIMEOUT` раньше, чем очередь дойдёт до рабочего адреса профиля.
+/// Тогда подключение не восстановится до переоткрытия вручную, а при правиле «только после `PatroniUnreachable`»
+/// опросы чередовались бы: удачный, провал по сроку, снова удачный.
 pub fn cluster_bases(settings: &PatroniSettings, previous: Option<&Topology>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut add = |u: &str| {
@@ -345,25 +352,38 @@ pub fn cluster_bases(settings: &PatroniSettings, previous: Option<&Topology>) ->
             out.push(b);
         }
     };
-    if let Some(t) = previous {
-        if let Some(u) = t.leader().and_then(|m| m.api_url.as_deref()) {
-            add(u);
-        }
-        for m in &t.members {
-            if let Some(u) = m.api_url.as_deref() {
-                add(u);
-            }
-        }
+    // Участники прошлого опроса, лидер первым (повтор адреса отсекает `add`).
+    let members: Vec<&Member> = previous
+        .map(|t| t.leader().into_iter().chain(&t.members).collect())
+        .unwrap_or_default();
+    let api_urls = |answered: bool| {
+        members
+            .iter()
+            .filter(move |m| m.reachable == answered)
+            .filter_map(|m| m.api_url.as_deref())
+    };
+    for u in api_urls(true) {
+        add(u);
     }
     for u in &settings.urls {
+        add(u);
+    }
+    for u in api_urls(false) {
         add(u);
     }
     out
 }
 
-async fn fetch_cluster(http: &dyn PatroniHttp, bases: &[String]) -> AppResult<ClusterJson> {
+/// Первый ответ `/cluster` по адресам `bases`. В `tried` — адреса, к которым уже обращались (вместе с тем, чей
+/// ответ ещё ждут): по ним видно, где повис обход, если его прервал общий срок.
+async fn fetch_cluster(
+    http: &dyn PatroniHttp,
+    bases: &[String],
+    tried: &mut Vec<String>,
+) -> AppResult<ClusterJson> {
     let mut last = None;
     for base in bases {
+        tried.push(crate::conn::profile::strip_url_credentials(base));
         let url = format!("{base}/cluster");
         match http
             .get_json(&url)
@@ -390,19 +410,23 @@ pub async fn discover(
     previous: Option<&Topology>,
     now_ms: i64,
 ) -> AppResult<Topology> {
-    let fetched = match tokio::time::timeout(
-        DISCOVER_TIMEOUT,
-        fetch_cluster(http, &cluster_bases(settings, previous)),
-    )
-    .await
-    {
+    let bases = cluster_bases(settings, previous);
+    let mut tried = Vec::new();
+    let fetched =
+        tokio::time::timeout(DISCOVER_TIMEOUT, fetch_cluster(http, &bases, &mut tried)).await;
+    let fetched = match fetched {
         Ok(r) => r,
         Err(_) => Err(app_err!(
             ErrorCode::PatroniError,
             "errors.patroni.discoverTimeout",
             "Patroni API did not answer within {{secs}} s",
             secs = DISCOVER_TIMEOUT.as_secs()
-        )),
+        )
+        .with_details(format!(
+            "tried: {} (deadline {} s)",
+            tried.join(", "),
+            DISCOVER_TIMEOUT.as_secs()
+        ))),
     };
     let cluster = match fetched {
         Ok(c) => c,
@@ -544,6 +568,25 @@ mod tests {
         })
     }
 
+    /// Кластер `cluster_v3()` по адресу `http://s:8008`, API всех трёх участников отвечает.
+    fn healthy_v3() -> FakeHttp {
+        FakeHttp::new(vec![
+            ("http://s:8008/cluster", Ok(cluster_v3())),
+            (
+                "http://10.0.0.1:8008/patroni",
+                Ok(patroni_json(170_002, "7400")),
+            ),
+            (
+                "http://10.0.0.2:8008/patroni",
+                Ok(patroni_json(170_002, "7400")),
+            ),
+            (
+                "http://10.0.0.3:8008/patroni",
+                Ok(patroni_json(170_002, "7400")),
+            ),
+        ])
+    }
+
     #[test]
     fn members_from_patroni3_cluster() {
         let c: ClusterJson = serde_json::from_value(cluster_v3()).unwrap();
@@ -663,8 +706,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code, ErrorCode::PatroniError);
 
-        let ok = FakeHttp::new(vec![("http://s:8008/cluster", Ok(cluster_v3()))]);
-        let prev = discover(&ok, &settings(&["http://s:8008"]), "c", None, 1)
+        let prev = discover(&healthy_v3(), &settings(&["http://s:8008"]), "c", None, 1)
             .await
             .unwrap();
         // Первый вызов `discover` тоже обращался к `http`: журнал считаем с чистого листа.
@@ -732,6 +774,128 @@ mod tests {
         );
     }
 
+    /// Адреса с префиксом из `hanging` «думают» `delay` и отвечают отказом, остальные — как `answers`.
+    struct HangingHttp {
+        answers: FakeHttp,
+        hanging: Vec<String>,
+        delay: Duration,
+    }
+
+    impl PatroniHttp for HangingHttp {
+        fn get_json<'a>(&'a self, url: &'a str) -> BoxFuture<'a, AppResult<serde_json::Value>> {
+            if !self
+                .hanging
+                .iter()
+                .any(|b| url.starts_with(&format!("{b}/")))
+            {
+                return self.answers.get_json(url);
+            }
+            self.answers.calls.lock_safe().push(url.to_string());
+            Box::pin(async move {
+                tokio::time::sleep(self.delay).await;
+                Err(unreachable_err(url))
+            })
+        }
+    }
+
+    /// Пять участников, лидер — `pg-1`; `api_url` — адреса подов `http://10.0.0.N:8008`.
+    fn cluster_of_five() -> serde_json::Value {
+        let members: Vec<serde_json::Value> = (1..=5)
+            .map(|i| {
+                serde_json::json!({
+                    "name": format!("pg-{i}"),
+                    "role": if i == 1 { "leader" } else { "replica" },
+                    "state": if i == 1 { "running" } else { "streaming" },
+                    "api_url": format!("http://10.0.0.{i}:8008/patroni"),
+                    "host": format!("10.0.0.{i}"),
+                    "port": 5432
+                })
+            })
+            .collect();
+        serde_json::json!({"members": members, "scope": "billing"})
+    }
+
+    /// `api_url` участников перестали отвечать снаружи (поды за NAT), а адрес профиля работает. Обход
+    /// участников в порядке спецификации упирается в общий срок, но следующий опрос начинает с адреса профиля
+    /// и восстанавливается в пределах срока. И опрос после него тоже: участники, не ответившие в прошлый раз,
+    /// идут после адресов профиля, поэтому опросы не чередуются «удачный — провал по сроку».
+    #[tokio::test(start_paused = true)]
+    async fn discover_recovers_through_profile_url_when_member_api_urls_hang() {
+        let s = settings(&["http://lb:8008"]);
+        let pods: Vec<String> = (1..=5).map(|i| format!("http://10.0.0.{i}:8008")).collect();
+        let mut answers = vec![("http://lb:8008/cluster", Ok(cluster_of_five()))];
+        let patroni_urls: Vec<String> = pods.iter().map(|b| format!("{b}/patroni")).collect();
+        for u in &patroni_urls {
+            answers.push((u.as_str(), Ok(patroni_json(170_002, "7400"))));
+        }
+        // Первое подключение: всё отвечает.
+        let healthy = FakeHttp::new(answers);
+        let prev = discover(&healthy, &s, "c", None, 1).await.unwrap();
+        assert!(prev.members.iter().all(|m| m.reachable));
+        assert!(prev.warnings.is_empty(), "{:?}", prev.warnings);
+
+        let http = HangingHttp {
+            answers: FakeHttp::new(vec![("http://lb:8008/cluster", Ok(cluster_of_five()))]),
+            hanging: pods.clone(),
+            delay: HTTP_TIMEOUT,
+        };
+        // Участники обходятся первыми (лидер прошлого опроса — первым) и съедают весь срок.
+        let started = tokio::time::Instant::now();
+        let failed = discover(&http, &s, "c", Some(&prev), 2).await.unwrap();
+        assert_eq!(started.elapsed(), DISCOVER_TIMEOUT);
+        assert_eq!(failed.warnings, vec![TopologyWarning::PatroniUnreachable]);
+        let e = failed.members[0].error.clone().unwrap();
+        assert_eq!(e.key, "errors.patroni.discoverTimeout");
+        // В подробностях — адреса по порядку обхода: видно, какие повисли.
+        assert_eq!(
+            e.details.as_deref(),
+            Some(
+                "tried: http://10.0.0.1:8008, http://10.0.0.2:8008, http://10.0.0.3:8008, \
+                 http://10.0.0.4:8008, http://10.0.0.5:8008 (deadline 20 s)"
+            )
+        );
+
+        // Следующий опрос начинается с адреса профиля и укладывается в срок.
+        http.answers.calls.lock_safe().clear();
+        let started = tokio::time::Instant::now();
+        let recovered = discover(&http, &s, "c", Some(&failed), 3).await.unwrap();
+        assert!(
+            started.elapsed() < DISCOVER_TIMEOUT,
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(http.answers.calls.lock_safe()[0], "http://lb:8008/cluster");
+        assert!(
+            !recovered
+                .warnings
+                .contains(&TopologyWarning::PatroniUnreachable),
+            "{:?}",
+            recovered.warnings
+        );
+        assert_eq!(recovered.members.len(), 5);
+        assert_eq!(recovered.observed_at_ms, 3);
+        // `/patroni` участников по-прежнему молчит: это видно как недоступность участников, а не всего API.
+        assert!(recovered.members.iter().all(|m| !m.reachable));
+
+        // И следующий за ним опрос тоже не упирается в срок.
+        http.answers.calls.lock_safe().clear();
+        let started = tokio::time::Instant::now();
+        let again = discover(&http, &s, "c", Some(&recovered), 4).await.unwrap();
+        assert!(
+            started.elapsed() < DISCOVER_TIMEOUT,
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(http.answers.calls.lock_safe()[0], "http://lb:8008/cluster");
+        assert!(
+            !again
+                .warnings
+                .contains(&TopologyWarning::PatroniUnreachable),
+            "{:?}",
+            again.warnings
+        );
+    }
+
     /// Кластер из трёх участников, лидер — второй (не первый в списке).
     fn cluster_leader_second() -> serde_json::Value {
         serde_json::json!({
@@ -749,7 +913,21 @@ mod tests {
 
     #[tokio::test]
     async fn later_polls_start_with_leader_then_members_then_profile_urls() {
-        let ok = FakeHttp::new(vec![("http://s:8008/cluster", Ok(cluster_leader_second()))]);
+        let ok = FakeHttp::new(vec![
+            ("http://s:8008/cluster", Ok(cluster_leader_second())),
+            (
+                "http://10.0.0.1:8008/patroni",
+                Ok(patroni_json(170_002, "1")),
+            ),
+            (
+                "http://10.0.0.2:8008/patroni",
+                Ok(patroni_json(170_002, "1")),
+            ),
+            (
+                "http://10.0.0.3:8008/patroni",
+                Ok(patroni_json(170_002, "1")),
+            ),
+        ]);
         // Профиль: адрес одного из участников (повтор) и посторонний шлюз.
         let s = settings(&[
             "http://10.0.0.3:8008/patroni",
@@ -759,6 +937,7 @@ mod tests {
         let prev = discover(&ok, &s, "c", None, 1).await.unwrap();
         assert_eq!(prev.leader().unwrap().name, "pg-2");
         assert_eq!(prev.members[0].name, "pg-1", "лидер не первый в списке");
+        assert!(prev.members.iter().all(|m| m.reachable));
 
         let expected = [
             "http://10.0.0.2:8008",
@@ -781,6 +960,31 @@ mod tests {
         let calls: Vec<String> = down.calls.lock_safe().clone();
         let want: Vec<String> = expected.iter().map(|b| format!("{b}/cluster")).collect();
         assert_eq!(calls, want);
+
+        // Участник, чей API не ответил, — после адресов профиля; остальные на прежних местах.
+        let mut one_down = prev.clone();
+        one_down.members[0].reachable = false;
+        assert_eq!(
+            cluster_bases(&s, Some(&one_down)),
+            [
+                "http://10.0.0.2:8008",
+                "http://10.0.0.3:8008",
+                "http://s:8008",
+                "http://gw:8008",
+                "http://10.0.0.1:8008",
+            ]
+        );
+        // После `PatroniUnreachable` недоступны все участники: первыми — адреса профиля, затем лидер и остальные.
+        assert_eq!(
+            cluster_bases(&s, Some(&t)),
+            [
+                "http://10.0.0.3:8008",
+                "http://s:8008",
+                "http://gw:8008",
+                "http://10.0.0.2:8008",
+                "http://10.0.0.1:8008",
+            ]
+        );
     }
 
     #[tokio::test]
