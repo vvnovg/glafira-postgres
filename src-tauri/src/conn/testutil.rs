@@ -183,6 +183,16 @@ fn fatal(sqlstate: &str, message: &str) -> Vec<u8> {
 /// сертификатом `server`, читает стартовое сообщение, отвечает `ErrorResponse` 28000 и закрывает
 /// TLS. Если клиент отверг сертификат, рукопожатие у сервера просто не удаётся.
 pub fn tls_server(server: &Issued) -> FakeServer {
+    tls_server_replying(server, Some(error_response()))
+}
+
+/// Как `tls_server`, но после рукопожатия и стартового сообщения закрывает TLS без `ErrorResponse`: у клиента
+/// ошибка без ответа сервера, и классификация идёт не через SQLSTATE.
+pub fn tls_server_closing_after_handshake(server: &Issued) -> FakeServer {
+    tls_server_replying(server, None)
+}
+
+fn tls_server_replying(server: &Issued, reply: Option<Vec<u8>>) -> FakeServer {
     let (listener, port) = listen();
     let mut acceptor = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls()).unwrap();
     acceptor.set_private_key(&server.key).unwrap();
@@ -207,7 +217,9 @@ pub fn tls_server(server: &Issued) -> FakeServer {
         }
         let mut startup = vec![0u8; (u32::from_be_bytes(len) as usize).saturating_sub(4)];
         let _ = tls.read_exact(&mut startup);
-        let _ = tls.write_all(&error_response());
+        if let Some(reply) = &reply {
+            let _ = tls.write_all(reply);
+        }
         let _ = tls.shutdown();
     });
     FakeServer {

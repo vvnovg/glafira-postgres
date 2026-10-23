@@ -70,11 +70,12 @@ pub(crate) fn classify_sqlstate(code: &SqlState) -> (ErrorCode, LocalizedText) {
             ),
         )
     } else if *code == SqlState::ADMIN_SHUTDOWN || *code == SqlState::CRASH_SHUTDOWN {
+        // 57P01 приходит и при остановке сервера, и от `pg_terminate_backend`: сеанс завершил администратор.
         (
             ErrorCode::NodeUnavailable,
             ltext!(
                 "errors.pg.serverShutdown",
-                "The server is shutting down or restarting"
+                "The server is shutting down or restarting, or an administrator ended the session"
             ),
         )
     } else if *code == SqlState::LOCK_NOT_AVAILABLE {

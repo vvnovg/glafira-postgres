@@ -119,7 +119,7 @@
       "lockTimeout": "Запрос ждал блокировку дольше lock_timeout",
       "tooManyConnections": "На сервере нет свободных соединений (max_connections)",
       "cannotConnectNow": "Сервер запускается или находится в восстановлении",
-      "serverShutdown": "Сервер останавливается или перезапускается",
+      "serverShutdown": "Сервер останавливается или перезапускается, либо администратор завершил сеанс",
       "serverError": "Ошибка PostgreSQL {{code}}",
       "passwordMissing": "Сервер запросил пароль, но он не сохранён и не найден в ~/.pgpass",
       "tlsNotSupported": "Сервер не принимает TLS-соединения: выберите sslmode prefer или disable",

@@ -119,7 +119,7 @@
       "lockTimeout": "The query waited for a lock longer than lock_timeout",
       "tooManyConnections": "The server has no free connections (max_connections)",
       "cannotConnectNow": "The server is starting up or in recovery",
-      "serverShutdown": "The server is shutting down or restarting",
+      "serverShutdown": "The server is shutting down or restarting, or an administrator ended the session",
       "serverError": "PostgreSQL error {{code}}",
       "passwordMissing": "The server asked for a password, but none is saved or found in ~/.pgpass",
       "tlsNotSupported": "The server does not accept TLS connections: choose sslmode prefer or disable",

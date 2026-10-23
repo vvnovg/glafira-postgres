@@ -5,55 +5,86 @@ use std::path::{Path, PathBuf};
 
 /// Поле строки .pgpass: `*` без экранирования — любое значение, `\*` — буквальная звёздочка (как в libpq).
 struct Field {
-    text: String,
+    bytes: Vec<u8>,
     wildcard: bool,
 }
 
-/// Делит строку по неэкранированным `:`, снимая экранирование.
-fn split_fields(line: &str) -> Vec<Field> {
-    // (текст, был ли в нём экранированный символ)
-    let mut fields: Vec<(String, bool)> = vec![(String::new(), false)];
-    let mut chars = line.chars();
-    while let Some(c) = chars.next() {
+/// Делит строку по неэкранированным `:`, снимая экранирование. Работает с байтами, как libpq: `\` и `:` в
+/// UTF-8 не встречаются внутри многобайтовых символов, поэтому для текста в UTF-8 результат тот же, что и
+/// посимвольно, а байты не в UTF-8 доходят до поля без искажений.
+fn split_fields(line: &[u8]) -> Vec<Field> {
+    // (байты, был ли в них экранированный символ)
+    let mut fields: Vec<(Vec<u8>, bool)> = vec![(Vec::new(), false)];
+    let mut bytes = line.iter().copied();
+    while let Some(b) = bytes.next() {
         let last = fields.last_mut().expect("at least one field");
-        match c {
-            '\\' => match chars.next() {
+        match b {
+            b'\\' => match bytes.next() {
                 Some(n) => {
                     last.0.push(n);
                     last.1 = true;
                 }
                 // Одинокий обратный слеш в конце строки libpq оставляет как есть.
-                None => last.0.push('\\'),
+                None => last.0.push(b'\\'),
             },
-            ':' => fields.push((String::new(), false)),
-            c => last.0.push(c),
+            b':' => fields.push((Vec::new(), false)),
+            b => last.0.push(b),
         }
     }
     fields
         .into_iter()
-        .map(|(text, escaped)| Field {
-            wildcard: text == "*" && !escaped,
-            text,
+        .map(|(bytes, escaped)| Field {
+            wildcard: bytes == b"*" && !escaped,
+            bytes,
         })
         .collect()
 }
 
+/// Пароль из содержимого файла в UTF-8 (см. `lookup_bytes`).
 pub fn lookup(content: &str, host: &str, port: u16, database: &str, user: &str) -> Option<String> {
+    lookup_bytes(content.as_bytes(), host, port, database, user)
+}
+
+/// Первая подходящая строка содержимого `.pgpass`. Поля сравниваются побайтно, как в libpq. Пароль не в UTF-8
+/// (файл в cp1251 и т. п.) передать серверу без искажения нельзя: libpq отправил бы сырые байты, а замена на
+/// U+FFFD дала бы неверный пароль, и отказ во входе пул запомнил бы до переоткрытия подключения. Такая строка
+/// пропускается с предупреждением в журнале, поиск идёт дальше.
+fn lookup_bytes(
+    content: &[u8],
+    host: &str,
+    port: u16,
+    database: &str,
+    user: &str,
+) -> Option<String> {
     let port = port.to_string();
-    let matches = |f: &Field, value: &str| f.wildcard || f.text == value;
-    content
-        .lines()
-        .map(|l| l.trim_end_matches('\r'))
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(split_fields)
-        .filter(|f| f.len() >= 5)
-        .find(|f| {
-            matches(&f[0], host)
+    let matches = |f: &Field, value: &str| f.wildcard || f.bytes == value.as_bytes();
+    for (n, line) in content.split(|&b| b == b'\n').enumerate() {
+        // Как libpq (`pg_strip_crlf`): все `\r` в конце строки.
+        let mut line = line;
+        while let Some(l) = line.strip_suffix(b"\r") {
+            line = l;
+        }
+        if line.is_empty() || line.starts_with(b"#") {
+            continue;
+        }
+        let f = split_fields(line);
+        if f.len() < 5
+            || !(matches(&f[0], host)
                 && matches(&f[1], &port)
                 && matches(&f[2], database)
-                && matches(&f[3], user)
-        })
-        .map(|f| f[4].text.clone())
+                && matches(&f[3], user))
+        {
+            continue;
+        }
+        match String::from_utf8(f[4].bytes.clone()) {
+            Ok(password) => return Some(password),
+            Err(_) => tracing::warn!(
+                line = n + 1,
+                "pgpass line skipped: the password is not valid UTF-8"
+            ),
+        }
+    }
+    None
 }
 
 pub fn default_path() -> Option<PathBuf> {
@@ -102,7 +133,7 @@ pub fn find_password_in(
     }
     // Байты не в UTF-8 (например, в комментарии) не прячут файл целиком: libpq читает его побайтно.
     let bytes = std::fs::read(path).ok()?;
-    lookup(&String::from_utf8_lossy(&bytes), host, port, database, user)
+    lookup_bytes(&bytes, host, port, database, user)
 }
 
 #[cfg(test)]
@@ -176,6 +207,14 @@ short:line
     /// libpq: `\*` — буквальная звёздочка, а не любое значение; одинокий обратный слеш в конце остаётся.
     #[test]
     fn escaped_star_is_literal_and_trailing_backslash_is_kept() {
+        // `\*` — не шаблон: строка подходит только к хосту с именем `*`.
+        let only = "\\*:5432:db:u:star-host";
+        assert_eq!(
+            lookup(only, "*", 5432, "db", "u").as_deref(),
+            Some("star-host")
+        );
+        assert_eq!(lookup(only, "h", 5432, "db", "u"), None);
+
         let file = "\\*:5432:db:u:star-host\n*:*:*:u:x\\";
         assert_eq!(
             lookup(file, "*", 5432, "db", "u").as_deref(),
@@ -184,19 +223,55 @@ short:line
         assert_eq!(lookup(file, "h", 5432, "db", "u").as_deref(), Some("x\\"));
     }
 
-    #[test]
-    fn non_utf8_bytes_do_not_hide_the_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("pgpass");
-        std::fs::write(&path, b"# \xff\xfe comment\nh:5432:db:u:secret\n").unwrap();
+    /// Файл `.pgpass` с правами только для владельца (иначе `find_password_in` его не читает).
+    fn private_file(dir: &Path, content: &[u8]) -> PathBuf {
+        let path = dir.join("pgpass");
+        std::fs::write(&path, content).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
+        path
+    }
+
+    #[test]
+    fn non_utf8_bytes_do_not_hide_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = private_file(dir.path(), b"# \xff\xfe comment\nh:5432:db:u:secret\n");
         assert_eq!(
             find_password_in(&path, "h", 5432, "db", "u").as_deref(),
             Some("secret")
+        );
+    }
+
+    /// Пароль в cp1251 («Пароль») не превращается в U+FFFD: такая строка пропускается, а следующая подходящая
+    /// строка в UTF-8 находится.
+    #[test]
+    fn password_not_in_utf8_skips_the_line() {
+        let cp1251 = b"\xcf\xe0\xf0\xee\xeb\xfc";
+        let mut only = b"h:5432:db:u:".to_vec();
+        only.extend_from_slice(cp1251);
+        only.push(b'\n');
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            find_password_in(&private_file(dir.path(), &only), "h", 5432, "db", "u"),
+            None
+        );
+
+        let mut with_fallback = only.clone();
+        with_fallback.extend_from_slice("*:*:*:u:ok-пароль\r\n".as_bytes());
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            find_password_in(
+                &private_file(dir.path(), &with_fallback),
+                "h",
+                5432,
+                "db",
+                "u"
+            )
+            .as_deref(),
+            Some("ok-пароль")
         );
     }
 

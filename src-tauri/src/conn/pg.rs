@@ -379,7 +379,16 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let stream = tcp_connect("127.0.0.1", port).await.unwrap();
-        assert!(socket2::SockRef::from(&stream).keepalive().unwrap());
+        let sock = socket2::SockRef::from(&stream);
+        assert!(sock.keepalive().unwrap());
+        // Windows прочитать время keepalive не даёт.
+        #[cfg(not(windows))]
+        assert_eq!(sock.tcp_keepalive_time().unwrap(), Duration::from_secs(60));
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert_eq!(
+            sock.tcp_keepalive_interval().unwrap(),
+            Duration::from_secs(10)
+        );
         assert!(stream.nodelay().unwrap());
     }
 
@@ -446,6 +455,22 @@ mod tests {
         let server = testutil::tls_server(&testutil::make_expired_server_cert(&ca, "localhost"));
         let spec = loopback_spec(server.port, "localhost", SslMode::Prefer, Some(&ca_path));
         assert_handshake_ok(spec.connect().await.unwrap_err());
+    }
+
+    /// То же без ответа сервера: после рукопожатия соединение просто закрыто. Причина отказа проверки, которой
+    /// при `prefer` не было (обратный вызов ставится только при `PEER`), не подменяет обрыв на «срок истёк».
+    #[tokio::test]
+    async fn prefer_with_ca_and_closed_connection_is_not_reported_as_expired() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = testutil::make_ca("test-ca");
+        let ca_path = write_pem(dir.path(), "ca.pem", &ca.cert);
+        let server = testutil::tls_server_closing_after_handshake(
+            &testutil::make_expired_server_cert(&ca, "localhost"),
+        );
+        let spec = loopback_spec(server.port, "localhost", SslMode::Prefer, Some(&ca_path));
+        let e = spec.connect().await.unwrap_err();
+        assert_ne!(e.key, "errors.pg.certExpired", "{e:?}");
+        assert_eq!(e.code, ErrorCode::ConnectionFailed, "{e:?}");
     }
 
     #[tokio::test]
