@@ -25,6 +25,8 @@ export function PgSection(props: {
   const tlsScope = t("connections.form.pgTls");
   const set = (patch: Partial<PgSettings>) => props.onChange({ ...props.profile, pg: { ...pg, ...patch } });
   const [dbText, setDbText] = useState(formatDatabases(pg.databases));
+  // При sslmode=disable настройки TLS из профиля убираются (visibleProfile): предупредить, если есть что терять.
+  const tlsDropped = pg.sslMode === "disable" && (pg.tls.caPath !== null || pg.tls.clientCert !== null);
   return (
     <>
       <label htmlFor={`${id}-pg-user`}>{t("connections.form.pgUser")}</label>
@@ -40,15 +42,21 @@ export function PgSection(props: {
       <label htmlFor={`${id}-pg-db`}>{t("connections.form.pgDatabase")}</label>
       <input id={`${id}-pg-db`} value={pg.database} onChange={(e) => set({ database: e.target.value })} />
       <RowLabel id={`${id}-ssl`} label="sslmode" hint={<Hint k="hints.connections.sslMode" label="sslmode" />} />
-      <select id={`${id}-ssl`} value={pg.sslMode} onChange={(e) => set({ sslMode: e.target.value as SslMode })}>
+      <select
+        id={`${id}-ssl`}
+        value={pg.sslMode}
+        aria-describedby={tlsDropped ? `${id}-ssl-note` : undefined}
+        onChange={(e) => set({ sslMode: e.target.value as SslMode })}
+      >
         {SSL_MODES.map((m) => (
           <option key={m} value={m}>
             {m}
           </option>
         ))}
       </select>
-      {pg.sslMode === "disable" && (pg.tls.caPath !== null || pg.tls.clientCert !== null) && (
-        <p className="muted" role="note">
+      {tlsDropped && (
+        // `full` — на всю ширину сетки формы, иначе заметка заняла бы колонку подписи и сдвинула бы строки ниже.
+        <p id={`${id}-ssl-note`} className="full muted" role="note">
           {t("connections.form.tlsDroppedOnDisable")}
         </p>
       )}

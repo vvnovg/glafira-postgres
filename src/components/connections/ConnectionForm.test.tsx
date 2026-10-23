@@ -675,7 +675,11 @@ describe("ConnectionForm", () => {
     renderWithClient(<ConnectionForm initial={{ ...newProfile(), pg: { ...newProfile().pg, tls: { caPath: "/etc/ca.pem", clientCert: null } } }} tabId="t" />);
     expect(screen.queryByRole("note")).not.toBeInTheDocument();
     await user.selectOptions(screen.getByLabelText("sslmode"), "disable");
-    expect(screen.getByRole("note")).toHaveTextContent("Настройки TLS (CA, клиентский сертификат) при сохранении будут удалены — верните sslmode, чтобы их оставить");
+    const note = screen.getByRole("note");
+    expect(note).toHaveTextContent("Настройки TLS (CA, клиентский сертификат) при сохранении будут удалены — верните sslmode, чтобы их оставить");
+    // Заметка на всю ширину сетки и привязана к полю sslmode для скринридера.
+    expect(note).toHaveClass("full");
+    expect(screen.getByLabelText("sslmode")).toHaveAccessibleDescription(note.textContent ?? "");
   });
 
   it("sslmode=disable без CA и сертификата ничего не удаляет — предупреждения нет", async () => {
