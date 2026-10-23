@@ -54,6 +54,8 @@ pnpm tauri dev
 | Primary и реплика без Patroni (PG 16) | `localhost:5451`, `localhost:5452` |
 | Одиночный сервер без `pg_stat_statements` (PG 15) | `localhost:5460` |
 
+Порты стенда опубликованы только на `127.0.0.1` (учётные данные известные), поэтому `localhost` в адресах ниже работает, а с другой машины стенд недоступен.
+
 Учётные данные: PG `glafira_diag` / `glafira-secret` (роль для диагностики), суперпользователь `postgres` / `postgres-secret`;
 REST API Patroni `patroni` / `patroni-secret`. Демо-база `orders`, схема `shop`.
 Участники Patroni отдают внутренние адреса `patroniN`: в профиле кластера задайте подмену адресов

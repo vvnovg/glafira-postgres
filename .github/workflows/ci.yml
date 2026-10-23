@@ -17,7 +17,8 @@ permissions:
 jobs:
   linux:
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    # Обрыв по таймауту пропускает сохранение кэша rust-cache: запас по времени нужен, чтобы холодная сборка успела завершиться.
+    timeout-minutes: 90
     env:
       # Полная отладочная информация в тестовых бинарниках (каждый с Tauri) занимает много места
       # на диске раннера; номеров строк в backtrace достаточно.
@@ -81,9 +82,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-2022]
+        # macos-15-intel — x86_64, как в release.yml.
+        os: [macos-14, macos-15-intel, windows-2022]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    # Обрыв по таймауту пропускает сохранение кэша rust-cache: запас по времени нужен, чтобы холодная сборка успела завершиться.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4

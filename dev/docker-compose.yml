@@ -29,7 +29,8 @@ services:
       PATRONI_NAME: patroni1
       PATRONI_RESTAPI_CONNECT_ADDRESS: patroni1:8008
       PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni1:5432
-    ports: ["5441:5432", "8011:8008"]
+    # Стенд слушает только loopback: учётные данные известные.
+    ports: ["127.0.0.1:5441:5432", "127.0.0.1:8011:8008"]
 
   patroni2:
     <<: *patroni
@@ -39,7 +40,7 @@ services:
       PATRONI_NAME: patroni2
       PATRONI_RESTAPI_CONNECT_ADDRESS: patroni2:8008
       PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni2:5432
-    ports: ["5442:5432", "8012:8008"]
+    ports: ["127.0.0.1:5442:5432", "127.0.0.1:8012:8008"]
 
   patroni3:
     <<: *patroni
@@ -49,7 +50,7 @@ services:
       PATRONI_NAME: patroni3
       PATRONI_RESTAPI_CONNECT_ADDRESS: patroni3:8008
       PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni3:5432
-    ports: ["5443:5432", "8013:8008"]
+    ports: ["127.0.0.1:5443:5432", "127.0.0.1:8013:8008"]
 
   pg-primary:
     image: postgres:16
@@ -74,7 +75,7 @@ services:
     volumes:
       - ./primary/10-replication.sh:/docker-entrypoint-initdb.d/10-replication.sh:ro
       - ./sql/init.sql:/docker-entrypoint-initdb.d/20-init.sql:ro
-    ports: ["5451:5432"]
+    ports: ["127.0.0.1:5451:5432"]
 
   pg-replica:
     image: postgres:16
@@ -88,7 +89,7 @@ services:
       REPLICATION_PASSWORD: replicator-secret
     volumes:
       - ./replica/entrypoint.sh:/replica-entrypoint.sh:ro
-    ports: ["5452:5432"]
+    ports: ["127.0.0.1:5452:5432"]
 
   pg-single:
     image: postgres:15
@@ -97,4 +98,4 @@ services:
       POSTGRES_PASSWORD: postgres-secret
     volumes:
       - ./sql/init.sql:/docker-entrypoint-initdb.d/20-init.sql:ro
-    ports: ["5460:5432"]
+    ports: ["127.0.0.1:5460:5432"]

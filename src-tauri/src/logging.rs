@@ -1,5 +1,7 @@
 //! Логи: stderr и файл в папке логов ОС с ротацией по размеру (5 × 5 МБ).
-//! Секреты в логи не пишутся нигде в коде; it_log_redaction.rs это проверяет.
+//! Секреты в логи не пишутся: отладочный вывод профилей и ввода формы их скрывает (`Debug` у `SecretsInput`,
+//! `ConnectionInput`, `ParsedConnection`; тесты `debug_output_hides_secrets` в commands/connections.rs и
+//! `debug_hides_the_password` в conn/connstr.rs).
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
