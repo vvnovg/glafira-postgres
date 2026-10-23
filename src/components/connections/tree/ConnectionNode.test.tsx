@@ -225,6 +225,30 @@ describe("ConnectionNode", () => {
     await user.click(screen.getByRole("button", { name: "Действия с подключением billing" }));
     await user.click(screen.getByRole("menuitem", { name: "Переподключить" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("reopen refused");
+    // После ошибки пункт снова предлагается: флаг переподключения сброшен.
+    await user.click(screen.getByRole("button", { name: "Действия с подключением billing" }));
+    expect(within(screen.getByRole("menu")).getByRole("menuitem", { name: "Переподключить" })).toBeInTheDocument();
+  });
+
+  it("«Подключиться» после «Отключиться» во время долгого переподключения не пропадает", async () => {
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView({ state: "degraded" }));
+    vi.mocked(api.reconnect).mockReturnValue(new Promise(() => {}));
+    vi.mocked(api.disconnect).mockResolvedValue(undefined);
+    vi.mocked(api.connect).mockResolvedValue(topologyView());
+    const user = userEvent.setup();
+    const { client } = renderNode();
+    await screen.findByRole("img", { name: "Часть узлов недоступна" });
+    const menuButton = screen.getByRole("button", { name: "Действия с подключением billing" });
+    await user.click(menuButton);
+    await user.click(screen.getByRole("menuitem", { name: "Переподключить" }));
+    await user.click(menuButton);
+    await user.click(screen.getByRole("menuitem", { name: "Отключиться" }));
+    act(() => client.setQueryData(["topology", "c"], disconnectedView));
+    await screen.findByRole("img", { name: "Не подключено" });
+    await user.click(menuButton);
+    await user.click(screen.getByRole("menuitem", { name: "Подключиться" }));
+    expect(api.connect).toHaveBeenCalledWith("c");
+    expect(await screen.findByRole("img", { name: "Подключено" })).toBeInTheDocument();
   });
 
   it("меню: отключение сворачивает узел", async () => {

@@ -23,6 +23,7 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
   const [expanded, setExpanded] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [reopening, setReopening] = useState(false);
   const [error, setError] = useState<AppError | null>(null);
   const { data: view = disconnectedView } = useTopology(c.id);
   const live = view.state === "connected" || view.state === "degraded";
@@ -49,12 +50,13 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
   };
 
   /**
-   * Переподключение живого подключения на месте. Пока оно идёт, узел занят (`busy`): пункт меню не предлагается,
-   * и повторные нажатия не ставят переподключения в очередь одно за другим.
+   * Переподключение живого подключения на месте. Пока оно идёт, пункт меню не предлагается (`reopening`), и повторные
+   * нажатия не ставят переподключения в очередь. Флаг свой, не `busy`: иначе «Подключиться» после «Отключиться»
+   * во время долгого переподключения молча пропадало бы.
    */
   const reconnect = async () => {
-    if (busy) return;
-    setBusy(true);
+    if (reopening) return;
+    setReopening(true);
     setError(null);
     try {
       setView(await api.reconnect(c.id));
@@ -64,7 +66,7 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
     } catch (e) {
       setError(toAppError(e));
     } finally {
-      setBusy(false);
+      setReopening(false);
     }
   };
 
@@ -117,8 +119,8 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
       : []),
     // Живое подключение можно переподключить на месте: после смены пароля на сервере или сбоя LDAP отказ во входе
     // запоминается до переподключения (errors.pg.loginNotRetried); журнал и узел каталога при этом остаются. Пока идёт
-    // подключение (connecting), пункта нет: переподключать ещё нечего; пока идёт само переподключение (busy) — тоже.
-    ...(live && !busy ? [{ label: t("sidebar.reopen"), onSelect: () => void reconnect() }] : []),
+    // подключение (connecting), пункта нет: переподключать ещё нечего; пока идёт само переподключение — тоже.
+    ...(live && !reopening ? [{ label: t("sidebar.reopen"), onSelect: () => void reconnect() }] : []),
     ...(live || view.state === "failed"
       ? [
           {
