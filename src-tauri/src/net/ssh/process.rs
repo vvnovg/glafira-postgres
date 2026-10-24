@@ -16,8 +16,11 @@ use crate::conn::profile::{SshAuth, SshSettings, validate_ssh};
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::sync::MutexExt;
 
-/// Сколько последних строк stderr и лога хранится для `details` ошибки.
-const STDERR_TAIL: usize = 20;
+/// Сколько последних строк настоящего stderr идёт в хвост ошибки (`details`).
+const STDERR_LINES: usize = 10;
+/// Сколько последних строк лога `-E` этого запуска идёт в хвост ошибки. У каждого источника свой запас: длинный
+/// баннер сервера (ssh печатает его в stderr) не должен вытеснять итоговую ошибку из лога.
+const LOG_LINES: usize = 20;
 /// Сколько байт конца лога `-E` читается для хвоста ошибки: за долгую жизнь туннеля лог растёт.
 const LOG_TAIL_BYTES: u64 = 64 * 1024;
 /// Ожидание `ssh -V`.
@@ -119,6 +122,11 @@ impl SshArgs {
             "-E".into(),
             self.log_file.clone().into(),
         ];
+        // `ControlMaster=no` и `ControlPath=none` изолируют туннель от разделения соединений в `~/.ssh/config`
+        // (`ControlMaster auto` + `ControlPath`). Иначе `ssh -N -D` мог бы отдать проброс уже открытому общему
+        // сеансу: порт SOCKS пережил бы приложение как прокси без аутентификации, а ключ хоста и вход не
+        // проверялись бы вовсе. Или наш процесс сам стал бы мастером, и чужие сеансы пользователя умерли бы
+        // вместе с ним. Опции командной строки главнее файла настроек.
         for o in [
             "ExitOnForwardFailure=yes",
             "ServerAliveInterval=15",
@@ -126,6 +134,8 @@ impl SshArgs {
             "StrictHostKeyChecking=ask",
             "NumberOfPasswordPrompts=1",
             "BatchMode=no",
+            "ControlMaster=no",
+            "ControlPath=none",
         ] {
             a.push("-o".into());
             a.push(o.into());
@@ -190,13 +200,14 @@ impl SshChild {
         self.child.id()
     }
 
-    /// Последние строки вывода этого запуска: лог `-E` (с ним ssh пишет ошибки туда, а не в stderr) и stderr
-    /// (то, что ssh успел вывести до открытия лога).
+    /// Хвост вывода этого запуска: последние `STDERR_LINES` строк stderr (баннер сервера, вывод ProxyCommand,
+    /// то, что ssh успел вывести до открытия лога), затем последние `LOG_LINES` строк лога `-E` (с ним ssh пишет
+    /// ошибки туда, а не в stderr; итоговая причина выхода — в конце). Источники не делят запас строк.
     pub fn stderr_tail(&self) -> String {
-        let mut lines = log_lines_since(&self.log_file, self.log_offset);
-        lines.extend(self.stderr.lock_safe().iter().cloned());
-        let skip = lines.len().saturating_sub(STDERR_TAIL);
-        lines[skip..].join("\n")
+        let mut lines: Vec<String> = self.stderr.lock_safe().iter().cloned().collect();
+        let log = log_lines_since(&self.log_file, self.log_offset);
+        lines.extend(log[log.len().saturating_sub(LOG_LINES)..].iter().cloned());
+        lines.join("\n")
     }
 
     /// Завершился ли процесс (без ожидания); `Some(code)` — код выхода (`None` — завершён сигналом).
@@ -322,13 +333,24 @@ pub fn spawn(args: &SshArgs, env: &AskpassEnv) -> AppResult<SshChild> {
     let reader = child.stderr.take().map(|err| {
         let tail = tail.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(err).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            // Построчно по байтам, а не `lines()`: не-UTF-8 (вывод ProxyCommand, askpass) не должен обрывать чтение,
+            // иначе канал закроется и дочерние процессы получат EPIPE/SIGPIPE.
+            let mut reader = BufReader::new(err);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let text = String::from_utf8_lossy(&buf);
+                let line = text.strip_suffix('\n').unwrap_or(&text);
+                let line = line.strip_suffix('\r').unwrap_or(line);
                 let mut t = tail.lock_safe();
-                if t.len() == STDERR_TAIL {
+                if t.len() == STDERR_LINES {
                     t.pop_front();
                 }
-                t.push_back(line);
+                t.push_back(line.to_owned());
             }
         })
     });
@@ -385,13 +407,26 @@ pub fn parse_host_key_report(report: &str) -> (Option<String>, Option<String>) {
     (host, fingerprint)
 }
 
-/// Обрыв уже установленного соединения с бастионом (`ServerAlive`, сброс, закрытие сервером).
-const DISCONNECT_MARKERS: [&str; 4] = [
+/// Обрыв соединения с бастионом (`ServerAlive`, сброс, закрытие сервером, таймаут).
+const DISCONNECT_MARKERS: [&str; 8] = [
     "Timeout, server",
     "closed by remote host",
     "Read from remote host",
     "Broken pipe",
+    "Connection closed by",
+    "Connection reset by",
+    "timed out",
+    "Disconnected from",
 ];
+
+/// Есть ли в выводе признак обрыва. Строки «channel N: open failed: …» не считаются: в их причине («connect
+/// failed: Connection timed out», «…reset by peer») говорит бастион о недоступном узле, а не об обрыве самого
+/// соединения с бастионом.
+fn is_disconnect(s: &str) -> bool {
+    s.lines()
+        .filter(|l| !l.contains("open failed"))
+        .any(|l| DISCONNECT_MARKERS.iter().any(|m| l.contains(m)))
+}
 
 /// Вид ошибки по выводу ssh (`stderr_tail`) и отчёту askpass; код выхода у OpenSSH на все ошибки один (255),
 /// поэтому решает текст. Неудачные CONNECT через `-D` («open failed») процесс не завершают, а в логе остаются:
@@ -418,7 +453,7 @@ pub fn classify_stderr(code: Option<i32>, stderr: &str, report: Option<&str>) ->
         || s.contains("Could not request local forwarding")
     {
         SshErrorKind::BindFailed
-    } else if DISCONNECT_MARKERS.iter().any(|m| s.contains(m)) {
+    } else if is_disconnect(s) {
         SshErrorKind::Exited
     } else if s.contains("open failed") || s.contains("connect failed") {
         SshErrorKind::ForwardFailed
@@ -535,6 +570,10 @@ mod tests {
                 "-o",
                 "BatchMode=no",
                 "-o",
+                "ControlMaster=no",
+                "-o",
+                "ControlPath=none",
+                "-o",
                 "UserKnownHostsFile=/tmp/kh",
                 "-p",
                 "2222",
@@ -629,6 +668,40 @@ mod tests {
                 "channel 2: open failed: connect failed: Connection refused\nTimeout, server bastion not responding.\n"
             ),
             SshErrorKind::Exited
+        );
+        // Обрыв по другим признакам: «Connection closed/reset by», «timed out», «Disconnected from».
+        for line in [
+            "Connection closed by 10.0.0.5 port 22",
+            "Read from remote host bastion: Connection reset by peer",
+            "Connection reset by 10.0.0.5 port 22",
+            "ssh: connect to host bastion port 22: Operation timed out",
+            "Disconnected from 10.0.0.5 port 22",
+        ] {
+            assert_eq!(
+                c(
+                    255,
+                    &format!(
+                        "channel 2: open failed: connect failed: Connection refused\n{line}\n"
+                    )
+                ),
+                SshErrorKind::Exited,
+                "{line}"
+            );
+        }
+        // Но сбой одного канала с «timed out»/«reset by» в причине — это проброс, а не обрыв бастиона.
+        assert_eq!(
+            c(
+                255,
+                "channel 2: open failed: connect failed: Connection timed out\n"
+            ),
+            SshErrorKind::ForwardFailed
+        );
+        assert_eq!(
+            c(
+                255,
+                "channel 2: open failed: connect failed: Connection reset by peer\n"
+            ),
+            SshErrorKind::ForwardFailed
         );
         // Отчёт askpass точнее stderr: в нём хост и отпечаток.
         let report = "The authenticity of host 'bastion (10.0.0.5)' can't be established.\nED25519 key fingerprint is SHA256:abcDEF+/=.\nAre you sure you want to continue connecting (yes/no/[fingerprint])?";
@@ -822,6 +895,63 @@ mod tests {
             classify_stderr(Some(255), &tail, None),
             SshErrorKind::AuthFailed
         );
+    }
+
+    /// Баннер сервера ssh печатает в настоящий stderr, а итоговую ошибку пишет в лог `-E`: длинный stderr не
+    /// должен вытеснять строки лога, по которым разбирается ошибка. У каждого источника свой запас строк.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn long_stderr_does_not_push_out_the_log_lines_classification_needs() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_ssh(
+            dir.path(),
+            "i=1\n\
+             while [ $i -le 25 ]; do echo \"banner $i\" >&2; i=$((i+1)); done\n\
+             i=1\n\
+             while [ $i -le 30 ]; do echo \"log noise $i\" >> \"$4\"; i=$((i+1)); done\n\
+             echo \"tester@bastion: Permission denied (publickey,password).\" >> \"$4\"\n\
+             exit 255",
+        );
+        let (args, env) = fake_args(dir.path(), bin);
+        let mut child = spawn_fake(&args, &env);
+        let unused = SocketAddr::from(([127, 0, 0, 1], free_port().unwrap()));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        assert_eq!(child.wait_ready(unused, deadline).await, Err(Some(255)));
+        let tail = child.stderr_tail();
+        assert!(tail.contains("Permission denied"), "{tail}");
+        assert_eq!(
+            classify_stderr(Some(255), &tail, None),
+            SshErrorKind::AuthFailed
+        );
+        // Из stderr — последние 10 строк, из лога — последние 20, лог идёт последним.
+        let lines: Vec<&str> = tail.lines().collect();
+        assert_eq!(lines.len(), 30, "{tail}");
+        assert_eq!(lines[0], "banner 16", "{tail}");
+        assert_eq!(lines[9], "banner 25", "{tail}");
+        assert_eq!(lines[10], "log noise 12", "{tail}");
+        assert!(lines[29].contains("Permission denied"), "{tail}");
+    }
+
+    /// Не-UTF-8 в stderr (вывод ProxyCommand, askpass) не обрывает чтение: следующие строки доходят, а дочерний
+    /// процесс не упирается в закрытый канал.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn non_utf8_stderr_line_does_not_stop_the_reader() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_ssh(
+            dir.path(),
+            "printf 'before\\377after\\n' >&2\n\
+             echo \"later line\" >&2\n\
+             exit 255",
+        );
+        let (args, env) = fake_args(dir.path(), bin);
+        let mut child = spawn_fake(&args, &env);
+        let unused = SocketAddr::from(([127, 0, 0, 1], free_port().unwrap()));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        assert_eq!(child.wait_ready(unused, deadline).await, Err(Some(255)));
+        let tail = child.stderr_tail();
+        assert!(tail.contains("before\u{fffd}after"), "{tail}");
+        assert!(tail.contains("later line"), "{tail}");
     }
 
     #[cfg(unix)]

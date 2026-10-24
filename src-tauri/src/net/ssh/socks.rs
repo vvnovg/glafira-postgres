@@ -10,9 +10,10 @@ use crate::error::{AppError, AppResult, ErrorCode};
 
 pub type SocksStream = Socks5Stream<TcpStream>;
 
-/// TCP к `proxy` (с keepalive, как прямое соединение), затем SOCKS5 CONNECT к `host:port` по имени. Своего
-/// срока нет: ответ на CONNECT ждёт, пока бастион соединится с узлом, — вызывающий оборачивает в таймаут
-/// подключения.
+/// TCP к `proxy` (с keepalive, как прямое соединение), затем SOCKS5 CONNECT к `host:port` по имени. `ssh -D`
+/// отвечает успехом SOCKS5 ещё до того, как бастион откроет канал к узлу, поэтому недоступный узел виден не
+/// ошибкой `connect`, а концом потока (EOF) при первом чтении, и разбирает его вызывающий. Своего срока у
+/// `connect` нет: вызывающий оборачивает его в таймаут подключения.
 pub async fn connect(proxy: SocketAddr, host: &str, port: u16) -> AppResult<SocksStream> {
     let tcp = tcp_connect(&proxy.ip().to_string(), proxy.port())
         .await
@@ -22,7 +23,8 @@ pub async fn connect(proxy: SocketAddr, host: &str, port: u16) -> AppResult<Sock
         .map_err(|e| socks_error(host, port, &e.to_string()))
 }
 
-/// `SSH_ERROR` вида `forwardFailed`: порт туннеля не ответил или бастион не соединился с узлом.
+/// `SSH_ERROR` вида `forwardFailed`. На практике срабатывает, только когда порт туннеля закрыт (процесс `ssh`
+/// уже умер) или рукопожатие SOCKS5 оборвалось: недоступный узел сюда не попадает (см. `connect`).
 fn socks_error(host: &str, port: u16, cause: &str) -> AppError {
     let mut e = app_err!(
         ErrorCode::SshError,
