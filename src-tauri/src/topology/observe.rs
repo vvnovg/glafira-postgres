@@ -123,7 +123,6 @@ mod tests {
 
     #[test]
     fn leader_member_is_the_writable_node_regardless_of_target_server_type() {
-        use crate::topology::model::{member, topo};
         let mut t = topo(vec![member("a", Role::Replica), member("b", Role::Primary)]);
         assert_eq!(
             leader_member(ConnectionKind::HostList, &t).map(|m| m.name.as_str()),

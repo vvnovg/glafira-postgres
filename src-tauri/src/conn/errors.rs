@@ -99,10 +99,15 @@ pub(crate) fn classify_sqlstate(code: &SqlState) -> (ErrorCode, LocalizedText) {
 }
 
 /// Конфликт recovery: запрос на реплике отменён, чтобы применить WAL (40001 — снимок, 40P01 — взаимная блокировка
-/// с буфером). Код один с ошибками сериализации, поэтому решает текст сервера.
-pub(crate) fn is_recovery_conflict(code: &SqlState, message: &str) -> bool {
+/// с буфером). Код один с ошибками сериализации и обычных взаимных блокировок, поэтому нужен второй признак.
+/// Признаков два, потому что сервер переводит сообщения по `lc_messages` (русский каталог переводит и эту фразу),
+/// а приложение не может заставить сервер говорить по-английски: английский текст «conflict with recovery» — это
+/// первый признак; второй, не зависящий от локали, — файл исходников сервера (поле `F` ошибки): на PostgreSQL 13–18
+/// конфликты recovery поднимаются в `tcop/postgres.c`, а сериализация и взаимные блокировки — в других файлах
+/// (`predicate.c`, `deadlock.c`, код кучи и исполнителя). Достаточно любого из двух признаков при подходящем коде.
+pub(crate) fn is_recovery_conflict(code: &SqlState, message: &str, file: Option<&str>) -> bool {
     (*code == SqlState::T_R_SERIALIZATION_FAILURE || *code == SqlState::T_R_DEADLOCK_DETECTED)
-        && message.contains("conflict with recovery")
+        && (message.contains("conflict with recovery") || file == Some("postgres.c"))
 }
 
 /// Ошибка без ответа сервера (нет `DbError`): классификация по тексту цепочки причин.
@@ -163,7 +168,7 @@ pub fn from_pg(e: &tokio_postgres::Error) -> AppError {
             Some(d) => format!("{}: {} ({d})", code.code(), db.message()),
             None => format!("{}: {}", code.code(), db.message()),
         };
-        if is_recovery_conflict(code, db.message()) {
+        if is_recovery_conflict(code, db.message(), db.file()) {
             return app_err!(
                 ErrorCode::RecoveryConflict,
                 "errors.pg.recoveryConflict",
@@ -429,14 +434,45 @@ mod tests {
         let msg = "canceling statement due to conflict with recovery";
         assert!(is_recovery_conflict(
             &SqlState::T_R_SERIALIZATION_FAILURE,
-            msg
+            msg,
+            None
         ));
-        assert!(is_recovery_conflict(&SqlState::T_R_DEADLOCK_DETECTED, msg));
+        assert!(is_recovery_conflict(
+            &SqlState::T_R_DEADLOCK_DETECTED,
+            msg,
+            None
+        ));
         assert!(!is_recovery_conflict(
             &SqlState::T_R_SERIALIZATION_FAILURE,
-            "could not serialize access"
+            "could not serialize access",
+            None
         ));
-        assert!(!is_recovery_conflict(&SqlState::QUERY_CANCELED, msg));
+        assert!(!is_recovery_conflict(&SqlState::QUERY_CANCELED, msg, None));
+    }
+
+    #[test]
+    fn recovery_conflict_is_recognized_by_server_file_when_message_is_localized() {
+        let ru = "выполнение оператора отменено из-за конфликта с восстановлением";
+        assert!(is_recovery_conflict(
+            &SqlState::T_R_SERIALIZATION_FAILURE,
+            ru,
+            Some("postgres.c")
+        ));
+        assert!(is_recovery_conflict(
+            &SqlState::T_R_DEADLOCK_DETECTED,
+            ru,
+            Some("postgres.c")
+        ));
+        assert!(!is_recovery_conflict(
+            &SqlState::T_R_SERIALIZATION_FAILURE,
+            ru,
+            Some("predicate.c")
+        ));
+        assert!(!is_recovery_conflict(
+            &SqlState::QUERY_CANCELED,
+            ru,
+            Some("postgres.c")
+        ));
     }
 
     #[test]

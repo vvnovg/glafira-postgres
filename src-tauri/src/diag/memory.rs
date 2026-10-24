@@ -48,7 +48,6 @@ impl CloseListener for CounterMemory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::topology::runtime::CloseListener;
 
     #[test]
     fn swap_returns_the_previous_snapshot_of_the_same_opening() {
