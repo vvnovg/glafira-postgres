@@ -1,6 +1,6 @@
 //! Сироты ssh после сбоя приложения (спец. P1 §5): PID и путь лога в `tunnels.json` (0600) в каталоге данных.
-//! При старте процессы из файла завершаются, если в их командной строке есть путь их лога (чужой процесс с
-//! тем же PID не пострадает). Все функции блокирующие (файл, `ps`/PowerShell): вызывать из `spawn_blocking`.
+//! При старте процессы из файла завершаются, если в их командной строке есть имя их лога `ssh-<id>.log` (чужой
+//! процесс с тем же PID не пострадает). Все функции блокирующие (файл, `ps`/PowerShell): вызывать из `spawn_blocking`.
 
 use std::path::{Path, PathBuf};
 
@@ -83,12 +83,17 @@ fn command_line(pid: u32) -> String {
     }
     #[cfg(windows)]
     {
+        // Перенаправленный вывод PowerShell — в OEM-кодировке консоли (CP866 в русской Windows): без UTF-8 путь с
+        // кириллицей (профиль «C:\Users\Иван») пришёл бы искажённым. Сравнение всё равно идёт по ASCII-имени
+        // файла лога (`names_log`), так что и непредусмотренная кодировка его не ломает.
         hidden(&mut std::process::Command::new("powershell"))
             .args([
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
-                &format!("(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\").CommandLine"),
+                &format!(
+                    "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; (Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\").CommandLine"
+                ),
             ])
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
@@ -116,14 +121,40 @@ fn terminate(pid: u32) {
     }
 }
 
+/// Имя файла лога (`ssh-<id>.log`) из пути, записанного в `tunnels.json`: разделители обеих ОС, чтобы разбор не
+/// зависел от платформы. Пусто — пути нет.
+fn log_file_name(log: &Path) -> String {
+    let path = log.to_string_lossy();
+    path.rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Есть ли в командной строке процесса аргумент, оканчивающийся именем лога: `…/ssh-<id>.log` или `…\ssh-<id>.log`
+/// (до него — разделитель пути, пробел, кавычка или начало строки; после — конец аргумента). Сравнивается ASCII-имя
+/// файла, а не путь целиком: каталог с не-ASCII символами (профиль Windows с кириллицей) мог прийти от `ps` или
+/// PowerShell в другой кодировке. Id подключения — только ASCII-буквы, цифры, «_» и «-» (`validate_profile`), поэтому
+/// имя однозначно указывает на туннель.
+fn names_log(command_line: &str, file_name: &str) -> bool {
+    if file_name.is_empty() {
+        return false;
+    }
+    command_line.match_indices(file_name).any(|(at, _)| {
+        let before = command_line[..at].chars().next_back();
+        let after = command_line[at + file_name.len()..].chars().next();
+        before.is_none_or(|c| matches!(c, '/' | '\\' | ' ' | '"' | '\''))
+            && after.is_none_or(|c| matches!(c, ' ' | '"' | '\'' | '\0' | '\r' | '\n'))
+    })
+}
+
 /// Завершает сирот и очищает файл; возвращает число завершённых.
 pub fn reap(dir: &Path) -> usize {
     let _g = LOCK.lock_safe();
     let r = read(dir);
     let mut killed = 0;
     for e in &r.pids {
-        let log = e.log.to_string_lossy();
-        if !log.is_empty() && command_line(e.pid).contains(log.as_ref()) {
+        if names_log(&command_line(e.pid), &log_file_name(&e.log)) {
             terminate(e.pid);
             killed += 1;
         }
@@ -132,6 +163,55 @@ pub fn reap(dir: &Path) -> usize {
         let _ = write(dir, &Registry::default());
     }
     killed
+}
+
+/// Сравнение командной строки с логом — без процессов, на всех ОС.
+#[cfg(test)]
+mod matcher_tests {
+    use super::*;
+
+    #[test]
+    fn log_is_matched_by_its_ascii_file_name_even_in_a_garbled_path() {
+        let log = Path::new(
+            "C:\\Users\\Вячеслав\\AppData\\Local\\io.github.vvnovg.glafira.postgres\\logs\\ssh-c1.log",
+        );
+        assert_eq!(log_file_name(log), "ssh-c1.log");
+        assert_eq!(
+            log_file_name(Path::new("/home/иван/.local/share/x/logs/ssh-c1.log")),
+            "ssh-c1.log"
+        );
+        // Командная строка из PowerShell в OEM-кодировке: кириллица профиля искажена, имя файла — нет.
+        let garbled = "\"C:\\Windows\\System32\\OpenSSH\\ssh.exe\" -N -T -E C:\\Users\\\u{2592}\u{2592}\u{2592}\\AppData\\Local\\io.github.vvnovg.glafira.postgres\\logs\\ssh-c1.log -o ExitOnForwardFailure=yes -- bastion\r\n";
+        assert!(names_log(garbled, "ssh-c1.log"));
+        // Путь в кавычках и `/proc/<pid>/cmdline` с NUL между аргументами.
+        assert!(names_log(
+            "ssh.exe -E \"C:\\Users\\Иван\\logs\\ssh-c1.log\" -- bastion",
+            "ssh-c1.log"
+        ));
+        assert!(names_log(
+            "ssh\0-N\0-E\0/home/u/logs/ssh-c1.log\0--\0bastion",
+            "ssh-c1.log"
+        ));
+        // Чужие логи и процессы: другой id, имя внутри другого имени, лог прошлого запуска, пустое имя.
+        assert!(!names_log(
+            "ssh -E /logs/ssh-c10.log -- bastion",
+            "ssh-c1.log"
+        ));
+        assert!(!names_log(
+            "ssh -E /logs/xssh-c1.log -- bastion",
+            "ssh-c1.log"
+        ));
+        assert!(!names_log(
+            "ssh -E /logs/ssh-c1.log.bak -- bastion",
+            "ssh-c1.log"
+        ));
+        assert!(!names_log(
+            "ssh -E /logs/ssh-c1.1.log -- bastion",
+            "ssh-c1.log"
+        ));
+        assert!(!names_log("", "ssh-c1.log"));
+        assert!(!names_log("ssh -E /logs/ssh-c1.log", ""));
+    }
 }
 
 // Тест на `sh` и сигналах — только unix.
