@@ -120,7 +120,7 @@ services:
     hostname: bastion
     ports: ["127.0.0.1:2222:22"]
 
-  # Матрица версий (профиль `matrix`): `docker compose -f dev/docker-compose.yml --profile matrix up -d`.
+  # Матрица версий (профиль `matrix`): `docker compose -f dev/docker-compose.yml --profile matrix up -d --no-recreate`.
   # Порты 127.0.0.1:5513…5518 — по номеру версии; роль glafira_diag и база orders — из sql/init.sql.
   pg13:
     <<: *matrix
