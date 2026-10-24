@@ -200,6 +200,42 @@ pub fn from_handshake(e: &tokio_postgres::Error, verify: Option<X509VerifyResult
     }
 }
 
+/// Поток оборвался: в цепочке причин ошибка ввода-вывода «конец потока / сброс / разрыв» или такой текст
+/// (TLS-библиотеки и HTTP-клиент оборачивают конец потока в свои ошибки).
+pub fn stream_closed(e: &(dyn std::error::Error + 'static)) -> bool {
+    use std::io::ErrorKind;
+    let mut cur = Some(e);
+    while let Some(err) = cur {
+        if let Some(io) = err.downcast_ref::<std::io::Error>()
+            && matches!(
+                io.kind(),
+                ErrorKind::UnexpectedEof
+                    | ErrorKind::ConnectionReset
+                    | ErrorKind::ConnectionAborted
+                    | ErrorKind::BrokenPipe
+            )
+        {
+            return true;
+        }
+        cur = err.source();
+    }
+    let text = chain(e).to_lowercase();
+    [
+        "unexpected eof",
+        "early eof",
+        "connection closed",
+        "connection reset",
+        "broken pipe",
+    ]
+    .iter()
+    .any(|m| text.contains(m))
+}
+
+/// Соединение закрыто до ответа сервера (`ssh -D` закрывает его, когда бастион не смог открыть канал к узлу).
+pub fn closed_early(e: &tokio_postgres::Error) -> bool {
+    e.is_closed() || stream_closed(e)
+}
+
 /// Можно ли доверять соединению после ошибки. Ответ сервера (`ErrorResponse`) соединение не портит;
 /// обрыв, ошибка ввода-вывода или протокола — портят: такое соединение закрывают
 /// (`PooledClient::discard`), а не возвращают в пул.
@@ -279,6 +315,26 @@ mod tests {
             "Connection refused",
         ));
         assert_eq!(chain(&e), "error connecting to server: Connection refused");
+    }
+
+    /// Обрыв потока узнаётся по виду ошибки ввода-вывода в цепочке причин или по тексту; отказ в соединении — нет.
+    #[test]
+    fn stream_closed_looks_through_the_chain() {
+        let io = |kind, text: &str| Outer(std::io::Error::new(kind, text.to_string()));
+        assert!(stream_closed(&io(
+            std::io::ErrorKind::UnexpectedEof,
+            "early"
+        )));
+        assert!(stream_closed(&io(std::io::ErrorKind::ConnectionReset, "x")));
+        assert!(stream_closed(&io(std::io::ErrorKind::BrokenPipe, "x")));
+        assert!(stream_closed(&io(
+            std::io::ErrorKind::Other,
+            "connection closed before message completed"
+        )));
+        assert!(!stream_closed(&io(
+            std::io::ErrorKind::ConnectionRefused,
+            "Connection refused"
+        )));
     }
 
     #[test]

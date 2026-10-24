@@ -66,7 +66,16 @@ pub fn askpass_supported(v: (u32, u32)) -> bool {
 /// Версия клиента из `ssh -V`. Не запустился, не ответил за 5 с или ответил не как OpenSSH — `notFound`
 /// с причиной в `details`: пригодного клиента OpenSSH нет.
 pub async fn ssh_version(bin: &Path) -> AppResult<(u32, u32)> {
+    ssh_version_with_env(bin, &[]).await
+}
+
+/// То же с дополнительным окружением (как `SshArgs::extra_env`: тесты управляют поддельным ssh).
+pub async fn ssh_version_with_env(
+    bin: &Path,
+    extra_env: &[(String, String)],
+) -> AppResult<(u32, u32)> {
     let mut cmd = Command::new(bin);
+    cmd.envs(extra_env.iter().map(|(k, v)| (k, v)));
     cmd.arg("-V")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -109,6 +118,9 @@ pub struct SshArgs {
     pub settings: SshSettings,
     /// Только для тестов (`GLAFIRA_SSH_KNOWN_HOSTS`): свой known_hosts, чтобы не трогать файл пользователя.
     pub known_hosts: Option<PathBuf>,
+    /// Дополнительное окружение процесса (тесты управляют поддельным ssh). В командную строку не попадает;
+    /// переменные askpass приложения главнее.
+    pub extra_env: Vec<(String, String)>,
 }
 
 impl SshArgs {
@@ -187,6 +199,10 @@ pub struct AskpassEnv {
     pub connection_id: String,
     pub report_file: PathBuf,
     pub trust: Option<String>,
+    /// Файл секретов 0600 вместо keychain (`GLAFIRA_ASKPASS_SECRET_FILE`): только тесты, где keychain нет.
+    pub secret_file: Option<PathBuf>,
+    /// Бинарь для `SSH_ASKPASS` вместо текущего процесса (интеграционные тесты запускаются бинарём libtest).
+    pub askpass_bin: Option<PathBuf>,
 }
 
 pub struct SshChild {
@@ -228,6 +244,11 @@ impl SshChild {
 
     pub async fn kill(&mut self) {
         let _ = self.child.kill().await;
+    }
+
+    /// Сигнал завершения без ожидания (вне async: закрытие туннеля, drop). Завершившийся процесс не трогается.
+    pub fn start_kill(&mut self) {
+        let _ = self.child.start_kill();
     }
 
     /// Туннель готов, когда порт SOCKS принимает TCP; процесс завершился раньше — `Err(код выхода)` (причина —
@@ -303,14 +324,19 @@ fn hide_window(cmd: &mut Command) {
 pub fn spawn(args: &SshArgs, env: &AskpassEnv) -> AppResult<SshChild> {
     validate_ssh(Some(&args.settings))?;
     let target = &args.settings.target;
-    let askpass = std::env::current_exe()
-        .map_err(|e| ssh_error(SshErrorKind::Exited, target, &e.to_string()))?;
+    let askpass = match &env.askpass_bin {
+        Some(bin) => bin.clone(),
+        None => std::env::current_exe()
+            .map_err(|e| ssh_error(SshErrorKind::Exited, target, &e.to_string()))?,
+    };
     let mut cmd = Command::new(&args.bin);
     cmd.args(args.command_line())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
+        // Сначала дополнительное окружение: переменные askpass ниже его перекрывают.
+        .envs(args.extra_env.iter().map(|(k, v)| (k, v)))
         .env("SSH_ASKPASS", askpass)
         .env("SSH_ASKPASS_REQUIRE", "force")
         .env("GLAFIRA_ASKPASS", &env.connection_id)
@@ -324,6 +350,16 @@ pub fn spawn(args: &SshArgs, env: &AskpassEnv) -> AppResult<SshChild> {
         }
         None => {
             cmd.env_remove("GLAFIRA_ASKPASS_TRUST");
+        }
+    }
+    // Файл секретов — только явно (тесты); унаследованная из окружения приложения переменная не должна увести
+    // askpass от keychain.
+    match &env.secret_file {
+        Some(f) => {
+            cmd.env("GLAFIRA_ASKPASS_SECRET_FILE", f);
+        }
+        None => {
+            cmd.env_remove("GLAFIRA_ASKPASS_SECRET_FILE");
         }
     }
     hide_window(&mut cmd);
@@ -548,6 +584,7 @@ mod tests {
             socks_port: 40123,
             settings: settings(),
             known_hosts: Some(PathBuf::from("/tmp/kh")),
+            extra_env: vec![],
         };
         let line: Vec<String> = args
             .command_line()
@@ -747,11 +784,16 @@ mod tests {
         assert!(askpass_supported((8, 4)) && !askpass_supported((8, 3)));
     }
 
+    /// Параллельные тесты (туннели с поддельным ssh) тоже берут свободные порты и могут занять тот же порт между
+    /// `free_port` и повторной привязкой — та же гонка, ради которой супервизор повторяет запуск: несколько попыток.
     #[test]
     fn free_port_is_bindable_again() {
-        let p = free_port().unwrap();
-        assert!(p > 0);
-        std::net::TcpListener::bind(("127.0.0.1", p)).unwrap();
+        let bound = (0..5).any(|_| {
+            let p = free_port().unwrap();
+            assert!(p > 0);
+            std::net::TcpListener::bind(("127.0.0.1", p)).is_ok()
+        });
+        assert!(bound);
     }
 
     #[test]
@@ -808,11 +850,14 @@ mod tests {
             socks_port: 40123,
             settings: bad,
             known_hosts: None,
+            extra_env: vec![],
         };
         let env = AskpassEnv {
             connection_id: "c1".into(),
             report_file: PathBuf::from("/nonexistent/report"),
             trust: None,
+            secret_file: None,
+            askpass_bin: None,
         };
         let e = spawn(&args, &env).err().expect("spawn must refuse");
         assert_eq!(
@@ -871,11 +916,14 @@ mod tests {
             socks_port: 40123,
             settings: settings(),
             known_hosts: None,
+            extra_env: vec![],
         };
         let env = AskpassEnv {
             connection_id: "c1".into(),
             report_file: dir.join("askpass-c1.txt"),
             trust: Some("SHA256:x".into()),
+            secret_file: None,
+            askpass_bin: None,
         };
         (args, env)
     }
@@ -945,6 +993,54 @@ mod tests {
         assert_eq!(lines[9], "banner 25", "{tail}");
         assert_eq!(lines[10], "log noise 12", "{tail}");
         assert!(lines[29].contains("Permission denied"), "{tail}");
+    }
+
+    /// Бинарь askpass, файл секретов и дополнительное окружение доходят до ssh; переменные askpass приложения
+    /// главнее дополнительных, а унаследованный файл секретов без явного указания снимается.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn askpass_binary_secret_file_and_extra_env_reach_ssh() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_ssh(
+            dir.path(),
+            "echo \"env [$SSH_ASKPASS] [$GLAFIRA_ASKPASS_SECRET_FILE] [$FAKE_X] [$GLAFIRA_ASKPASS]\" >&2\n\
+             exit 255",
+        );
+        let (mut args, mut env) = fake_args(dir.path(), bin);
+        args.extra_env = vec![
+            ("FAKE_X".into(), "1".into()),
+            ("GLAFIRA_ASKPASS".into(), "spoofed".into()),
+        ];
+        env.askpass_bin = Some(PathBuf::from("/opt/glafira-pg"));
+        env.secret_file = Some(dir.path().join("askpass-c1.secrets"));
+        let unused = SocketAddr::from(([127, 0, 0, 1], free_port().unwrap()));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut child = spawn_fake(&args, &env);
+        assert_eq!(child.wait_ready(unused, deadline).await, Err(Some(255)));
+        let tail = child.stderr_tail();
+        let secrets = dir.path().join("askpass-c1.secrets");
+        assert!(
+            tail.contains(&format!(
+                "env [/opt/glafira-pg] [{}] [1] [c1]",
+                secrets.display()
+            )),
+            "{tail}"
+        );
+        // Без указания: SSH_ASKPASS — текущий бинарь, файла секретов нет.
+        env.askpass_bin = None;
+        env.secret_file = None;
+        args.extra_env = vec![(
+            "GLAFIRA_ASKPASS_SECRET_FILE".into(),
+            "/tmp/inherited".into(),
+        )];
+        let mut child = spawn_fake(&args, &env);
+        assert_eq!(child.wait_ready(unused, deadline).await, Err(Some(255)));
+        let tail = child.stderr_tail();
+        let me = std::env::current_exe().unwrap();
+        assert!(
+            tail.contains(&format!("env [{}] [] [] [c1]", me.display())),
+            "{tail}"
+        );
     }
 
     /// Не-UTF-8 в stderr (вывод ProxyCommand, askpass) не обрывает чтение: следующие строки доходят, а дочерний

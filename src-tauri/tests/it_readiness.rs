@@ -12,6 +12,10 @@ use glafira_pg_lib::secrets::{
 };
 use pg_advisor::readiness::Status;
 
+fn no_tunnels() -> Arc<glafira_pg_lib::net::ssh::tunnel::TunnelRegistry> {
+    common::no_tunnels(Default::default())
+}
+
 fn status_of(report: &glafira_pg_lib::readiness::check::TestReport, id: &str) -> Status {
     report.readiness.iter().find(|i| i.id == id).unwrap().status
 }
@@ -58,6 +62,7 @@ async fn single_server_without_pg_stat_statements() {
     let report = run(
         common::server_profile("t", &addr),
         common::secrets_with_password("t"),
+        no_tunnels(),
         &|e| events.lock().unwrap().push(e),
     )
     .await
@@ -94,7 +99,7 @@ async fn role_without_pg_monitor_gets_a_checklist() {
         .set(&secret_key("plain", PG_PASSWORD), PLAIN_PASSWORD)
         .unwrap();
     let events = Mutex::new(Vec::<TestEvent>::new());
-    let report = run(profile, Arc::new(secrets), &|e| {
+    let report = run(profile, Arc::new(secrets), no_tunnels(), &|e| {
         events.lock().unwrap().push(e)
     })
     .await
@@ -142,9 +147,11 @@ async fn patroni_cluster_is_ready() {
         .unwrap();
     let events = Mutex::new(Vec::<TestEvent>::new());
     let secrets: Arc<dyn SecretStore> = secrets;
-    let report = run(p, secrets, &|e| events.lock().unwrap().push(e))
-        .await
-        .unwrap();
+    let report = run(p, secrets, no_tunnels(), &|e| {
+        events.lock().unwrap().push(e)
+    })
+    .await
+    .unwrap();
     assert!(report.ok, "{:?}", events.lock().unwrap());
     assert_eq!(status_of(&report, "pgssPreloaded"), Status::Ok);
     assert_eq!(status_of(&report, "pgssInstalled"), Status::Ok);
@@ -174,6 +181,7 @@ async fn wrong_password_fails_node_step() {
     let report = run(
         common::server_profile("w", &addr),
         Arc::new(secrets),
+        no_tunnels(),
         &|e| events.lock().unwrap().push(e),
     )
     .await

@@ -62,6 +62,8 @@ export const api = {
   connectionSecrets: (id: string) => call<SecretsSet>("connection_secrets", { id }),
   deleteConnection: (id: string) => call<void>("delete_connection", { id }),
   parseConnectionString: (text: string) => call<ParsedConnection>("parse_connection_string", { text }),
+  /** Доверие ключу хоста ssh (после `errors.ssh.hostKeyUnknown`) — до выхода из приложения; затем повтор. */
+  trustSshHostKey: (target: string, fingerprint: string) => call<void>("trust_ssh_host_key", { target, fingerprint }),
   /** Шаги проверки приходят в `onEvent` по мере выполнения; итог — отчёт. */
   testConnection: (profile: ConnectionProfile, secrets: SecretsInput, onEvent: (e: TestEvent) => void) => {
     const channel = new Channel<TestEvent>();

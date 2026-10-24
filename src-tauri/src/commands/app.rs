@@ -56,12 +56,15 @@ pub async fn export_diagnostics(
         .app_log_dir()
         .map_err(|e| AppError::internal_with(e.to_string()))?;
     blocking(move || {
+        // Логи приложения и процессов ssh (`-E`: диагностика ssh, секретов в ней нет).
+        let mut logs = crate::logging::log_files(&log_dir);
+        logs.extend(crate::logging::log_files_with_prefix(&log_dir, "ssh-"));
         crate::diagnostics::write_archive(
             std::path::Path::new(&path),
             &info,
             &st.connections.list(),
             &st.policy.status,
-            &crate::logging::log_files(&log_dir),
+            &logs,
         )
     })
     .await

@@ -2,6 +2,7 @@
 //! фоновый опрос раз в 10 с. События уходят в интерфейс через `RuntimeSink`.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -13,6 +14,7 @@ use crate::conn::pool::{IDLE_TIMEOUT, PoolRegistry};
 use crate::conn::profile::{ConnectionKind, ConnectionProfile, same_connection_settings};
 use crate::conn::run_blocking;
 use crate::error::{AppError, AppResult, ErrorCode};
+use crate::net::ssh::tunnel::TunnelRegistry;
 use crate::secrets::{PATRONI_KEY_PASSWORD, PATRONI_PASSWORD, SecretStore, secret_key};
 use crate::sync::MutexExt;
 use crate::topology::BoxFuture;
@@ -83,25 +85,38 @@ pub trait TopologySource: Send + Sync {
     fn forget(&self, _connection_id: &str) {}
 }
 
-/// Patroni REST и опрос узлов через пулы приложения. Клиент HTTP строится один раз на подключение:
-/// keychain не читается каждые 10 с.
+/// Patroni REST и опрос узлов через пулы приложения. Клиент HTTP строится один раз на подключение и маршрут:
+/// keychain не читается каждые 10 с, а после перезапуска туннеля на новом порту клиент строится заново.
 pub struct LiveSource {
     secrets: Arc<dyn SecretStore>,
     pools: Arc<PoolRegistry>,
-    http: Mutex<HashMap<String, Arc<ReqwestHttp>>>,
+    tunnels: Arc<TunnelRegistry>,
+    http: Mutex<HashMap<String, RoutedHttp>>,
 }
 
+/// Клиент HTTP подключения и маршрут, на который он настроен (`None` — напрямую, иначе порт туннеля).
+type RoutedHttp = (Option<SocketAddr>, Arc<ReqwestHttp>);
+
 impl LiveSource {
-    pub fn new(secrets: Arc<dyn SecretStore>, pools: Arc<PoolRegistry>) -> Self {
+    pub fn new(
+        secrets: Arc<dyn SecretStore>,
+        pools: Arc<PoolRegistry>,
+        tunnels: Arc<TunnelRegistry>,
+    ) -> Self {
         Self {
             secrets,
             pools,
+            tunnels,
             http: Mutex::new(HashMap::new()),
         }
     }
 
     async fn http_for(&self, profile: &ConnectionProfile) -> AppResult<Arc<ReqwestHttp>> {
-        if let Some(h) = self.http.lock_safe().get(&profile.id) {
+        // Туннель упал или закрыт — его ошибка: напрямую к API не идём.
+        let proxy = self.tunnels.route_for(profile)?;
+        if let Some((route, h)) = self.http.lock_safe().get(&profile.id)
+            && *route == proxy
+        {
             return Ok(h.clone());
         }
         let (p, s) = (profile.clone(), self.secrets.clone());
@@ -115,13 +130,17 @@ impl LiveSource {
             })?;
             let password = s.get(&secret_key(&p.id, PATRONI_PASSWORD))?;
             let key_password = s.get(&secret_key(&p.id, PATRONI_KEY_PASSWORD))?;
-            ReqwestHttp::new(settings, password, key_password.as_deref())
+            let http = ReqwestHttp::new(settings, password, key_password.as_deref(), proxy)?;
+            Ok(match &p.ssh {
+                Some(ssh) => http.with_ssh_target(&ssh.target),
+                None => http,
+            })
         })
         .await?;
         let http = Arc::new(http);
         self.http
             .lock_safe()
-            .insert(profile.id.clone(), http.clone());
+            .insert(profile.id.clone(), (proxy, http.clone()));
         Ok(http)
     }
 }
@@ -137,6 +156,7 @@ impl TopologySource for LiveSource {
                 pools: self.pools.clone(),
                 profile: profile.clone(),
                 secrets: self.secrets.clone(),
+                tunnels: self.tunnels.clone(),
             };
             let http = match profile.kind {
                 ConnectionKind::Patroni => Some(self.http_for(profile).await?),
@@ -232,12 +252,14 @@ fn state_for(t: &Topology) -> ConnState {
 
 /// Порядок блокировок один, обратного нет — взаимной блокировки нет: замок подключения (`connect_locks`,
 /// tokio) → очередь опросов открытия (`Entry::observing`, tokio) → `entries` (std) → пулы, кэш клиентов
-/// HTTP, `connect_locks`, приёмник событий (std). `reconnect` берёт оба замка tokio, фоновый опрос —
-/// только очередь опросов, `connect` — только замок подключения, `disconnect`, `discard_stale` и
+/// HTTP, реестр туннелей, `connect_locks`, приёмник событий (std). `reconnect` берёт оба замка tokio, фоновый
+/// опрос — только очередь опросов, `connect` — только замок подключения, `disconnect`, `discard_stale` и
 /// `refresh_profile` — ни одного. std-мьютекс не держится через `await`.
 pub struct Runtimes {
     source: Arc<dyn TopologySource>,
     pools: Arc<PoolRegistry>,
+    /// Туннели ssh подключений: открываются перед первым опросом, закрываются вместе с подключением.
+    tunnels: Arc<TunnelRegistry>,
     interval: Duration,
     /// Счётчик номеров открытий (`Entry::generation`).
     generations: AtomicU64,
@@ -254,19 +276,30 @@ fn not_connected() -> AppError {
     )
 }
 
+/// Срок открытия туннеля: таймаут подключения профиля плюс время на вход на бастион.
+fn tunnel_timeout(profile: &ConnectionProfile) -> Duration {
+    Duration::from_secs(profile.pg.connect_timeout_s + 5)
+}
+
 impl Runtimes {
-    pub fn new(source: Arc<dyn TopologySource>, pools: Arc<PoolRegistry>) -> Arc<Self> {
-        Self::with_interval(source, pools, POLL_INTERVAL)
+    pub fn new(
+        source: Arc<dyn TopologySource>,
+        pools: Arc<PoolRegistry>,
+        tunnels: Arc<TunnelRegistry>,
+    ) -> Arc<Self> {
+        Self::with_interval(source, pools, tunnels, POLL_INTERVAL)
     }
 
     pub fn with_interval(
         source: Arc<dyn TopologySource>,
         pools: Arc<PoolRegistry>,
+        tunnels: Arc<TunnelRegistry>,
         interval: Duration,
     ) -> Arc<Self> {
         Arc::new(Self {
             source,
             pools,
+            tunnels,
             interval,
             generations: AtomicU64::new(0),
             entries: Mutex::new(HashMap::new()),
@@ -352,6 +385,20 @@ impl Runtimes {
             self.emit_state(&id, ConnState::Connecting, None);
             generation
         };
+        // Туннель — до первого опроса: соединения профиля с ssh идут только через него.
+        if profile.ssh.is_some()
+            && let Err(err) = self.tunnels.open(&profile, tunnel_timeout(&profile)).await
+        {
+            let mut entries = self.entries.lock_safe();
+            let Some(e) = entries.get_mut(&id).filter(|e| e.generation == generation) else {
+                drop(entries);
+                return Err(self.discard_stale(&id));
+            };
+            e.state = ConnState::Failed;
+            e.error = Some(err.clone());
+            self.emit_state(&id, ConnState::Failed, Some(&err));
+            return Err(err);
+        }
         let result = self.source.observe(&profile, None).await.and_then(|t| {
             match first_connect_failure(&profile, &t) {
                 Some(err) => Err(err),
@@ -379,6 +426,8 @@ impl Runtimes {
             Err(err) => {
                 e.state = ConnState::Failed;
                 e.error = Some(err.clone());
+                // Неудачное подключение без опроса: процесс ssh не нужен (повтор откроет туннель заново).
+                self.tunnels.close(&id);
                 self.emit_state(&id, ConnState::Failed, Some(&err));
                 Err(err)
             }
@@ -386,10 +435,17 @@ impl Runtimes {
     }
 
     /// Опрос, закончившийся после закрытия подключения, мог заново создать то, что закрытие убрало
-    /// (пулы, клиент HTTP): убираем это и сообщаем, что подключение уже не открыто.
+    /// (пулы, клиент HTTP, туннель): убираем это и сообщаем, что подключение уже не открыто. Туннель
+    /// закрывается, только если подключение и правда закрыто: опрос прошлого открытия не должен закрыть
+    /// туннель нового. Проверка и закрытие — под `entries`: новое открытие сначала записывается туда, а
+    /// туннель открывает потом.
     fn discard_stale(&self, id: &str) -> AppError {
         self.pools.evict_connection(id);
         self.source.forget(id);
+        let entries = self.entries.lock_safe();
+        if !entries.contains_key(id) {
+            self.tunnels.close(id);
+        }
         not_connected()
     }
 
@@ -493,6 +549,7 @@ impl Runtimes {
         }
         self.pools.evict_connection(id);
         self.source.forget(id);
+        self.tunnels.close(id);
         // Замок подключения нужен только пока кто-то подключается: иначе карта росла бы с каждым id.
         self.connect_locks
             .lock_safe()
@@ -539,10 +596,14 @@ impl Runtimes {
             let Some(e) = entries.get_mut(&id).filter(|e| e.generation == generation) else {
                 return Err(not_connected());
             };
-            e.profile = profile;
+            e.profile = profile.clone();
             self.pools.evict_connection(&id);
             self.source.forget(&id);
         }
+        // Упавший туннель поднимается сразу, не дожидаясь паузы супервизора; живой не трогается.
+        self.tunnels
+            .restart_if_down(&profile, tunnel_timeout(&profile))
+            .await?;
         if !self.observe_entry(&id, generation, true).await {
             return Err(not_connected());
         }
@@ -619,13 +680,14 @@ impl Runtimes {
         Ok((m, e.profile.clone()))
     }
 
-    /// Останавливает все опросы (выход из приложения, конец теста).
+    /// Останавливает все опросы и туннели (выход из приложения, конец теста). Рантайм не нужен.
     pub fn shutdown(&self) {
         for (_, e) in self.entries.lock_safe().drain() {
             if let Some(h) = e.poller {
                 h.abort();
             }
         }
+        self.tunnels.close_all_blocking();
     }
 }
 
@@ -760,6 +822,11 @@ mod tests {
         ])
     }
 
+    /// Реестр туннелей без ssh: профили этих тестов без туннеля, файлов реестр не трогает.
+    fn no_tunnels(pools: &Arc<PoolRegistry>) -> Arc<TunnelRegistry> {
+        crate::net::ssh::tunnel::unused_registry(pools.clone())
+    }
+
     type Fixture = (
         Arc<Runtimes>,
         Arc<Scripted>,
@@ -770,7 +837,7 @@ mod tests {
     fn setup_with(interval: Duration, answers: Vec<AppResult<Topology>>) -> Fixture {
         let src = Scripted::new(answers);
         let pools = Arc::new(PoolRegistry::default());
-        let rt = Runtimes::with_interval(src.clone(), pools.clone(), interval);
+        let rt = Runtimes::with_interval(src.clone(), pools.clone(), no_tunnels(&pools), interval);
         let rec = Arc::new(Recorder::default());
         rt.set_sink(rec.clone());
         (rt, src, rec, pools)
@@ -1067,9 +1134,11 @@ mod tests {
     #[tokio::test]
     async fn reconnect_waits_for_a_connect_in_progress() {
         let src = Scripted::with_delay(vec![Ok(two("a"))], Duration::from_millis(100));
+        let pools = Arc::new(PoolRegistry::default());
         let rt = Runtimes::with_interval(
             src.clone(),
-            Arc::new(PoolRegistry::default()),
+            pools.clone(),
+            no_tunnels(&pools),
             Duration::from_secs(60),
         );
         let rec = Arc::new(Recorder::default());
@@ -1224,9 +1293,11 @@ mod tests {
     #[tokio::test]
     async fn disconnect_keeps_the_lock_of_a_connect_in_progress() {
         let src = Scripted::with_delay(vec![Ok(two("a"))], Duration::from_millis(150));
+        let pools = Arc::new(PoolRegistry::default());
         let rt = Runtimes::with_interval(
             src.clone(),
-            Arc::new(PoolRegistry::default()),
+            pools.clone(),
+            no_tunnels(&pools),
             Duration::from_secs(60),
         );
         let connect = tokio::spawn({
@@ -1398,9 +1469,11 @@ mod tests {
     #[tokio::test]
     async fn concurrent_connects_observe_once() {
         let src = Scripted::with_delay(vec![Ok(two("a"))], Duration::from_millis(50));
+        let pools = Arc::new(PoolRegistry::default());
         let rt = Runtimes::with_interval(
             src.clone(),
-            Arc::new(PoolRegistry::default()),
+            pools.clone(),
+            no_tunnels(&pools),
             Duration::from_secs(60),
         );
         let (a, b) = tokio::join!(rt.connect(patroni_profile()), rt.connect(patroni_profile()));
@@ -1675,7 +1748,12 @@ mod tests {
     async fn disconnect_during_a_slow_connect_leaves_no_trace() {
         let src = Scripted::with_delay(vec![Ok(two("a"))], Duration::from_millis(150));
         let pools = Arc::new(PoolRegistry::default());
-        let rt = Runtimes::with_interval(src.clone(), pools.clone(), Duration::from_secs(60));
+        let rt = Runtimes::with_interval(
+            src.clone(),
+            pools.clone(),
+            no_tunnels(&pools),
+            Duration::from_secs(60),
+        );
         let rec = Arc::new(Recorder::default());
         rt.set_sink(rec.clone());
         // Опрос, не успевший до закрытия, создаёт пул уже после того, как закрытие их убрало.
@@ -1713,7 +1791,12 @@ mod tests {
     async fn disconnect_during_a_failing_slow_connect_leaves_no_trace() {
         let src = Scripted::with_delay(vec![Err(err())], Duration::from_millis(150));
         let pools = Arc::new(PoolRegistry::default());
-        let rt = Runtimes::with_interval(src.clone(), pools.clone(), Duration::from_secs(60));
+        let rt = Runtimes::with_interval(
+            src.clone(),
+            pools.clone(),
+            no_tunnels(&pools),
+            Duration::from_secs(60),
+        );
         let rec = Arc::new(Recorder::default());
         rt.set_sink(rec.clone());
         *src.on_finish.lock_safe() = Some(Box::new({
@@ -1837,6 +1920,110 @@ mod tests {
         assert_eq!(rec.topologies.lock_safe().len(), topologies);
         assert!(pools.keys().is_empty());
         assert!(rt.events("c").is_empty());
+        rt.shutdown();
+    }
+
+    /// Рантайм с поддельным ssh: профили с туннелем (`tunnel::tests::profile`, id `c1`).
+    fn with_fake_ssh(
+        dir: &std::path::Path,
+        env: Vec<(&str, String)>,
+        answers: Vec<AppResult<Topology>>,
+    ) -> (
+        Arc<Runtimes>,
+        Arc<Scripted>,
+        Arc<Recorder>,
+        Arc<TunnelRegistry>,
+    ) {
+        let (tunnels, pools) = crate::net::ssh::tunnel::tests::registry(dir, env);
+        let src = Scripted::new(answers);
+        let rt =
+            Runtimes::with_interval(src.clone(), pools, tunnels.clone(), Duration::from_secs(60));
+        let rec = Arc::new(Recorder::default());
+        rt.set_sink(rec.clone());
+        (rt, src, rec, tunnels)
+    }
+
+    fn ssh_profile() -> ConnectionProfile {
+        let mut p =
+            crate::net::ssh::tunnel::tests::profile(crate::conn::profile::SshAuth::Password);
+        p.kind = ConnectionKind::Patroni;
+        p
+    }
+
+    /// Туннель не поднялся (вход на бастион отклонён): подключение `failed` с ошибкой ssh, узлы не опрашиваются.
+    #[tokio::test]
+    async fn tunnel_failure_fails_the_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let (rt, src, rec, tunnels) = with_fake_ssh(
+            dir.path(),
+            vec![("FAKE_SSH_MODE", "auth".into())],
+            vec![Ok(two("a"))],
+        );
+        let e = rt.connect(ssh_profile()).await.unwrap_err();
+        assert_eq!(e.key, "errors.ssh.authFailed");
+        assert_eq!(rt.view("c1").state, ConnState::Failed);
+        assert_eq!(rt.view("c1").error.unwrap().key, "errors.ssh.authFailed");
+        assert_eq!(
+            *rec.states.lock_safe(),
+            [ConnState::Connecting, ConnState::Failed]
+        );
+        assert_eq!(src.calls(), 0, "без туннеля узлы не опрашиваются");
+        rt.disconnect("c1");
+        assert_eq!(tunnels.status("c1"), None);
+        rt.shutdown();
+    }
+
+    /// Туннель открывается до первого опроса и закрывается вместе с подключением.
+    #[tokio::test]
+    async fn tunnel_lives_as_long_as_the_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let (rt, _src, _rec, tunnels) = with_fake_ssh(dir.path(), vec![], vec![Ok(two("a"))]);
+        rt.connect(ssh_profile()).await.unwrap();
+        assert!(matches!(
+            tunnels.status("c1"),
+            Some(crate::net::ssh::tunnel::TunnelStatus::Up { .. })
+        ));
+        rt.disconnect("c1");
+        assert_eq!(tunnels.status("c1"), None);
+        rt.shutdown();
+    }
+
+    /// Неудачное первое подключение (узлы не ответили) не держит процесс ssh.
+    #[tokio::test]
+    async fn failed_first_connect_closes_its_tunnel() {
+        let dir = tempfile::tempdir().unwrap();
+        let (rt, _src, _rec, tunnels) = with_fake_ssh(dir.path(), vec![], vec![Err(err())]);
+        rt.connect(ssh_profile()).await.unwrap_err();
+        assert_eq!(rt.view("c1").state, ConnState::Failed);
+        assert_eq!(tunnels.status("c1"), None);
+        rt.shutdown();
+    }
+
+    /// Опрос прошлого открытия, закончившийся после переоткрытия, не закрывает туннель нового открытия.
+    #[tokio::test]
+    async fn stale_poll_does_not_close_the_tunnel_of_the_new_opening() {
+        let dir = tempfile::tempdir().unwrap();
+        let (rt, src, _rec, tunnels) = with_fake_ssh(dir.path(), vec![], vec![Ok(two("a"))]);
+        rt.connect(ssh_profile()).await.unwrap();
+        let generation = generation_of(&rt, "c1");
+        src.set_delay(Duration::from_millis(300));
+        let poll = tokio::spawn({
+            let rt = rt.clone();
+            async move { rt.poll_once("c1", generation).await }
+        });
+        eventually("опрос начался", || src.calls() == 2).await;
+        rt.disconnect("c1");
+        src.set_delay(Duration::ZERO);
+        rt.connect(ssh_profile()).await.unwrap();
+        assert!(!poll.await.unwrap(), "опрос прошлого открытия устарел");
+        assert!(
+            matches!(
+                tunnels.status("c1"),
+                Some(crate::net::ssh::tunnel::TunnelStatus::Up { .. })
+            ),
+            "туннель нового открытия жив"
+        );
+        assert_eq!(rt.view("c1").state, ConnState::Connected);
         rt.shutdown();
     }
 

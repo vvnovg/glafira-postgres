@@ -360,6 +360,7 @@ mod tests {
             port,
             "postgres",
             PoolPurpose::Catalog,
+            None,
         )
         .await
     }

@@ -3,4 +3,6 @@
 pub mod orphans;
 pub mod process;
 pub mod socks;
+#[cfg(test)]
+pub(crate) mod testutil;
 pub mod tunnel;

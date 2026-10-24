@@ -12,6 +12,7 @@
     "tabs.unknownConnection",
     "test.nodeOk",
     "test.step.patroni",
+    "test.step.ssh",
     "topology.role.leader",
     "topology.role.primary",
     "topology.role.quorumStandby",

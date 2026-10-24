@@ -349,10 +349,22 @@ pub async fn test_connection(
         secrets,
     } = input;
     let overlay = test_secrets(state.secrets.clone(), &mut profile, &secrets);
-    crate::readiness::check::run(profile, overlay, &|e| {
+    crate::readiness::check::run(profile, overlay, state.tunnels.clone(), &|e| {
         let _ = channel.send(e);
     })
     .await
+}
+
+/// Пользователь подтвердил ключ хоста ssh (`errors.ssh.hostKeyUnknown`): следующий запуск туннеля к этой
+/// цели отвечает askpass «yes», а ssh сам записывает ключ в known_hosts. Действует до выхода из приложения.
+#[tauri::command]
+pub fn trust_ssh_host_key(
+    state: State<'_, AppState>,
+    target: String,
+    fingerprint: String,
+) -> AppResult<()> {
+    state.tunnels.trust(&target, &fingerprint);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -810,8 +822,12 @@ mod tests {
     /// Состояние с сохранённым и открытым подключением `a`; узел каталога выбран вручную (`b`).
     async fn open_connection() -> (tempfile::TempDir, AppState, Arc<Closed>, ConnectionProfile) {
         let (dir, mut st) = state_with(Arc::new(MemoryStore::default()));
-        st.runtimes =
-            Runtimes::with_interval(Arc::new(Fixed), st.pools.clone(), Duration::from_secs(60));
+        st.runtimes = Runtimes::with_interval(
+            Arc::new(Fixed),
+            st.pools.clone(),
+            st.tunnels.clone(),
+            Duration::from_secs(60),
+        );
         let saved = save_connection_blocking(
             &st,
             input(

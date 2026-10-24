@@ -441,10 +441,13 @@
     "discoveryOk_other": "{{count}} nodes found",
     "nodeOk": "{{role}}, PostgreSQL {{version}}",
     "patroniNotUsed": "Not used: this is not a Patroni cluster",
+    "sshOk": "OpenSSH {{version}}, tunnel is up",
+    "sshNotUsed": "Not used: direct connection",
     "readinessNoNode": "Not checked: no node accepted the connection",
     "readinessTitle": "Readiness for diagnostics",
     "roleScript": "Role script for diagnostics",
     "step": {
+      "ssh": "SSH",
       "patroni": "Patroni API",
       "discovery": "Node discovery",
       "node": "Node",

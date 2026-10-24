@@ -19,6 +19,7 @@ async fn observe() -> Option<Topology> {
     let nodes = AdhocConnector {
         profile: p.clone(),
         secrets: common::secrets_with_password("it"),
+        socks: None,
     };
     Some(observe_hosts(&p.id, p.kind, &p.hosts, &nodes, now_ms()).await)
 }

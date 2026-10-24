@@ -24,9 +24,11 @@ const SWITCHOVER_LIMIT: Duration = Duration::from_secs(20);
 
 fn runtimes(secrets: Arc<dyn SecretStore>) -> (Arc<Runtimes>, Arc<PoolRegistry>) {
     let pools = Arc::new(PoolRegistry::default());
+    let tunnels = common::no_tunnels(pools.clone());
     let rt = Runtimes::new(
-        Arc::new(LiveSource::new(secrets, pools.clone())),
+        Arc::new(LiveSource::new(secrets, pools.clone(), tunnels.clone())),
         pools.clone(),
+        tunnels,
     );
     (rt, pools)
 }
@@ -306,9 +308,11 @@ const FAST_POLL: Duration = Duration::from_millis(150);
 
 fn fast_runtimes(secrets: Arc<dyn SecretStore>) -> (Arc<Runtimes>, Arc<PoolRegistry>) {
     let pools = Arc::new(PoolRegistry::default());
+    let tunnels = common::no_tunnels(pools.clone());
     let rt = Runtimes::with_interval(
-        Arc::new(LiveSource::new(secrets, pools.clone())),
+        Arc::new(LiveSource::new(secrets, pools.clone(), tunnels.clone())),
         pools.clone(),
+        tunnels,
         FAST_POLL,
     );
     (rt, pools)

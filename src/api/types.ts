@@ -241,7 +241,7 @@ export interface MemberFacts {
   databases: number;
 }
 
-export type TestStep = "patroni" | "discovery" | "node" | "readiness";
+export type TestStep = "ssh" | "patroni" | "discovery" | "node" | "readiness";
 export type StepStatus = "running" | "ok" | "failed" | "skipped";
 export interface TestEvent {
   step: TestStep;

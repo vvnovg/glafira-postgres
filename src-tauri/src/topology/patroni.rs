@@ -1,10 +1,11 @@
 //! Клиент Patroni REST API (спец. P1 §6.2): участники — `GET /cluster`, детали — `GET /patroni`.
 
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::conn::errors::chain;
+use crate::conn::errors::{chain, stream_closed};
 use crate::conn::profile::{ConnectionKind, PatroniSettings};
 use crate::conn::tls;
 use crate::error::{AppError, AppResult, ErrorCode};
@@ -33,6 +34,10 @@ pub struct ReqwestHttp {
     https_only: bool,
     /// Адреса, о которых уже предупредили в журнале: опрос идёт каждые 10 с.
     warned: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Запросы идут через SOCKS5 туннеля ssh (`socks5h`: имена разрешает бастион).
+    proxy: Option<SocketAddr>,
+    /// Цель ssh туннеля — для сообщения о сбое проброса (`with_ssh_target`).
+    ssh_target: String,
 }
 
 fn is_https(url: &str) -> bool {
@@ -51,15 +56,20 @@ fn http_setup(e: impl std::fmt::Display) -> AppError {
 }
 
 impl ReqwestHttp {
-    /// Блокирующий вызов (файлы сертификатов). `password` — секрет `patroniPassword`.
+    /// Блокирующий вызов (файлы сертификатов). `password` — секрет `patroniPassword`; `proxy` — порт SOCKS5
+    /// туннеля подключения (адреса API разрешает бастион, TLS проверяется по ним же).
     pub fn new(
         settings: &PatroniSettings,
         password: Option<String>,
         key_password: Option<&str>,
+        proxy: Option<SocketAddr>,
     ) -> AppResult<Self> {
         let mut b = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
             .connect_timeout(HTTP_TIMEOUT);
+        if let Some(p) = proxy {
+            b = b.proxy(reqwest::Proxy::all(format!("socks5h://{p}")).map_err(http_setup)?);
+        }
         if let Some(t) = &settings.tls {
             // CA-файл заменяет системные корни (как для PostgreSQL). Без проверки имени reqwest/rustls
             // принимает только явный набор корней, поэтому системные в этом случае подставляем сами.
@@ -99,13 +109,75 @@ impl ReqwestHttp {
                 .map(|u| (u, password.unwrap_or_default())),
             https_only: profile_urls.all(|u| is_https(u)),
             warned: Default::default(),
+            proxy,
+            ssh_target: String::new(),
         })
+    }
+
+    /// Цель ssh туннеля для сообщений о сбое проброса.
+    pub fn with_ssh_target(mut self, target: &str) -> Self {
+        self.ssh_target = target.to_string();
+        self
+    }
+
+    /// Ошибка запроса. Через туннель обрыв потока (`ssh -D` закрывает соединение, когда бастион не достучался до
+    /// узла) — сбой проброса, отказ порта туннеля (процесс ssh умер) — ошибка SOCKS; срок и TLS — как обычно.
+    fn request_error(&self, url: &str, e: &reqwest::Error) -> AppError {
+        if self.proxy.is_some() && !e.is_timeout() && !is_certificate_error(e) {
+            let parsed = reqwest::Url::parse(url).ok();
+            let host = parsed
+                .as_ref()
+                .and_then(|u| u.host_str().map(str::to_string))
+                .unwrap_or_default();
+            let port = parsed
+                .as_ref()
+                .and_then(|u| u.port_or_known_default())
+                .unwrap_or_default();
+            let cause = format!(
+                "{}: {}",
+                crate::conn::profile::strip_url_credentials(url),
+                chain(e)
+            );
+            if refused(e) {
+                return crate::net::ssh::socks::socks_error(&host, port, &cause);
+            }
+            if stream_closed(e) {
+                return crate::net::ssh::socks::forward_failed(
+                    &self.ssh_target,
+                    &host,
+                    port,
+                    &cause,
+                );
+            }
+        }
+        request_error(url, e)
     }
 
     /// Пароль API не отправляется на этот адрес: профиль только https, а адрес — нет.
     fn withholds_credentials(&self, url: &str) -> bool {
         self.auth.is_some() && self.https_only && !is_https(url)
     }
+}
+
+fn is_certificate_error(e: &reqwest::Error) -> bool {
+    chain(e).to_lowercase().contains("certificate")
+}
+
+/// Не удалось открыть TCP-соединение с прокси — портом туннеля (через `socks5h` клиент сам соединяется только с
+/// ним). SOCKS-клиент reqwest (hyper-util) не отдаёт исходную ошибку ввода-вывода в цепочке причин, поэтому
+/// узнаётся и по его тексту.
+fn refused(e: &reqwest::Error) -> bool {
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(err) = cur {
+        if err
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::ConnectionRefused)
+        {
+            return true;
+        }
+        cur = err.source();
+    }
+    chain(e).contains("failed to create underlying connection")
 }
 
 fn request_error(url: &str, e: &reqwest::Error) -> AppError {
@@ -117,7 +189,7 @@ fn request_error(url: &str, e: &reqwest::Error) -> AppError {
             "Patroni API at {{url}} did not answer within 5 s",
             url = url
         )
-    } else if text.to_lowercase().contains("certificate") {
+    } else if is_certificate_error(e) {
         app_err!(
             ErrorCode::TlsError,
             "errors.patroni.tls",
@@ -174,9 +246,9 @@ impl PatroniHttp for ReqwestHttp {
             } else if let Some((u, p)) = &self.auth {
                 req = req.basic_auth(u, Some(p));
             }
-            let resp = req.send().await.map_err(|e| request_error(url, &e))?;
+            let resp = req.send().await.map_err(|e| self.request_error(url, &e))?;
             let status = resp.status();
-            let body = resp.text().await.map_err(|e| request_error(url, &e))?;
+            let body = resp.text().await.map_err(|e| self.request_error(url, &e))?;
             let parsed = serde_json::from_str::<serde_json::Value>(&body);
             match (status.as_u16(), parsed) {
                 (200..=299, Ok(v)) => Ok(v),
@@ -1074,7 +1146,7 @@ mod tests {
         )])
         .await;
         let s = settings(&[&gateway, &patroni]);
-        let http = ReqwestHttp::new(&s, None, None).unwrap();
+        let http = ReqwestHttp::new(&s, None, None, None).unwrap();
         let t = discover(&http, &s, "c", None, 1).await.unwrap();
         assert_eq!(t.members.len(), 1);
         assert_eq!(t.leader().unwrap().name, "pg-1");
@@ -1167,7 +1239,7 @@ mod tests {
         let base = stub_server().await;
         let mut s = settings(&[&base]);
         s.username = Some("patroni".into());
-        let http = ReqwestHttp::new(&s, Some("secret".into()), None).unwrap();
+        let http = ReqwestHttp::new(&s, Some("secret".into()), None, None).unwrap();
 
         assert_eq!(
             http.get_json(&format!("{base}/ok")).await.unwrap()["state"],
@@ -1227,7 +1299,7 @@ mod tests {
         // Профиль — только https; участник прислал в `/cluster` адрес http://.
         let mut s = settings(&["https://pg-1:8008", "https://pg-2:8008"]);
         s.username = Some("patroni".into());
-        let http = ReqwestHttp::new(&s, Some("secret".into()), None).unwrap();
+        let http = ReqwestHttp::new(&s, Some("secret".into()), None, None).unwrap();
         assert_eq!(
             http.get_json(&format!("{base}/echo")).await.unwrap()["auth"],
             "",
@@ -1247,13 +1319,14 @@ mod tests {
             port: None,
             api_url: Some(base.clone()),
         }];
-        let mixed = ReqwestHttp::new(&s, Some("secret".into()), None).unwrap();
+        let mixed = ReqwestHttp::new(&s, Some("secret".into()), None, None).unwrap();
         assert_eq!(
             mixed.get_json(&format!("{base}/echo")).await.unwrap()["auth"],
             "Basic cGF0cm9uaTpzZWNyZXQ="
         );
         // Без пользователя API и не о чем говорить: 401 — обычный отказ.
-        let anonymous = ReqwestHttp::new(&settings(&["https://pg-1:8008"]), None, None).unwrap();
+        let anonymous =
+            ReqwestHttp::new(&settings(&["https://pg-1:8008"]), None, None, None).unwrap();
         assert_eq!(
             anonymous
                 .get_json(&format!("{base}/denied"))
@@ -1268,7 +1341,7 @@ mod tests {
     #[tokio::test]
     async fn status_503_with_json_is_only_a_patroni_node_answer() {
         let base = stub_server().await;
-        let http = ReqwestHttp::new(&settings(&[&base]), None, None).unwrap();
+        let http = ReqwestHttp::new(&settings(&[&base]), None, None, None).unwrap();
         // 503 на /cluster — даже с JSON — ошибка: опрос должен перейти к следующему адресу.
         let cluster = http.get_json(&format!("{base}/cluster")).await.unwrap_err();
         assert_eq!(
@@ -1289,7 +1362,7 @@ mod tests {
     #[tokio::test]
     async fn reqwest_http_times_out_on_silent_server() {
         let server = testutil::silent_server();
-        let http = ReqwestHttp::new(&settings(&["http://x"]), None, None).unwrap();
+        let http = ReqwestHttp::new(&settings(&["http://x"]), None, None, None).unwrap();
         let started = std::time::Instant::now();
         let err = http
             .get_json(&format!("http://127.0.0.1:{}/cluster", server.port))
@@ -1312,7 +1385,7 @@ mod tests {
             let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             l.local_addr().unwrap().port()
         };
-        let http = ReqwestHttp::new(&settings(&["http://x"]), None, None).unwrap();
+        let http = ReqwestHttp::new(&settings(&["http://x"]), None, None, None).unwrap();
         let err = http
             .get_json(&format!("http://127.0.0.1:{port}/cluster"))
             .await
@@ -1322,6 +1395,80 @@ mod tests {
             (ErrorCode::PatroniError, "errors.patroni.unreachable")
         );
         assert!(err.details.is_some());
+    }
+
+    /// Через туннель адрес API разрешает бастион. Узел за бастионом недоступен (`ssh -D` закрыл поток после успеха
+    /// SOCKS) — сбой проброса; порт туннеля закрыт (процесс ssh умер) — ошибка SOCKS.
+    #[tokio::test]
+    async fn reqwest_http_goes_through_the_tunnel() {
+        use crate::conn::profile::SshAuth;
+        use crate::net::ssh::tunnel::tests::{closed_port, profile as ssh_profile, registry};
+        let base = stub_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let (tunnels, _) = registry(
+            dir.path(),
+            vec![(
+                "FAKE_SSH_UPSTREAM",
+                base.trim_start_matches("http://").into(),
+            )],
+        );
+        let p = ssh_profile(SshAuth::Agent);
+        let socks = tunnels.open(&p, Duration::from_secs(5)).await.unwrap();
+        let s = settings(&["http://patroni1:8008"]);
+        let http = ReqwestHttp::new(&s, None, None, Some(socks))
+            .unwrap()
+            .with_ssh_target("bastion");
+        // Имя patroni1 локально не разрешается: ответ пришёл — значит, его разрешил прокси.
+        let v = http.get_json("http://patroni1:8008/ok").await.unwrap();
+        assert_eq!(v["state"], "running");
+        tunnels.close("c1");
+
+        let dir = tempfile::tempdir().unwrap();
+        let (tunnels, _) = registry(
+            dir.path(),
+            vec![("FAKE_SSH_UPSTREAM", format!("127.0.0.1:{}", closed_port()))],
+        );
+        let socks = tunnels.open(&p, Duration::from_secs(5)).await.unwrap();
+        let http = ReqwestHttp::new(&s, None, None, Some(socks))
+            .unwrap()
+            .with_ssh_target("bastion");
+        let e = http
+            .get_json("http://patroni1:8008/cluster")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (e.code, e.key.as_str(), e.params["kind"].as_str()),
+            (
+                ErrorCode::SshError,
+                "errors.ssh.forwardFailed",
+                "forwardFailed"
+            ),
+            "{e:?}"
+        );
+        assert_eq!(e.params["target"], "bastion");
+        assert!(
+            e.details.as_deref().unwrap().contains("patroni1:8008"),
+            "{e:?}"
+        );
+        tunnels.close("c1");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while tokio::net::TcpStream::connect(socks).await.is_ok() {
+            assert!(std::time::Instant::now() < deadline, "ssh не завершился");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let e = http
+            .get_json("http://patroni1:8008/cluster")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (
+                e.key.as_str(),
+                e.params["host"].as_str(),
+                e.params["port"].as_str()
+            ),
+            ("errors.ssh.socks", "patroni1", "8008"),
+            "{e:?}"
+        );
     }
 
     /// HTTPS-сервер на 127.0.0.1 (отвечает `{"state":"running"}`); `ca` — если задан, требует клиентский сертификат от него.
@@ -1387,13 +1534,14 @@ mod tests {
 
         // Сертификат выдан на localhost, CA указан — запрос проходит.
         let port = https_stub(&testutil::make_server_cert(&ca, "localhost"), None);
-        let http = ReqwestHttp::new(&tls_settings(&ca_path, true, None), None, None).unwrap();
+        let http = ReqwestHttp::new(&tls_settings(&ca_path, true, None), None, None, None).unwrap();
         assert_eq!(http.get_json(&url(port)).await.unwrap()["state"], "running");
 
         // Чужой CA: сертификат не доверенный — TlsError, даже если проверка имени выключена.
         let other_ca = testutil::make_ca("other-ca");
         let other_path = pem_file(dir.path(), "other.pem", &other_ca.cert.to_pem().unwrap());
-        let http = ReqwestHttp::new(&tls_settings(&other_path, false, None), None, None).unwrap();
+        let http =
+            ReqwestHttp::new(&tls_settings(&other_path, false, None), None, None, None).unwrap();
         let err = http.get_json(&url(port)).await.unwrap_err();
         assert_eq!(
             (err.code, err.key.as_str()),
@@ -1402,13 +1550,14 @@ mod tests {
 
         // Имя в сертификате не совпадает: с проверкой — TlsError, без неё — ответ.
         let port = https_stub(&testutil::make_server_cert(&ca, "other.example"), None);
-        let strict = ReqwestHttp::new(&tls_settings(&ca_path, true, None), None, None).unwrap();
+        let strict =
+            ReqwestHttp::new(&tls_settings(&ca_path, true, None), None, None, None).unwrap();
         let err = strict.get_json(&url(port)).await.unwrap_err();
         assert_eq!(
             (err.code, err.key.as_str()),
             (ErrorCode::TlsError, "errors.patroni.tls")
         );
-        let lax = ReqwestHttp::new(&tls_settings(&ca_path, false, None), None, None).unwrap();
+        let lax = ReqwestHttp::new(&tls_settings(&ca_path, false, None), None, None, None).unwrap();
         assert_eq!(lax.get_json(&url(port)).await.unwrap()["state"], "running");
 
         // Сервер требует клиентский сертификат (mTLS).
@@ -1427,12 +1576,14 @@ mod tests {
             certificate_path: cert_path,
             key_path: Some(key_path),
         };
-        let without = ReqwestHttp::new(&tls_settings(&ca_path, true, None), None, None).unwrap();
+        let without =
+            ReqwestHttp::new(&tls_settings(&ca_path, true, None), None, None, None).unwrap();
         assert!(
             without.get_json(&url(port)).await.is_err(),
             "без клиентского сертификата сервер отказывает"
         );
-        let with = ReqwestHttp::new(&tls_settings(&ca_path, true, Some(cc)), None, None).unwrap();
+        let with =
+            ReqwestHttp::new(&tls_settings(&ca_path, true, Some(cc)), None, None, None).unwrap();
         assert_eq!(with.get_json(&url(port)).await.unwrap()["state"], "running");
     }
 
@@ -1445,13 +1596,13 @@ mod tests {
             verify_hostname: false,
             client_cert: None,
         });
-        ReqwestHttp::new(&s, None, None).unwrap();
+        ReqwestHttp::new(&s, None, None, None).unwrap();
         s.tls = Some(ApiTls {
             ca_path: None,
             verify_hostname: true,
             client_cert: None,
         });
-        ReqwestHttp::new(&s, None, None).unwrap();
+        ReqwestHttp::new(&s, None, None, None).unwrap();
     }
 
     #[test]

@@ -1,17 +1,19 @@
 //! Соединение с PostgreSQL: параметры из профиля и keychain, TCP, TLS, таймаут (спец. P1 §7).
 
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use openssl::ssl::{SslConnector, SslVerifyMode};
 use openssl::x509::X509VerifyResult;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::task::AbortHandle;
 use tokio_postgres::{Client, NoTls};
 
 use crate::conn::profile::{ConnectionProfile, SslMode};
 use crate::conn::{errors, pgpass, tls};
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::secrets::{PG_KEY_PASSWORD, PG_PASSWORD, SecretStore, secret_key};
 use crate::sync::MutexExt;
 
@@ -38,10 +40,10 @@ pub(crate) async fn tcp_connect(host: &str, port: u16) -> std::io::Result<TcpStr
 /// Всё для нового соединения с узлом. Собирается один раз на пул: keychain, ~/.pgpass, файлы TLS.
 #[derive(Clone)]
 pub struct ConnectSpec {
-    /// Куда открывать TCP (P1b: при туннеле — локальный порт).
+    /// Куда открывать TCP напрямую (без туннеля).
     pub tcp_host: String,
     pub tcp_port: u16,
-    /// Исходный адрес узла: имя для проверки сертификата и поиска в ~/.pgpass.
+    /// Исходный адрес узла: имя для проверки сертификата и поиска в ~/.pgpass; через туннель его разрешает бастион.
     pub host: String,
     pub port: u16,
     pub user: String,
@@ -50,6 +52,10 @@ pub struct ConnectSpec {
     pub ssl_mode: SslMode,
     pub connector: Option<SslConnector>,
     pub timeout: Duration,
+    /// Порт SOCKS5 туннеля ssh (`127.0.0.1:<порт>`): TCP-поток идёт через него.
+    pub socks: Option<SocketAddr>,
+    /// Цель ssh туннеля — для сообщения о сбое проброса.
+    pub ssh_target: Option<String>,
 }
 
 impl std::fmt::Debug for ConnectSpec {
@@ -60,6 +66,7 @@ impl std::fmt::Debug for ConnectSpec {
             .field("database", &self.database)
             .field("user", &self.user)
             .field("ssl_mode", &self.ssl_mode)
+            .field("socks", &self.socks)
             .finish_non_exhaustive()
     }
 }
@@ -72,6 +79,19 @@ impl ConnectSpec {
         port: u16,
         database: &str,
         secrets: &dyn SecretStore,
+    ) -> AppResult<Self> {
+        Self::build_via(profile, host, port, database, secrets, None)
+    }
+
+    /// То же через туннель: `socks` — порт SOCKS5 туннеля подключения (`TunnelRegistry::route_for`). TLS и
+    /// `~/.pgpass` — по исходному имени узла. Блокирующий вызов.
+    pub fn build_via(
+        profile: &ConnectionProfile,
+        host: &str,
+        port: u16,
+        database: &str,
+        secrets: &dyn SecretStore,
+        socks: Option<SocketAddr>,
     ) -> AppResult<Self> {
         let user = profile.pg.username.clone();
         let password = match secrets.get(&secret_key(&profile.id, PG_PASSWORD))? {
@@ -96,6 +116,8 @@ impl ConnectSpec {
             ssl_mode: profile.pg.ssl_mode,
             connector,
             timeout: Duration::from_secs(profile.pg.connect_timeout_s),
+            socks,
+            ssh_target: socks.and(profile.ssh.as_ref().map(|s| s.target.clone())),
         })
     }
 
@@ -127,51 +149,86 @@ impl ConnectSpec {
     /// а соединение с неотвеченным запросом после drop остаётся открытым.
     pub async fn connect_with_handle(&self) -> AppResult<(Client, AbortHandle)> {
         let attempt = async {
-            let stream = tcp_connect(&self.tcp_host, self.tcp_port)
-                .await
-                .map_err(|e| errors::tcp_error(&e, &self.host, self.port))?;
-            let cfg = self.pg_config();
-            match &self.connector {
+            match self.socks {
                 None => {
-                    let (client, conn) = cfg
-                        .connect_raw(stream, NoTls)
+                    let tcp = tcp_connect(&self.tcp_host, self.tcp_port)
                         .await
-                        .map_err(|e| errors::from_pg(&e))?;
-                    Ok((client, spawn_connection(conn)))
+                        .map_err(|e| errors::tcp_error(&e, &self.host, self.port))?;
+                    self.handshake(tcp).await
                 }
-                Some(connector) => {
-                    let mut ssl = connector.configure().map_err(errors::tls_setup)?;
-                    if self.ssl_mode != SslMode::VerifyFull {
-                        ssl.set_verify_hostname(false);
-                    }
-                    // Причину отказа разбирать по тексту ненадёжно: OpenSSL пишет общее «certificate verify
-                    // failed», пояснение крейт openssl дописывает в свободной форме. Код причины берём из
-                    // обратного вызова проверки, чтобы отличить просроченный сертификат от чужого CA. Режим
-                    // проверки не меняется. Без проверки (`prefer`, `require` без файла CA) отказ не
-                    // прерывает рукопожатие и ни о чём не говорит: там не запоминаем.
-                    let verify_error: Arc<Mutex<Option<X509VerifyResult>>> = Arc::default();
-                    let mode = ssl.verify_mode();
-                    if mode.contains(SslVerifyMode::PEER) {
-                        let slot = verify_error.clone();
-                        ssl.set_verify_callback(mode, move |ok, ctx| {
-                            if !ok {
-                                *slot.lock_safe() = Some(ctx.error());
-                            }
-                            ok
-                        });
-                    }
-                    let tls = postgres_openssl::TlsConnector::new(ssl, &self.host);
-                    let (client, conn) = cfg
-                        .connect_raw(stream, tls)
-                        .await
-                        .map_err(|e| errors::from_handshake(&e, verify_error.lock_safe().take()))?;
-                    Ok((client, spawn_connection(conn)))
+                // Через туннель имя узла разрешает бастион; TLS ниже проверяется по тому же имени.
+                Some(proxy) => {
+                    let stream =
+                        crate::net::ssh::socks::connect(proxy, &self.host, self.port).await?;
+                    self.handshake(stream).await
                 }
             }
         };
         tokio::time::timeout(self.timeout, attempt)
             .await
             .map_err(|_| errors::connect_timeout(&self.host, self.port, self.timeout.as_secs()))?
+    }
+
+    /// TLS (если нужен) и вход поверх открытого потока: TCP напрямую или SOCKS5 туннеля. Обобщённая функция, а
+    /// не `Box<dyn …>`: с потоком-объектом компилятор не доказывает `Send` будущего рукопожатия tokio-postgres.
+    async fn handshake<S>(&self, stream: S) -> AppResult<(Client, AbortHandle)>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let cfg = self.pg_config();
+        match &self.connector {
+            None => {
+                let (client, conn) = cfg
+                    .connect_raw(stream, NoTls)
+                    .await
+                    .map_err(|e| self.wire_error(&e, errors::from_pg(&e)))?;
+                Ok((client, spawn_connection(conn)))
+            }
+            Some(connector) => {
+                let mut ssl = connector.configure().map_err(errors::tls_setup)?;
+                if self.ssl_mode != SslMode::VerifyFull {
+                    ssl.set_verify_hostname(false);
+                }
+                // Причину отказа разбирать по тексту ненадёжно: OpenSSL пишет общее «certificate verify
+                // failed», пояснение крейт openssl дописывает в свободной форме. Код причины берём из
+                // обратного вызова проверки, чтобы отличить просроченный сертификат от чужого CA. Режим
+                // проверки не меняется. Без проверки (`prefer`, `require` без файла CA) отказ не
+                // прерывает рукопожатие и ни о чём не говорит: там не запоминаем.
+                let verify_error: Arc<Mutex<Option<X509VerifyResult>>> = Arc::default();
+                let mode = ssl.verify_mode();
+                if mode.contains(SslVerifyMode::PEER) {
+                    let slot = verify_error.clone();
+                    ssl.set_verify_callback(mode, move |ok, ctx| {
+                        if !ok {
+                            *slot.lock_safe() = Some(ctx.error());
+                        }
+                        ok
+                    });
+                }
+                let tls = postgres_openssl::TlsConnector::new(ssl, &self.host);
+                let (client, conn) = cfg.connect_raw(stream, tls).await.map_err(|e| {
+                    let mapped = errors::from_handshake(&e, verify_error.lock_safe().take());
+                    self.wire_error(&e, mapped)
+                })?;
+                Ok((client, spawn_connection(conn)))
+            }
+        }
+    }
+
+    /// Через туннель недоступный узел виден как конец потока сразу после успеха SOCKS: `ssh -D` отвечает успехом
+    /// до открытия канала, а когда бастион не смог подключиться к узлу, закрывает соединение. Такой обрыв до
+    /// ответа сервера — сбой проброса (`forwardFailed`), а не ошибка PostgreSQL.
+    fn wire_error(&self, e: &tokio_postgres::Error, mapped: AppError) -> AppError {
+        if self.socks.is_some() && e.as_db_error().is_none() && errors::closed_early(e) {
+            crate::net::ssh::socks::forward_failed(
+                self.ssh_target.as_deref().unwrap_or_default(),
+                &self.host,
+                self.port,
+                &errors::chain(e),
+            )
+        } else {
+            mapped
+        }
     }
 }
 
@@ -260,7 +317,42 @@ mod tests {
             ssl_mode: mode,
             connector: tls::pg_connector(mode, ca, None, None).unwrap(),
             timeout: Duration::from_secs(10),
+            socks: None,
+            ssh_target: None,
         }
+    }
+
+    /// Через SOCKS-прокси: TCP — на прокси, узел `host:5432` — по имени, TLS — по тому же имени.
+    fn loopback_spec_via(
+        proxy: std::net::SocketAddr,
+        host: &str,
+        mode: SslMode,
+        ca: Option<&str>,
+    ) -> ConnectSpec {
+        let mut p = sample_profile("a");
+        p.pg.ssl_mode = mode;
+        p.pg.tls.ca_path = ca.map(str::to_string);
+        p.ssh = Some(crate::conn::profile::SshSettings {
+            target: "bastion".into(),
+            port: None,
+            user: None,
+            auth: crate::conn::profile::SshAuth::Agent,
+            key_path: None,
+        });
+        let spec = ConnectSpec::build_via(
+            &p,
+            host,
+            5432,
+            "postgres",
+            &MemoryStore::default(),
+            Some(proxy),
+        )
+        .unwrap();
+        assert_eq!(
+            (spec.socks, spec.ssh_target.as_deref()),
+            (Some(proxy), Some("bastion"))
+        );
+        spec
     }
 
     fn write_pem(dir: &std::path::Path, name: &str, cert: &openssl::x509::X509) -> String {
@@ -372,6 +464,40 @@ mod tests {
         let server = testutil::tls_server(&testutil::make_self_signed_server("localhost"));
         let spec = loopback_spec(server.port, "localhost", SslMode::Require, Some(&ca_path));
         assert_eq!(spec.connect().await.unwrap_err().code, ErrorCode::TlsError);
+    }
+
+    /// Через SOCKS TLS проверяется по исходному имени узла, а не по адресу прокси (спец. P1 §7).
+    #[tokio::test]
+    async fn verify_full_via_socks_checks_the_original_host_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = testutil::make_ca("test-ca");
+        let ca_path = write_pem(dir.path(), "ca.pem", &ca.cert);
+        let server = testutil::tls_server(&testutil::make_server_cert(&ca, "pg-single"));
+        let proxy = testutil::socks_proxy_to(("127.0.0.1", server.port)).await;
+        let ok = loopback_spec_via(proxy, "pg-single", SslMode::VerifyFull, Some(&ca_path));
+        assert_handshake_ok(ok.connect().await.unwrap_err());
+        // Заглушка принимает одно соединение: для второго — своя.
+        let server = testutil::tls_server(&testutil::make_server_cert(&ca, "pg-single"));
+        let proxy = testutil::socks_proxy_to(("127.0.0.1", server.port)).await;
+        let bad = loopback_spec_via(proxy, "other-name", SslMode::VerifyFull, Some(&ca_path));
+        let e = bad.connect().await.unwrap_err();
+        assert_eq!(e.key, "errors.pg.hostnameMismatch", "{e:?}");
+    }
+
+    /// Без туннеля спецификация прежняя: ни прокси, ни цели ssh, даже если у профиля есть ssh.
+    #[test]
+    fn build_without_socks_has_no_tunnel() {
+        let mut p = sample_profile("a");
+        p.ssh = Some(crate::conn::profile::SshSettings {
+            target: "bastion".into(),
+            port: None,
+            user: None,
+            auth: crate::conn::profile::SshAuth::Agent,
+            key_path: None,
+        });
+        let spec = ConnectSpec::build(&p, "h", 5432, "postgres", &MemoryStore::default()).unwrap();
+        assert_eq!((spec.socks, spec.ssh_target.as_deref()), (None, None));
+        assert!(format!("{spec:?}").contains("socks: None"));
     }
 
     #[tokio::test]

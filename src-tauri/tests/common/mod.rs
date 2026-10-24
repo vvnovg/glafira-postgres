@@ -4,10 +4,12 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use glafira_pg_lib::conn::pool::PoolRegistry;
 use glafira_pg_lib::conn::profile::{
     ConnectionKind, ConnectionProfile, Environment, HostOverride, HostPort, PatroniSettings,
     PgSettings, PgTls, SslMode, TargetServerType,
 };
+use glafira_pg_lib::net::ssh::tunnel::{TunnelConfig, TunnelRegistry};
 use glafira_pg_lib::secrets::{MemoryStore, PG_PASSWORD, SecretStore, secret_key};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -52,6 +54,17 @@ pub fn server_profile(id: &str, addr: &str) -> ConnectionProfile {
         order: 0,
         extra: Default::default(),
     }
+}
+
+/// Реестр туннелей для тестов без ssh: каталоги во временной папке процесса (без профилей с ssh реестр файлов
+/// не пишет).
+pub fn no_tunnels(pools: Arc<PoolRegistry>) -> Arc<TunnelRegistry> {
+    let dir = std::env::temp_dir().join(format!("glafira-it-tunnels-{}", std::process::id()));
+    TunnelRegistry::new(
+        TunnelConfig::new(dir.join("data"), dir.join("logs")),
+        pools,
+        Arc::new(MemoryStore::default()),
+    )
 }
 
 pub fn secrets_with_password(id: &str) -> Arc<MemoryStore> {

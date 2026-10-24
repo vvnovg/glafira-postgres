@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::conn::pool::{PoolRegistry, PooledClient};
 use crate::error::AppResult;
+use crate::net::ssh::tunnel::{TunnelConfig, TunnelRegistry};
 use crate::secrets::SecretStore;
 use crate::settings::SettingsStore;
 use crate::storage::connections::{ConnectionProfile, ConnectionStore};
@@ -19,6 +20,8 @@ pub struct AppState {
     pub pools: Arc<PoolRegistry>,
     /// Открытые подключения: топология, журнал событий, узел каталога.
     pub runtimes: Arc<Runtimes>,
+    /// Туннели ssh открытых подключений и проверок; доверенные ключи хостов.
+    pub tunnels: Arc<TunnelRegistry>,
     /// Операции с секретами подключений (сохранение формы, импорт, удаление) идут по одной. Иначе импорт,
     /// удаливший пароли подключения, мог бы записать адрес из файла после того, как параллельное сохранение
     /// положило в keychain новый пароль. Берётся в блокирующем потоке и держится вокруг обращений к keychain
@@ -27,13 +30,33 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Логи ssh — в `<data_dir>/logs` (тесты); приложение передаёт свой каталог логов (`new_with_logs`).
     pub fn new(data_dir: &Path, secrets: Arc<dyn SecretStore>) -> AppResult<Self> {
+        Self::new_with_logs(data_dir, &data_dir.join("logs"), secrets)
+    }
+
+    /// `log_dir` — каталог логов приложения: туда пишут логи процессов ssh (`ssh-<id>.log`, архив диагностики).
+    pub fn new_with_logs(
+        data_dir: &Path,
+        log_dir: &Path,
+        secrets: Arc<dyn SecretStore>,
+    ) -> AppResult<Self> {
         std::fs::create_dir_all(data_dir)?;
         crate::migrate::remove_legacy_license_file(data_dir);
         let pools = Arc::new(PoolRegistry::default());
-        let runtimes = Runtimes::new(
-            Arc::new(LiveSource::new(secrets.clone(), pools.clone())),
+        let tunnels = TunnelRegistry::new(
+            TunnelConfig::new(data_dir.to_path_buf(), log_dir.to_path_buf()),
             pools.clone(),
+            secrets.clone(),
+        );
+        let runtimes = Runtimes::new(
+            Arc::new(LiveSource::new(
+                secrets.clone(),
+                pools.clone(),
+                tunnels.clone(),
+            )),
+            pools.clone(),
+            tunnels.clone(),
         );
         Ok(Self {
             connections: Arc::new(ConnectionStore::open(data_dir)?),
@@ -42,6 +65,7 @@ impl AppState {
             settings: Arc::new(SettingsStore::open(data_dir)),
             pools,
             runtimes,
+            tunnels,
             secrets_lock: Arc::new(std::sync::Mutex::new(())),
         })
     }
@@ -63,6 +87,8 @@ impl AppState {
         let db = database
             .map(str::to_string)
             .unwrap_or_else(|| profile.pg.database.clone());
+        // Через туннель подключения; упавший туннель — его ошибка, а не соединение в обход.
+        let socks = self.tunnels.route_for(&profile)?;
         crate::topology::connector::pooled_client(
             &self.pools,
             &profile,
@@ -72,6 +98,7 @@ impl AppState {
             m.port,
             &db,
             crate::conn::pool::PoolPurpose::Catalog,
+            socks,
         )
         .await
     }

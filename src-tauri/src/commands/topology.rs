@@ -243,6 +243,7 @@ mod tests {
                 server.port,
                 "postgres",
                 PoolPurpose::Catalog,
+                None,
             )
         };
         let mut held = Vec::new();

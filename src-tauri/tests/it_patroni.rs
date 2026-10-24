@@ -10,8 +10,13 @@ use glafira_pg_lib::topology::patroni::{ReqwestHttp, discover};
 
 async fn observe(prev: Option<&Topology>) -> Option<Topology> {
     let settings = common::patroni_settings()?;
-    let http =
-        ReqwestHttp::new(&settings, Some(common::PATRONI_PASSWORD_VALUE.into()), None).unwrap();
+    let http = ReqwestHttp::new(
+        &settings,
+        Some(common::PATRONI_PASSWORD_VALUE.into()),
+        None,
+        None,
+    )
+    .unwrap();
     Some(
         discover(&http, &settings, "it", prev, now_ms())
             .await

@@ -116,6 +116,26 @@ pub fn log_files(dir: &Path) -> Vec<PathBuf> {
     log_files_named(dir, LOG_BASE)
 }
 
+/// Файлы `<prefix>*.log` в каталоге (логи процессов ssh `ssh-<id>.log` и `ssh-<id>.1.log`), по имени.
+pub fn log_files_with_prefix(dir: &Path, prefix: &str) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| {
+                    let name = e.file_name();
+                    let name = name.to_string_lossy();
+                    name.starts_with(prefix) && name.ends_with(".log")
+                })
+                .map(|e| e.path())
+                .filter(|p| p.is_file())
+                .collect()
+        })
+        .unwrap_or_default();
+    files.sort();
+    files
+}
+
 /// stderr + файл. Если файл открыть нельзя, остаётся только stderr (и предупреждение в нём).
 pub fn init(log_dir: &Path) {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -145,6 +165,26 @@ pub fn init(log_dir: &Path) {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn ssh_logs_are_found_by_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "ssh-b.log",
+            "ssh-a.1.log",
+            "ssh-a.log",
+            "app.log",
+            "ssh-x.txt",
+        ] {
+            std::fs::write(dir.path().join(name), "x").unwrap();
+        }
+        let names: Vec<String> = log_files_with_prefix(dir.path(), "ssh-")
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["ssh-a.1.log", "ssh-a.log", "ssh-b.log"]);
+        assert!(log_files_with_prefix(&dir.path().join("nope"), "ssh-").is_empty());
+    }
 
     #[test]
     fn rotates_by_size_and_keeps_n_files() {

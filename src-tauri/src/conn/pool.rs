@@ -201,6 +201,12 @@ impl PgPool {
         self.spec.host == host && self.spec.port == port
     }
 
+    /// Пул открывает соединения с этим адресом узла этим путём: напрямую (`None`) или через этот порт туннеля.
+    /// Туннель перезапускается на новом порту — пул старого порта не годится.
+    pub fn routes_to(&self, host: &str, port: u16, socks: Option<std::net::SocketAddr>) -> bool {
+        self.looks_at(host, port) && self.spec.socks == socks
+    }
+
     /// Отказ во входе, после которого пул новых соединений не открывает.
     pub fn auth_failure(&self) -> Option<AppError> {
         self.auth_failure.lock_safe().clone()
@@ -328,7 +334,7 @@ impl PoolRegistry {
     pub fn insert_if_absent(&self, key: PoolKey, spec: ConnectSpec) -> Arc<PgPool> {
         let mut pools = self.pools.lock_safe();
         if let Some(p) = pools.get(&key)
-            && p.looks_at(&spec.host, spec.port)
+            && p.routes_to(&spec.host, spec.port, spec.socks)
         {
             return p.clone();
         }
@@ -382,6 +388,8 @@ mod tests {
             ssl_mode: SslMode::Disable,
             connector: None,
             timeout: Duration::from_secs(1),
+            socks: None,
+            ssh_target: None,
         }
     }
 
@@ -444,6 +452,26 @@ mod tests {
             ("other", 6432)
         );
         assert_eq!(r.keys().len(), 1);
+    }
+
+    /// Туннель перезапустился на новом порту: пул старого порта заменяется, хотя адрес узла тот же.
+    #[test]
+    fn pool_is_replaced_when_the_tunnel_port_changes() {
+        let r = PoolRegistry::default();
+        let mut via_old = spec();
+        via_old.socks = Some("127.0.0.1:40001".parse().unwrap());
+        let first = r.insert_if_absent(key("c", "m", "d"), via_old.clone());
+        assert!(first.routes_to("h", 5432, via_old.socks));
+        assert!(!first.routes_to("h", 5432, None));
+        let mut via_new = spec();
+        via_new.socks = Some("127.0.0.1:40002".parse().unwrap());
+        let second = r.insert_if_absent(key("c", "m", "d"), via_new.clone());
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(second.spec().socks, via_new.socks);
+        assert!(Arc::ptr_eq(
+            &second,
+            &r.insert_if_absent(key("c", "m", "d"), via_new)
+        ));
     }
 
     #[test]

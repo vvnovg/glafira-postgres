@@ -7,6 +7,7 @@ use tokio_socks::tcp::Socks5Stream;
 
 use crate::conn::pg::tcp_connect;
 use crate::error::{AppError, AppResult, ErrorCode};
+use crate::net::ssh::process::{SshErrorKind, ssh_error};
 
 pub type SocksStream = Socks5Stream<TcpStream>;
 
@@ -24,8 +25,8 @@ pub async fn connect(proxy: SocketAddr, host: &str, port: u16) -> AppResult<Sock
 }
 
 /// `SSH_ERROR` вида `forwardFailed`. На практике срабатывает, только когда порт туннеля закрыт (процесс `ssh`
-/// уже умер) или рукопожатие SOCKS5 оборвалось: недоступный узел сюда не попадает (см. `connect`).
-fn socks_error(host: &str, port: u16, cause: &str) -> AppError {
+/// уже умер) или рукопожатие SOCKS5 оборвалось: недоступный узел сюда не попадает (см. `connect`, `forward_failed`).
+pub(crate) fn socks_error(host: &str, port: u16, cause: &str) -> AppError {
     let mut e = app_err!(
         ErrorCode::SshError,
         "errors.ssh.socks",
@@ -39,44 +40,20 @@ fn socks_error(host: &str, port: u16, cause: &str) -> AppError {
     e
 }
 
+/// Узел недоступен с бастиона (`forwardFailed`): `ssh -D` ответил успехом SOCKS5 и закрыл поток — канал к узлу не
+/// открылся. `target` — цель ssh туннеля; адрес узла и причина — в `details`.
+pub fn forward_failed(target: &str, host: &str, port: u16, cause: &str) -> AppError {
+    ssh_error(
+        SshErrorKind::ForwardFailed,
+        target,
+        &format!("{host}:{port}: {cause}"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Поддельный SOCKS5-прокси без аутентификации: CONNECT к имени → TCP к `upstream`, затем прокачка байтов.
-    async fn fake_socks(upstream: std::net::SocketAddr) -> std::net::SocketAddr {
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = l.local_addr().unwrap();
-        tokio::spawn(async move {
-            loop {
-                let (mut s, _) = l.accept().await.unwrap();
-                tokio::spawn(async move {
-                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                    let mut buf = [0u8; 262];
-                    s.read_exact(&mut buf[..2]).await.unwrap();
-                    let n = buf[1] as usize;
-                    s.read_exact(&mut buf[..n]).await.unwrap();
-                    s.write_all(&[5, 0]).await.unwrap();
-                    s.read_exact(&mut buf[..4]).await.unwrap();
-                    assert_eq!(
-                        (buf[0], buf[1], buf[3]),
-                        (5, 1, 3),
-                        "CONNECT к доменному имени"
-                    );
-                    s.read_exact(&mut buf[..1]).await.unwrap();
-                    let n = buf[0] as usize;
-                    s.read_exact(&mut buf[..n]).await.unwrap();
-                    assert_eq!(&buf[..n], b"pg-single");
-                    s.read_exact(&mut buf[..2]).await.unwrap();
-                    assert_eq!(u16::from_be_bytes([buf[0], buf[1]]), 5432);
-                    let mut up = tokio::net::TcpStream::connect(upstream).await.unwrap();
-                    s.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await.unwrap();
-                    let _ = tokio::io::copy_bidirectional(&mut s, &mut up).await;
-                });
-            }
-        });
-        addr
-    }
+    use crate::conn::testutil::socks_proxy_recording;
 
     #[tokio::test]
     async fn connect_goes_through_the_proxy_with_remote_name_resolution() {
@@ -92,7 +69,7 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let proxy = fake_socks(upstream).await;
+        let (proxy, requests) = socks_proxy_recording(("127.0.0.1", upstream.port())).await;
         let mut stream = connect(proxy, "pg-single", 5432).await.unwrap();
         tokio::io::AsyncWriteExt::write_all(&mut stream, b"hello")
             .await
@@ -102,6 +79,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&b, b"hello");
+        // CONNECT к доменному имени: адрес разрешает прокси (бастион), а не клиент.
+        assert_eq!(
+            *requests.lock().unwrap(),
+            [(3u8, "pg-single".to_string(), 5432u16)]
+        );
+    }
+
+    #[test]
+    fn forward_failure_names_the_bastion_and_keeps_the_node_in_details() {
+        let e = forward_failed("bastion", "pg-single", 5432, "early eof");
+        assert_eq!(
+            (e.code, e.key.as_str(), e.params["kind"].as_str()),
+            (
+                ErrorCode::SshError,
+                "errors.ssh.forwardFailed",
+                "forwardFailed"
+            )
+        );
+        assert_eq!(e.params["target"], "bastion");
+        assert_eq!(e.details.as_deref(), Some("pg-single:5432: early eof"));
+        assert!(e.retryable);
     }
 
     #[tokio::test]

@@ -1,5 +1,6 @@
 //! Соединение с узлом для опроса топологии: разовое (проверка подключения) или из пула (Task 12).
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,6 +9,7 @@ use crate::conn::pool::{PoolKey, PoolPurpose, PoolRegistry, PooledClient};
 use crate::conn::profile::ConnectionProfile;
 use crate::conn::run_blocking;
 use crate::error::{AppResult, ErrorCode};
+use crate::net::ssh::tunnel::TunnelRegistry;
 use crate::secrets::SecretStore;
 use crate::topology::BoxFuture;
 use crate::topology::probe::{COLLECT_TIMEOUT, NodeFacts, collect_with_timeout, no_answer};
@@ -22,9 +24,11 @@ pub trait NodeConnector: Send + Sync {
 }
 
 /// Новое соединение на каждый опрос; секреты — как переданы (для проверки — форма поверх keychain).
+/// `socks` — порт туннеля проверки (`None` — напрямую).
 pub struct AdhocConnector {
     pub profile: ConnectionProfile,
     pub secrets: Arc<dyn SecretStore>,
+    pub socks: Option<SocketAddr>,
 }
 
 impl AdhocConnector {
@@ -37,10 +41,11 @@ impl AdhocConnector {
         limit: Duration,
     ) -> AppResult<NodeFacts> {
         let (profile, secrets, h) = (self.profile.clone(), self.secrets.clone(), host.to_string());
-        let db = profile.pg.database.clone();
-        let spec =
-            run_blocking(move || ConnectSpec::build(&profile, &h, port, &db, secrets.as_ref()))
-                .await?;
+        let (db, socks) = (profile.pg.database.clone(), self.socks);
+        let spec = run_blocking(move || {
+            ConnectSpec::build_via(&profile, &h, port, &db, secrets.as_ref(), socks)
+        })
+        .await?;
         let (client, abort) = spec.connect_with_handle().await?;
         let facts = collect_with_timeout(&client, limit).await;
         if facts.is_err() {
@@ -64,7 +69,8 @@ impl NodeConnector for AdhocConnector {
 /// Соединение из пула приложения. При ошибке TLS пул вытесняется — следующая попытка перечитает файлы
 /// сертификатов. Отказ во входе пул запоминает и новых попыток входа не делает (`PgPool::auth_failure`):
 /// keychain не перечитывается, пароль не перебирается каждые 10 с. Пул, открытый на другой адрес узла,
-/// заменяется. `purpose` выбирает пул: опрос топологии не стоит в очереди за страницами каталога.
+/// заменяется. `purpose` выбирает пул: опрос топологии не стоит в очереди за страницами каталога. `socks` —
+/// маршрут подключения (`TunnelRegistry::route_for`): пул, открытый через другой порт туннеля, тоже заменяется.
 #[allow(clippy::too_many_arguments)]
 pub async fn pooled_client(
     pools: &PoolRegistry,
@@ -75,6 +81,7 @@ pub async fn pooled_client(
     port: u16,
     database: &str,
     purpose: PoolPurpose,
+    socks: Option<SocketAddr>,
 ) -> AppResult<PooledClient> {
     let key = PoolKey {
         connection_id: profile.id.clone(),
@@ -82,12 +89,14 @@ pub async fn pooled_client(
         database: database.into(),
         purpose,
     };
-    let pool = match pools.get(&key).filter(|p| p.looks_at(host, port)) {
+    let pool = match pools.get(&key).filter(|p| p.routes_to(host, port, socks)) {
         Some(p) => p,
         None => {
             let (p, h, d) = (profile.clone(), host.to_string(), database.to_string());
-            let spec = run_blocking(move || ConnectSpec::build(&p, &h, port, &d, secrets.as_ref()))
-                .await?;
+            let spec = run_blocking(move || {
+                ConnectSpec::build_via(&p, &h, port, &d, secrets.as_ref(), socks)
+            })
+            .await?;
             pools.insert_if_absent(key.clone(), spec)
         }
     };
@@ -102,6 +111,8 @@ pub struct PooledConnector {
     pub pools: Arc<PoolRegistry>,
     pub profile: ConnectionProfile,
     pub secrets: Arc<dyn SecretStore>,
+    /// Туннели подключений: соединения профиля с ssh идут только через его туннель.
+    pub tunnels: Arc<TunnelRegistry>,
 }
 
 impl PooledConnector {
@@ -118,6 +129,8 @@ impl PooledConnector {
         port: u16,
         limit: Duration,
     ) -> AppResult<NodeFacts> {
+        // Туннель упал или закрыт — узел недоступен с его ошибкой (`SSH_ERROR`), напрямую не идём.
+        let socks = self.tunnels.route_for(&self.profile)?;
         let total = Duration::from_secs(self.profile.pg.connect_timeout_s) + limit;
         // Соединение лежит вне будущего под таймаутом: если предел вышел посреди `collect`, будущее
         // отбрасывается, а соединение с неотвеченными запросами нужно закрыть, а не вернуть в пул.
@@ -133,6 +146,7 @@ impl PooledConnector {
                     port,
                     &self.profile.pg.database,
                     PoolPurpose::Probe,
+                    socks,
                 )
                 .await?,
             );
@@ -178,10 +192,12 @@ mod tests {
     }
 
     fn pooled(mode: SslMode) -> PooledConnector {
+        let pools: Arc<PoolRegistry> = Arc::default();
         PooledConnector {
-            pools: Arc::default(),
+            pools: pools.clone(),
             profile: profile(mode),
             secrets: Arc::new(MemoryStore::default()),
+            tunnels: crate::net::ssh::tunnel::unused_registry(pools),
         }
     }
 
@@ -330,6 +346,7 @@ mod tests {
                 server.port,
                 db,
                 PoolPurpose::Catalog,
+                None,
             )
             .await
             .err()
@@ -374,12 +391,67 @@ mod tests {
         assert_eq!(nodes.pools.keys(), vec![probe_key("m")]);
     }
 
+    /// Через туннель: узел, до которого бастион не достучался, — сбой проброса, а не ошибка PostgreSQL; закрытый
+    /// туннель — ошибка туннеля без попытки соединиться напрямую.
+    #[tokio::test]
+    async fn pooled_connection_goes_through_the_tunnel_only() {
+        use crate::net::ssh::tunnel::tests::{closed_port, profile as ssh_profile, registry};
+        let dir = tempfile::tempdir().unwrap();
+        let (tunnels, pools) = registry(
+            dir.path(),
+            vec![("FAKE_SSH_UPSTREAM", format!("127.0.0.1:{}", closed_port()))],
+        );
+        let mut p = ssh_profile(crate::conn::profile::SshAuth::Agent);
+        p.pg.ssl_mode = SslMode::Disable;
+        let socks = tunnels.open(&p, Duration::from_secs(5)).await.unwrap();
+        let nodes = PooledConnector {
+            pools: pools.clone(),
+            profile: p.clone(),
+            secrets: Arc::new(MemoryStore::default()),
+            tunnels: tunnels.clone(),
+        };
+        let e = nodes
+            .facts_within("m", "pg-single", 5432, LIMIT)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (e.code, e.key.as_str(), e.params["kind"].as_str()),
+            (
+                ErrorCode::SshError,
+                "errors.ssh.forwardFailed",
+                "forwardFailed"
+            ),
+            "{e:?}"
+        );
+        assert!(e.details.as_deref().unwrap().contains("pg-single:5432"));
+        let pool = pools.get(&probe_key_of("c1", "m")).expect("пул создан");
+        assert_eq!(pool.spec().socks, Some(socks));
+
+        tunnels.close("c1");
+        let e = nodes
+            .facts_within("m", "pg-single", 5432, LIMIT)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (e.code, e.params["kind"].as_str()),
+            (ErrorCode::SshError, "exited")
+        );
+    }
+
+    fn probe_key_of(connection: &str, member: &str) -> PoolKey {
+        PoolKey {
+            connection_id: connection.into(),
+            ..probe_key(member)
+        }
+    }
+
     #[tokio::test]
     async fn adhoc_failed_facts_abort_the_connection() {
         let server = testutil::stalling_pg_server();
         let nodes = AdhocConnector {
             profile: profile(SslMode::Disable),
             secrets: Arc::new(MemoryStore::default()),
+            socks: None,
         };
         let e = nodes
             .facts_within("127.0.0.1", server.port, LIMIT)
@@ -399,6 +471,7 @@ mod tests {
             port,
             "postgres",
             purpose,
+            None,
         )
         .await
         .unwrap()

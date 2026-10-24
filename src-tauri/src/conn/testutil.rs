@@ -392,3 +392,62 @@ fn serve_stalling(mut tcp: TcpStream, terminated: &AtomicUsize) {
         }
     }
 }
+
+/// Запросы CONNECT, которые получил поддельный SOCKS5-прокси: тип адреса (3 — имя, 1 — IPv4), узел, порт.
+pub type SocksRequests = Arc<std::sync::Mutex<Vec<(u8, String, u16)>>>;
+
+/// Поддельный SOCKS5-прокси без аутентификации: любой CONNECT (к имени или IPv4) → TCP к `upstream`, затем
+/// прокачка байтов. Запросы запоминаются: по ним видно, что имя узла разрешает прокси, а не клиент.
+pub async fn socks_proxy_recording(upstream: (&str, u16)) -> (std::net::SocketAddr, SocksRequests) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let requests: SocksRequests = Arc::default();
+    let upstream = format!("{}:{}", upstream.0, upstream.1);
+    let seen = requests.clone();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            let (upstream, seen) = (upstream.clone(), seen.clone());
+            tokio::spawn(async move {
+                let mut buf = [0u8; 262];
+                let request = async {
+                    s.read_exact(&mut buf[..2]).await?;
+                    let n = buf[1] as usize;
+                    s.read_exact(&mut buf[..n]).await?;
+                    s.write_all(&[5, 0]).await?;
+                    s.read_exact(&mut buf[..4]).await?;
+                    let atyp = buf[3];
+                    let host = match atyp {
+                        3 => {
+                            s.read_exact(&mut buf[..1]).await?;
+                            let n = buf[0] as usize;
+                            s.read_exact(&mut buf[..n]).await?;
+                            String::from_utf8_lossy(&buf[..n]).into_owned()
+                        }
+                        _ => {
+                            s.read_exact(&mut buf[..4]).await?;
+                            format!("{}.{}.{}.{}", buf[0], buf[1], buf[2], buf[3])
+                        }
+                    };
+                    s.read_exact(&mut buf[..2]).await?;
+                    let port = u16::from_be_bytes([buf[0], buf[1]]);
+                    Ok::<_, std::io::Error>((atyp, host, port))
+                };
+                let Ok(req) = request.await else { return };
+                seen.lock().unwrap().push(req);
+                let Ok(mut up) = tokio::net::TcpStream::connect(upstream.as_str()).await else {
+                    return;
+                };
+                if s.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await.is_ok() {
+                    let _ = tokio::io::copy_bidirectional(&mut s, &mut up).await;
+                }
+            });
+        }
+    });
+    (addr, requests)
+}
+
+/// То же без журнала запросов.
+pub async fn socks_proxy_to(upstream: (&str, u16)) -> std::net::SocketAddr {
+    socks_proxy_recording(upstream).await.0
+}

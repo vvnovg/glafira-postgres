@@ -59,6 +59,7 @@ describe("команды и аргументы", () => {
     ["deleteConnection", () => api.deleteConnection("c"), "delete_connection", { id: "c" }],
     ["connectionSecrets", () => api.connectionSecrets("c"), "connection_secrets", { id: "c" }],
     ["parseConnectionString", () => api.parseConnectionString("postgres://h"), "parse_connection_string", { text: "postgres://h" }],
+    ["trustSshHostKey", () => api.trustSshHostKey("bastion", "SHA256:x"), "trust_ssh_host_key", { target: "bastion", fingerprint: "SHA256:x" }],
     ["connect", () => api.connect("c"), "connect", { id: "c" }],
     ["disconnect", () => api.disconnect("c"), "disconnect", { id: "c" }],
     ["reconnect", () => api.reconnect("c"), "reconnect", { id: "c" }],
