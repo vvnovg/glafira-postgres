@@ -10,7 +10,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib-wait.sh"
 versions=("$@")
 [ "${#versions[@]}" -gt 0 ] || versions=(13 14 15 16 17 18)
 for v in "${versions[@]}"; do
-  wait_for docker exec "gp-pg$v" pg_isready -h localhost -q
+  wait_for docker exec "gp-pg$v" pg_isready -h localhost -U postgres -q
   wait_for docker exec "gp-pg$v" psql -U postgres -d orders -tAc "select 1"
 done
 echo "matrix is ready"

@@ -547,8 +547,8 @@ async fn last_idx_scan_follows_the_server_version() {
     }
 }
 
-/// `table::get` заполняет `ddl`: заголовок, `CREATE TABLE` с настоящими определениями из каталога (на PG 15,
-/// 16 и 17), партиционирование и триггеры. У партиции — только `PARTITION OF` с границами.
+/// `table::get` заполняет `ddl`: заголовок, `CREATE TABLE` с настоящими определениями из каталога (на PG 13–18
+/// через `GPG_IT_MATRIX`), партиционирование и триггеры. У партиции — только `PARTITION OF` с границами.
 #[tokio::test]
 async fn table_ddl_is_built_from_the_catalog() {
     for addr in addrs() {
@@ -690,10 +690,20 @@ async fn quote_ident_matches_the_server() {
 /// localhost:5518`). Остальные тесты этого файла тоже идут по узлам матрицы (`addrs()`); этот проверяет
 /// без привязки к деталям данных, что ни один запрос не падает на синтаксисе или отсутствующем столбце
 /// версии, и что каждый адрес — своя мажорная версия (иначе матрица на деле не проверяет ничего нового).
+/// Без `GPG_IT_MATRIX` локально тест пропускается; при `CI` (его задаёт GitHub Actions) матрица обязана быть
+/// задана и покрыть ровно 13–18, иначе отсутствие контейнера не осталось бы незамеченным.
 #[tokio::test]
 async fn catalog_queries_on_every_supported_version() {
+    let in_ci = common::env("CI").is_some();
+    let matrix = common::matrix_addrs();
+    if in_ci {
+        assert!(
+            !matrix.is_empty(),
+            "CI: GPG_IT_MATRIX не задан или пуст, матрица версий не проверена"
+        );
+    }
     let mut majors = Vec::new();
-    for addr in common::matrix_addrs() {
+    for addr in matrix {
         let pg = client(&addr, "postgres").await;
         let version = glafira_pg_lib::catalog::server_version_num(&pg)
             .await
@@ -701,7 +711,11 @@ async fn catalog_queries_on_every_supported_version() {
         assert!((130000..190000).contains(&version), "{addr}: {version}");
         let banner: String = pg.query_one("SELECT version()", &[]).await.unwrap().get(0);
         eprintln!("matrix {addr}: {banner}");
-        assert!(!majors.contains(&(version / 10000)), "{addr}: {version}");
+        assert!(
+            !majors.contains(&(version / 10000)),
+            "повтор мажорной версии {} на {addr}: {version}",
+            version / 10000
+        );
         majors.push(version / 10000);
 
         let dbs = databases::list(&pg, None).await.unwrap();
@@ -795,5 +809,13 @@ async fn catalog_queries_on_every_supported_version() {
 
         sequence::get(&c, "shop", "invoice_seq").await.unwrap();
         sequence::get(&c, "shop", "orders_id_seq").await.unwrap();
+    }
+    if in_ci {
+        majors.sort_unstable();
+        assert_eq!(
+            majors,
+            (13..=18).collect::<Vec<_>>(),
+            "CI: матрица должна покрывать ровно PG 13–18"
+        );
     }
 }

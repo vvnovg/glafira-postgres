@@ -73,18 +73,24 @@ REST API Patroni `patroni` / `patroni-secret`. Демо-база `orders`, сх�
 Шесть одиночных серверов PostgreSQL 13…18 с той же демо-схемой `shop` (роль `glafira_diag`, база `orders`, `pg_stat_statements`);
 порт — `55` и номер версии (`gp-pg13` — `localhost:5513`, …, `gp-pg18` — `localhost:5518`). В обычный `up` они не входят:
 ```bash
-docker compose -f dev/docker-compose.yml --profile matrix up -d
+docker compose -f dev/docker-compose.yml --profile matrix up -d --no-recreate
 scripts/wait-matrix.sh        # можно назвать часть версий: scripts/wait-matrix.sh 15 16
 ```
-Запуск профиля не трогает остальной стенд (у остальных сервисов конфигурация не меняется). Интеграционные тесты каталога
+С флагом `--no-recreate` запуск профиля не трогает остальной стенд. Без него compose пересоздаёт любой сервис, у которого
+изменился хеш конфигурации (например, контейнеры, созданные до перевода портов на `127.0.0.1`, будут пересозданы). Явная
+альтернатива — перечислить только сервисы матрицы: `docker compose -f dev/docker-compose.yml --profile matrix up -d pg13 pg14 pg15 pg16 pg17 pg18`.
+Интеграционные тесты каталога
 проходят по узлам матрицы, если задать `GPG_IT_MATRIX=localhost:5513,localhost:5514,localhost:5515,localhost:5516,localhost:5517,localhost:5518`.
 
-Схема `wide` с 10 000 таблиц для проверки прокрутки и пагинации дерева создаётся вручную в нужной базе (на любом узле стенда или матрицы),
+Схема `wide` с 10 000 таблиц для проверки прокрутки и пагинации дерева создаётся вручную в отдельной базе (на любом узле стенда или матрицы),
 по умолчанию ни в один сервис не входит; повторный запуск безопасен (около 10 секунд):
 ```bash
-docker exec -i gp-pg-single psql -U postgres -d orders -v ON_ERROR_STOP=1 < dev/sql/many-tables.sql
+docker exec gp-pg-single createdb -U postgres wide_demo
+docker exec -i gp-pg-single psql -U postgres -d wide_demo -v ON_ERROR_STOP=1 < dev/sql/many-tables.sql
+docker exec gp-pg-single dropdb -U postgres wide_demo     # убрать, когда не нужна
 ```
-Убрать схему целиком `DROP SCHEMA wide CASCADE` нельзя (не хватит блокировок): создайте её в отдельной базе и удаляйте базу.
+Убрать схему целиком `DROP SCHEMA wide CASCADE` нельзя (не хватит блокировок), поэтому общую демо-базу `orders` под неё не берите:
+создавайте отдельную базу и удаляйте базу целиком.
 
 ## Тесты
 ```bash

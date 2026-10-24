@@ -7,7 +7,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib-wait.sh"
 
 for c in gp-pg-single gp-pg-primary gp-pg-replica gp-patroni1 gp-patroni2 gp-patroni3; do
-  wait_for docker exec "$c" pg_isready -h localhost -p 5432 -q
+  wait_for docker exec "$c" pg_isready -h localhost -p 5432 -U postgres -q
 done
 
 # Порт bastion публикует docker-proxy и принимает соединение раньше sshd: готовым считается ответ баннером SSH.
