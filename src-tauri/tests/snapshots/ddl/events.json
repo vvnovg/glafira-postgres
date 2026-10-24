@@ -3,6 +3,7 @@
   "schema": "shop",
   "name": "events",
   "relkind": "p",
+  "unlogged": false,
   "owner": "postgres",
   "tablespace": null,
   "comment": null,

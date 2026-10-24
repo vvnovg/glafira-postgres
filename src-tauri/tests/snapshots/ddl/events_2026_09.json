@@ -3,6 +3,7 @@
   "schema": "shop",
   "name": "events_2026_09",
   "relkind": "r",
+  "unlogged": false,
   "owner": "postgres",
   "tablespace": null,
   "comment": null,

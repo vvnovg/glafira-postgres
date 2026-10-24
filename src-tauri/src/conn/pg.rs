@@ -17,9 +17,13 @@ use crate::error::{AppError, AppResult};
 use crate::secrets::{PG_KEY_PASSWORD, PG_PASSWORD, SecretStore, secret_key};
 use crate::sync::MutexExt;
 
-/// Параметры сессии диагностики: только чтение и короткие таймауты.
-pub const SESSION_OPTIONS: &str =
-    "-c default_transaction_read_only=on -c statement_timeout=5000 -c lock_timeout=1000";
+/// Параметры сессии диагностики: только чтение, короткие таймауты и «нейтральный» текст определений.
+/// `search_path=pg_catalog`: `pg_get_constraintdef`, `pg_get_triggerdef`, `pg_get_indexdef`, `pg_get_viewdef`
+/// и `pg_get_expr` опускают схему у видимых в пути имён; без этого объекты из `public` попадали бы в DDL
+/// без схемы и работали бы только при том же `search_path`. Запросы приложения читают лишь объекты
+/// `pg_catalog`. `DateStyle=ISO`: границы партиций и значения по умолчанию печатаются в ISO (`'2026-03-01'`),
+/// а не в стиле сеанса (`'01/03/2026'` при `SQL, DMY`).
+pub const SESSION_OPTIONS: &str = "-c default_transaction_read_only=on -c statement_timeout=5000 -c lock_timeout=1000 -c search_path=pg_catalog -c DateStyle=ISO";
 
 /// Отсечка молчащего соединения на уровне TCP: после 60 с тишины зонды раз в 10 с. После failover
 /// полуоткрытое соединение иначе живёт в пуле, пока его не попробуют использовать.
@@ -269,6 +273,16 @@ mod tests {
         assert_eq!(cfg.get_dbname(), Some("orders"));
         assert_eq!(cfg.get_application_name(), Some("glafira-pg"));
         assert_eq!(cfg.get_options(), Some(SESSION_OPTIONS));
+        // Сами параметры сеанса: чтение, таймауты, нейтральные `search_path` и `DateStyle` для определений в DDL.
+        for opt in [
+            "-c default_transaction_read_only=on",
+            "-c statement_timeout=5000",
+            "-c lock_timeout=1000",
+            "-c search_path=pg_catalog",
+            "-c DateStyle=ISO",
+        ] {
+            assert!(SESSION_OPTIONS.contains(opt), "{opt}");
+        }
         assert_eq!(cfg.get_password(), Some(b"pw".as_slice()));
         assert_eq!(cfg.get_ssl_mode(), tokio_postgres::config::SslMode::Disable);
     }

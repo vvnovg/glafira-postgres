@@ -4,9 +4,10 @@
 //! Вход — только [`TableDetails`] (определения ограничений, индексов и триггеров уже собраны сервером:
 //! `pg_get_constraintdef`, `pg_get_indexdef`, `pg_get_triggerdef`), так что результат можно проверять
 //! снимками без стенда. Порядок инструкций: заголовок, `CREATE TABLE`, строка `-- partitions:`, индексы,
-//! триггеры, комментарии. Результат пригоден для PostgreSQL 13–18.
+//! `ALTER TABLE … ADD CONSTRAINT` (внешние ключи и непроверенные ограничения), триггеры, комментарии.
+//! Результат пригоден для PostgreSQL 13–18.
 
-use super::table::{Column, Constraint, TableDetails};
+use super::table::{Column, Constraint, TableDetails, Trigger};
 
 pub const DDL_HEADER: &str = "-- DDL built by Glafira from the catalog; not a replacement for pg_dump (no privileges, RLS policies or owners)";
 
@@ -54,8 +55,30 @@ pub fn quote_ident(s: &str) -> String {
     }
 }
 
+/// Строковый литерал SQL. С обратной косой чертой — `E'…'` с удвоенными `\\`: обычный литерал при
+/// `standard_conforming_strings = off` читал бы `\n` как перевод строки, и результат зависел бы от настройки.
 fn literal(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
+    let quoted = s.replace('\'', "''");
+    if s.contains('\\') {
+        format!("E'{}'", quoted.replace('\\', "\\\\"))
+    } else {
+        format!("'{quoted}'")
+    }
+}
+
+/// Текст для строки-комментария `--`: перевод строки (и `\r`, который лексер PostgreSQL тоже считает концом
+/// комментария) и другие управляющие символы заменяются пробелом. Идентификатор вправе содержать `\n`, а
+/// `quote_ident` его сохраняет: без замены остаток имени после `\n` выполнился бы как отдельная инструкция.
+fn comment_text(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 fn column_def(c: &Column) -> String {
@@ -90,24 +113,102 @@ fn is_table_constraint(k: &Constraint) -> bool {
     !matches!(k.kind.as_str(), "n" | "t") && !k.definition.is_empty()
 }
 
-fn constraint_def(k: &Constraint) -> String {
-    let mut s = format!("CONSTRAINT {} {}", quote_ident(&k.name), k.definition);
-    // `pg_get_constraintdef` сам дописывает NOT VALID (а в PostgreSQL 18 — NOT ENFORCED), повторять нельзя.
+/// Определение ограничения для DDL. `pg_get_constraintdef` сам дописывает NOT VALID (а в PostgreSQL 18 —
+/// NOT ENFORCED), повторять нельзя.
+fn constraint_body(k: &Constraint) -> String {
     let def = k.definition.trim_end();
     if !k.validated && !def.ends_with("NOT VALID") && !def.ends_with("NOT ENFORCED") {
-        s.push_str(" NOT VALID");
+        format!("{def} NOT VALID")
+    } else {
+        def.to_string()
     }
-    s
+}
+
+/// Ограничение пишется отдельным `ALTER TABLE … ADD CONSTRAINT` после индексов (порядок `pg_dump`), если это
+/// внешний ключ или оно непроверенное. `NOT VALID` внутри `CREATE TABLE` PostgreSQL принимает, но молча
+/// игнорирует (ограничение становилось бы проверенным); внешнему ключу нужен уже созданный уникальный индекс
+/// (в том числе у самой таблицы при ссылке на себя). `NOT ENFORCED` (PostgreSQL 18) в `CREATE TABLE`
+/// учитывается, поэтому остаётся внутри.
+fn is_added_later(k: &Constraint) -> bool {
+    k.kind == "f" || constraint_body(k).ends_with("NOT VALID")
+}
+
+fn constraint_def(k: &Constraint) -> String {
+    format!("CONSTRAINT {} {}", quote_ident(&k.name), constraint_body(k))
+}
+
+/// Слово перед `TABLE` в `CREATE`: у нежурналируемой таблицы (в Patroni она не реплицируется) — `UNLOGGED `.
+fn persistence(t: &TableDetails) -> &'static str {
+    if t.unlogged { "UNLOGGED " } else { "" }
+}
+
+/// `pg_get_indexdef` печатает у индекса партиционированной таблицы `CREATE INDEX … ON ONLY схема.таблица`
+/// (индекс только на самой таблице, без партиций); в DDL нужен обычный `ON`, чтобы индекс создался и на
+/// партициях. Разбирается только начало определения, чтобы не задеть ` ON ONLY ` внутри имени индекса.
+fn index_on_all_partitions(def: &str) -> String {
+    let Some(rest) = def
+        .strip_prefix("CREATE UNIQUE INDEX ")
+        .or_else(|| def.strip_prefix("CREATE INDEX "))
+    else {
+        return def.to_string();
+    };
+    // Имя индекса: в кавычках (кавычка внутри удваивается) или до первого пробела.
+    let name_len = if rest.starts_with('"') {
+        let bytes = rest.as_bytes();
+        let mut i = 1;
+        loop {
+            match bytes.get(i) {
+                None => return def.to_string(),
+                Some(b'"') if bytes.get(i + 1) == Some(&b'"') => i += 2,
+                Some(b'"') => break i + 1,
+                Some(_) => i += 1,
+            }
+        }
+    } else {
+        rest.find(' ').unwrap_or(rest.len())
+    };
+    let (name, tail) = rest.split_at(name_len);
+    match tail.strip_prefix(" ON ONLY ") {
+        Some(after) => format!("{}{name} ON {after}", &def[..def.len() - rest.len()]),
+        None => def.to_string(),
+    }
+}
+
+/// `ALTER TABLE … {DISABLE | ENABLE REPLICA | ENABLE ALWAYS} TRIGGER …` для триггера в нестандартном
+/// состоянии. `pg_get_triggerdef` состояния не передаёт: выключенный (или «только реплика») триггер без
+/// этого включился бы при выполнении DDL. У включённого по умолчанию (`O`) строки нет.
+fn trigger_state_stmt(qname: &str, x: &Trigger) -> Option<String> {
+    let name = quote_ident(&x.name);
+    match x.enabled.as_str() {
+        "D" => Some(format!("ALTER TABLE {qname} DISABLE TRIGGER {name};")),
+        "R" => Some(format!(
+            "ALTER TABLE {qname} ENABLE REPLICA TRIGGER {name};"
+        )),
+        "A" => Some(format!("ALTER TABLE {qname} ENABLE ALWAYS TRIGGER {name};")),
+        _ => None,
+    }
 }
 
 pub fn table_ddl(t: &TableDetails) -> String {
+    build_ddl(t, &[])
+}
+
+/// DDL партиции, из описания которой уже убраны унаследованные объекты (`table::without_inherited`).
+/// `inherited_triggers` — убранные копии триггеров родителя: `PARTITION OF` создаёт их сам, но выключенную
+/// (или «только реплика») копию пришлось бы снова переключить, поэтому для них пишутся строки состояния.
+pub(crate) fn partition_ddl(t: &TableDetails, inherited_triggers: &[Trigger]) -> String {
+    build_ddl(t, inherited_triggers)
+}
+
+fn build_ddl(t: &TableDetails, inherited_triggers: &[Trigger]) -> String {
     let qname = format!("{}.{}", quote_ident(&t.schema), quote_ident(&t.name));
     let mut out = format!("{DDL_HEADER}\n");
     // Внешней таблице нужны сервер и параметры (`SERVER …`, `OPTIONS (…)`), каталог вкладки их не читает:
     // вместо неполного и невыполнимого оператора — явная заглушка.
     if t.relkind == "f" {
         out.push_str(&format!(
-            "-- CREATE FOREIGN TABLE {qname} is not generated: the foreign server and its options are not read from the catalog\n"
+            "-- CREATE FOREIGN TABLE {} is not generated: the foreign server and its options are not read from the catalog\n",
+            comment_text(&qname)
         ));
         return out;
     }
@@ -116,6 +217,9 @@ pub fn table_ddl(t: &TableDetails) -> String {
         .iter()
         .filter(|k| is_table_constraint(k))
         .collect();
+    // Внутри `CREATE TABLE` — проверенные PK, UNIQUE, EXCLUDE, CHECK; остальные — после индексов.
+    let (later, inline): (Vec<&Constraint>, Vec<&Constraint>) =
+        constraints.iter().partition(|k| is_added_later(k));
     let partition_of = t
         .partitioning
         .parent
@@ -123,23 +227,27 @@ pub fn table_ddl(t: &TableDetails) -> String {
         .zip(t.partitioning.bound.as_ref());
     match partition_of {
         Some((parent, bound)) => {
-            out.push_str(&format!("CREATE TABLE {qname} PARTITION OF {parent}\n"));
+            out.push_str(&format!(
+                "CREATE {}TABLE {qname} PARTITION OF {parent}\n",
+                persistence(t)
+            ));
             // Колонки партиции — колонки родителя; здесь только её собственные ограничения (унаследованные
             // отбирает `table::get`, см. `without_inherited`).
-            if !constraints.is_empty() {
-                let own: Vec<String> = constraints.iter().map(|k| constraint_def(k)).collect();
+            if !inline.is_empty() {
+                let own: Vec<String> = inline.iter().map(|k| constraint_def(k)).collect();
                 out.push_str(&format!("(\n    {}\n)\n", own.join(",\n    ")));
             }
             out.push_str(&format!("    {bound}"));
         }
         None => {
             let mut items: Vec<String> = t.columns.iter().map(column_def).collect();
-            items.extend(constraints.iter().map(|k| constraint_def(k)));
+            items.extend(inline.iter().map(|k| constraint_def(k)));
+            let unlogged = persistence(t);
             if items.is_empty() {
-                out.push_str(&format!("CREATE TABLE {qname} ()"));
+                out.push_str(&format!("CREATE {unlogged}TABLE {qname} ()"));
             } else {
                 out.push_str(&format!(
-                    "CREATE TABLE {qname} (\n    {}\n)",
+                    "CREATE {unlogged}TABLE {qname} (\n    {}\n)",
                     items.join(",\n    ")
                 ));
             }
@@ -159,7 +267,7 @@ pub fn table_ddl(t: &TableDetails) -> String {
     if !t.partitioning.partitions.is_empty() {
         out.push_str(&format!(
             "-- partitions: {}\n",
-            t.partitioning.partitions.join(", ")
+            comment_text(&t.partitioning.partitions.join(", "))
         ));
     }
     // Индексы ограничений (PK, UNIQUE, EXCLUDE) уже созданы ограничениями; у ограничения и индекса имя одно.
@@ -173,31 +281,35 @@ pub fn table_ddl(t: &TableDetails) -> String {
         .iter()
         .filter(|i| !i.definition.is_empty() && !constraint_indexes.contains(&i.name.as_str()))
         .map(|i| {
-            format!(
-                "{};{}",
-                i.definition,
-                if i.valid { "" } else { " -- INVALID" }
-            )
+            let definition = if t.relkind == "p" {
+                index_on_all_partitions(&i.definition)
+            } else {
+                i.definition.clone()
+            };
+            format!("{definition};{}", if i.valid { "" } else { " -- INVALID" })
         })
         .collect();
     if !indexes.is_empty() {
         out.push_str(&format!("\n{}\n", indexes.join("\n")));
     }
+    let added_later: Vec<String> = later
+        .iter()
+        .map(|k| format!("ALTER TABLE {qname} ADD {};", constraint_def(k)))
+        .collect();
+    if !added_later.is_empty() {
+        out.push_str(&format!("\n{}\n", added_later.join("\n")));
+    }
     let mut triggers = Vec::new();
     for x in t.triggers.iter().filter(|x| !x.definition.is_empty()) {
         triggers.push(format!("{};", x.definition));
-        // `pg_get_triggerdef` состояния не передаёт: выключенный (или «только реплика») триггер без этого
-        // включился бы при выполнении DDL.
-        let name = quote_ident(&x.name);
-        match x.enabled.as_str() {
-            "D" => triggers.push(format!("ALTER TABLE {qname} DISABLE TRIGGER {name};")),
-            "R" => triggers.push(format!(
-                "ALTER TABLE {qname} ENABLE REPLICA TRIGGER {name};"
-            )),
-            "A" => triggers.push(format!("ALTER TABLE {qname} ENABLE ALWAYS TRIGGER {name};")),
-            _ => {}
-        }
+        triggers.extend(trigger_state_stmt(&qname, x));
     }
+    // Копии унаследованных триггеров партиция получает сама, но их нестандартное состояние — своё.
+    triggers.extend(
+        inherited_triggers
+            .iter()
+            .filter_map(|x| trigger_state_stmt(&qname, x)),
+    );
     if !triggers.is_empty() {
         out.push_str(&format!("\n{}\n", triggers.join("\n")));
     }
@@ -231,6 +343,7 @@ mod tests {
             schema: "shop".into(),
             name: name.into(),
             relkind: "r".into(),
+            unlogged: false,
             owner: "postgres".into(),
             tablespace: None,
             comment: None,
@@ -375,7 +488,7 @@ mod tests {
         assert_eq!(
             ddl,
             format!(
-                "{DDL_HEADER}\nCREATE TABLE shop.orders (\n    id bigint,\n    customer_id bigint,\n    CONSTRAINT orders_pkey PRIMARY KEY (id),\n    CONSTRAINT orders_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES shop.customers(id) NOT VALID\n) WITH (fillfactor=90, autovacuum_enabled=false);\n\nCREATE INDEX orders_customer_idx ON shop.orders USING btree (customer_id);\n\nCREATE TRIGGER touch BEFORE INSERT ON shop.orders FOR EACH ROW EXECUTE FUNCTION shop.touch();\n\nCOMMENT ON TABLE shop.orders IS 'Заказы ''клиентов''';\nCOMMENT ON COLUMN shop.orders.id IS 'id';\n"
+                "{DDL_HEADER}\nCREATE TABLE shop.orders (\n    id bigint,\n    customer_id bigint,\n    CONSTRAINT orders_pkey PRIMARY KEY (id)\n) WITH (fillfactor=90, autovacuum_enabled=false);\n\nCREATE INDEX orders_customer_idx ON shop.orders USING btree (customer_id);\n\nALTER TABLE shop.orders ADD CONSTRAINT orders_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES shop.customers(id) NOT VALID;\n\nCREATE TRIGGER touch BEFORE INSERT ON shop.orders FOR EACH ROW EXECUTE FUNCTION shop.touch();\n\nCOMMENT ON TABLE shop.orders IS 'Заказы ''клиентов''';\nCOMMENT ON COLUMN shop.orders.id IS 'id';\n"
             )
         );
     }
@@ -536,18 +649,64 @@ mod tests {
         let ddl = table_ddl(&t);
         assert!(!ddl.contains("NOT VALID NOT VALID"), "{ddl}");
         assert!(!ddl.contains("NOT ENFORCED NOT VALID"), "{ddl}");
+        // NOT ENFORCED и проверенный CHECK остаются внутри CREATE TABLE (PostgreSQL 18 учитывает NOT ENFORCED),
+        // NOT VALID CHECK и внешний ключ уходят в ALTER TABLE.
         assert!(
-            ddl.contains("    CONSTRAINT t_chk CHECK (a > 0) NOT VALID,\n"),
+            ddl.contains(
+                "    CONSTRAINT t_ne CHECK (a < 100) NOT ENFORCED,\n    CONSTRAINT t_ok CHECK (a <> 7)\n);"
+            ),
             "{ddl}"
         );
-        assert!(ddl.contains("INITIALLY DEFERRED NOT VALID,\n"), "{ddl}");
         assert!(
-            ddl.contains("    CONSTRAINT t_ne CHECK (a < 100) NOT ENFORCED,\n"),
+            ddl.ends_with(
+                "\nALTER TABLE shop.t ADD CONSTRAINT t_chk CHECK (a > 0) NOT VALID;\nALTER TABLE shop.t ADD CONSTRAINT t_fk FOREIGN KEY (r) REFERENCES shop.ref(id) DEFERRABLE INITIALLY DEFERRED NOT VALID;\n"
+            ),
             "{ddl}"
         );
-        assert!(
-            ddl.contains("    CONSTRAINT t_ok CHECK (a <> 7)\n);"),
-            "{ddl}"
+    }
+
+    #[test]
+    fn not_valid_check_and_foreign_keys_follow_the_indexes_as_alter_table() {
+        let mut t = table("node");
+        t.columns = vec![column("id", "integer"), column("parent_id", "integer")];
+        t.constraints = vec![
+            // `NOT VALID` внутри CREATE TABLE молча игнорируется: такой CHECK пишется отдельно.
+            constraint("node_chk", "c", "CHECK (id > 0) NOT VALID", false),
+            // Самоссылка на колонку с одним уникальным индексом: индекс обязан существовать раньше ключа.
+            constraint(
+                "node_parent_fkey",
+                "f",
+                "FOREIGN KEY (parent_id) REFERENCES shop.node(id)",
+                true,
+            ),
+            constraint("node_pkey", "p", "PRIMARY KEY (id)", true),
+        ];
+        t.indexes = vec![index(
+            "node_parent_idx",
+            "CREATE INDEX node_parent_idx ON shop.node USING btree (parent_id)",
+            true,
+        )];
+        assert_eq!(
+            table_ddl(&t),
+            format!(
+                "{DDL_HEADER}\nCREATE TABLE shop.node (\n    id integer,\n    parent_id integer,\n    CONSTRAINT node_pkey PRIMARY KEY (id)\n);\n\nCREATE INDEX node_parent_idx ON shop.node USING btree (parent_id);\n\nALTER TABLE shop.node ADD CONSTRAINT node_chk CHECK (id > 0) NOT VALID;\nALTER TABLE shop.node ADD CONSTRAINT node_parent_fkey FOREIGN KEY (parent_id) REFERENCES shop.node(id);\n"
+            )
+        );
+        // Только внешние ключи и непроверенные ограничения: у таблицы без остальных скобок нет.
+        let mut only_fk = table("child");
+        only_fk.partitioning.parent = Some("shop.parent".into());
+        only_fk.partitioning.bound = Some("DEFAULT".into());
+        only_fk.constraints = vec![constraint(
+            "child_fk",
+            "f",
+            "FOREIGN KEY (a) REFERENCES shop.ref(id)",
+            true,
+        )];
+        assert_eq!(
+            table_ddl(&only_fk),
+            format!(
+                "{DDL_HEADER}\nCREATE TABLE shop.child PARTITION OF shop.parent\n    DEFAULT;\n\nALTER TABLE shop.child ADD CONSTRAINT child_fk FOREIGN KEY (a) REFERENCES shop.ref(id);\n"
+            )
         );
     }
 
@@ -681,5 +840,185 @@ mod tests {
         t.columns = vec![column("Col", "text")];
         t.columns[0].comment = Some("it's".into());
         assert!(table_ddl(&t).ends_with("\nCOMMENT ON COLUMN shop.\"Odd\".\"Col\" IS 'it''s';\n"));
+    }
+
+    #[test]
+    fn newlines_in_identifiers_cannot_break_out_of_comment_lines() {
+        // Идентификатор вправе содержать перевод строки: `quote_ident` сервера и наш его сохраняют.
+        let mut parent = table("events");
+        parent.relkind = "p".into();
+        parent.columns = vec![column("id", "integer")];
+        parent.partitioning.key = Some("RANGE (id)".into());
+        parent.partitioning.partitions = vec![
+            "shop.\"p_1\nSELECT 'INJECTED'; --\"".into(),
+            "shop.\"p_2\r\nDROP TABLE shop.events; --\"".into(),
+            "shop.ok".into(),
+        ];
+        let ddl = table_ddl(&parent);
+        // Заголовок, CREATE TABLE (3 строки: заголовок, колонка, PARTITION BY) и одна строка-комментарий.
+        assert_eq!(ddl.lines().count(), 1 + 3 + 1, "{ddl}");
+        assert!(!ddl.contains('\r'), "{ddl:?}");
+        assert!(
+            ddl.lines().all(|l| l.starts_with("--")
+                || l.starts_with("CREATE TABLE")
+                || l.starts_with("    id")
+                || l.starts_with(") PARTITION BY")),
+            "{ddl}"
+        );
+        assert!(
+            ddl.ends_with(
+                "-- partitions: shop.\"p_1 SELECT 'INJECTED'; --\", shop.\"p_2  DROP TABLE shop.events; --\", shop.ok\n"
+            ),
+            "{ddl}"
+        );
+        // Заглушка внешней таблицы строится из имени таблицы — то же правило.
+        let mut foreign = table("remote\nSELECT 1; --");
+        foreign.relkind = "f".into();
+        let ddl = table_ddl(&foreign);
+        assert_eq!(ddl.lines().count(), 2, "{ddl}");
+        assert!(
+            ddl.lines().nth(1).unwrap().starts_with(
+                "-- CREATE FOREIGN TABLE shop.\"remote SELECT 1; --\" is not generated"
+            )
+        );
+    }
+
+    #[test]
+    fn comment_text_replaces_control_characters_only() {
+        assert_eq!(
+            comment_text("a\nb\rc\td\u{1}e\u{85}f\u{2028}g"),
+            "a b c d e f g"
+        );
+        assert_eq!(
+            comment_text("shop.\"Таблица 1\", ok"),
+            "shop.\"Таблица 1\", ok"
+        );
+    }
+
+    #[test]
+    fn indexes_of_partitioned_tables_lose_only() {
+        let mut t = table("events");
+        t.relkind = "p".into();
+        t.columns = vec![column("id", "integer")];
+        t.indexes = vec![
+            index(
+                "events_id_idx",
+                "CREATE INDEX events_id_idx ON ONLY shop.events USING btree (id)",
+                true,
+            ),
+            index(
+                "events_u",
+                "CREATE UNIQUE INDEX events_u ON ONLY shop.events USING btree (id)",
+                true,
+            ),
+            // ` ON ONLY ` в имени индекса не трогаем: меняется только оператор.
+            index(
+                "x ON ONLY y",
+                "CREATE INDEX \"x ON ONLY y\" ON ONLY shop.events USING btree (id)",
+                true,
+            ),
+            index(
+                "q\"a ON ONLY b",
+                "CREATE INDEX \"q\"\"a ON ONLY b\" ON ONLY shop.events USING btree (id)",
+                true,
+            ),
+            // Индекс, который сам присоединён к индексу родителя, печатается с обычным ON.
+            index(
+                "events_plain",
+                "CREATE INDEX events_plain ON shop.events USING btree (id)",
+                true,
+            ),
+        ];
+        let ddl = table_ddl(&t);
+        assert!(
+            ddl.ends_with(
+                "\nCREATE INDEX events_id_idx ON shop.events USING btree (id);\nCREATE UNIQUE INDEX events_u ON shop.events USING btree (id);\nCREATE INDEX \"x ON ONLY y\" ON shop.events USING btree (id);\nCREATE INDEX \"q\"\"a ON ONLY b\" ON shop.events USING btree (id);\nCREATE INDEX events_plain ON shop.events USING btree (id);\n"
+            ),
+            "{ddl}"
+        );
+        // У обычной таблицы определение остаётся как есть.
+        let mut r = table("r");
+        r.indexes = vec![index(
+            "r_idx",
+            "CREATE INDEX r_idx ON ONLY shop.r USING btree (id)",
+            true,
+        )];
+        assert!(table_ddl(&r).contains("ON ONLY shop.r"));
+    }
+
+    #[test]
+    fn literals_with_backslashes_do_not_depend_on_standard_conforming_strings() {
+        assert_eq!(literal("plain"), "'plain'");
+        assert_eq!(literal("it's"), "'it''s'");
+        assert_eq!(literal("C:\\new\\dir"), "E'C:\\\\new\\\\dir'");
+        assert_eq!(literal("a\\'b"), "E'a\\\\''b'");
+        let mut t = table("t");
+        t.columns = vec![column("a", "integer")];
+        t.comment = Some("C:\\new\\dir".into());
+        assert!(table_ddl(&t).ends_with("COMMENT ON TABLE shop.t IS E'C:\\\\new\\\\dir';\n"));
+    }
+
+    #[test]
+    fn disabled_copies_of_inherited_triggers_keep_their_state() {
+        let mut part = table("events_2026_09");
+        part.partitioning.parent = Some("shop.events".into());
+        part.partitioning.bound = Some("DEFAULT".into());
+        let trig = |name: &str, enabled: &str| Trigger {
+            name: name.into(),
+            enabled: enabled.into(),
+            definition: format!(
+                "CREATE TRIGGER {name} BEFORE INSERT ON shop.events_2026_09 FOR EACH ROW EXECUTE FUNCTION shop.f()"
+            ),
+        };
+        // Собственный триггер партиции выводится целиком, унаследованные копии — только со своим состоянием.
+        part.triggers = vec![trig("own", "O")];
+        let inherited = vec![
+            trig("on_copy", "O"),
+            trig("off_copy", "D"),
+            trig("replica_copy", "R"),
+            trig("always_copy", "A"),
+        ];
+        assert_eq!(
+            partition_ddl(&part, &inherited)
+                .split_once("DEFAULT;\n")
+                .unwrap()
+                .1,
+            "\nCREATE TRIGGER own BEFORE INSERT ON shop.events_2026_09 FOR EACH ROW EXECUTE FUNCTION shop.f();\n\
+             ALTER TABLE shop.events_2026_09 DISABLE TRIGGER off_copy;\n\
+             ALTER TABLE shop.events_2026_09 ENABLE REPLICA TRIGGER replica_copy;\n\
+             ALTER TABLE shop.events_2026_09 ENABLE ALWAYS TRIGGER always_copy;\n"
+        );
+        // Без унаследованных копий результат прежний.
+        assert_eq!(partition_ddl(&part, &[]), table_ddl(&part));
+        // Только включённые копии: лишних строк нет.
+        assert_eq!(partition_ddl(&part, &inherited[..1]), table_ddl(&part));
+        // Партиция без собственных триггеров, но с выключенной копией: строка есть.
+        part.triggers.clear();
+        assert!(
+            partition_ddl(&part, &inherited[1..2]).ends_with(
+                "DEFAULT;\n\nALTER TABLE shop.events_2026_09 DISABLE TRIGGER off_copy;\n"
+            )
+        );
+    }
+
+    #[test]
+    fn unlogged_tables_and_partitions_are_created_unlogged() {
+        let mut t = table("t");
+        t.unlogged = true;
+        t.columns = vec![column("a", "integer")];
+        assert_eq!(
+            table_ddl(&t),
+            format!("{DDL_HEADER}\nCREATE UNLOGGED TABLE shop.t (\n    a integer\n);\n")
+        );
+        t.columns.clear();
+        assert!(table_ddl(&t).contains("CREATE UNLOGGED TABLE shop.t ();\n"));
+        let mut part = table("p");
+        part.unlogged = true;
+        part.partitioning.parent = Some("shop.t".into());
+        part.partitioning.bound = Some("DEFAULT".into());
+        assert!(table_ddl(&part).contains("CREATE UNLOGGED TABLE shop.p PARTITION OF shop.t\n"));
+        // Обычная таблица без слова.
+        t.unlogged = false;
+        assert!(table_ddl(&t).contains("\nCREATE TABLE shop.t ();\n"));
     }
 }

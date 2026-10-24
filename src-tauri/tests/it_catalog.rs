@@ -559,11 +559,23 @@ async fn table_ddl_is_built_from_the_catalog() {
         for part in [
             "    total numeric(12,2) NOT NULL,\n",
             "    total_with_tax numeric(12,2) GENERATED ALWAYS AS ((total * 1.2)) STORED,\n",
-            "    CONSTRAINT orders_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES shop.customers(id)",
+            "    CONSTRAINT orders_pkey PRIMARY KEY (id)\n);\n",
             "\nCREATE INDEX orders_customer_idx ON shop.orders USING btree (customer_id);\n",
+            "\nALTER TABLE shop.orders ADD CONSTRAINT orders_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES shop.customers(id);\n",
         ] {
             assert!(orders.contains(part), "{addr}: {part}\n{orders}");
         }
+        // Внешний ключ — после индексов, не внутри CREATE TABLE.
+        assert!(
+            !orders.contains("    CONSTRAINT orders_customer_id_fkey"),
+            "{addr}: {orders}"
+        );
+        assert!(
+            orders.find("CREATE INDEX orders_customer_idx")
+                < orders.find("ADD CONSTRAINT orders_customer_id_fkey"),
+            "{addr}: {orders}"
+        );
+        assert!(!orders.contains("UNLOGGED"), "{addr}: {orders}");
         // Индекс первичного ключа создаёт сам PRIMARY KEY.
         assert!(
             !orders.contains("CREATE UNIQUE INDEX orders_pkey"),

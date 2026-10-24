@@ -3,6 +3,7 @@
   "schema": "shop",
   "name": "customers",
   "relkind": "r",
+  "unlogged": false,
   "owner": "postgres",
   "tablespace": null,
   "comment": "Покупатели",

@@ -38,7 +38,7 @@ async fn session_is_read_only_with_timeouts() {
     .unwrap();
     let row = c
         .query_one(
-            "SELECT current_setting('default_transaction_read_only'), current_setting('application_name'), current_setting('statement_timeout')",
+            "SELECT current_setting('default_transaction_read_only'), current_setting('application_name'), current_setting('statement_timeout'), current_setting('search_path'), current_setting('DateStyle')",
             &[],
         )
         .await
@@ -46,6 +46,9 @@ async fn session_is_read_only_with_timeouts() {
     assert_eq!(row.get::<_, String>(0), "on");
     assert_eq!(row.get::<_, String>(1), "glafira-pg");
     assert_eq!(row.get::<_, String>(2), "5s");
+    // Определения (`pg_get_constraintdef` и др.) всегда с именами схем, даты — в ISO.
+    assert_eq!(row.get::<_, String>(3), "pg_catalog");
+    assert!(row.get::<_, String>(4).starts_with("ISO"));
     let err = c
         .batch_execute("CREATE TABLE glafira_must_not_exist ()")
         .await

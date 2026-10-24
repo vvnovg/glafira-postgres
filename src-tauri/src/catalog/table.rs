@@ -122,6 +122,8 @@ pub struct TableDetails {
     pub name: String,
     /// `r`, `p` или `f`.
     pub relkind: String,
+    /// Нежурналируемая таблица (`relpersistence = 'u'`): не реплицируется на реплики и теряется при сбое.
+    pub unlogged: bool,
     pub owner: String,
     pub tablespace: Option<String>,
     pub comment: Option<String>,
@@ -232,7 +234,8 @@ const HEAD_SQL: &str = "SELECT n.nspname::text, c.relname::text, c.relkind::text
     pg_get_partkeydef(c.oid), pg_get_expr(c.relpartbound, c.oid), \
     (SELECT quote_ident(pn.nspname) || '.' || quote_ident(p.relname) FROM pg_inherits i \
        JOIN pg_class p ON p.oid = i.inhparent JOIN pg_namespace pn ON pn.oid = p.relnamespace \
-       WHERE c.relispartition AND i.inhrelid = c.oid LIMIT 1) \
+       WHERE c.relispartition AND i.inhrelid = c.oid LIMIT 1), \
+    c.relpersistence = 'u' \
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
   LEFT JOIN pg_tablespace ts ON ts.oid = c.reltablespace \
   CROSS JOIN LATERAL (SELECT CASE WHEN c.relkind = 'p' \
@@ -318,6 +321,15 @@ pub(crate) fn without_inherited(t: &TableDetails, inh: &Inherited) -> TableDetai
     own.indexes.retain(|i| !inh.indexes.contains(&i.name));
     own.triggers.retain(|x| !inh.triggers.contains(&x.name));
     own
+}
+
+/// Триггеры, убранные [`without_inherited`]: генератору нужно их состояние (`tgenabled`).
+pub(crate) fn inherited_triggers(t: &TableDetails, inh: &Inherited) -> Vec<Trigger> {
+    t.triggers
+        .iter()
+        .filter(|x| inh.triggers.contains(&x.name))
+        .cloned()
+        .collect()
 }
 
 pub(crate) fn column_from(r: &Row) -> Column {
@@ -418,6 +430,7 @@ pub async fn get(c: &Client, schema: &str, name: &str) -> AppResult<TableDetails
         schema: h.get(0),
         name: h.get(1),
         relkind,
+        unlogged: h.get(29),
         owner: h.get(3),
         tablespace: h.get(4),
         comment: h.get(5),
@@ -456,13 +469,13 @@ pub async fn get(c: &Client, schema: &str, name: &str) -> AppResult<TableDetails
         triggers,
         ddl: String::new(),
     };
-    // DDL партиции не повторяет объекты, унаследованные от родителя.
+    // DDL партиции не повторяет объекты, унаследованные от родителя; состояние их триггеров — повторяет.
     details.ddl = if details.partitioning.parent.is_some() {
-        let inherited = rows(c, &inherited_sql(version), oid).await?;
-        ddl::table_ddl(&without_inherited(
-            &details,
-            &Inherited::from_rows(&inherited),
-        ))
+        let inherited = Inherited::from_rows(&rows(c, &inherited_sql(version), oid).await?);
+        ddl::partition_ddl(
+            &without_inherited(&details, &inherited),
+            &inherited_triggers(&details, &inherited),
+        )
     } else {
         ddl::table_ddl(&details)
     };
@@ -511,6 +524,7 @@ mod tests {
             schema: "shop".into(),
             name: "p1".into(),
             relkind: "r".into(),
+            unlogged: false,
             owner: "postgres".into(),
             tablespace: None,
             comment: None,
@@ -550,6 +564,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["p1_own_trg"]
         );
+        // Убранные триггеры (с их состоянием) отдаются отдельно — для строк `ALTER TABLE … TRIGGER`.
+        assert_eq!(inherited_triggers(&t, &inherited), vec![trigger("par_trg")]);
+        assert!(inherited_triggers(&t, &Inherited::default()).is_empty());
         // Описание вкладки не меняется: фильтр работает на копии.
         assert_eq!(t.constraints.len(), 3);
         assert_eq!(without_inherited(&t, &Inherited::default()), t);
