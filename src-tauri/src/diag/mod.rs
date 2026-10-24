@@ -2,15 +2,19 @@
 //! `run_diagnostic`. Сбор фактов (SQL, HTTP) — здесь, правила и типы данных — в `pg_advisor::rules`.
 
 pub mod caps;
+pub mod horizon;
 pub mod locks;
 pub mod memory;
 pub mod pulse;
+pub mod replication;
 pub mod sessions;
 pub mod sql;
 
 use futures_util::future::BoxFuture;
 use pg_advisor::findings::Finding;
 use pg_advisor::locktree::LocksData;
+use pg_advisor::rules::horizon::HorizonData;
+use pg_advisor::rules::replication::ReplicationData;
 use pg_advisor::rules::sessions::SessionsData;
 use serde::{Deserialize, Serialize};
 use tokio_postgres::Client;
@@ -21,6 +25,7 @@ use crate::conn::profile::ConnectionKind;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::i18n::LocalizedText;
 use crate::state::AppState;
+use crate::topology::model::Topology;
 use crate::topology::runtime::DiagTarget;
 
 /// Инструмент диагностики. `idleTx` — вкладка фронтенда поверх `sessions`, отдельного инструмента в Rust нет.
@@ -75,13 +80,18 @@ pub struct Unavailable {
     pub reason: LocalizedText,
 }
 
-/// Данные инструмента; `kind` — id инструмента.
+/// Данные инструмента; `kind` — id инструмента. Отчёт живёт недолго и один на запрос: разница в размере вариантов
+/// (данные реплик втрое больше остальных) обходится без `Box`, чтобы сопоставление с образцом в тестах и коде осталось
+/// прямым.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
+#[allow(clippy::large_enum_variant)]
 pub enum DiagData {
     Pulse(pulse::PulseData),
     Sessions(SessionsData),
     Locks(LocksData),
+    Horizon(HorizonData),
+    Replication(ReplicationData),
 }
 
 /// Конверт отчёта (спец. P2 §3.2). У инструментов кластера `member`, `serverVersionNum` и `inRecovery` пусты.
@@ -138,6 +148,16 @@ pub async fn head(c: &Client) -> AppResult<Head> {
         in_recovery: r.get(1),
         now_ms: r.get(2),
     })
+}
+
+/// Участник топологии для `application_name` отправителя WAL (уточнение 5 плана P2a): имя участника или его хост.
+/// Без DNS: опрос топологии разрешает имена, диагностика — нет. Не сопоставилось — `None`.
+pub fn sender_member(t: &Topology, application: Option<&str>) -> Option<String> {
+    let app = application?;
+    t.members
+        .iter()
+        .find(|m| m.name == app || m.host == app)
+        .map(|m| m.name.clone())
 }
 
 /// Запрос узлового инструмента на его узле: соединение пула `Catalog`, предел — `catalog_limit` профиля.
@@ -198,7 +218,9 @@ pub async fn run(st: &AppState, id: &str, req: DiagRequest) -> AppResult<DiagRep
         Tool::Pulse => pulse::report(st, id, &target).await,
         Tool::Sessions => sessions::report(st, id, &target).await,
         Tool::Locks => locks::report(st, id, &target).await,
-        // Задачи 4–9 добавляют свои ветки; до тех пор инструмент недоступен.
+        Tool::Horizon => horizon::report(st, id, &target).await,
+        Tool::Replication => replication::report(st, id, &target).await,
+        // Остальные задачи добавляют свои ветки; до тех пор инструмент недоступен.
         other => Err(app_err!(
             ErrorCode::FeatureUnavailable,
             "errors.diag.notYet",
@@ -234,6 +256,29 @@ mod tests {
         );
         assert!(validate(&req(Tool::Waits, Some(3600)), ConnectionKind::Server).is_ok());
         assert!(Tool::Pulse.is_cluster() && !Tool::Sessions.is_cluster());
+    }
+
+    #[test]
+    fn horizon_and_replication_data_are_tagged_with_the_tool_id() {
+        let h = serde_json::to_value(DiagData::Horizon(HorizonData::default())).unwrap();
+        assert_eq!(
+            (&h["kind"], &h["holders"]),
+            (&"horizon".into(), &serde_json::json!([]))
+        );
+        let r = serde_json::to_value(DiagData::Replication(ReplicationData::default())).unwrap();
+        assert_eq!(r["kind"], "replication");
+        assert_eq!(r["inRecovery"], false);
+    }
+
+    #[test]
+    fn sender_member_needs_an_application_name() {
+        let t = crate::topology::model::topo(vec![crate::topology::model::Member::new(
+            "pg-1", "db1", 5432,
+        )]);
+        assert_eq!(sender_member(&t, Some("pg-1")).as_deref(), Some("pg-1"));
+        assert_eq!(sender_member(&t, Some("db1")).as_deref(), Some("pg-1"));
+        assert_eq!(sender_member(&t, Some("other")), None);
+        assert_eq!(sender_member(&t, None), None);
     }
 
     #[test]

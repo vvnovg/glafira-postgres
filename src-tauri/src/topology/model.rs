@@ -105,6 +105,20 @@ pub struct Topology {
 }
 
 impl Topology {
+    /// Топология без участников — для проверки SQL инструментов в интеграционных тестах.
+    #[doc(hidden)]
+    pub fn empty_for_tests() -> Self {
+        Self {
+            connection_id: "c".into(),
+            kind: ConnectionKind::Patroni,
+            observed_at_ms: 1_000,
+            scope: Some("demo".into()),
+            paused: Some(false),
+            members: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
     /// Узел, принимающий запись: primary, иначе лидер standby-кластера.
     pub fn leader(&self) -> Option<&Member> {
         self.members
@@ -178,13 +192,8 @@ pub fn now_ms() -> i64 {
 #[cfg(test)]
 pub(crate) fn topo(members: Vec<Member>) -> Topology {
     Topology {
-        connection_id: "c".into(),
-        kind: ConnectionKind::Patroni,
-        observed_at_ms: 1_000,
-        scope: Some("demo".into()),
-        paused: Some(false),
         members,
-        warnings: vec![],
+        ..Topology::empty_for_tests()
     }
 }
 

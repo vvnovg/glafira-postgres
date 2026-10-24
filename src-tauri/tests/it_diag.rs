@@ -10,6 +10,8 @@ use common::open_server;
 use futures_util::FutureExt;
 use glafira_pg_lib::diag::caps::Caps;
 use glafira_pg_lib::diag::{self, DiagData, DiagRequest, Tool};
+use glafira_pg_lib::topology::model::Topology;
+use pg_advisor::rules::horizon::HolderKind;
 
 fn req(tool: Tool) -> DiagRequest {
     DiagRequest {
@@ -456,4 +458,306 @@ async fn ddl_queue_behind_a_long_transaction_is_found() {
     released.unwrap();
     ddl_done.unwrap().unwrap().unwrap().unwrap();
     victim_done.unwrap().unwrap().unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn horizon_and_replication_sql_run_on_every_version() {
+    for addr in sql_addrs() {
+        let c = common::connect_as(
+            &addr,
+            "postgres",
+            common::PG_USER,
+            common::PG_PASSWORD_VALUE,
+        )
+        .await;
+        let h = diag::head(&c).await.unwrap();
+        let caps = Caps::new(h.version_num);
+        let empty = Topology::empty_for_tests();
+        let horizon = diag::horizon::collect(&c, caps, &empty)
+            .await
+            .unwrap_or_else(|e| panic!("{addr}: {e:?}"));
+        assert!(
+            horizon.hot_standby_feedback.is_some(),
+            "{addr}: настройка прочитана"
+        );
+        let (replication, snapshot) = diag::replication::collect(&c, caps, h.in_recovery, &empty)
+            .await
+            .unwrap_or_else(|e| panic!("{addr}: {e:?}"));
+        assert_eq!(replication.in_recovery, h.in_recovery, "{addr}");
+        assert_eq!(
+            (
+                replication.receiver.is_some(),
+                replication.replay.is_some(),
+                replication.conflicts.is_some(),
+                snapshot.is_some()
+            ),
+            (h.in_recovery, h.in_recovery, h.in_recovery, h.in_recovery),
+            "{addr}: приёмник, replay и конфликты — только на узле в recovery"
+        );
+        assert!(
+            replication.synchronous_commit.is_some() && replication.hot_standby_feedback.is_some(),
+            "{addr}: {replication:?}"
+        );
+        assert!(
+            replication.max_standby_streaming_delay_ms.is_some(),
+            "{addr}"
+        );
+    }
+}
+
+/// Пауза replay видна с обеих сторон: на primary отправитель отстаёт в байтах, на реплике приёмник жив, а replay на
+/// паузе. Стенд возвращается при любом выходе: replay возобновлён, таблица `it_lag` удалена (порядок восстановления —
+/// обратный порядку объявления).
+#[tokio::test]
+async fn paused_replay_shows_on_both_sides() {
+    let (Some(primary), Some(replica)) =
+        (common::env("GPG_IT_PRIMARY"), common::env("GPG_IT_REPLICA"))
+    else {
+        return;
+    };
+    let _drop_table = common::restore_on_drop({
+        let primary = primary.clone();
+        move || common::run_sql_blocking(&primary, "postgres", "DROP TABLE IF EXISTS it_lag")
+    });
+    let _resume = common::restore_on_drop({
+        let replica = replica.clone();
+        move || common::run_sql_blocking(&replica, "postgres", "SELECT pg_wal_replay_resume()")
+    });
+    common::superuser(&replica, "postgres")
+        .await
+        .batch_execute("SELECT pg_wal_replay_pause()")
+        .await
+        .unwrap();
+    let w = common::superuser(&primary, "postgres").await;
+    w.batch_execute(
+        "CREATE TABLE IF NOT EXISTS it_lag (x int); INSERT INTO it_lag SELECT generate_series(1, 200000);",
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    let (_d1, st) = open_server(&primary).await;
+    let r = diag::run(&st, "it", req(Tool::Replication)).await.unwrap();
+    let DiagData::Replication(d) = r.data else {
+        panic!()
+    };
+    assert!(!d.in_recovery);
+    assert!(
+        d.senders
+            .iter()
+            .any(|s| s.replay_lag_bytes.unwrap_or(0) > 0),
+        "{:?}",
+        d.senders
+    );
+
+    let (_d2, st) = open_server(&replica).await;
+    let r = diag::run(&st, "it", req(Tool::Replication)).await.unwrap();
+    let DiagData::Replication(d) = &r.data else {
+        panic!()
+    };
+    assert!(d.in_recovery);
+    assert_eq!(
+        d.receiver.as_ref().and_then(|x| x.status.as_deref()),
+        Some("streaming")
+    );
+    assert!(matches!(
+        d.replay.as_ref().and_then(|x| x.pause.as_deref()),
+        Some("paused" | "pause requested")
+    ));
+    assert!(r.findings.iter().any(|f| f.id == "replayPaused"));
+}
+
+/// Prepared transaction и логический слот лаборатории держат горизонт. Prepared transaction откатывается при любом
+/// выходе: `ROLLBACK PREPARED` нельзя выполнить из блока `DO`, поэтому — `rollback_prepared_blocking`.
+#[tokio::test]
+async fn prepared_transaction_and_logical_slot_hold_the_lab_horizon() {
+    let Some(lab) = common::lab_addr() else {
+        return;
+    };
+    let _cleanup = common::restore_on_drop({
+        let lab = lab.clone();
+        move || common::rollback_prepared_blocking(&lab, "orders", "it_horizon")
+    });
+    let c = common::superuser(&lab, "orders").await;
+    c.batch_execute(
+        "BEGIN; UPDATE shop.customers SET email = email WHERE id = 1; PREPARE TRANSACTION 'it_horizon';",
+    )
+    .await
+    .unwrap();
+    let (_dir, st) = open_server(&lab).await;
+    let r = diag::run(&st, "it", req(Tool::Horizon)).await.unwrap();
+    let DiagData::Horizon(d) = r.data else {
+        panic!()
+    };
+    assert!(
+        d.holders
+            .iter()
+            .any(|h| h.kind == HolderKind::PreparedXact && h.gid.as_deref() == Some("it_horizon")),
+        "{:?}",
+        d.holders
+    );
+    assert!(
+        d.holders
+            .iter()
+            .any(|h| h.kind == HolderKind::Slot && h.name == "lab_sub_slot" && h.catalog),
+        "{:?}",
+        d.holders
+    );
+    assert!(
+        d.holders.windows(2).all(|w| w[0].xmin_age >= w[1].xmin_age),
+        "по возрасту"
+    );
+}
+
+/// Откат prepared transaction для восстановления стенда: повторный вызов, когда транзакции уже нет, не падает.
+#[tokio::test]
+async fn rollback_prepared_helper_is_idempotent() {
+    let Some(lab) = common::lab_addr() else {
+        return;
+    };
+    let _cleanup = common::restore_on_drop({
+        let lab = lab.clone();
+        move || common::rollback_prepared_blocking(&lab, "orders", "it_helper")
+    });
+    let c = common::superuser(&lab, "orders").await;
+    c.batch_execute(
+        "BEGIN; UPDATE shop.customers SET email = email WHERE id = 1; PREPARE TRANSACTION 'it_helper';",
+    )
+    .await
+    .unwrap();
+    let left = || async {
+        c.query_one(
+            "SELECT count(*) FROM pg_prepared_xacts WHERE gid = 'it_helper'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get::<_, i64>(0)
+    };
+    assert_eq!(left().await, 1);
+    common::rollback_prepared_blocking(&lab, "orders", "it_helper");
+    assert_eq!(left().await, 0);
+    common::rollback_prepared_blocking(&lab, "orders", "it_helper");
+}
+
+/// Сессия с назначенным XID держит горизонт: видна по `pid` и `backend_start`, держатель — клиентская транзакция.
+#[tokio::test]
+async fn a_session_with_an_xid_holds_the_horizon() {
+    let Some(addr) = common::env("GPG_IT_SINGLE") else {
+        return;
+    };
+    common::ensure_fixtures(&addr).await;
+    let app = common::app(&addr).await;
+    app.batch_execute("BEGIN; SELECT txid_current();")
+        .await
+        .unwrap();
+    let pid: i32 = app
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .unwrap()
+        .get(0);
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+
+    let (_dir, st) = open_server(&addr).await;
+    let r = diag::run(&st, "it", req(Tool::Horizon)).await.unwrap();
+    assert_eq!((r.tool, r.in_recovery), (Tool::Horizon, Some(false)));
+    let DiagData::Horizon(d) = r.data else {
+        panic!()
+    };
+    let h = d
+        .holders
+        .iter()
+        .find(|h| h.kind == HolderKind::Session && h.pid == Some(pid))
+        .unwrap_or_else(|| panic!("сессия {pid} не держатель: {:?}", d.holders));
+    assert_eq!(h.name, pid.to_string());
+    assert_eq!(h.user.as_deref(), Some("glafira_app"));
+    assert_eq!(h.database.as_deref(), Some("orders"));
+    assert!(
+        h.backend_start_us
+            .is_some_and(|us| us > 1_600_000_000_000_000)
+    );
+    assert!(h.duration_s.is_some_and(|s| s >= 1.0), "{h:?}");
+    app.batch_execute("ROLLBACK").await.unwrap();
+}
+
+/// Обратная связь реплики (`hot_standby_feedback`) держит горизонт primary. Реплика стенда подключена через
+/// физический слот `replica1`: тогда xmin записывается в слот (`pg_replication_slots.xmin`), а
+/// `pg_stat_replication.backend_xmin` пуст — держатель виден как слот. Без слота он был бы `StandbyFeedback`.
+/// Настройка возвращается при любом выходе: `ALTER SYSTEM RESET` и reload — отдельными командами.
+#[tokio::test]
+async fn standby_feedback_is_a_holder_on_the_primary() {
+    let (Some(primary), Some(replica)) =
+        (common::env("GPG_IT_PRIMARY"), common::env("GPG_IT_REPLICA"))
+    else {
+        return;
+    };
+    common::ensure_fixtures(&primary).await;
+    let _reset = common::restore_on_drop({
+        let replica = replica.clone();
+        move || {
+            common::run_sql_blocking(
+                &replica,
+                "postgres",
+                "ALTER SYSTEM RESET hot_standby_feedback",
+            );
+            common::run_sql_blocking(&replica, "postgres", "SELECT pg_reload_conf()");
+        }
+    });
+    let su = common::superuser(&replica, "postgres").await;
+    su.batch_execute("ALTER SYSTEM SET hot_standby_feedback = on")
+        .await
+        .unwrap();
+    su.batch_execute("SELECT pg_reload_conf()").await.unwrap();
+    let reader = common::app(&replica).await;
+    reader
+        .batch_execute("BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT count(*) FROM shop.orders;")
+        .await
+        .unwrap();
+    let probe = common::superuser(&primary, "postgres").await;
+    common::wait_until(
+        "feedback дошёл до primary",
+        Duration::from_secs(20),
+        async || {
+            probe
+                .query_one(
+                    "SELECT (SELECT count(*) FROM pg_replication_slots WHERE xmin IS NOT NULL) \
+                      + (SELECT count(*) FROM pg_stat_replication WHERE backend_xmin IS NOT NULL)",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get::<_, i64>(0)
+                >= 1
+        },
+    )
+    .await;
+    let (_dir, st) = open_server(&primary).await;
+    let DiagData::Horizon(d) = diag::run(&st, "it", req(Tool::Horizon)).await.unwrap().data else {
+        panic!()
+    };
+    assert!(
+        d.holders.iter().any(|h| match h.kind {
+            HolderKind::StandbyFeedback => true,
+            HolderKind::Slot => {
+                h.slot_type.as_deref() == Some("physical") && h.active == Some(true) && !h.catalog
+            }
+            _ => false,
+        }),
+        "{:?}",
+        d.holders
+    );
+    // Горизонт на самой реплике: её настройка включена, а читающая транзакция видна как сессия.
+    let (_dir_replica, st) = open_server(&replica).await;
+    let DiagData::Horizon(d) = diag::run(&st, "it", req(Tool::Horizon)).await.unwrap().data else {
+        panic!()
+    };
+    assert_eq!(d.hot_standby_feedback, Some(true));
+    assert!(
+        d.holders
+            .iter()
+            .any(|h| h.kind == HolderKind::Session && h.user.as_deref() == Some("glafira_app")),
+        "{:?}",
+        d.holders
+    );
+    reader.batch_execute("ROLLBACK").await.unwrap();
 }

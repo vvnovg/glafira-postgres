@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -632,6 +633,58 @@ impl<F: FnOnce()> Drop for RestoreGuard<F> {
             }
         }
     }
+}
+
+/// Выполняет `fut` в своём потоке и рантайме и ждёт результата: восстановление стенда из `Drop`, где `await` нельзя.
+fn on_own_runtime<T: Send + 'static>(fut: impl Future<Output = T> + Send + 'static) -> T {
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(fut)
+    })
+    .join()
+    .expect("восстановление стенда")
+}
+
+/// SQL от суперпользователя в своём потоке и рантайме: для восстановления стенда из `Drop`, где `await` нельзя.
+/// Одна команда на вызов: несколько команд в одной строке выполняются в неявном блоке транзакции, а `ALTER SYSTEM`,
+/// `ROLLBACK PREPARED` и им подобные в блоке не допускаются.
+pub fn run_sql_blocking(addr: &str, db: &str, sql: &str) {
+    let (addr, db, sql) = (addr.to_string(), db.to_string(), sql.to_string());
+    on_own_runtime(async move {
+        superuser(&addr, &db)
+            .await
+            .batch_execute(&sql)
+            .await
+            .unwrap()
+    })
+}
+
+/// Откатывает prepared transaction `gid` базы `db`, если она ещё есть: «уже откачена» — не ошибка. Условие нельзя
+/// выразить блоком `DO` (`ROLLBACK PREPARED` в PL/pgSQL — синтаксическая ошибка), поэтому проверка и откат — две
+/// отдельные команды.
+pub fn rollback_prepared_blocking(addr: &str, db: &str, gid: &str) {
+    let (addr, db, gid) = (addr.to_string(), db.to_string(), gid.to_string());
+    on_own_runtime(async move {
+        let c = superuser(&addr, &db).await;
+        let exists = c
+            .query_opt(
+                "SELECT 1 FROM pg_prepared_xacts WHERE gid = $1 AND database = current_database()",
+                &[&gid],
+            )
+            .await
+            .unwrap()
+            .is_some();
+        if exists {
+            let sql = format!(
+                "ROLLBACK PREPARED {}",
+                pg_advisor::rules::horizon::quote_literal(&gid)
+            );
+            c.batch_execute(&sql).await.unwrap();
+        }
+    })
 }
 
 /// Список узлов стенда без Patroni.
