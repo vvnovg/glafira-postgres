@@ -3,6 +3,7 @@
 
 mod common;
 
+use glafira_pg_lib::catalog::ddl::{DDL_HEADER, quote_ident};
 use glafira_pg_lib::catalog::objects::ObjectKind;
 use glafira_pg_lib::catalog::{
     databases, extensions, function, objects, roles, schemas, sequence, table, view,
@@ -541,5 +542,132 @@ async fn last_idx_scan_follows_the_server_version() {
             }
         }
         assert!(checked > 0, "{addr}: у демо-таблиц есть индексы");
+    }
+}
+
+/// `table::get` заполняет `ddl`: заголовок, `CREATE TABLE` с настоящими определениями из каталога (на PG 15,
+/// 16 и 17), партиционирование и триггеры. У партиции — только `PARTITION OF` с границами.
+#[tokio::test]
+async fn table_ddl_is_built_from_the_catalog() {
+    for addr in addrs() {
+        let c = client(&addr, "orders").await;
+        let orders = table::get(&c, "shop", "orders").await.unwrap().ddl;
+        assert!(
+            orders.starts_with(&format!("{DDL_HEADER}\nCREATE TABLE shop.orders (\n")),
+            "{addr}: {orders}"
+        );
+        for part in [
+            "    total numeric(12,2) NOT NULL,\n",
+            "    total_with_tax numeric(12,2) GENERATED ALWAYS AS ((total * 1.2)) STORED,\n",
+            "    CONSTRAINT orders_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES shop.customers(id)",
+            "\nCREATE INDEX orders_customer_idx ON shop.orders USING btree (customer_id);\n",
+        ] {
+            assert!(orders.contains(part), "{addr}: {part}\n{orders}");
+        }
+        // Индекс первичного ключа создаёт сам PRIMARY KEY.
+        assert!(
+            !orders.contains("CREATE UNIQUE INDEX orders_pkey"),
+            "{addr}: {orders}"
+        );
+
+        let customers = table::get(&c, "shop", "customers").await.unwrap().ddl;
+        assert!(
+            customers.contains("    id bigint GENERATED ALWAYS AS IDENTITY NOT NULL,\n"),
+            "{addr}: {customers}"
+        );
+        assert!(
+            customers.contains("CREATE TRIGGER customers_touch BEFORE INSERT ON shop.customers"),
+            "{addr}"
+        );
+        assert!(
+            customers.ends_with("COMMENT ON TABLE shop.customers IS 'Покупатели';\n"),
+            "{addr}"
+        );
+
+        let events = table::get(&c, "shop", "events").await.unwrap().ddl;
+        assert!(
+            events.contains(") PARTITION BY RANGE (happened_at);\n"),
+            "{addr}: {events}"
+        );
+        assert!(
+            events.contains("-- partitions: shop.events_2026_09, shop.events_2026_10\n"),
+            "{addr}: {events}"
+        );
+
+        let part = table::get(&c, "shop", "events_2026_09").await.unwrap().ddl;
+        assert!(
+            part.contains(
+                "CREATE TABLE shop.events_2026_09 PARTITION OF shop.events\n    FOR VALUES FROM ("
+            ),
+            "{addr}: {part}"
+        );
+        assert!(
+            !part.contains("CREATE TABLE shop.events_2026_09 ("),
+            "{addr}: {part}"
+        );
+    }
+}
+
+/// Генератор сам берёт идентификаторы в кавычки; правила и список ключевых слов не должны отставать от
+/// `quote_ident()` сервера. Проверяются все слова `pg_get_keywords()`: недостаточно кавычек (слово, которое
+/// сервер берёт в кавычки, а генератор — нет) ломает DDL, и тест на это падает; лишние кавычки у слова,
+/// которое в этой версии ещё не зарезервировано (`json` до 17), безвредны и допускаются. Для остальных имён
+/// («странных», но не ключевых) результат обязан совпасть точно.
+#[tokio::test]
+async fn quote_ident_matches_the_server() {
+    for addr in addrs() {
+        let c = client(&addr, "orders").await;
+        let keywords: Vec<String> = c
+            .query("SELECT word::text FROM pg_get_keywords()", &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        assert!(
+            keywords.len() > 100,
+            "{addr}: слов мало: {}",
+            keywords.len()
+        );
+        let mut quoted_by_server = 0;
+        for n in &keywords {
+            let server: String = c
+                .query_one("SELECT quote_ident($1)", &[n])
+                .await
+                .unwrap()
+                .get(0);
+            let ours = quote_ident(n);
+            if server.starts_with('"') {
+                quoted_by_server += 1;
+                assert_eq!(ours, server, "{addr}: слово {n:?} нужно брать в кавычки");
+            } else if ours != server {
+                assert_eq!(ours, format!("\"{n}\""), "{addr}: {n:?}");
+            }
+        }
+        assert!(quoted_by_server > 50, "{addr}: {quoted_by_server}");
+        for n in [
+            "orders",
+            "Orders",
+            "_x",
+            "x1",
+            "1x",
+            "a$b",
+            "a b",
+            "a\"b",
+            "заказы",
+            "Ünï",
+            "",
+            "x-y",
+            "WITH",
+            "Order Items",
+            "events_2026_09",
+        ] {
+            let server: String = c
+                .query_one("SELECT quote_ident($1)", &[&n])
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(quote_ident(n), server, "{addr}: {n:?}");
+        }
     }
 }

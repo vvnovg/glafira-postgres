@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use tokio_postgres::{Client, Row};
 
-use crate::catalog::{object_not_found, relation_oid, server_version_num};
+use crate::catalog::{ddl, object_not_found, relation_oid, server_version_num};
 use crate::conn::errors::from_pg;
 use crate::error::AppResult;
 
@@ -67,7 +67,7 @@ pub struct IncomingFk {
 
 /// Размеры и статистика. У партиционированной таблицы — по всему дереву партиций (отступление 7 плана):
 /// размеры и счётчики — суммы, времена — самые поздние, `reltuples` — сумма по листьям.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableStats {
     pub heap_bytes: i64,
@@ -92,7 +92,7 @@ pub struct TableStats {
     pub autoanalyze_count: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Partitioning {
     /// Ключ партиционирования (`RANGE (happened_at)`) — у партиционированной таблицы.
@@ -133,7 +133,7 @@ pub struct TableDetails {
     pub stats: TableStats,
     pub partitioning: Partitioning,
     pub triggers: Vec<Trigger>,
-    /// DDL по каталогу; заполняет генератор задачи 8, до него — пустая строка.
+    /// DDL по каталогу (`catalog::ddl::table_ddl`); заполняется в [`get`].
     pub ddl: String,
 }
 
@@ -262,6 +262,64 @@ const TRIGGERS_SQL: &str = "SELECT t.tgname::text, t.tgenabled::text, \
     COALESCE(pg_get_triggerdef(t.oid, true), '') \
   FROM pg_trigger t WHERE t.tgrelid = $1 AND NOT t.tgisinternal ORDER BY t.tgname";
 
+/// Имена объектов партиции, которые PostgreSQL создал копиями объектов родителя (`PARTITION OF` создаёт их
+/// сам, повторять их в DDL нельзя: два первичных ключа, одноимённый индекс, дубль внешнего ключа). Только
+/// каталог, без блокировок отношений. Ограничения: `conparentid <> 0` (PRIMARY KEY, UNIQUE, FOREIGN KEY
+/// родителя) или не `conislocal` (унаследованный CHECK). Индексы: `relispartition` (присоединён к
+/// индексу родителя). Триггеры: `tgparentid <> 0`; до PostgreSQL 15 такие копии помечены внутренними
+/// (`tgisinternal`) и в [`TRIGGERS_SQL`] не попадают, а столбец `tgparentid` на них нельзя читать наверняка.
+/// `$1` — OID партиции.
+pub fn inherited_sql(version_num: i32) -> String {
+    let triggers = if version_num >= 150000 {
+        "SELECT 't', tgname::text FROM pg_trigger \
+         WHERE tgrelid = $1 AND NOT tgisinternal AND tgparentid <> 0"
+    } else {
+        "SELECT 't', NULL::text WHERE false"
+    };
+    format!(
+        "SELECT 'c', conname::text FROM pg_constraint \
+           WHERE conrelid = $1 AND (conparentid <> 0 OR NOT conislocal) \
+         UNION ALL \
+         SELECT 'i', ic.relname::text FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid \
+           WHERE i.indrelid = $1 AND ic.relispartition \
+         UNION ALL {triggers}"
+    )
+}
+
+/// Унаследованные объекты партиции по виду: ограничения, индексы, триггеры.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct Inherited {
+    constraints: Vec<String>,
+    indexes: Vec<String>,
+    triggers: Vec<String>,
+}
+
+impl Inherited {
+    fn from_rows(rows: &[Row]) -> Self {
+        let mut inh = Inherited::default();
+        for r in rows {
+            let (kind, name): (String, String) = (r.get(0), r.get(1));
+            match kind.as_str() {
+                "c" => inh.constraints.push(name),
+                "i" => inh.indexes.push(name),
+                _ => inh.triggers.push(name),
+            }
+        }
+        inh
+    }
+}
+
+/// Копия описания без унаследованных объектов: из неё строится DDL партиции (вкладки по-прежнему
+/// показывают все ограничения, индексы и триггеры).
+pub(crate) fn without_inherited(t: &TableDetails, inh: &Inherited) -> TableDetails {
+    let mut own = t.clone();
+    own.constraints
+        .retain(|k| !inh.constraints.contains(&k.name));
+    own.indexes.retain(|i| !inh.indexes.contains(&i.name));
+    own.triggers.retain(|x| !inh.triggers.contains(&x.name));
+    own
+}
+
 pub(crate) fn column_from(r: &Row) -> Column {
     Column {
         name: r.get(0),
@@ -355,7 +413,7 @@ pub async fn get(c: &Client, schema: &str, name: &str) -> AppResult<TableDetails
             definition: r.get(2),
         })
         .collect();
-    Ok(TableDetails {
+    let mut details = TableDetails {
         oid: i64::from(oid),
         schema: h.get(0),
         name: h.get(1),
@@ -397,5 +455,111 @@ pub async fn get(c: &Client, schema: &str, name: &str) -> AppResult<TableDetails
         incoming_fks,
         triggers,
         ddl: String::new(),
-    })
+    };
+    // DDL партиции не повторяет объекты, унаследованные от родителя.
+    details.ddl = if details.partitioning.parent.is_some() {
+        let inherited = rows(c, &inherited_sql(version), oid).await?;
+        ddl::table_ddl(&without_inherited(
+            &details,
+            &Inherited::from_rows(&inherited),
+        ))
+    } else {
+        ddl::table_ddl(&details)
+    };
+    Ok(details)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn constraint(name: &str, kind: &str) -> Constraint {
+        Constraint {
+            name: name.into(),
+            kind: kind.into(),
+            definition: "X".into(),
+            validated: true,
+        }
+    }
+
+    fn index(name: &str) -> Index {
+        Index {
+            name: name.into(),
+            definition: "Y".into(),
+            primary: false,
+            unique: false,
+            valid: true,
+            size_bytes: 0,
+            idx_scan: None,
+            idx_tup_read: None,
+            last_idx_scan_ms: None,
+        }
+    }
+
+    fn trigger(name: &str) -> Trigger {
+        Trigger {
+            name: name.into(),
+            enabled: "O".into(),
+            definition: "Z".into(),
+        }
+    }
+
+    #[test]
+    fn partition_ddl_input_drops_only_inherited_objects() {
+        let t = TableDetails {
+            oid: 1,
+            schema: "shop".into(),
+            name: "p1".into(),
+            relkind: "r".into(),
+            owner: "postgres".into(),
+            tablespace: None,
+            comment: None,
+            reloptions: vec![],
+            columns: vec![],
+            indexes: vec![index("p1_pkey"), index("p1_own_idx")],
+            constraints: vec![
+                constraint("p1_pkey", "p"),
+                constraint("par_chk", "c"),
+                constraint("p1_own_chk", "c"),
+            ],
+            incoming_fks: vec![],
+            stats: Default::default(),
+            partitioning: Default::default(),
+            triggers: vec![trigger("par_trg"), trigger("p1_own_trg")],
+            ddl: String::new(),
+        };
+        let inherited = Inherited {
+            constraints: vec!["p1_pkey".into(), "par_chk".into()],
+            indexes: vec!["p1_pkey".into()],
+            triggers: vec!["par_trg".into()],
+        };
+        let own = without_inherited(&t, &inherited);
+        let names = |v: &[Constraint]| v.iter().map(|k| k.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&own.constraints), ["p1_own_chk"]);
+        assert_eq!(
+            own.indexes
+                .iter()
+                .map(|i| i.name.as_str())
+                .collect::<Vec<_>>(),
+            ["p1_own_idx"]
+        );
+        assert_eq!(
+            own.triggers
+                .iter()
+                .map(|x| x.name.as_str())
+                .collect::<Vec<_>>(),
+            ["p1_own_trg"]
+        );
+        // Описание вкладки не меняется: фильтр работает на копии.
+        assert_eq!(t.constraints.len(), 3);
+        assert_eq!(without_inherited(&t, &Inherited::default()), t);
+    }
+
+    #[test]
+    fn inherited_trigger_copies_are_read_only_from_postgres_15() {
+        assert!(inherited_sql(150000).contains("tgparentid"));
+        assert!(inherited_sql(170000).contains("tgparentid"));
+        assert!(!inherited_sql(140012).contains("tgparentid"));
+        assert!(!inherited_sql(130000).contains("tgparentid"));
+    }
 }

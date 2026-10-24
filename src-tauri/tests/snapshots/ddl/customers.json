@@ -1,0 +1,129 @@
+{
+  "oid": 0,
+  "schema": "shop",
+  "name": "customers",
+  "relkind": "r",
+  "owner": "postgres",
+  "tablespace": null,
+  "comment": "Покупатели",
+  "reloptions": [],
+  "columns": [
+    {
+      "name": "id",
+      "dataType": "bigint",
+      "notNull": true,
+      "defaultExpr": null,
+      "identity": "a",
+      "generated": null,
+      "collation": null,
+      "statTarget": null,
+      "storage": "p",
+      "comment": null
+    },
+    {
+      "name": "email",
+      "dataType": "text",
+      "notNull": true,
+      "defaultExpr": null,
+      "identity": null,
+      "generated": null,
+      "collation": null,
+      "statTarget": null,
+      "storage": "x",
+      "comment": null
+    },
+    {
+      "name": "created_at",
+      "dataType": "timestamp with time zone",
+      "notNull": true,
+      "defaultExpr": "now()",
+      "identity": null,
+      "generated": null,
+      "collation": null,
+      "statTarget": null,
+      "storage": "p",
+      "comment": null
+    }
+  ],
+  "indexes": [
+    {
+      "name": "customers_email_key",
+      "definition": "CREATE UNIQUE INDEX customers_email_key ON shop.customers USING btree (email)",
+      "primary": false,
+      "unique": true,
+      "valid": true,
+      "sizeBytes": 0,
+      "idxScan": null,
+      "idxTupRead": null,
+      "lastIdxScanMs": null
+    },
+    {
+      "name": "customers_pkey",
+      "definition": "CREATE UNIQUE INDEX customers_pkey ON shop.customers USING btree (id)",
+      "primary": true,
+      "unique": true,
+      "valid": true,
+      "sizeBytes": 0,
+      "idxScan": null,
+      "idxTupRead": null,
+      "lastIdxScanMs": null
+    }
+  ],
+  "constraints": [
+    {
+      "name": "customers_pkey",
+      "kind": "p",
+      "definition": "PRIMARY KEY (id)",
+      "validated": true
+    },
+    {
+      "name": "customers_email_key",
+      "kind": "u",
+      "definition": "UNIQUE (email)",
+      "validated": true
+    }
+  ],
+  "incomingFks": [
+    {
+      "constraint": "orders_customer_id_fkey",
+      "schema": "shop",
+      "table": "orders",
+      "definition": "FOREIGN KEY (customer_id) REFERENCES shop.customers(id)"
+    }
+  ],
+  "stats": {
+    "heapBytes": 0,
+    "indexBytes": 0,
+    "toastBytes": 0,
+    "totalBytes": 0,
+    "reltuples": 0.0,
+    "seqScan": null,
+    "idxScan": null,
+    "nLiveTup": null,
+    "nDeadTup": null,
+    "nModSinceAnalyze": null,
+    "nInsSinceVacuum": null,
+    "lastVacuumMs": null,
+    "lastAutovacuumMs": null,
+    "lastAnalyzeMs": null,
+    "lastAutoanalyzeMs": null,
+    "vacuumCount": null,
+    "autovacuumCount": null,
+    "analyzeCount": null,
+    "autoanalyzeCount": null
+  },
+  "partitioning": {
+    "key": null,
+    "bound": null,
+    "parent": null,
+    "partitions": []
+  },
+  "triggers": [
+    {
+      "name": "customers_touch",
+      "enabled": "O",
+      "definition": "CREATE TRIGGER customers_touch BEFORE INSERT ON shop.customers FOR EACH ROW EXECUTE FUNCTION shop.touch()"
+    }
+  ],
+  "ddl": ""
+}

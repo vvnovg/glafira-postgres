@@ -1,0 +1,146 @@
+{
+  "oid": 0,
+  "schema": "shop",
+  "name": "orders",
+  "relkind": "r",
+  "owner": "postgres",
+  "tablespace": null,
+  "comment": null,
+  "reloptions": [],
+  "columns": [
+    {
+      "name": "id",
+      "dataType": "bigint",
+      "notNull": true,
+      "defaultExpr": "nextval('shop.orders_id_seq'::regclass)",
+      "identity": null,
+      "generated": null,
+      "collation": null,
+      "statTarget": null,
+      "storage": "p",
+      "comment": null
+    },
+    {
+      "name": "customer_id",
+      "dataType": "bigint",
+      "notNull": true,
+      "defaultExpr": null,
+      "identity": null,
+      "generated": null,
+      "collation": null,
+      "statTarget": null,
+      "storage": "p",
+      "comment": null
+    },
+    {
+      "name": "total",
+      "dataType": "numeric(12,2)",
+      "notNull": true,
+      "defaultExpr": null,
+      "identity": null,
+      "generated": null,
+      "collation": null,
+      "statTarget": null,
+      "storage": "m",
+      "comment": null
+    },
+    {
+      "name": "total_with_tax",
+      "dataType": "numeric(12,2)",
+      "notNull": false,
+      "defaultExpr": "(total * 1.2)",
+      "identity": null,
+      "generated": "s",
+      "collation": null,
+      "statTarget": null,
+      "storage": "m",
+      "comment": null
+    },
+    {
+      "name": "status",
+      "dataType": "text",
+      "notNull": true,
+      "defaultExpr": "'new'::text",
+      "identity": null,
+      "generated": null,
+      "collation": null,
+      "statTarget": null,
+      "storage": "x",
+      "comment": null
+    }
+  ],
+  "indexes": [
+    {
+      "name": "orders_customer_idx",
+      "definition": "CREATE INDEX orders_customer_idx ON shop.orders USING btree (customer_id)",
+      "primary": false,
+      "unique": false,
+      "valid": true,
+      "sizeBytes": 0,
+      "idxScan": null,
+      "idxTupRead": null,
+      "lastIdxScanMs": null
+    },
+    {
+      "name": "orders_pkey",
+      "definition": "CREATE UNIQUE INDEX orders_pkey ON shop.orders USING btree (id)",
+      "primary": true,
+      "unique": true,
+      "valid": true,
+      "sizeBytes": 0,
+      "idxScan": null,
+      "idxTupRead": null,
+      "lastIdxScanMs": null
+    }
+  ],
+  "constraints": [
+    {
+      "name": "orders_total_check",
+      "kind": "c",
+      "definition": "CHECK (total >= 0::numeric)",
+      "validated": true
+    },
+    {
+      "name": "orders_customer_id_fkey",
+      "kind": "f",
+      "definition": "FOREIGN KEY (customer_id) REFERENCES shop.customers(id)",
+      "validated": true
+    },
+    {
+      "name": "orders_pkey",
+      "kind": "p",
+      "definition": "PRIMARY KEY (id)",
+      "validated": true
+    }
+  ],
+  "incomingFks": [],
+  "stats": {
+    "heapBytes": 0,
+    "indexBytes": 0,
+    "toastBytes": 0,
+    "totalBytes": 0,
+    "reltuples": 0.0,
+    "seqScan": null,
+    "idxScan": null,
+    "nLiveTup": null,
+    "nDeadTup": null,
+    "nModSinceAnalyze": null,
+    "nInsSinceVacuum": null,
+    "lastVacuumMs": null,
+    "lastAutovacuumMs": null,
+    "lastAnalyzeMs": null,
+    "lastAutoanalyzeMs": null,
+    "vacuumCount": null,
+    "autovacuumCount": null,
+    "analyzeCount": null,
+    "autoanalyzeCount": null
+  },
+  "partitioning": {
+    "key": null,
+    "bound": null,
+    "parent": null,
+    "partitions": []
+  },
+  "triggers": [],
+  "ddl": ""
+}

@@ -2,6 +2,7 @@
 //! рассчитан на PostgreSQL 13+; столбцы новых версий выбираются по [`server_version_num`].
 
 pub mod databases;
+pub mod ddl;
 pub mod extensions;
 pub mod function;
 pub mod objects;

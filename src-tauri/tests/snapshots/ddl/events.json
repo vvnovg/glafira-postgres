@@ -1,0 +1,83 @@
+{
+  "oid": 0,
+  "schema": "shop",
+  "name": "events",
+  "relkind": "p",
+  "owner": "postgres",
+  "tablespace": null,
+  "comment": null,
+  "reloptions": [],
+  "columns": [
+    {
+      "name": "id",
+      "dataType": "bigint",
+      "notNull": true,
+      "defaultExpr": null,
+      "identity": null,
+      "generated": null,
+      "collation": null,
+      "statTarget": null,
+      "storage": "p",
+      "comment": null
+    },
+    {
+      "name": "happened_at",
+      "dataType": "timestamp with time zone",
+      "notNull": true,
+      "defaultExpr": null,
+      "identity": null,
+      "generated": null,
+      "collation": null,
+      "statTarget": null,
+      "storage": "p",
+      "comment": null
+    },
+    {
+      "name": "payload",
+      "dataType": "jsonb",
+      "notNull": false,
+      "defaultExpr": null,
+      "identity": null,
+      "generated": null,
+      "collation": null,
+      "statTarget": null,
+      "storage": "x",
+      "comment": null
+    }
+  ],
+  "indexes": [],
+  "constraints": [],
+  "incomingFks": [],
+  "stats": {
+    "heapBytes": 0,
+    "indexBytes": 0,
+    "toastBytes": 0,
+    "totalBytes": 0,
+    "reltuples": 0.0,
+    "seqScan": null,
+    "idxScan": null,
+    "nLiveTup": null,
+    "nDeadTup": null,
+    "nModSinceAnalyze": null,
+    "nInsSinceVacuum": null,
+    "lastVacuumMs": null,
+    "lastAutovacuumMs": null,
+    "lastAnalyzeMs": null,
+    "lastAutoanalyzeMs": null,
+    "vacuumCount": null,
+    "autovacuumCount": null,
+    "analyzeCount": null,
+    "autoanalyzeCount": null
+  },
+  "partitioning": {
+    "key": "RANGE (happened_at)",
+    "bound": null,
+    "parent": null,
+    "partitions": [
+      "shop.events_2026_09",
+      "shop.events_2026_10"
+    ]
+  },
+  "triggers": [],
+  "ddl": ""
+}
