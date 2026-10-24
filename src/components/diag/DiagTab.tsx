@@ -1,17 +1,24 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../api/client";
-import type { AppError, DiagReport, DiagTool } from "../../api/types";
+import type { AppError, DiagData, DiagReport, DiagTool } from "../../api/types";
 import { tr } from "../../i18n/text";
 import { defaultIntervalS, isClusterTool, useDiagnostic } from "../../lib/useDiagnostic";
 import { refreshAfterConnect, useTopology } from "../../lib/useConnectionEvents";
+import { useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { DiagHeader } from "./DiagHeader";
 import { FindingsPanel } from "./FindingsPanel";
 
 /** Окно профиля ожиданий, секунды: по умолчанию 15 минут (выбор окна — в шапке инструмента «Профиль ожиданий»). */
 const DEFAULT_WAITS_WINDOW_S = 900;
+
+/** JSON данных отчёта (до видов задач 11–13); строится заново только при изменении данных, а не при каждой отрисовке. */
+function RawData({ data }: { data: DiagData }) {
+  const json = useMemo(() => JSON.stringify(data, null, 2), [data]);
+  return <pre className="diag-raw">{json}</pre>;
+}
 
 /**
  * Тело инструмента. Виды данных подставляют свои компоненты по `report.data.kind` (задачи 11–13); до них — JSON отчёта.
@@ -28,20 +35,20 @@ function ToolBody({ report }: { tool: DiagTool; report: DiagReport; connectionId
     case "slots":
     case "failover":
     case "health":
-      return <pre className="diag-raw">{JSON.stringify(report.data, null, 2)}</pre>;
+      return <RawData data={report.data} />;
   }
 }
 
 /**
  * Вкладка инструмента диагностики (спец. P2 §7.2): шапка с выбором узла и интервала, находки, недоступное и тело
- * инструмента. `member` из спеки вкладки — начальный выбор узла (`null` — «за лидером»); `active` — вкладка видна
- * (скрытая не опрашивает сервер). `tabId` вкладки нужен справке (F1 открывает главу инструмента).
+ * инструмента. Узел (`null` — «за лидером») целиком определяет спека вкладки: выбор в шапке записывается в неё
+ * (`open`), и повторное открытие вкладки из ссылки или клетки пульса с любым узлом всегда действует. `active` —
+ * вкладка видна (скрытая не опрашивает сервер). `tabId` вкладки нужен справке (F1 открывает главу инструмента).
  */
 export function DiagTab({ connectionId, tool, member, active }: { connectionId: string; tool: DiagTool; member: string | null; active: boolean; tabId: string }) {
   const { t } = useTranslation();
   const qc = useQueryClient();
   const view = useTopology(connectionId);
-  const [selected, setSelected] = useState<string | null>(member);
   const [intervalS, setIntervalS] = useState<number | null>(defaultIntervalS(tool));
   const [connectError, setConnectError] = useState<AppError | null>(null);
   const [busy, setBusy] = useState(false);
@@ -53,7 +60,7 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
   const state = view.data?.state;
   const live = state === "connected" || state === "degraded";
   // Отчёты кластера узла не берут; остальные ждут выбранный узел (null — лидер).
-  const q = useDiagnostic(connectionId, tool, cluster ? null : selected, {
+  const q = useDiagnostic(connectionId, tool, cluster ? null : member, {
     active,
     intervalS,
     windowS: tool === "waits" ? DEFAULT_WAITS_WINDOW_S : undefined,
@@ -61,20 +68,17 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
   });
   const report = q.data;
 
-  const pick = (m: string | null) => {
-    lastLeader.current = null;
-    setMoved(null);
-    setSelected(m);
-  };
+  // Выбор узла в шапке — то же открытие вкладки, что и из ссылки находки: спека (и узел вместе с ней) обновляется.
+  const pick = (m: string | null) => useWorkspace.getState().open({ kind: "diag", connectionId, tool, member: m });
 
-  // Открытие инструмента из другого места (находка, клетка пульса) с другим узлом обновляет вкладку: выбор следует за спекой.
-  const specMember = useRef(member);
+  // Смена узла в спеке (выбор в шапке или повторное открытие) — не смена лидера: объявление сбрасывается.
+  // Эффект стоит раньше эффекта лидера: тот видит уже сброшенный `lastLeader`.
+  const prevMember = useRef(member);
   useEffect(() => {
-    if (specMember.current === member) return;
-    specMember.current = member;
+    if (prevMember.current === member) return;
+    prevMember.current = member;
     lastLeader.current = null;
     setMoved(null);
-    setSelected(member);
   }, [member]);
 
   // Placeholder — отчёт прошлого узла на время загрузки нового: лидером «за лидером» он не считается.
@@ -134,7 +138,7 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
         controls={{
           members,
           kind: topo?.kind ?? "server",
-          selected,
+          selected: member,
           leader: report?.followsLeader ? report.member : null,
           onSelect: pick,
           intervalS,
@@ -157,8 +161,7 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
             <div className="diag-unavailable">
               {report.unavailable.map((u, i) => (
                 <p key={`${u.part}:${u.member ?? ""}:${i}`} className="muted">
-                  {u.member && <span className="diag-unavailable-node">{u.member}: </span>}
-                  {tr(u.reason)}
+                  {u.member ? t("diag.unavailable.onMember", { member: u.member, text: tr(u.reason) }) : tr(u.reason)}
                 </p>
               ))}
             </div>

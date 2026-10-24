@@ -1,6 +1,7 @@
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { Finding } from "../../api/types";
 import { renderWithClient } from "../../test/render";
 import { useWorkspace } from "../../state/workspace";
 import { FindingsPanel } from "./FindingsPanel";
@@ -51,6 +52,50 @@ describe("FindingsPanel", () => {
     expect(items[2]).toHaveTextContent("Сведения");
     await user.click(screen.getByRole("button", { name: "Свернуть находки" }));
     expect(screen.queryAllByRole("listitem")).toHaveLength(0);
+    // Имя кнопки следует за состоянием.
+    const expand = screen.getByRole("button", { name: "Развернуть находки" });
+    expect(expand).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("button", { name: "Свернуть находки" })).not.toBeInTheDocument();
+    await user.click(expand);
+    expect(screen.getAllByRole("listitem")).toHaveLength(3);
+    expect(screen.getByRole("button", { name: "Свернуть находки" })).toHaveAttribute("aria-expanded", "true");
+  });
+
+  describe("устойчивые ключи находок", () => {
+    const base = { severity: "warning" as const, links: [] };
+    const query1: Finding = { ...base, id: "longQuery", member: "pg-1", target: { kind: "session", pid: 11, backendStartUs: 1 }, params: { maxS: 1000, count: 1 } };
+    const query2: Finding = { ...base, id: "longQuery", member: "pg-1", target: { kind: "session", pid: 22, backendStartUs: 2 }, params: { maxS: 2000, count: 1 } };
+    const other: Finding = { ...base, id: "longQuery", member: "pg-2", target: { kind: "session", pid: 11, backendStartUs: 1 }, params: { maxS: 3000, count: 1 } };
+    const items = () => screen.getAllByRole("listitem");
+    const item = (text: string) => items().find((li) => li.textContent?.includes(text))!;
+    const detailsOf = (li: HTMLElement) => li.querySelector("details")!;
+
+    it("раскрытое «Что сделать» остаётся раскрытым, когда те же находки приходят в другом порядке", async () => {
+      const user = userEvent.setup();
+      const { rerender } = renderWithClient(<FindingsPanel connectionId="c" findings={[query1, query2, other]} showMember />);
+      await user.click(within(item("16 мин 40 с")).getByText("Что сделать"));
+      expect(detailsOf(item("16 мин 40 с"))).toHaveAttribute("open");
+      rerender(<FindingsPanel connectionId="c" findings={[other, query2, query1]} showMember />);
+      expect(items().map((li) => li.textContent)).toEqual([
+        expect.stringContaining("50 мин"),
+        expect.stringContaining("33 мин 20 с"),
+        expect.stringContaining("16 мин 40 с"),
+      ]);
+      expect(detailsOf(item("16 мин 40 с"))).toHaveAttribute("open");
+      expect(detailsOf(item("33 мин 20 с"))).not.toHaveAttribute("open");
+      expect(detailsOf(item("50 мин"))).not.toHaveAttribute("open");
+    });
+
+    it("одинаковые находки не дают предупреждения о повторе ключа и показываются обе", () => {
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        renderWithClient(<FindingsPanel connectionId="c" findings={[query1, { ...query1 }]} />);
+        expect(items()).toHaveLength(2);
+        expect(error.mock.calls.filter((c) => String(c[0]).includes("same key"))).toEqual([]);
+      } finally {
+        error.mockRestore();
+      }
+    });
   });
 
   it("узел показывается отдельной меткой только у находок отчёта кластера", () => {

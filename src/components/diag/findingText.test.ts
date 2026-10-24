@@ -1,10 +1,74 @@
 import { describe, expect, it } from "vitest";
 import type { Finding } from "../../api/types";
-import { i18n } from "../../i18n";
+import { DICTIONARIES, i18n } from "../../i18n";
 import { formatCount } from "../../lib/format";
 import { findingFix, findingParams, findingTitle } from "./findingText";
 
 const f = (patch: Partial<Finding>): Finding => ({ id: "idleInTransaction", severity: "warning", member: "pg-1", target: null, params: {}, links: [], ...patch });
+
+/** Все id находок (`findings.<id>.title|fix` в словарях). */
+const IDS = [
+  "connectionsSaturated", "idleInTransaction", "longQuery", "longTransaction", "xidAge", "lockWait", "walDirSize", "deadlocks", "lockShare",
+  "rootBlocker", "ddlQueue", "xminHorizon", "replicaLag", "replicaNotStreaming", "replicaReplyStale", "syncStandbyMissing", "walReceiverDown",
+  "replayPaused", "recoveryConflicts", "recoveryConflictsTotal", "slotRetainsWal", "slotLost", "subscriptionErrors", "failoverCandidates",
+  "clusterPaused", "syncModeWithoutSync", "patroniTiming", "healthPrimary", "healthUnhealthy", "replicaOutOfPool", "cacheHitLow", "tempFiles",
+  "noIdleTimeout", "hiddenQueries", "lockCycle",
+];
+
+const GIB = 1024 ** 3;
+const session = { kind: "session", pid: 4242, backendStartUs: 1_700_000_000_000_000 } as const;
+const slot = { kind: "slot", name: "old_slot" } as const;
+const node = { kind: "member", name: "pg-2" } as const;
+const CLUSTER = { member: null } as const;
+
+/**
+ * Находки с полным набором параметров — как их выдаёт Rust (`crates/pg-advisor/src/rules/*`, `failover.rs`).
+ * Где форма зависит от данных (имя или oid отношения, вид держателя горизонта, лаг в байтах и/или секундах), — по варианту на форму.
+ */
+const EMITTED: (Pick<Finding, "id"> & Partial<Finding>)[] = [
+  { id: "connectionsSaturated", params: { usedPct: 91.5, used: 183, available: 200 } },
+  { id: "idleInTransaction", target: session, params: { maxS: 2000, count: 3 } },
+  { id: "longQuery", target: session, params: { maxS: 1000, count: 2 } },
+  { id: "longTransaction", target: session, params: { maxS: 7200, count: 1 } },
+  { id: "xidAge", params: { agePct: 62.5, maxXidAge: 1_342_177_280 } },
+  { id: "lockWait", params: { maxS: 75, count: 4 } },
+  { id: "walDirSize", params: { walDirBytes: 3 * GIB, maxWalSizeBytes: GIB } },
+  { id: "deadlocks", params: { count: 2 } },
+  { id: "lockShare", params: { sharePct: 35.5 } },
+  { id: "rootBlocker", target: session, params: { count: 4, maxS: 75 } },
+  { id: "ddlQueue", target: session, params: { relation: "shop.orders", count: 3, maxS: 12 } },
+  { id: "ddlQueue", target: session, params: { relationOid: 16384, relationDatabase: "orders", count: 3, maxS: 12 } },
+  { id: "xminHorizon", target: session, params: { kind: "session", name: "4242", xminAge: 12_345_678, maxS: 4000 } },
+  { id: "xminHorizon", target: slot, params: { kind: "slot", name: "old_slot", xminAge: 12_345_678, slotType: "logical", active: false } },
+  { id: "xminHorizon", params: { kind: "preparedXact", name: "gid-1", xminAge: 12_345_678, maxS: 4000, command: "ROLLBACK PREPARED 'gid-1';" } },
+  { id: "xminHorizon", target: node, params: { kind: "standbyFeedback", name: "pg-2", xminAge: 12_345_678, slotType: "physical", active: true } },
+  { id: "replicaLag", target: node, params: { count: 2, lagBytes: 20 * 1024 * 1024, delayS: 40 } },
+  { id: "replicaLag", params: { lagBytes: 20 * 1024 * 1024 } },
+  { id: "replicaLag", params: { delayS: 40 } },
+  { id: "replicaNotStreaming", target: node, params: { count: 1, state: "catchup" } },
+  { id: "replicaReplyStale", params: { count: 1, maxS: 90 } },
+  { id: "syncStandbyMissing" },
+  { id: "walReceiverDown" },
+  { id: "replayPaused" },
+  { id: "recoveryConflicts", params: { count: 5 } },
+  { id: "recoveryConflictsTotal", params: { count: 17 } },
+  { id: "slotRetainsWal", target: slot, params: { count: 2, retainedBytes: 5 * GIB, walStatus: "extended" } },
+  { id: "slotLost", target: slot, params: { count: 1 } },
+  { id: "subscriptionErrors", params: { count: 3 } },
+  { id: "failoverCandidates", ...CLUSTER, params: { count: 0 } },
+  { id: "failoverCandidates", ...CLUSTER, params: { count: 1 } },
+  { id: "clusterPaused", ...CLUSTER },
+  { id: "syncModeWithoutSync", ...CLUSTER },
+  { id: "patroniTiming", ...CLUSTER, params: { ttlS: 20, loopWaitS: 10, retryTimeoutS: 10 } },
+  { id: "healthPrimary", ...CLUSTER, params: { count: 2 } },
+  { id: "healthUnhealthy" },
+  { id: "replicaOutOfPool" },
+  { id: "cacheHitLow", params: { hitPct: 85.5 } },
+  { id: "tempFiles", params: { count: 12 } },
+  { id: "noIdleTimeout", params: { command: "ALTER ROLE \"app\" SET idle_in_transaction_session_timeout = '10min';" } },
+  { id: "hiddenQueries", params: { count: 7 } },
+  { id: "lockCycle", params: { count: 2 } },
+];
 
 describe("тексты находок", () => {
   it("параметры форматируются по суффиксу имени", async () => {
@@ -79,19 +143,41 @@ describe("тексты находок", () => {
   });
 
   it("тексты есть у каждой находки в обоих языках (ключ не показывается как есть)", async () => {
-    const ids = [
-      "connectionsSaturated", "idleInTransaction", "longQuery", "longTransaction", "xidAge", "lockWait", "walDirSize", "deadlocks", "lockShare",
-      "rootBlocker", "ddlQueue", "xminHorizon", "replicaLag", "replicaNotStreaming", "replicaReplyStale", "syncStandbyMissing", "walReceiverDown",
-      "replayPaused", "recoveryConflicts", "recoveryConflictsTotal", "slotRetainsWal", "slotLost", "subscriptionErrors", "failoverCandidates",
-      "clusterPaused", "syncModeWithoutSync", "patroniTiming", "healthPrimary", "healthUnhealthy", "replicaOutOfPool", "cacheHitLow", "tempFiles",
-      "noIdleTimeout", "hiddenQueries", "lockCycle",
-    ];
-    expect(ids).toHaveLength(35);
+    expect(IDS).toHaveLength(35);
+    // Словарь и список id не расходятся: новая находка без записи в этом тесте не пройдёт.
+    expect(Object.keys(DICTIONARIES.en.findings as object).sort()).toEqual([...IDS].sort());
     for (const lng of ["ru", "en"]) {
       await i18n.changeLanguage(lng);
-      for (const id of ids) {
+      for (const id of IDS) {
         expect(findingTitle(f({ id })), `${lng}: findings.${id}.title`).not.toMatch(/^findings\./);
         expect(findingFix(f({ id })), `${lng}: findings.${id}.fix`).not.toMatch(/^findings\./);
+      }
+    }
+    await i18n.changeLanguage("ru");
+  });
+
+  it("с полным набором параметров, как их выдаёт Rust, в текстах нет остатков подстановки, пустых скобок и двойных пробелов", async () => {
+    // Каждая находка представлена хотя бы одним вариантом, и каждый вариант проверен в обоих языках.
+    expect([...new Set(EMITTED.map((e) => e.id))].sort()).toEqual([...IDS].sort());
+    for (const lng of ["ru", "en"]) {
+      await i18n.changeLanguage(lng);
+      for (const e of EMITTED) {
+        const finding = f(e);
+        const params = findingParams(finding);
+        for (const part of ["title", "fix"] as const) {
+          const where = `${lng}: findings.${e.id}.${part} ${JSON.stringify(e.params)}`;
+          // Каждая подстановка шаблона получает значение (иначе i18next подставит пустую строку).
+          const template = String((DICTIONARIES[lng].findings as Record<string, Record<string, string>>)[e.id][part]);
+          for (const [, name] of template.matchAll(/\{\{\s*(\w+)\s*\}\}/g)) expect(params, `${where}: нет значения для {{${name}}}`).toHaveProperty(name);
+          const text = part === "title" ? findingTitle(finding) : findingFix(finding);
+          expect(text, where).not.toMatch(/\{\{|\}\}/);
+          // Пустые скобки — признак потерянной подстановки; вызов функции («pg_wal_replay_resume()») скобками после слова — законный.
+          expect(text, where).not.toMatch(/(^|\W)\(\s*\)/);
+          expect(text, where).not.toMatch(/\s{2}/);
+          expect(text, where).not.toMatch(/undefined|NaN|\[object/);
+          expect(text, where).toBe(text.trim());
+          expect(text, where).not.toBe("");
+        }
       }
     }
     await i18n.changeLanguage("ru");

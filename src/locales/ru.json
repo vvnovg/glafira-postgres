@@ -776,7 +776,8 @@
     "unavailable": {
       "version": "{{part}}: PostgreSQL {{version}}+",
       "privilege": "{{part}}: нужна роль pg_monitor",
-      "patroniConfig": "{{part}}: не удалось прочитать конфигурацию Patroni"
+      "patroniConfig": "{{part}}: не удалось прочитать конфигурацию Patroni",
+      "onMember": "{{member}}: {{text}}"
     },
     "tools": {
       "pulse": "Пульс",
@@ -794,6 +795,7 @@
       "node": "Узел",
       "followLeader": "За лидером ({{member}})",
       "followLeaderPending": "За лидером",
+      "memberOption": "{{member}} — {{role}}",
       "interval": "Обновление",
       "seconds": "{{n}} с",
       "pause": "Пауза",
@@ -810,7 +812,8 @@
       "fix": "Что сделать",
       "open": "Открыть «{{tool}}»",
       "copy": "Скопировать команду",
-      "collapse": "Свернуть находки"
+      "collapse": "Свернуть находки",
+      "expand": "Развернуть находки"
     },
     "severity": {
       "info": "Сведения",

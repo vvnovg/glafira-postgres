@@ -217,7 +217,6 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 /* Отчёт прошлого узла на время загрузки нового. */
 .diag-pending { opacity: 0.6; }
 .diag-unavailable p { margin: 0 0 2px; }
-.diag-unavailable-node { font-weight: 600; }
 .diag-raw { max-height: 60vh; overflow: auto; padding: 8px; background: var(--bg-alt); border: 1px solid var(--border); border-radius: 4px; word-break: normal; overflow-wrap: anywhere; }
 .findings { border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; }
 .findings-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }

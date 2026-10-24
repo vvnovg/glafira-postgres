@@ -43,7 +43,7 @@ export function DiagHeader({ tool, controls }: { tool: DiagTool; controls?: Diag
             <option value={FOLLOW}>{c.leader ? t("diag.header.followLeader", { member: c.leader }) : t("diag.header.followLeaderPending")}</option>
             {c.members.map((m) => (
               <option key={m.name} value={m.name}>
-                {m.name} — {roleLabel(m.role, c.kind)}
+                {t("diag.header.memberOption", { member: m.name, role: roleLabel(m.role, c.kind) })}
               </option>
             ))}
           </select>

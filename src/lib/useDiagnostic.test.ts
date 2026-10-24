@@ -90,6 +90,47 @@ describe("useDiagnostic: опрос по таймеру", () => {
     expect(api.runDiagnostic).not.toHaveBeenCalled();
   });
 
+  it("вкладка, снова ставшая видимой, сразу перечитывает данные старше интервала", async () => {
+    const h = setup({ active: false, intervalS: 5 });
+    await tick(0);
+    expect(api.runDiagnostic).toHaveBeenCalledTimes(1);
+    // Скрытая вкладка не опрашивает: данные стареют.
+    await tick(20_000);
+    expect(api.runDiagnostic).toHaveBeenCalledTimes(1);
+    h.rerender({ active: true, intervalS: 5 });
+    await tick(0);
+    expect(api.runDiagnostic).toHaveBeenCalledTimes(2);
+    // Дальше — обычный опрос по интервалу, без лишних запросов.
+    await tick(5000);
+    expect(api.runDiagnostic).toHaveBeenCalledTimes(3);
+  });
+
+  it("свежие данные при показе не перечитываются; пауза и закрытое подключение — тоже", async () => {
+    const fresh = setup({ active: false, intervalS: 5 });
+    await tick(0);
+    await tick(3_000);
+    fresh.rerender({ active: true, intervalS: 5 });
+    await tick(0);
+    expect(api.runDiagnostic).toHaveBeenCalledTimes(1);
+    fresh.unmount();
+
+    vi.mocked(api.runDiagnostic).mockClear();
+    const paused = setup({ active: false, intervalS: null });
+    await tick(0);
+    await tick(60_000);
+    paused.rerender({ active: true, intervalS: null });
+    await tick(0);
+    expect(api.runDiagnostic).toHaveBeenCalledTimes(1);
+    paused.unmount();
+
+    vi.mocked(api.runDiagnostic).mockClear();
+    const closed = setup({ active: false, intervalS: 5, live: false });
+    await tick(60_000);
+    closed.rerender({ active: true, intervalS: 5, live: false });
+    await tick(0);
+    expect(api.runDiagnostic).not.toHaveBeenCalled();
+  });
+
   it("после отказа во входе опрос останавливается", async () => {
     vi.mocked(api.runDiagnostic).mockRejectedValue({ code: "AUTH_FAILED", message: "x", retryable: false });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });

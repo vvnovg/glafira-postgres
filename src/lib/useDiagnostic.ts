@@ -1,4 +1,5 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
 import { api, toAppError } from "../api/client";
 import type { DiagTool, RustTool } from "../api/types";
 
@@ -23,7 +24,8 @@ export function diagRefetchInterval(active: boolean, intervalS: number | null, e
 
 /**
  * Отчёт инструмента с периодическим обновлением. `member` — закреплённый узел, `null` — «за лидером»; `live` —
- * подключение открыто (иначе запрос не уходит).
+ * подключение открыто (иначе запрос не уходит). Вкладка, снова ставшая видимой, сразу перечитывает данные, которые
+ * за время скрытия устарели больше чем на интервал: иначе до первого тика на экране остался бы старый отчёт.
  */
 export function useDiagnostic(
   connectionId: string,
@@ -32,12 +34,24 @@ export function useDiagnostic(
   opts: { active: boolean; intervalS: number | null; windowS?: number; live: boolean },
 ) {
   const rt = rustTool(tool);
-  return useQuery({
+  const q = useQuery({
     queryKey: ["diag", connectionId, rt, member ?? "", opts.windowS ?? 0],
     queryFn: () => api.runDiagnostic(connectionId, { tool: rt, member, ...(opts.windowS ? { windowS: opts.windowS } : {}) }),
     enabled: opts.live,
     // Прошлый ответ остаётся на экране, пока идёт новый и если новый упал («устарело»).
     placeholderData: keepPreviousData,
-    refetchInterval: (q) => diagRefetchInterval(opts.active, opts.intervalS, q.state.error),
+    refetchInterval: (query) => diagRefetchInterval(opts.active, opts.intervalS, query.state.error),
   });
+  const wasActive = useRef(opts.active);
+  const { dataUpdatedAt, refetch } = q;
+  const { active, intervalS, live } = opts;
+  useEffect(() => {
+    const shown = active && !wasActive.current;
+    wasActive.current = active;
+    // Пауза и закрытое подключение отчёт не обновляют; без данных (`dataUpdatedAt` = 0) читать нечего — это дело первого запроса.
+    if (!shown || !live || intervalS === null || dataUpdatedAt === 0) return;
+    // Идущий запрос не отменяется: он и принесёт свежие данные.
+    if (Date.now() - dataUpdatedAt > intervalS * 1000) void refetch({ cancelRefetch: false });
+  }, [active, intervalS, live, dataUpdatedAt, refetch]);
+  return q;
 }

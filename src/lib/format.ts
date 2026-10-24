@@ -58,21 +58,25 @@ export function formatInt64(n: number | null): string {
   return num(n);
 }
 
+const DURATION_UNITS: [number, "d" | "h" | "m" | "s"][] = [[86_400, "d"], [3_600, "h"], [60, "m"], [1, "s"]];
+
 /**
- * Длительность в секундах — две старшие ненулевые единицы («1 ч 2 мин», «42 с»); null — «—».
+ * Длительность в секундах — старшая единица и только смежная за ней, если она не нулевая («1 ч 2 мин», «1 д», «42 с»):
+ * 86 405 с — «1 д», а не «1 д 5 с» (секунды при днях — шум). null — «—».
  * Сервер может отдать небольшое отрицательное значение (−0,001 с: `now()` — начало транзакции, а событие позже): оно показывается как «0 с».
  */
 export function formatDuration(seconds: number | null): string {
   if (seconds === null) return "—";
   const s = Math.max(0, Math.floor(seconds));
-  const units: [number, string][] = [[86_400, "d"], [3_600, "h"], [60, "m"], [1, "s"]];
-  const parts: string[] = [];
-  let rest = s;
-  for (const [size, key] of units) {
-    const n = Math.floor(rest / size);
-    if (n > 0 || (key === "s" && parts.length === 0)) parts.push(i18n.t(`diag.duration.${key}`, { n }));
-    rest -= n * size;
-    if (parts.length === 2) break;
+  // Меньше секунды (0) — «0 с»: старшей единицей остаётся последняя.
+  const found = DURATION_UNITS.findIndex(([size]) => s >= size);
+  const i = found < 0 ? DURATION_UNITS.length - 1 : found;
+  const [size, key] = DURATION_UNITS[i];
+  const parts = [i18n.t(`diag.duration.${key}`, { n: Math.floor(s / size) })];
+  const next = DURATION_UNITS[i + 1];
+  if (next) {
+    const n = Math.floor((s % size) / next[0]);
+    if (n > 0) parts.push(i18n.t(`diag.duration.${next[1]}`, { n }));
   }
   return parts.join(" ");
 }

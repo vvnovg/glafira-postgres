@@ -85,15 +85,30 @@ describe("форматы по языку", () => {
     expect(formatInt64(2 ** 63)).toBe("9,223,372,036,854,775,807");
   });
 
-  it("длительность — две старшие единицы", async () => {
+  it("длительность — старшая единица и только смежная за ней", async () => {
     await i18n.changeLanguage("ru");
     expect([formatDuration(null), formatDuration(0.4), formatDuration(42), formatDuration(3725), formatDuration(90061)]).toEqual(["—", "0 с", "42 с", "1 ч 2 мин", "1 д 1 ч"]);
     await i18n.changeLanguage("en");
     expect(formatDuration(125)).toBe("2 min 5 s");
   });
 
-  it("длительность: отрицательное значение сервера (−0,001 с) показывается как 0, нулевые единицы пропускаются", async () => {
+  it("длительность: нулевая смежная единица опускается, несмежные не показываются", async () => {
     await i18n.changeLanguage("ru");
-    expect([formatDuration(-0.001), formatDuration(-5), formatDuration(3600), formatDuration(86_400 + 5)]).toEqual(["0 с", "0 с", "1 ч", "1 д 5 с"]);
+    // 1 д 5 с — это «1 д»: секунды не смежны с днями, а часы нулевые.
+    expect([formatDuration(86_405), formatDuration(3_605), formatDuration(3_600), formatDuration(86_400)]).toEqual(["1 д", "1 ч", "1 ч", "1 д"]);
+    expect([formatDuration(60), formatDuration(65), formatDuration(59), formatDuration(3_599), formatDuration(172_800 + 3_600 * 23)]).toEqual([
+      "1 мин",
+      "1 мин 5 с",
+      "59 с",
+      "59 мин 59 с",
+      "2 д 23 ч",
+    ]);
+    await i18n.changeLanguage("en");
+    expect(formatDuration(86_405)).toBe("1 d");
+  });
+
+  it("длительность: отрицательное значение сервера (−0,001 с) показывается как 0", async () => {
+    await i18n.changeLanguage("ru");
+    expect([formatDuration(-0.001), formatDuration(-5), formatDuration(-86_400)]).toEqual(["0 с", "0 с", "0 с"]);
   });
 });

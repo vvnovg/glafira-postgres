@@ -1,6 +1,8 @@
-import { screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { DiagTool } from "../../api/types";
+import { useWorkspace } from "../../state/workspace";
 import { connection, diagReport, member, topology, topologyView } from "../../test/fixtures";
 import { renderWithClient } from "../../test/render";
 
@@ -12,9 +14,20 @@ vi.mock("../../api/client", async (importOriginal) => {
 import { api } from "../../api/client";
 import { DiagTab } from "./DiagTab";
 
+/** Вкладка в рабочей области, как в приложении: узел берётся из спеки вкладки (`TabContent` передаёт `tab.member`). */
+function Host({ tool }: { tool: DiagTool }) {
+  const tab = useWorkspace((s) => s.tabs.find((t) => t.id === `diag:c:${tool}`));
+  if (!tab || tab.kind !== "diag") return null;
+  return <DiagTab connectionId="c" tool={tool} member={tab.member ?? null} active tabId={tab.id} />;
+}
+
+/** Открытие вкладки инструмента из другого места (ссылка находки, клетка пульса). */
+const openTab = (tool: DiagTool, member: string | null) => act(() => useWorkspace.getState().open({ kind: "diag", connectionId: "c", tool, member }));
+
 describe("DiagTab", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    useWorkspace.setState({ tabs: [], activeId: null });
     vi.mocked(api.getTopology).mockResolvedValue(topologyView({ topology: topology({ members: [member("pg-1", { role: "primary" }), member("pg-2", { role: "replica" })] }) }));
     vi.mocked(api.listConnections).mockResolvedValue([connection({ id: "c", kind: "patroni" })]);
   });
@@ -22,12 +35,41 @@ describe("DiagTab", () => {
   it("за лидером по умолчанию; выбор узла перечитывает отчёт с этим узлом", async () => {
     vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport({ kind: "sessions", rows: [], settings: { idleInTransactionSessionTimeoutMs: 0, trackActivityQuerySize: 4096 } }));
     const user = userEvent.setup();
-    renderWithClient(<DiagTab connectionId="c" tool="sessions" member={null} active tabId="diag:c:sessions" />);
+    openTab("sessions", null);
+    renderWithClient(<Host tool="sessions" />);
     expect(await screen.findByRole("heading", { name: "Сессии" })).toBeInTheDocument();
     expect(api.runDiagnostic).toHaveBeenCalledWith("c", { tool: "sessions", member: null });
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Узел" })).toHaveDisplayValue("За лидером (pg-1)"));
     await user.selectOptions(screen.getByRole("combobox", { name: "Узел" }), "pg-2");
     await waitFor(() => expect(api.runDiagnostic).toHaveBeenLastCalledWith("c", { tool: "sessions", member: "pg-2" }));
+    // Выбор узла в шапке записывается в спеку вкладки: она — единственный источник узла.
+    expect(useWorkspace.getState().tabs[0]).toMatchObject({ kind: "diag", tool: "sessions", member: "pg-2" });
+  });
+
+  it("узел, выбранный в шапке, не мешает повторному открытию вкладки со старым узлом: оно всегда действует", async () => {
+    vi.mocked(api.runDiagnostic).mockImplementation(async (_id, req) =>
+      diagReport({ kind: "locks", roots: [], cycles: [], ddlQueue: [] }, { member: req.member ?? "pg-1", followsLeader: req.member === null }),
+    );
+    const user = userEvent.setup();
+    // Вкладка открыта ссылкой «за лидером» (member = null), пользователь выбирает pg-2 в шапке.
+    openTab("locks", null);
+    renderWithClient(<Host tool="locks" />);
+    await screen.findByText("Проблем не найдено");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Узел" }), "pg-2");
+    await waitFor(() => expect(api.runDiagnostic).toHaveBeenLastCalledWith("c", { tool: "locks", member: "pg-2" }));
+    expect(screen.getByRole("combobox", { name: "Узел" })).toHaveDisplayValue("pg-2 — Реплика");
+    // Та же ссылка («за лидером», member = null) открывает вкладку снова: выбор возвращается к лидеру.
+    openTab("locks", null);
+    await waitFor(() => expect(api.runDiagnostic).toHaveBeenLastCalledWith("c", { tool: "locks", member: null }));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Узел" })).toHaveDisplayValue("За лидером (pg-1)"));
+    expect(screen.queryByText(/Узел сменился/)).not.toBeInTheDocument();
+    // И с закреплённым узлом, равным прежнему значению спеки, тоже.
+    openTab("locks", "pg-1");
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Узел" })).toHaveDisplayValue("pg-1 — Leader"));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Узел" }), "pg-2");
+    openTab("locks", "pg-1");
+    await waitFor(() => expect(api.runDiagnostic).toHaveBeenLastCalledWith("c", { tool: "locks", member: "pg-1" }));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Узел" })).toHaveDisplayValue("pg-1 — Leader"));
   });
 
   it("смена лидера в режиме «за лидером» объявляется строкой", async () => {
@@ -75,9 +117,10 @@ describe("DiagTab", () => {
     vi.mocked(api.runDiagnostic).mockImplementation(async (_id, req) =>
       diagReport({ kind: "locks", roots: [], cycles: [], ddlQueue: [] }, { member: req.member ?? "pg-1", followsLeader: req.member === null }),
     );
-    const { rerender } = renderWithClient(<DiagTab connectionId="c" tool="locks" member={null} active tabId="diag:c:locks" />);
+    openTab("locks", null);
+    renderWithClient(<Host tool="locks" />);
     await screen.findByText("Проблем не найдено");
-    rerender(<DiagTab connectionId="c" tool="locks" member="pg-2" active tabId="diag:c:locks" />);
+    openTab("locks", "pg-2");
     await waitFor(() => expect(api.runDiagnostic).toHaveBeenLastCalledWith("c", { tool: "locks", member: "pg-2" }));
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Узел" })).toHaveDisplayValue("pg-2 — Реплика"));
     expect(screen.queryByText(/Узел сменился/)).not.toBeInTheDocument();
@@ -104,8 +147,7 @@ describe("DiagTab", () => {
     expect(await screen.findByRole("heading", { name: "Пульс" })).toBeInTheDocument();
     expect(api.runDiagnostic).toHaveBeenCalledWith("c", { tool: "pulse", member: null });
     expect(screen.queryByRole("combobox", { name: "Узел" })).not.toBeInTheDocument();
-    expect(await screen.findByText("walDir: нужна роль pg_monitor")).toBeInTheDocument();
-    expect(screen.getByText("pg-2:")).toBeInTheDocument();
+    expect(await screen.findByText("pg-2: walDir: нужна роль pg_monitor")).toBeInTheDocument();
   });
 
   it("у одиночного сервера выбора узла нет", async () => {
@@ -135,6 +177,27 @@ describe("DiagTab", () => {
     expect(api.connect).toHaveBeenCalledWith("c");
     await screen.findByText("Проблем не найдено");
     expect(api.runDiagnostic).toHaveBeenCalledTimes(1);
+  });
+
+  it("JSON тела не пересчитывается, пока данные отчёта те же", async () => {
+    const stringify = vi.spyOn(JSON, "stringify");
+    try {
+      vi.mocked(api.runDiagnostic).mockImplementation(async () => diagReport({ kind: "locks", roots: [], cycles: [], ddlQueue: [] }, { observedAtMs: Date.now() }));
+      const user = userEvent.setup();
+      renderWithClient(<DiagTab connectionId="c" tool="locks" member={null} active tabId="diag:c:locks" />);
+      await screen.findByText("Проблем не найдено");
+      const raw = () => stringify.mock.calls.filter((c) => c[2] === 2).length;
+      expect(raw()).toBe(1);
+      for (let n = 2; n <= 3; n++) {
+        await user.click(screen.getByRole("button", { name: "Обновить" }));
+        await waitFor(() => expect(api.runDiagnostic).toHaveBeenCalledTimes(n));
+      }
+      // Время ответа меняется при каждом опросе, данные инструмента — нет: тело остаётся прежним.
+      expect(screen.getByText(/Обновлено/)).toBeInTheDocument();
+      expect(raw()).toBe(1);
+    } finally {
+      stringify.mockRestore();
+    }
   });
 
   it("пауза: выбор «Пауза» оставляет данные и убирает опрос; интервал по умолчанию — 5 с (10 с у Patroni)", async () => {
