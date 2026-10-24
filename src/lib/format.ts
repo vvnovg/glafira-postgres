@@ -28,11 +28,11 @@ export function formatBytes(n: number): string {
   return `${num(v, 1)} ${units[i]}`;
 }
 
-/** undefined — ещё загружается, null — недоступно. */
-export function formatCount(n?: number | null): string {
+/** undefined — ещё загружается, null — недоступно. `digits` — знаков после запятой (скорости, например TPS, — один). */
+export function formatCount(n?: number | null, digits = 0): string {
   if (n === undefined) return "…";
   if (n === null) return "—";
-  return num(n);
+  return num(n, digits);
 }
 
 /** Доля в процентах с одним знаком после запятой («49,5 %»); null — нет данных. */

@@ -10,26 +10,32 @@ import { useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { DiagHeader } from "./DiagHeader";
 import { FindingsPanel } from "./FindingsPanel";
+import { LocksView } from "./LocksView";
+import { PulseView } from "./PulseView";
+import { SessionsView } from "./SessionsView";
 
 /** Окно профиля ожиданий, секунды: по умолчанию 15 минут (выбор окна — в шапке инструмента «Профиль ожиданий»). */
 const DEFAULT_WAITS_WINDOW_S = 900;
 
-/** JSON данных отчёта (до видов задач 11–13); строится заново только при изменении данных, а не при каждой отрисовке. */
+/** JSON данных отчёта (до видов задач 12–13); строится заново только при изменении данных, а не при каждой отрисовке. */
 function RawData({ data }: { data: DiagData }) {
   const json = useMemo(() => JSON.stringify(data, null, 2), [data]);
   return <pre className="diag-raw">{json}</pre>;
 }
 
 /**
- * Тело инструмента. Виды данных подставляют свои компоненты по `report.data.kind` (задачи 11–13); до них — JSON отчёта.
- * `tool` отличает вкладку `idleTx` от `sessions`: данные у них одни.
+ * Тело инструмента. Виды данных подставляют свои компоненты по `report.data.kind` (задачи 12–13 — остальные); до них — JSON отчёта.
+ * `tool` отличает вкладку `idleTx` от `sessions`: данные у них одни, а набор сессий разный.
  */
-function ToolBody({ report }: { tool: DiagTool; report: DiagReport; connectionId: string }) {
+function ToolBody({ tool, report, connectionId }: { tool: DiagTool; report: DiagReport; connectionId: string }) {
   switch (report.data.kind) {
     case "pulse":
+      return <PulseView connectionId={connectionId} report={report} />;
     case "sessions":
-    case "waits":
+      return <SessionsView key={tool} report={report} preset={tool === "idleTx" ? "idleTx" : "all"} />;
     case "locks":
+      return <LocksView report={report} />;
+    case "waits":
     case "horizon":
     case "replication":
     case "slots":

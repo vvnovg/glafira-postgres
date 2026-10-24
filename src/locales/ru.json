@@ -834,8 +834,112 @@
         "standbyFeedback": "feedback реплики"
       }
     },
+    "pulse": {
+      "table": "Пульс по узлам",
+      "node": "Узел",
+      "unreachable": "Узел недоступен",
+      "ratePending": "…",
+      "perSecond": "{{value}}/с",
+      "tpsTitle": "коммиты: {{commits}}/с, откаты: {{rollbacks}}/с",
+      "walDirTitle": "max_wal_size: {{value}}",
+      "open": "Открыть «{{tool}}» на узле {{member}}",
+      "columns": {
+        "connections": "Подключения",
+        "tps": "TPS",
+        "cache": "Попадания в кэш",
+        "wal": "WAL в секунду",
+        "xact": "Самая долгая транзакция",
+        "query": "Самый долгий запрос",
+        "idle": "Самый долгий idle in transaction",
+        "locks": "Ждут блокировку · дольше всех",
+        "xid": "Возраст XID",
+        "walDir": "Размер pg_wal",
+        "lag": "Лаг реплики"
+      }
+    },
+    "sessions": {
+      "table": "Список сессий",
+      "presetLabel": "Набор",
+      "presets": {
+        "all": "Все",
+        "active": "Активные",
+        "idleTx": "Idle in transaction",
+        "waiting": "Ждущие"
+      },
+      "filter": "Фильтр",
+      "filterPlaceholder": "pid, роль, приложение, клиент, база, запрос",
+      "groupBy": "Группировать",
+      "groups": {
+        "none": "Без группировки",
+        "application": "Приложение",
+        "user": "Роль",
+        "client": "Клиент",
+        "database": "База данных"
+      },
+      "groupTable": "Группы сессий",
+      "groupNote": "В группах — все сессии, независимо от набора",
+      "groupUnset": "(не задано)",
+      "groupTotal": "Всего",
+      "groupActive": "active",
+      "groupIdle": "idle",
+      "groupIdleTx": "idle in transaction",
+      "groupOther": "Прочие",
+      "hideGlafira": "Скрыть сессии Glafira",
+      "columns": {
+        "pid": "PID",
+        "state": "Состояние",
+        "wait": "Ожидание",
+        "queryAge": "Запрос",
+        "xactAge": "Транзакция",
+        "user": "Роль",
+        "application": "Приложение",
+        "client": "Клиент",
+        "database": "База данных",
+        "blockedBy": "Ждёт",
+        "text": "Текст",
+        "idleFor": "Простой",
+        "locksHeld": "Держит блокировок",
+        "xminAge": "Возраст xmin"
+      },
+      "none": "Подходящих сессий нет",
+      "panel": "Сессия {{pid}}",
+      "copyQuery": "Копировать запрос",
+      "truncated": "Текст запроса обрезан до 16 KB",
+      "ended": "Сессии больше нет в списке",
+      "timeoutName": "Таймаут idle in transaction",
+      "timeoutSetting": "idle_in_transaction_session_timeout = {{value}}",
+      "fields": {
+        "backendType": "Тип процесса",
+        "started": "Запущена",
+        "xid": "ID транзакции",
+        "queryId": "ID запроса",
+        "leaderPid": "PID лидера",
+        "stateAge": "В этом состоянии"
+      }
+    },
     "locks": {
-      "otherDb": "oid {{oid}} в БД {{db}}"
+      "otherDb": "oid {{oid}} в БД {{db}}",
+      "ddlQueue": "DDL в очереди",
+      "tree": "Дерево блокировок",
+      "session": "Сессия {{pid}}",
+      "xactAge": "транзакция {{duration}}",
+      "requests": "{{mode}} на {{relation}}",
+      "requestsOther": "{{mode}} ({{locktype}})",
+      "oidOnly": "oid {{oid}}",
+      "waitApprox": "≈ {{value}}",
+      "approxTitle": "Оценка по последней смене состояния: PostgreSQL 13 не записывает начало ожидания блокировки",
+      "waitsFor": "ждёт сессию {{pid}} {{waitS}}",
+      "waitsForHidden": "ждёт prepared transaction или завершившуюся сессию {{waitS}}",
+      "queued": "за ней сессий: {{count}}",
+      "victims": "жертв: {{count}}",
+      "alsoBlockedBy": "ещё ждёт: {{pids}}",
+      "preparedOrEnded": "prepared transaction или завершившаяся сессия",
+      "collapse": "Свернуть поддерево сессии {{pid}}",
+      "expand": "Развернуть поддерево сессии {{pid}}",
+      "none": "Никто не ждёт блокировок",
+      "cycles": "Циклы ожидания",
+      "cycle": "Сессии ждут друг друга: {{pids}}",
+      "logNote": "Подробности взаимных блокировок есть только в логе сервера"
     }
   },
   "findings": {
@@ -996,6 +1100,9 @@
     "import": {
       "target": "Куда попадут новые папки и подключения. Существующие останутся на своих местах.",
       "updateExisting": "Существующие подключения получат настройки из файла и останутся на местах. Сохранённые пароли остаются, только если не меняются настройки соединения (адрес, пользователь, база, TLS, Patroni, SSH)."
+    },
+    "diag": {
+      "idleTimeout": "Завершает сессии, простаивающие в транзакции дольше этого времени. Задаётся для роли приложения; <code>0</code> — выключено."
     }
   }
 }

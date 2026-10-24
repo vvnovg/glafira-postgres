@@ -812,8 +812,112 @@
         "standbyFeedback": "replica feedback"
       }
     },
+    "pulse": {
+      "table": "Pulse by node",
+      "node": "Node",
+      "unreachable": "Node unavailable",
+      "ratePending": "…",
+      "perSecond": "{{value}}/s",
+      "tpsTitle": "commits: {{commits}}/s, rollbacks: {{rollbacks}}/s",
+      "walDirTitle": "max_wal_size: {{value}}",
+      "open": "Open “{{tool}}” on {{member}}",
+      "columns": {
+        "connections": "Connections",
+        "tps": "TPS",
+        "cache": "Cache hit ratio",
+        "wal": "WAL per second",
+        "xact": "Longest transaction",
+        "query": "Longest query",
+        "idle": "Longest idle in transaction",
+        "locks": "Waiting for locks · longest",
+        "xid": "XID age",
+        "walDir": "pg_wal size",
+        "lag": "Replica lag"
+      }
+    },
+    "sessions": {
+      "table": "Session list",
+      "presetLabel": "Preset",
+      "presets": {
+        "all": "All",
+        "active": "Active",
+        "idleTx": "Idle in transaction",
+        "waiting": "Waiting"
+      },
+      "filter": "Filter",
+      "filterPlaceholder": "pid, role, application, client, database, query",
+      "groupBy": "Group by",
+      "groups": {
+        "none": "No grouping",
+        "application": "Application",
+        "user": "Role",
+        "client": "Client",
+        "database": "Database"
+      },
+      "groupTable": "Session groups",
+      "groupNote": "Groups include all sessions regardless of the preset",
+      "groupUnset": "(not set)",
+      "groupTotal": "Total",
+      "groupActive": "active",
+      "groupIdle": "idle",
+      "groupIdleTx": "idle in transaction",
+      "groupOther": "Other",
+      "hideGlafira": "Hide Glafira sessions",
+      "columns": {
+        "pid": "PID",
+        "state": "State",
+        "wait": "Wait",
+        "queryAge": "Query",
+        "xactAge": "Transaction",
+        "user": "Role",
+        "application": "Application",
+        "client": "Client",
+        "database": "Database",
+        "blockedBy": "Waits for",
+        "text": "Text",
+        "idleFor": "Idle for",
+        "locksHeld": "Locks held",
+        "xminAge": "xmin age"
+      },
+      "none": "No matching sessions",
+      "panel": "Session {{pid}}",
+      "copyQuery": "Copy query",
+      "truncated": "Query text is cut at 16 KB",
+      "ended": "The session is no longer in the list",
+      "timeoutName": "Idle in transaction timeout",
+      "timeoutSetting": "idle_in_transaction_session_timeout = {{value}}",
+      "fields": {
+        "backendType": "Backend type",
+        "started": "Started",
+        "xid": "Transaction ID",
+        "queryId": "Query ID",
+        "leaderPid": "Leader PID",
+        "stateAge": "In this state"
+      }
+    },
     "locks": {
-      "otherDb": "oid {{oid}} in database {{db}}"
+      "otherDb": "oid {{oid}} in database {{db}}",
+      "ddlQueue": "DDL in the queue",
+      "tree": "Lock tree",
+      "session": "Session {{pid}}",
+      "xactAge": "transaction {{duration}}",
+      "requests": "{{mode}} on {{relation}}",
+      "requestsOther": "{{mode}} ({{locktype}})",
+      "oidOnly": "oid {{oid}}",
+      "waitApprox": "≈ {{value}}",
+      "approxTitle": "Estimated from the last state change: PostgreSQL 13 does not record when a lock wait began",
+      "waitsFor": "waits for session {{pid}} {{waitS}}",
+      "waitsForHidden": "waits for a prepared transaction or an ended session {{waitS}}",
+      "queued": "sessions behind it: {{count}}",
+      "victims": "victims: {{count}}",
+      "alsoBlockedBy": "also waits for: {{pids}}",
+      "preparedOrEnded": "prepared transaction or ended session",
+      "collapse": "Collapse the subtree of session {{pid}}",
+      "expand": "Expand the subtree of session {{pid}}",
+      "none": "Nobody is waiting for locks",
+      "cycles": "Wait cycles",
+      "cycle": "Sessions waiting for each other: {{pids}}",
+      "logNote": "Details of deadlocks are only in the server log"
     }
   },
   "findings": {
@@ -974,6 +1078,9 @@
     "import": {
       "target": "Where new folders and connections go. Existing ones stay where they are.",
       "updateExisting": "Existing connections get the settings from the file and keep their place. Saved passwords are kept only if the connection settings (address, user, database, TLS, Patroni, SSH) do not change."
+    },
+    "diag": {
+      "idleTimeout": "Ends sessions idle in a transaction longer than this. Set it per application role; <code>0</code> — off."
     }
   }
 }

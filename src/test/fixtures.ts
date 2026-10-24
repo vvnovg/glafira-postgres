@@ -1,4 +1,4 @@
-import type { ConnectionProfile, DiagData, DiagReport, Member, Topology, TopologyView } from "../api/types";
+import type { ConnectionProfile, DiagData, DiagReport, Member, PulseFacts, PulseRates, SessionRow, Topology, TopologyView } from "../api/types";
 
 export function member(name: string, patch: Partial<Member> = {}): Member {
   return {
@@ -73,6 +73,75 @@ export function diagReport(data: DiagData, patch: Partial<DiagReport> = {}): Dia
     data,
     findings: [],
     unavailable: [],
+    ...patch,
+  };
+}
+
+/** Факты узла пульса: нули и `null` (ничего не заметно); `patch` меняет нужные поля. */
+export function pulseFacts(patch: Partial<PulseFacts> = {}): PulseFacts {
+  return {
+    used: 0,
+    available: 0,
+    byState: { active: 0, idle: 0, idleInTransaction: 0, other: 0 },
+    longestTransactionS: null,
+    longestQueryS: null,
+    longestIdleInTransactionS: null,
+    lockWaiting: 0,
+    longestLockWaitS: null,
+    maxXidAge: 0,
+    xidAgePct: 0,
+    walDirBytes: null,
+    maxWalSizeBytes: null,
+    lagBytes: null,
+    replayDelayMs: null,
+    ...patch,
+  };
+}
+
+/** Скорости пульса: все `null` — первый вызов, сравнимого снимка счётчиков ещё нет. */
+export function pulseRates(patch: Partial<PulseRates> = {}): PulseRates {
+  return {
+    tps: null,
+    commitsPerS: null,
+    rollbacksPerS: null,
+    cacheHitPct: null,
+    tempFilesPerS: null,
+    tempBytesPerS: null,
+    walBytesPerS: null,
+    deadlocks: null,
+    tempFiles: null,
+    blksRead: null,
+    ...patch,
+  };
+}
+
+/** Строка списка сессий: обычная клиентская сессия без запроса и ожиданий; время старта выводится из `pid`. */
+export function sessionRow(patch: Partial<SessionRow> = {}): SessionRow {
+  const pid = patch.pid ?? 1;
+  return {
+    pid,
+    leaderPid: null,
+    backendType: "client backend",
+    database: "orders",
+    user: "app",
+    application: null,
+    clientAddr: "10.0.0.5",
+    clientPort: 50_000,
+    backendStartUs: 1_700_000_000_000_000 + pid,
+    xactAgeS: null,
+    queryAgeS: null,
+    stateAgeS: null,
+    state: "active",
+    waitEventType: null,
+    waitEvent: null,
+    backendXid: null,
+    xminAge: null,
+    queryId: null,
+    query: null,
+    queryTruncated: false,
+    blockedBy: [],
+    locksHeld: 0,
+    glafira: false,
     ...patch,
   };
 }

@@ -49,6 +49,14 @@ describe("format", () => {
     expect(formatCount(null)).toBe("—");
   });
 
+  it("count: знаки после запятой задаются вторым аргументом (TPS — один знак), по умолчанию целое", () => {
+    expect(formatCount(1234.5, 1)).toBe("1 234,5".replace(/ /g, "\u00a0"));
+    expect(formatCount(3, 1)).toBe("3,0");
+    expect(formatCount(1234.56)).toBe("1 235".replace(/ /g, "\u00a0"));
+    expect(formatCount(null, 1)).toBe("—");
+    expect(formatCount(undefined, 1)).toBe("…");
+  });
+
   it("percent: один знак после запятой, прочерк для null", () => {
     expect(formatPercent(49.494949494949495)).toBe("49,5 %");
     expect(formatPercent(0)).toBe("0 %");

@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DiagTool } from "../../api/types";
 import { useWorkspace } from "../../state/workspace";
-import { connection, diagReport, member, topology, topologyView } from "../../test/fixtures";
+import { connection, diagReport, member, pulseFacts, pulseRates, topology, topologyView } from "../../test/fixtures";
 import { renderWithClient } from "../../test/render";
 
 vi.mock("../../api/client", async (importOriginal) => {
@@ -131,6 +131,27 @@ describe("DiagTab", () => {
     renderWithClient(<DiagTab connectionId="c" tool="idleTx" member={null} active tabId="diag:c:idleTx" />);
     expect(await screen.findByRole("heading", { name: "Idle in transaction" })).toBeInTheDocument();
     expect(api.runDiagnostic).toHaveBeenCalledWith("c", { tool: "sessions", member: null });
+    // Данные те же, что у «Сессий», но список открывается на наборе idle in transaction.
+    expect(screen.getByRole("tab", { name: "Idle in transaction", selected: true })).toBeInTheDocument();
+  });
+
+  it("вкладка «Сессии» открывается на наборе «Все»", async () => {
+    vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport({ kind: "sessions", rows: [], settings: { idleInTransactionSessionTimeoutMs: null, trackActivityQuerySize: null } }));
+    renderWithClient(<DiagTab connectionId="c" tool="sessions" member={null} active tabId="diag:c:sessions" />);
+    expect(await screen.findByRole("tab", { name: "Все", selected: true })).toBeInTheDocument();
+  });
+
+  it("пульс: клик по клетке открывает инструмент на узле через спеку вкладки", async () => {
+    vi.mocked(api.runDiagnostic).mockResolvedValue(
+      diagReport(
+        { kind: "pulse", nodes: [{ member: "pg-2", role: "replica", reachable: true, error: null, facts: pulseFacts({ used: 7, available: 100 }), rates: pulseRates() }] },
+        { member: null, followsLeader: false, serverVersionNum: null, inRecovery: null },
+      ),
+    );
+    const user = userEvent.setup();
+    renderWithClient(<DiagTab connectionId="c" tool="pulse" member={null} active tabId="diag:c:pulse" />);
+    await user.click(await screen.findByRole("button", { name: /7 \/ 100/ }));
+    expect(useWorkspace.getState().tabs.find((t) => t.kind === "diag" && t.tool === "sessions")).toMatchObject({ connectionId: "c", member: "pg-2" });
   });
 
   it("инструмент кластера не выбирает узел и не передаёт его; недоступное называет узел", async () => {
@@ -182,9 +203,10 @@ describe("DiagTab", () => {
   it("JSON тела не пересчитывается, пока данные отчёта те же", async () => {
     const stringify = vi.spyOn(JSON, "stringify");
     try {
-      vi.mocked(api.runDiagnostic).mockImplementation(async () => diagReport({ kind: "locks", roots: [], cycles: [], ddlQueue: [] }, { observedAtMs: Date.now() }));
+      // Инструмент без собственного вида (здесь матрица health): его тело — JSON отчёта.
+      vi.mocked(api.runDiagnostic).mockImplementation(async () => diagReport({ kind: "health", endpoints: [], members: [] }, { member: null, followsLeader: false, observedAtMs: Date.now() }));
       const user = userEvent.setup();
-      renderWithClient(<DiagTab connectionId="c" tool="locks" member={null} active tabId="diag:c:locks" />);
+      renderWithClient(<DiagTab connectionId="c" tool="health" member={null} active tabId="diag:c:health" />);
       await screen.findByText("Проблем не найдено");
       const raw = () => stringify.mock.calls.filter((c) => c[2] === 2).length;
       expect(raw()).toBe(1);
