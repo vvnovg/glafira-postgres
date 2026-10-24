@@ -27,6 +27,12 @@ function tabTitle(tab: Tab, byId: Map<string, ConnectionProfile>): string {
       return tab.connectionId ? i18n.t("tabs.connection", { name: conn }) : i18n.t("tabs.newConnection");
     case "overview":
       return i18n.t("tabs.overview", { conn });
+    case "table":
+    case "view":
+    case "sequence":
+      return `${tab.schema}.${tab.name}`;
+    case "function":
+      return tab.name;
   }
 }
 

@@ -7,6 +7,7 @@ import type { ObjectItem, ObjectKind, ObjectPage } from "../../../api/types";
 import { formatBytes, formatCount } from "../../../lib/format";
 import { Glyph } from "../../common/Glyph";
 import { useDebouncedValue } from "../../../lib/useDebouncedValue";
+import { type TabSpec, useWorkspace } from "../../../state/workspace";
 import { ErrorBanner } from "../../common/ErrorBanner";
 
 /** Размер страницы списка объектов (в спецификации — 500; предел команды Rust — 1000). */
@@ -63,8 +64,27 @@ function useOpenOids(): OpenState {
   return useMemo(() => ({ openOids, onToggle }), [openOids, onToggle]);
 }
 
+/** Вкладка объекта из строки списка; схема — схема самого объекта (партиция может лежать в другой схеме, чем список). */
+function objectTab(kind: ObjectKind, item: ObjectItem, connectionId: string, database: string): TabSpec {
+  const { schema, name } = item;
+  switch (kind) {
+    case "tables":
+      return { kind: "table", connectionId, database, schema, name };
+    case "views":
+      return { kind: "view", connectionId, database, schema, name, matview: false };
+    case "matviews":
+      return { kind: "view", connectionId, database, schema, name, matview: true };
+    case "functions":
+      // Имена функций перегружены: вкладка открывается по oid.
+      return { kind: "function", connectionId, database, oid: item.oid, name };
+    case "sequences":
+      return { kind: "sequence", connectionId, database, schema, name };
+  }
+}
+
 function ObjectRow({
   item,
+  kind,
   connectionId,
   db,
   schema,
@@ -72,6 +92,8 @@ function ObjectRow({
   rowAttrs,
 }: {
   item: ObjectItem;
+  /** Вид объектов списка: по нему выбирается вкладка. */
+  kind: ObjectKind;
   connectionId: string;
   db: string;
   /** Схема списка, в котором лежит строка: объект из другой схемы (партиция) подписывается `схема.имя`. */
@@ -80,6 +102,7 @@ function ObjectRow({
   rowAttrs?: RowAttrs;
 }) {
   const { t } = useTranslation();
+  const openTab = useWorkspace((s) => s.open);
   const partitioned = item.relkind === "p" && (item.partitions ?? 0) > 0;
   const open = partitioned && openState.openOids.has(item.oid);
   const name = item.schema === schema ? item.name : `${item.schema}.${item.name}`;
@@ -87,18 +110,23 @@ function ObjectRow({
   return (
     <li {...rowAttrs}>
       <div className="tree-conn tree-wrap">
-        {partitioned ? (
-          <button type="button" className="tree-folder-toggle" aria-expanded={open} title={label} onClick={() => openState.onToggle(item.oid)}>
+        {/* Стрелка раскрывает партиции (её имя — имя таблицы, состояние — aria-expanded), имя открывает вкладку. */}
+        {partitioned && (
+          <button type="button" className="tree-folder-toggle caret-only" aria-expanded={open} title={label} onClick={() => openState.onToggle(item.oid)}>
             <span className="tree-caret" aria-hidden="true">
               {open ? "▾" : "▸"}
             </span>
-            <span className="tree-name">{label}</span>
           </button>
-        ) : (
-          <span className="tree-name" title={label}>
-            {label}
-          </span>
         )}
+        <button
+          type="button"
+          className="link tree-name"
+          title={label}
+          aria-label={t("sidebar.openObject", { name: label })}
+          onClick={() => openTab(objectTab(kind, item, connectionId, db))}
+        >
+          {label}
+        </button>
         {partitioned && <span className="muted">{t("sidebar.partitions", { count: item.partitions ?? 0 })}</span>}
         {item.totalBytes !== null && item.totalBytes > 0 && <span className="muted">{formatBytes(item.totalBytes)}</span>}
         {/* Размер партиционированной таблицы в списке не считается: пришлось бы заблокировать каждую партицию. */}
@@ -155,7 +183,8 @@ function PartitionList({
       {q.error && <ErrorBanner error={q.error} onRetry={() => void (q.isFetchNextPageError ? q.fetchNextPage() : q.refetch())} />}
       <ul>
         {items.map((item) => (
-          <ObjectRow key={item.oid} item={item} connectionId={connectionId} db={db} schema={schema} openState={openState} />
+          // Партиция — таблица: вкладка открывается как у таблицы, схема берётся у самой партиции.
+          <ObjectRow key={item.oid} item={item} kind="tables" connectionId={connectionId} db={db} schema={schema} openState={openState} />
         ))}
         {q.hasNextPage && (
           <MoreButton
@@ -260,6 +289,7 @@ export function ObjectList({
               <ObjectRow
                 key={items[v.index].oid}
                 item={items[v.index]}
+                kind={kind}
                 connectionId={connectionId}
                 db={db}
                 schema={schema}
@@ -276,7 +306,7 @@ export function ObjectList({
       ) : (
         <ul>
           {items.map((item) => (
-            <ObjectRow key={item.oid} item={item} connectionId={connectionId} db={db} schema={schema} openState={openState} />
+            <ObjectRow key={item.oid} item={item} kind={kind} connectionId={connectionId} db={db} schema={schema} openState={openState} />
           ))}
           {hasNextPage && (
             <MoreButton pending={isFetchingNextPage} label={t("sidebar.moreFor", { label, where })} onClick={() => void fetchNextPage()} />

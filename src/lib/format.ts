@@ -34,3 +34,26 @@ export function formatCount(n?: number | null): string {
   if (n === null) return "—";
   return num(n);
 }
+
+/** Доля в процентах с одним знаком после запятой («49,5 %»); null — нет данных. */
+export function formatPercent(n: number | null): string {
+  if (n === null) return "—";
+  return `${n.toLocaleString(currentLocale(), { maximumFractionDigits: 1 })} %`;
+}
+
+/** Предел i64 (9223372036854775807) как BigInt; сам литерал не годится — в `number` он округляется до 2^63. */
+const I64_MAX = BigInt("9223372036854775807");
+
+/**
+ * Значение bigint из каталога. Rust отдаёт i64 числом JSON, а `number` точен только до 2^53: настоящая
+ * граница bigint (9223372036854775807) приходит как 2^63 и без поправки показывалась бы как …808.
+ * Остальные значения выше 2^53 приблизительны — точность теряется до интерфейса.
+ */
+export function formatInt64(n: number | null): string {
+  if (n === null) return "—";
+  const locale = currentLocale();
+  if (n >= 2 ** 63) return I64_MAX.toLocaleString(locale);
+  // Intl дописывает нули после 17 значащих цифр (…776 000); через BigInt печатается точное значение числа.
+  if (Math.abs(n) > Number.MAX_SAFE_INTEGER) return BigInt(n).toLocaleString(locale);
+  return num(n);
+}

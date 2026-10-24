@@ -7,6 +7,7 @@ import type {
   DatabaseInfo,
   ExportSummary,
   ExtensionInfo,
+  FunctionDetails,
   ImportPreview,
   LanguageSettings,
   MemberFacts,
@@ -18,6 +19,8 @@ import type {
   SchemaInfo,
   SecretsInput,
   SecretsSet,
+  SequenceDetails,
+  TableDetails,
   TestEvent,
   TestReport,
   TopologyEvent,
@@ -25,6 +28,7 @@ import type {
   TreeItemRef,
   UiSettings,
   UpdateCheck,
+  ViewDetails,
 } from "./types";
 
 export function isAppError(e: unknown): e is AppError {
@@ -101,6 +105,10 @@ export const api = {
     call<ObjectPage>("list_objects", { id, db, schema, kind, filter, offset, limit }),
   listPartitions: (id: string, db: string, schema: string, table: string, offset: number, limit: number) =>
     call<ObjectPage>("list_partitions", { id, db, schema, table, offset, limit }),
+  getTable: (id: string, db: string, schema: string, name: string) => call<TableDetails>("get_table", { id, db, schema, name }),
+  getView: (id: string, db: string, schema: string, name: string) => call<ViewDetails>("get_view", { id, db, schema, name }),
+  getFunction: (id: string, db: string, oid: number) => call<FunctionDetails>("get_function", { id, db, oid }),
+  getSequence: (id: string, db: string, schema: string, name: string) => call<SequenceDetails>("get_sequence", { id, db, schema, name }),
   listExtensions: (id: string, db: string) => call<ExtensionInfo[]>("list_extensions", { id, db }),
   listRoles: (id: string, includeSystem: boolean) => call<RoleInfo[]>("list_roles", { id, includeSystem }),
 

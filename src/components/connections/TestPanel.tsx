@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ReadinessItem, ReadinessStatus, StepStatus, TestEvent, TestReport, TopologyWarning } from "../../api/types";
 import { tr } from "../../i18n/text";
+import { CopyButton } from "../common/CopyButton";
 
 const STEP_ICON: Record<StepStatus, string> = { running: "⏳", ok: "✅", failed: "❌", skipped: "⏭" };
 const READY_ICON: Record<ReadinessStatus, string> = { ok: "✅", warn: "⚠️", missing: "❌" };
@@ -34,36 +34,6 @@ function StatusIcon({ icon, label }: { icon: string; label: string }) {
     <span role="img" aria-label={label}>
       {icon}
     </span>
-  );
-}
-
-/** Кнопка «Копировать»: буфер обмена может быть недоступен или отказать — об итоге сообщаем в любом случае. */
-function CopyButton({ text, label }: { text: string; label: string }) {
-  const { t } = useTranslation();
-  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
-  const timer = useRef<number | undefined>(undefined);
-  useEffect(() => () => window.clearTimeout(timer.current), []);
-  async function copy() {
-    let next: "copied" | "failed" = "copied";
-    try {
-      if (!navigator.clipboard) throw new Error("clipboard unavailable");
-      await navigator.clipboard.writeText(text);
-    } catch {
-      next = "failed";
-    }
-    setState(next);
-    window.clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => setState("idle"), 2500);
-  }
-  return (
-    <>
-      <button type="button" aria-label={label} onClick={() => void copy()}>
-        {t("common.copy")}
-      </button>
-      <span role="status" className="muted">
-        {state === "copied" ? t("test.copied") : state === "failed" ? t("test.copyFailed") : ""}
-      </span>
-    </>
   );
 }
 

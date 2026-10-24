@@ -187,3 +187,22 @@ label.inline.wrap { white-space: normal; }
 .members-table td.stale { color: var(--muted); }
 /* Причина недоступности узла: видимый текст в ячейке, а не только подсказка; длинное сообщение переносится. */
 .members-table .member-error { max-width: 28ch; font-size: 11px; font-weight: normal; white-space: normal; overflow-wrap: anywhere; }
+
+/* Вкладки объектов каталога (таблица, представление, функция, последовательность). */
+.subtabs { flex-wrap: wrap; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.plain-list { list-style: none; margin: 0; padding: 0; }
+.badges { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+/* Невалидный индекс и непроверенное ограничение: цвет плюс слово INVALID / NOT VALID — смысл не держится на одном цвете. */
+tr.invalid { color: var(--danger-text); }
+.kind-badge.invalid { color: var(--danger-text); border-color: var(--danger); }
+.table-scroll td { vertical-align: top; }
+.table-scroll td code { white-space: pre-wrap; overflow-wrap: anywhere; }
+.ddl { display: flex; flex-direction: column; gap: 6px; }
+.ddl pre { max-height: 60vh; overflow: auto; padding: 8px; background: var(--bg-alt); border: 1px solid var(--border); border-radius: 4px; word-break: normal; overflow-wrap: anywhere; }
+/* В списке объектов стрелка раскрытия партиций — отдельная кнопка рядом с именем, а не вся строка. */
+.tree-wrap .tree-folder-toggle.caret-only { flex: none; }
+/* Имя объекта в списке — кнопка, открывающая вкладку: при наведении и фокусе подчёркнуто. */
+button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decoration: underline; }

@@ -1,4 +1,4 @@
-import { act, fireEvent, screen, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { listen } from "@tauri-apps/api/event";
 import { ENV_COLORS } from "../lib/env";
@@ -93,6 +93,26 @@ describe("Layout tabs", () => {
     expect(within(list).getByRole("tab", { name: "Копия: prod-1" })).toBeInTheDocument();
     // Активна вкладка без подключения: полоса прозрачна.
     expect(container.querySelector<HTMLElement>(".env-stripe")!.style.background).toBe("transparent");
+  });
+
+  it("вкладки объектов: таблица, представление и последовательность — схема.имя, функция — имя; у всех значок окружения", async () => {
+    useWorkspace.setState({
+      tabs: [
+        { kind: "table", connectionId: "c1", database: "orders", schema: "shop", name: "orders", id: "table:c1:orders:shop.orders" },
+        { kind: "view", connectionId: "c1", database: "orders", schema: "shop", name: "v_orders", matview: false, id: "view:c1:orders:shop.v_orders" },
+        { kind: "function", connectionId: "c1", database: "orders", oid: 16401, name: "order_count", id: "function:c1:orders:16401" },
+        { kind: "sequence", connectionId: "c1", database: "orders", schema: "shop", name: "orders_id_seq", id: "sequence:c1:orders:shop.orders_id_seq" },
+      ],
+      activeId: "function:c1:orders:16401",
+    });
+    renderWithClient(<Layout />);
+    const list = screen.getByRole("tablist");
+    expect(await within(list).findByRole("tab", { name: "shop.orders" })).toBeInTheDocument();
+    expect(within(list).getByRole("tab", { name: "shop.v_orders" })).toBeInTheDocument();
+    expect(within(list).getByRole("tab", { name: "order_count" })).toBeInTheDocument();
+    expect(within(list).getByRole("tab", { name: "shop.orders_id_seq" })).toBeInTheDocument();
+    // Значки приходят вместе со списком подключений, позже заголовков.
+    await waitFor(() => expect(within(list).getAllByText("PROD")).toHaveLength(4));
   });
 
   it("подписывается на события наблюдения", () => {

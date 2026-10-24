@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { i18n } from "../i18n";
-import { formatBytes, formatCount, formatTimestamp } from "./format";
+import { formatBytes, formatCount, formatInt64, formatPercent, formatTimestamp } from "./format";
 
 describe("format", () => {
   it("timestamp в UTC с миллисекундами", () => {
@@ -48,6 +48,23 @@ describe("format", () => {
     expect(formatCount(undefined)).toBe("…");
     expect(formatCount(null)).toBe("—");
   });
+
+  it("percent: один знак после запятой, прочерк для null", () => {
+    expect(formatPercent(49.494949494949495)).toBe("49,5 %");
+    expect(formatPercent(0)).toBe("0 %");
+    expect(formatPercent(100)).toBe("100 %");
+    expect(formatPercent(null)).toBe("—");
+  });
+
+  it("int64: границы bigint не округляются вверх до 2^63", () => {
+    // i64::MAX из JSON приходит числом 2^63 (9223372036854775808): показывается настоящая граница.
+    expect(formatInt64(2 ** 63)).toBe("9 223 372 036 854 775 807".replace(/ /g, "\u00a0"));
+    // Знак минуса зависит от версии ICU (U+002D или U+2212).
+    expect(formatInt64(-(2 ** 63))).toMatch(new RegExp(`^[-\u2212]${"9 223 372 036 854 775 808".replace(/ /g, "\u00a0")}$`));
+    expect(formatInt64(2147483647)).toBe("2 147 483 647".replace(/ /g, "\u00a0"));
+    expect(formatInt64(-1)).toMatch(/^[-\u2212]1$/);
+    expect(formatInt64(null)).toBe("—");
+  });
 });
 
 describe("форматы по языку", () => {
@@ -59,5 +76,12 @@ describe("форматы по языку", () => {
     await i18n.changeLanguage("ru");
     expect(formatCount(1234567)).toBe("1 234 567".replace(/ /g, "\u00a0"));
     expect(formatBytes(1536)).toBe("1,5 KB");
+  });
+
+  it("проценты и int64 по языку", async () => {
+    await i18n.changeLanguage("en");
+    expect(formatPercent(49.5)).toBe("49.5 %");
+    expect(formatInt64(1234567)).toBe("1,234,567");
+    expect(formatInt64(2 ** 63)).toBe("9,223,372,036,854,775,807");
   });
 });

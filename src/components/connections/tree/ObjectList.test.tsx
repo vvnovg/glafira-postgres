@@ -1,7 +1,8 @@
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ObjectItem, ObjectPage } from "../../../api/types";
+import type { ObjectItem, ObjectKind, ObjectPage } from "../../../api/types";
+import { useWorkspace } from "../../../state/workspace";
 import { renderWithClient } from "../../../test/render";
 
 // В jsdom у элементов нет размеров, и настоящий виртуализатор ничего не показывает: окно задаётся тестом.
@@ -48,6 +49,11 @@ function renderList(count: number) {
   return renderWithClient(listEl(count));
 }
 
+/** Список объектов другого вида (функции, последовательности, представления). */
+function renderListOf(kind: ObjectKind, count: number) {
+  return renderWithClient(<ObjectList connectionId="c" db="orders" schema="shop" kind={kind} count={count} label="Объекты" />);
+}
+
 /** Повторная отрисовка с тем же клиентом: окно виртуализатора в тесте читается при каждом рендере. */
 function rerenderList(r: ReturnType<typeof renderList>, count: number) {
   r.rerender(listEl(count));
@@ -57,6 +63,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   win.from = 0;
   win.size = 10;
+  useWorkspace.setState({ tabs: [], activeId: null });
 });
 
 describe("ObjectList", () => {
@@ -146,6 +153,67 @@ describe("ObjectList", () => {
     await user.click(screen.getByRole("button", { name: /^events/ }));
     expect(await screen.findByText("events_2026_10")).toBeInTheDocument();
     expect(api.listPartitions).toHaveBeenCalledWith("c", "orders", "shop", "events", 0, PAGE);
+  });
+
+  it("клик по имени объекта открывает вкладку своего вида", async () => {
+    vi.mocked(api.listObjects).mockResolvedValue({ total: 2, nextOffset: null, items: [item(1, { name: "orders" }), item(2, { name: "events", relkind: "p", partitions: 2 })] });
+    const user = userEvent.setup();
+    renderList(2);
+    await user.click(await screen.findByRole("button", { name: "Открыть orders" }));
+    expect(useWorkspace.getState().tabs).toEqual([{ kind: "table", connectionId: "c", database: "orders", schema: "shop", name: "orders", id: "table:c:orders:shop.orders" }]);
+    // Партиционированная таблица: имя открывает вкладку, стрелка раскрывает партиции.
+    await user.click(screen.getByRole("button", { name: "Открыть events" }));
+    expect(useWorkspace.getState().activeId).toBe("table:c:orders:shop.events");
+  });
+
+  it("у партиционированной таблицы стрелка раскрывает партиции и не открывает вкладку", async () => {
+    vi.mocked(api.listObjects).mockResolvedValue({ total: 1, nextOffset: null, items: [item(2, { name: "events", relkind: "p", partitions: 2 })] });
+    vi.mocked(api.listPartitions).mockResolvedValue({
+      total: 2,
+      nextOffset: null,
+      items: [item(9, { name: "events_2026_10" }), item(10, { name: "events_old", schema: "archive" })],
+    });
+    const user = userEvent.setup();
+    renderList(1);
+    await user.click(await screen.findByRole("button", { name: /^events/ }));
+    expect(useWorkspace.getState().tabs).toEqual([]);
+    // Партиция открывается как таблица своей схемы — не схемы списка.
+    await user.click(await screen.findByRole("button", { name: "Открыть archive.events_old" }));
+    expect(useWorkspace.getState().tabs).toEqual([
+      { kind: "table", connectionId: "c", database: "orders", schema: "archive", name: "events_old", id: "table:c:orders:archive.events_old" },
+    ]);
+  });
+
+  it("функция открывается по oid, представление — с признаком мат. представления", async () => {
+    vi.mocked(api.listObjects).mockResolvedValue({ total: 1, nextOffset: null, items: [item(77, { name: "order_count", signature: "c bigint" })] });
+    const user = userEvent.setup();
+    renderListOf("functions", 1);
+    await user.click(await screen.findByRole("button", { name: "Открыть order_count(c bigint)" }));
+    expect(useWorkspace.getState().tabs[0]).toMatchObject({ kind: "function", oid: 77, name: "order_count" });
+    vi.mocked(api.listObjects).mockResolvedValue({ total: 1, nextOffset: null, items: [item(5, { name: "order_totals", relkind: "m" })] });
+    renderListOf("matviews", 1);
+    await user.click(await screen.findByRole("button", { name: "Открыть order_totals" }));
+    expect(useWorkspace.getState().tabs.slice(-1)[0]).toMatchObject({ kind: "view", matview: true, name: "order_totals" });
+  });
+
+  it("обычное представление и последовательность открываются своими вкладками", async () => {
+    vi.mocked(api.listObjects).mockResolvedValue({ total: 1, nextOffset: null, items: [item(5, { name: "v_orders", relkind: "v" })] });
+    const user = userEvent.setup();
+    const first = renderListOf("views", 1);
+    await user.click(await first.findByRole("button", { name: "Открыть v_orders" }));
+    expect(useWorkspace.getState().tabs.slice(-1)[0]).toMatchObject({ kind: "view", matview: false, name: "v_orders", schema: "shop" });
+    first.unmount();
+    vi.mocked(api.listObjects).mockResolvedValue({ total: 1, nextOffset: null, items: [item(6, { name: "orders_id_seq", relkind: "S" })] });
+    renderListOf("sequences", 1);
+    await user.click(await screen.findByRole("button", { name: "Открыть orders_id_seq" }));
+    expect(useWorkspace.getState().tabs.slice(-1)[0]).toEqual({
+      kind: "sequence",
+      connectionId: "c",
+      database: "orders",
+      schema: "shop",
+      name: "orders_id_seq",
+      id: "sequence:c:orders:shop.orders_id_seq",
+    });
   });
 
   it("функции показываются с сигнатурой", async () => {

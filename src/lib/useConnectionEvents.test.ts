@@ -110,6 +110,25 @@ describe("события наблюдения", () => {
     expect(qc.getQueryData(["memberFacts", "other", "pg-1"])).toBeDefined();
   });
 
+  it("вкладки объектов: смена узла каталога и отключение затрагивают только их подключение", () => {
+    const qc = new QueryClient();
+    const keys = [
+      ["catalog", "c", "table", "orders", "shop", "events"],
+      ["catalog", "c", "view", "orders", "shop", "v"],
+      ["catalog", "c", "function", "orders", 16401],
+      ["catalog", "c", "sequence", "orders", "shop", "s"],
+    ];
+    for (const k of keys) qc.setQueryData(k, {});
+    qc.setQueryData(["catalog", "other", "table", "orders", "shop", "events"], {});
+    qc.setQueryData(["topology", "c"], topologyView({ catalogMember: "a" }));
+    applyTopology(qc, { connectionId: "c", view: topologyView({ catalogMember: "b" }), newEvents: [] });
+    for (const k of keys) expect(qc.getQueryState(k)!.isInvalidated).toBe(true);
+    expect(qc.getQueryState(["catalog", "other", "table", "orders", "shop", "events"])!.isInvalidated).toBe(false);
+    applyState(qc, { connectionId: "c", state: "disconnected", error: null });
+    for (const k of keys) expect(qc.getQueryData(k)).toBeUndefined();
+    expect(qc.getQueryData(["catalog", "other", "table", "orders", "shop", "events"])).toEqual({});
+  });
+
   it("тот же узел каталога каталог не сбрасывает", () => {
     const qc = new QueryClient();
     qc.setQueryData(["topology", "c"], topologyView({ catalogMember: "a" }));

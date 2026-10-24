@@ -298,6 +298,170 @@ export interface ObjectPage {
   items: ObjectItem[];
   nextOffset: number | null;
 }
+/** Колонка таблицы или представления (зеркало `catalog::table::Column`). */
+export interface Column {
+  name: string;
+  /** `format_type` с модификатором: `numeric(12,2)`. */
+  dataType: string;
+  notNull: boolean;
+  /** Выражение `DEFAULT`, у генерируемой колонки — её выражение. */
+  defaultExpr: string | null;
+  /** `a` — `GENERATED ALWAYS AS IDENTITY`, `d` — `BY DEFAULT`. */
+  identity: string | null;
+  /** `s` — `GENERATED ALWAYS AS (…) STORED`. */
+  generated: string | null;
+  /** Сопоставление, только если отличается от сопоставления типа. */
+  collation: string | null;
+  /** Цель статистики; `null` — по умолчанию. */
+  statTarget: number | null;
+  /** `attstorage`: `p`, `e`, `m`, `x`. */
+  storage: string;
+  comment: string | null;
+}
+export interface Index {
+  name: string;
+  definition: string;
+  primary: boolean;
+  unique: boolean;
+  valid: boolean;
+  sizeBytes: number;
+  idxScan: number | null;
+  idxTupRead: number | null;
+  /** Последнее сканирование (PostgreSQL 16+), миллисекунды эпохи. */
+  lastIdxScanMs: number | null;
+}
+export interface Constraint {
+  name: string;
+  /** `contype`: `p`, `u`, `f`, `c`, `x`, `t`, `n`. */
+  kind: string;
+  definition: string;
+  validated: boolean;
+}
+/** Внешний ключ другой таблицы, ссылающийся на эту. */
+export interface IncomingFk {
+  constraint: string;
+  schema: string;
+  table: string;
+  definition: string;
+}
+/** У партиционированной таблицы — по всему дереву партиций: размеры и счётчики — суммы, времена — самые поздние. */
+export interface TableStats {
+  heapBytes: number;
+  indexBytes: number;
+  toastBytes: number;
+  totalBytes: number;
+  /** Оценка числа строк; -1 — таблицу ещё не анализировали. */
+  reltuples: number;
+  seqScan: number | null;
+  idxScan: number | null;
+  nLiveTup: number | null;
+  nDeadTup: number | null;
+  nModSinceAnalyze: number | null;
+  nInsSinceVacuum: number | null;
+  lastVacuumMs: number | null;
+  lastAutovacuumMs: number | null;
+  lastAnalyzeMs: number | null;
+  lastAutoanalyzeMs: number | null;
+  vacuumCount: number | null;
+  autovacuumCount: number | null;
+  analyzeCount: number | null;
+  autoanalyzeCount: number | null;
+}
+export interface Partitioning {
+  /** Ключ партиционирования (`RANGE (happened_at)`) — у партиционированной таблицы. */
+  key: string | null;
+  /** Границы (`FOR VALUES FROM (…) TO (…)`) — у партиции. */
+  bound: string | null;
+  /** Родитель партиции (`schema.table`); у потомка по `INHERITS` — `null`. */
+  parent: string | null;
+  /** Прямые партиции (`schema.table`). */
+  partitions: string[];
+}
+export interface Trigger {
+  name: string;
+  /** `tgenabled`: `O`, `D`, `R`, `A`. */
+  enabled: string;
+  definition: string;
+}
+export interface TableDetails {
+  oid: number;
+  schema: string;
+  name: string;
+  /** `r`, `p` или `f`. */
+  relkind: string;
+  /** Нежурналируемая таблица: не реплицируется на реплики и теряется при сбое. */
+  unlogged: boolean;
+  owner: string;
+  tablespace: string | null;
+  comment: string | null;
+  reloptions: string[];
+  columns: Column[];
+  indexes: Index[];
+  constraints: Constraint[];
+  incomingFks: IncomingFk[];
+  stats: TableStats;
+  partitioning: Partitioning;
+  triggers: Trigger[];
+  /** DDL по каталогу (не замена pg_dump). */
+  ddl: string;
+}
+export interface ViewDetails {
+  oid: number;
+  schema: string;
+  name: string;
+  matview: boolean;
+  owner: string;
+  comment: string | null;
+  /** Запрос представления (`pg_get_viewdef`). */
+  definition: string;
+  columns: Column[];
+  /** Заполнено ли материализованное представление; у обычного — `null`. */
+  populated: boolean | null;
+  /** Полный размер материализованного представления; у обычного — `null`. */
+  sizeBytes: number | null;
+  /** Индексы материализованного представления; у обычного — пусто. */
+  indexes: Index[];
+}
+/** `prokind`: функция, процедура, агрегат, оконная функция. */
+export type FunctionKind = "f" | "p" | "a" | "w";
+export interface FunctionDetails {
+  oid: number;
+  schema: string;
+  name: string;
+  kind: FunctionKind;
+  /** Аргументы (`pg_get_function_identity_arguments`). */
+  signature: string;
+  /** Тип результата; у процедуры и агрегата — `null`. */
+  returns: string | null;
+  language: string;
+  /** `provolatile`: `i`, `s`, `v`. */
+  volatility: string;
+  securityDefiner: boolean;
+  owner: string;
+  comment: string | null;
+  /** `CREATE OR REPLACE …`; у агрегата — `null`. */
+  definition: string | null;
+}
+export interface SequenceDetails {
+  oid: number;
+  schema: string;
+  name: string;
+  /** `smallint`, `integer` или `bigint`. */
+  dataType: string;
+  start: number;
+  increment: number;
+  min: number;
+  max: number;
+  cycle: boolean;
+  cache: number;
+  /** Последнее выданное значение; `null` — последовательность не использовалась или у роли нет права. */
+  lastValue: number | null;
+  /** У роли есть право SELECT или USAGE: без него `lastValue` и `percentUsed` пусты при любом использовании. */
+  readable: boolean;
+  percentUsed: number | null;
+  /** Колонка-владелец: `schema.table.column`. */
+  ownedBy: string | null;
+}
 export interface ExtensionInfo {
   name: string;
   version: string;

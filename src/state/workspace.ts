@@ -8,7 +8,12 @@ export type TabSpec =
   | { kind: "about" }
   /** Справка: глава и раздел руководства (F1, ссылки). */
   | { kind: "help"; chapter?: string; anchor?: string }
-  | { kind: "settings" };
+  | { kind: "settings" }
+  /** Объекты базы из дерева каталога. Таблица, представление и последовательность — по схеме и имени, функция — по oid (имена перегружены). */
+  | { kind: "table"; connectionId: string; database: string; schema: string; name: string }
+  | { kind: "view"; connectionId: string; database: string; schema: string; name: string; matview: boolean }
+  | { kind: "function"; connectionId: string; database: string; oid: number; name: string }
+  | { kind: "sequence"; connectionId: string; database: string; schema: string; name: string };
 
 export type Tab = TabSpec & { id: string };
 
@@ -25,6 +30,12 @@ export function tabId(spec: TabSpec): string {
       return "help";
     case "settings":
       return "settings";
+    case "table":
+    case "view":
+    case "sequence":
+      return `${spec.kind}:${spec.connectionId}:${spec.database}:${spec.schema}.${spec.name}`;
+    case "function":
+      return `function:${spec.connectionId}:${spec.database}:${spec.oid}`;
   }
 }
 

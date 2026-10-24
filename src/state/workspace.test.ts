@@ -38,6 +38,10 @@ describe("workspace", () => {
     expect(tabId({ kind: "settings" })).toBe("settings");
     expect(tabId({ kind: "about" })).toBe("about");
     expect(tabId({ kind: "help", chapter: "getting-started" })).toBe("help");
+    expect(tabId({ kind: "table", connectionId: "c", database: "orders", schema: "shop", name: "events" })).toBe("table:c:orders:shop.events");
+    expect(tabId({ kind: "view", connectionId: "c", database: "orders", schema: "shop", name: "v", matview: true })).toBe("view:c:orders:shop.v");
+    expect(tabId({ kind: "function", connectionId: "c", database: "orders", oid: 16401, name: "order_count" })).toBe("function:c:orders:16401");
+    expect(tabId({ kind: "sequence", connectionId: "c", database: "orders", schema: "shop", name: "s" })).toBe("sequence:c:orders:shop.s");
   });
 
   it("closeForConnection закрывает все вкладки подключения", () => {
@@ -58,6 +62,19 @@ describe("workspace", () => {
     closeForConnection("a");
     expect(useWorkspace.getState().tabs.map((t) => t.id)).toEqual(["settings"]);
     expect(useWorkspace.getState().activeId).toBe("settings");
+  });
+
+  it("вкладки объектов закрываются вместе с подключением, а повторное открытие объекта активирует ту же вкладку", () => {
+    const { open, closeForConnection } = useWorkspace.getState();
+    open({ kind: "settings" });
+    open({ kind: "table", connectionId: "a", database: "orders", schema: "shop", name: "events" });
+    open({ kind: "function", connectionId: "a", database: "orders", oid: 7, name: "f" });
+    open({ kind: "table", connectionId: "b", database: "orders", schema: "shop", name: "events" });
+    open({ kind: "table", connectionId: "a", database: "orders", schema: "shop", name: "events" });
+    expect(useWorkspace.getState().tabs).toHaveLength(4);
+    expect(useWorkspace.getState().activeId).toBe("table:a:orders:shop.events");
+    closeForConnection("a");
+    expect(useWorkspace.getState().tabs.map((t) => t.id)).toEqual(["settings", "table:b:orders:shop.events"]);
   });
 
   it("повторное open обновляет spec открытой вкладки", () => {
