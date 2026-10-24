@@ -42,6 +42,9 @@ describe("workspace", () => {
     expect(tabId({ kind: "view", connectionId: "c", database: "orders", schema: "shop", name: "v", matview: true })).toBe("view:c:orders:shop.v");
     expect(tabId({ kind: "function", connectionId: "c", database: "orders", oid: 16401, name: "order_count" })).toBe("function:c:orders:16401");
     expect(tabId({ kind: "sequence", connectionId: "c", database: "orders", schema: "shop", name: "s" })).toBe("sequence:c:orders:shop.s");
+    // Инструмент диагностики — одна вкладка на подключение и инструмент; узел в id не входит.
+    expect(tabId({ kind: "diag", connectionId: "c", tool: "pulse" })).toBe("diag:c:pulse");
+    expect(tabId({ kind: "diag", connectionId: "c", tool: "idleTx", member: "pg-2" })).toBe("diag:c:idleTx");
   });
 
   it("closeForConnection закрывает все вкладки подключения", () => {
@@ -104,5 +107,24 @@ describe("workspace", () => {
     open({ kind: "overview", connectionId: "b" });
     closeForConnection("a");
     expect(useWorkspace.getState().tabs.map((t) => t.id)).toEqual(["overview:b"]);
+  });
+
+  it("вкладка инструмента одна на подключение и инструмент: другой узел меняет member у существующей", () => {
+    const { open } = useWorkspace.getState();
+    open({ kind: "diag", connectionId: "c", tool: "locks" });
+    open({ kind: "settings" });
+    open({ kind: "diag", connectionId: "c", tool: "locks", member: "pg-2" });
+    const { tabs, activeId } = useWorkspace.getState();
+    expect(tabs.map((t) => t.id)).toEqual(["diag:c:locks", "settings"]);
+    expect(activeId).toBe("diag:c:locks");
+    expect(tabs[0]).toMatchObject({ kind: "diag", tool: "locks", member: "pg-2" });
+  });
+
+  it("closeForConnection закрывает и вкладки инструментов", () => {
+    const { open, closeForConnection } = useWorkspace.getState();
+    open({ kind: "diag", connectionId: "a", tool: "pulse" });
+    open({ kind: "diag", connectionId: "b", tool: "pulse" });
+    closeForConnection("a");
+    expect(useWorkspace.getState().tabs.map((t) => t.id)).toEqual(["diag:b:pulse"]);
   });
 });

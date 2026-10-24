@@ -1,5 +1,7 @@
 import { create } from "zustand";
 
+import type { DiagTool } from "../api/types";
+
 export type TabSpec =
   /** folderId — папка нового подключения («Новое подключение здесь»); copyOf — id подключения, копия которого создаётся. */
   | { kind: "connection-form"; connectionId: string | null; folderId?: string | null; copyOf?: string }
@@ -13,7 +15,9 @@ export type TabSpec =
   | { kind: "table"; connectionId: string; database: string; schema: string; name: string }
   | { kind: "view"; connectionId: string; database: string; schema: string; name: string; matview: boolean }
   | { kind: "function"; connectionId: string; database: string; oid: number; name: string }
-  | { kind: "sequence"; connectionId: string; database: string; schema: string; name: string };
+  | { kind: "sequence"; connectionId: string; database: string; schema: string; name: string }
+  /** Инструмент диагностики; member — закреплённый узел, нет — за лидером (одна вкладка на подключение и инструмент). */
+  | { kind: "diag"; connectionId: string; tool: DiagTool; member?: string | null };
 
 export type Tab = TabSpec & { id: string };
 
@@ -36,6 +40,8 @@ export function tabId(spec: TabSpec): string {
       return `${spec.kind}:${spec.connectionId}:${spec.database}:${spec.schema}.${spec.name}`;
     case "function":
       return `function:${spec.connectionId}:${spec.database}:${spec.oid}`;
+    case "diag":
+      return `diag:${spec.connectionId}:${spec.tool}`;
   }
 }
 

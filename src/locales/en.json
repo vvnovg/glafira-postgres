@@ -364,7 +364,9 @@
       "connected": "Connected",
       "degraded": "Some nodes are unreachable",
       "failed": "Could not connect"
-    }
+    },
+    "diagnostics": "Diagnostics",
+    "pulse": "Pulse"
   },
   "tabs": {
     "settings": "Settings",
@@ -374,7 +376,8 @@
     "newConnection": "New connection",
     "copyConnection": "Copy: {{name}}",
     "overview": "Overview: {{conn}}",
-    "unknownConnection": "?"
+    "unknownConnection": "?",
+    "diag": "{{tool}} — {{conn}}"
   },
   "settings": {
     "title": "Settings",
@@ -752,6 +755,204 @@
       "version": "{{part}}: PostgreSQL {{version}}+",
       "privilege": "{{part}}: needs the pg_monitor role",
       "patroniConfig": "{{part}}: the Patroni configuration could not be read"
+    },
+    "tools": {
+      "pulse": "Pulse",
+      "sessions": "Sessions",
+      "idleTx": "Idle in transaction",
+      "waits": "Wait profile",
+      "locks": "Locks",
+      "horizon": "xmin horizon",
+      "replication": "Replicas",
+      "slots": "Replication slots",
+      "failover": "Failover readiness",
+      "health": "Health matrix"
+    },
+    "header": {
+      "node": "Node",
+      "followLeader": "Follow the leader ({{member}})",
+      "followLeaderPending": "Follow the leader",
+      "interval": "Refresh",
+      "seconds": "{{n}} s",
+      "pause": "Pause",
+      "refresh": "Refresh",
+      "updated": "Updated {{time}}",
+      "stale": "stale",
+      "nodeChanged": "Node changed: {{from}} → {{to}}"
+    },
+    "closed": "The connection is closed",
+    "connect": "Connect",
+    "findings": {
+      "title": "Findings",
+      "none": "No problems found",
+      "fix": "What to do",
+      "open": "Open “{{tool}}”",
+      "copy": "Copy command",
+      "collapse": "Collapse findings"
+    },
+    "severity": {
+      "info": "Info",
+      "warning": "Warning",
+      "critical": "Critical"
+    },
+    "duration": {
+      "d": "{{n}} d",
+      "h": "{{n}} h",
+      "m": "{{n}} min",
+      "s": "{{n}} s"
+    },
+    "horizon": {
+      "kinds": {
+        "session": "session",
+        "preparedXact": "prepared transaction",
+        "slot": "slot",
+        "standbyFeedback": "replica feedback"
+      }
+    },
+    "locks": {
+      "otherDb": "oid {{oid}} in database {{db}}"
+    }
+  },
+  "findings": {
+    "connectionsSaturated": {
+      "title": "Connections {{usedPct}} used ({{used}} of {{available}})",
+      "fix": "See who holds connections in Sessions grouped by application; use a pooler or smaller application pools."
+    },
+    "idleInTransaction": {
+      "title": "Idle in transaction for {{maxS}}",
+      "fix": "Such transactions hold locks and the xmin horizon: fix the missing COMMIT in the application, set idle_in_transaction_session_timeout."
+    },
+    "longQuery": {
+      "title": "A query has been running for {{maxS}}",
+      "fix": "Check its plan and locks; cancel it if it blocks others."
+    },
+    "longTransaction": {
+      "title": "A transaction has been open for {{maxS}}",
+      "fix": "Long transactions hold the xmin horizon and bloat tables: find the session and the application behind it."
+    },
+    "xidAge": {
+      "title": "Transaction ID age is {{agePct}} of the wraparound limit",
+      "fix": "Find what holds vacuum (xmin horizon) and let autovacuum freeze the oldest tables."
+    },
+    "lockWait": {
+      "title": "{{count}} sessions wait for locks, the longest {{maxS}}",
+      "fix": "Open Locks to find the root blocker."
+    },
+    "walDirSize": {
+      "title": "pg_wal is {{walDirBytes}} with max_wal_size {{maxWalSizeBytes}}",
+      "fix": "WAL is usually held by an inactive replication slot or failing archiving: check Replication slots."
+    },
+    "deadlocks": {
+      "title": "Deadlocks in the interval: {{count}}",
+      "fix": "Details are only in the server log; make the application take locks in one order."
+    },
+    "lockShare": {
+      "title": "Lock waits take {{sharePct}} of active time",
+      "fix": "Open Locks to find who blocks."
+    },
+    "rootBlocker": {
+      "title": "Session {{pid}} blocks {{count}} sessions, the longest wait {{maxS}}",
+      "fix": "Look at its transaction; cancelling or ending it releases the chain."
+    },
+    "ddlQueue": {
+      "title": "DDL on {{relation}} is queued and blocks {{count}} sessions",
+      "fix": "Cancel the DDL to release the queue, or the query it waits for; run migrations with lock_timeout."
+    },
+    "xminHorizon": {
+      "title": "The xmin horizon is held by {{kindLabel}} {{name}} ({{xminAge}} transactions)",
+      "fix": "Vacuum cannot clean rows newer than the horizon: end the transaction, drop or fix the slot, or roll back the prepared transaction."
+    },
+    "replicaLag": {
+      "title": "Replica lag: {{lag}}",
+      "fix": "Check the replica's load, network and replay conflicts in Replicas."
+    },
+    "replicaNotStreaming": {
+      "title": "Replicas not streaming: {{count}} (state {{state}})",
+      "fix": "A replica in catchup or backup is not a failover candidate yet."
+    },
+    "replicaReplyStale": {
+      "title": "Replicas silent for {{maxS}}: {{count}}",
+      "fix": "The replica stopped confirming WAL: check its network and wal_receiver_status_interval."
+    },
+    "syncStandbyMissing": {
+      "title": "synchronous_standby_names is set but no synchronous replica is connected",
+      "fix": "Commits wait for a synchronous replica: bring one back or change synchronous_standby_names."
+    },
+    "walReceiverDown": {
+      "title": "The WAL receiver is not streaming",
+      "fix": "The replica is not receiving WAL from its upstream: check primary_conninfo, the slot and the network."
+    },
+    "replayPaused": {
+      "title": "WAL replay is paused",
+      "fix": "Resume it with pg_wal_replay_resume() if the pause is not intentional."
+    },
+    "recoveryConflicts": {
+      "title": "New recovery conflicts: {{count}}",
+      "fix": "Queries on the replica are cancelled to apply WAL: consider hot_standby_feedback or max_standby_streaming_delay."
+    },
+    "recoveryConflictsTotal": {
+      "title": "Recovery conflicts since the statistics reset: {{count}}",
+      "fix": "No new conflicts now; watch the counter."
+    },
+    "slotRetainsWal": {
+      "title": "Inactive slot {{name}} retains {{retainedBytes}} of WAL",
+      "fix": "If its consumer is gone, drop the slot; otherwise bring the consumer back; set max_slot_wal_keep_size."
+    },
+    "slotLost": {
+      "title": "Slot {{name}} lost the WAL it needs",
+      "fix": "The consumer cannot continue: drop the slot and resynchronize the consumer."
+    },
+    "subscriptionErrors": {
+      "title": "New subscription errors: {{count}}",
+      "fix": "Details are in the subscriber's server log."
+    },
+    "failoverCandidates": {
+      "title": "Failover candidates ready: {{count}}",
+      "fix": "See the reasons per replica in Failover readiness."
+    },
+    "clusterPaused": {
+      "title": "The cluster is paused: automatic failover is off",
+      "fix": "Resume the cluster when maintenance is over."
+    },
+    "syncModeWithoutSync": {
+      "title": "synchronous_mode is on but there is no synchronous replica",
+      "fix": "Failover is impossible and with synchronous_mode_strict writes stop: bring a replica back to sync."
+    },
+    "patroniTiming": {
+      "title": "ttl {{ttlS}} is less than loop_wait {{loopWaitS}} + 2 × retry_timeout {{retryTimeoutS}}",
+      "fix": "The leader key may expire during a DCS hiccup: raise ttl (patronictl edit-config)."
+    },
+    "healthPrimary": {
+      "title": "The leader address answers 200 on {{count}} members",
+      "fix": "A load balancer would send writes to the wrong place or nowhere: check the topology."
+    },
+    "healthUnhealthy": {
+      "title": "{{member}}: /health does not answer 200",
+      "fix": "PostgreSQL on the member is not running."
+    },
+    "replicaOutOfPool": {
+      "title": "{{member}} is a replica but /replica does not answer 200",
+      "fix": "The load balancer excludes it from reads: lag, the noloadbalance tag or a stopped replica."
+    },
+    "cacheHitLow": {
+      "title": "Cache hit in the interval: {{hitPct}}",
+      "fix": "Reads go to disk: check heavy queries and shared_buffers."
+    },
+    "tempFiles": {
+      "title": "Temporary files in the interval: {{count}}",
+      "fix": "Sorts and hashes spill to disk: look at work_mem for the heavy queries."
+    },
+    "noIdleTimeout": {
+      "title": "idle_in_transaction_session_timeout is off",
+      "fix": "Set it for the application role: {{command}}"
+    },
+    "hiddenQueries": {
+      "title": "Texts of {{count}} sessions are hidden",
+      "fix": "Grant pg_monitor to the diagnostics role."
+    },
+    "lockCycle": {
+      "title": "{{count}} sessions wait for each other",
+      "fix": "The deadlock detector will resolve it within deadlock_timeout; details are in the server log."
     }
   },
   "hints": {

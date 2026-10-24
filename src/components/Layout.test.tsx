@@ -75,6 +75,21 @@ describe("Layout tabs", () => {
     expect(stripe.style.background).toBe(hex(ENV_COLORS.prod));
   });
 
+  it("вкладка инструмента диагностики: заголовок «инструмент — подключение», значок окружения", async () => {
+    useWorkspace.setState({
+      tabs: [
+        { kind: "diag", connectionId: "c1", tool: "idleTx", id: "diag:c1:idleTx" },
+        { kind: "diag", connectionId: "c1", tool: "locks", member: "pg-2", id: "diag:c1:locks" },
+      ],
+      activeId: "diag:c1:idleTx",
+    });
+    renderWithClient(<Layout />);
+    const list = screen.getByRole("tablist");
+    expect(await within(list).findByRole("tab", { name: "Idle in transaction — prod-1" })).toBeInTheDocument();
+    expect(within(list).getByRole("tab", { name: "Блокировки — prod-1" })).toBeInTheDocument();
+    expect(within(list).getAllByText("PROD")).toHaveLength(2);
+  });
+
   it("форма подключения: в заголовке имя, а не id; без подключения — прочерк-заглушка", async () => {
     useWorkspace.setState({
       tabs: [

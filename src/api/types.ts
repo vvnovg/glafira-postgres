@@ -10,6 +10,7 @@ export type ErrorCode =
   | "NODE_UNAVAILABLE"
   | "SSH_ERROR"
   | "FEATURE_UNAVAILABLE"
+  | "RECOVERY_CONFLICT"
   | "INTERNAL";
 
 /** Текст из Rust: ключ словаря, параметры и английский текст (запасной вариант). */
@@ -177,6 +178,16 @@ export interface ImportPreview {
   needsPasswords: number;
 }
 
+/** Запланированный switchover кластера (`scheduled_switchover` из `/cluster`); `at` — время как есть (ISO 8601 со смещением). */
+export interface ScheduledSwitchover {
+  at: string;
+  from: string | null;
+  to: string | null;
+}
+export interface ScheduledRestart {
+  at: string;
+  postgresVersion: string | null;
+}
 export type Role = "primary" | "standbyLeader" | "syncStandby" | "quorumStandby" | "replica" | "unknown";
 export interface Member {
   name: string;
@@ -192,6 +203,8 @@ export interface Member {
   upstream: string | null;
   tags: Record<string, unknown>;
   pendingRestart: boolean;
+  /** Запланированный restart участника (`scheduled_restart` из `/cluster`). */
+  scheduledRestart: ScheduledRestart | null;
   serverVersion: string | null;
   patroniVersion: string | null;
   dcsLastSeenMs: number | null;
@@ -210,6 +223,7 @@ export interface Topology {
   observedAtMs: number;
   scope: string | null;
   paused: boolean | null;
+  scheduledSwitchover: ScheduledSwitchover | null;
   members: Member[];
   warnings: TopologyWarning[];
 }
@@ -520,3 +534,464 @@ export interface LanguageSettings {
   reason: LanguageReason;
   languages: string[];
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// Диагностика (P2a): зеркало JSON отчётов Rust (`diag::DiagReport`, `pg_advisor::*`), все поля camelCase.
+// Длительности — секунды (`…S`) от `now()` сервера, размеры — байты (`…Bytes`), доли — проценты (`…Pct`), если не сказано иное.
+// ---------------------------------------------------------------------------------------------------------------
+
+/** Вкладка инструмента. `idleTx` — вкладка фронтенда поверх `sessions`, в Rust отдельного инструмента нет. */
+export type DiagTool = "pulse" | "sessions" | "idleTx" | "waits" | "locks" | "horizon" | "replication" | "slots" | "failover" | "health";
+/** Инструмент Rust (`diag::Tool`). */
+export type RustTool = Exclude<DiagTool, "idleTx">;
+export type Severity = "info" | "warning" | "critical";
+export type FindingTarget =
+  | { kind: "session"; pid: number; backendStartUs: number }
+  | { kind: "slot"; name: string }
+  | { kind: "member"; name: string }
+  | { kind: "relation"; name: string }
+  | { kind: "database"; name: string };
+/** Куда ведёт кнопка находки; `tool` — id вкладки (`idleTx` допустим). */
+export type FindingLink = { kind: "openTool"; tool: DiagTool; member: string | null };
+export interface Finding {
+  /** Ключ текста: `findings.<id>.title` и `findings.<id>.fix`. */
+  id: string;
+  severity: Severity;
+  member: string | null;
+  target: FindingTarget | null;
+  /** Имена по единицам: `…S` — секунды, `…Bytes` — байты, `…Pct` — проценты, `count` — число объектов, `command` — готовая команда. */
+  params: Record<string, string | number | boolean | null>;
+  links: FindingLink[];
+}
+/** Что не показано и почему (версия сервера, нет права); `member` — узел у инструментов кластера, иначе поля нет. */
+export interface Unavailable {
+  part: string;
+  member?: string;
+  reason: LocalizedText;
+}
+export interface DiagRequest {
+  tool: RustTool;
+  /** `null` — «за лидером»; у инструментов кластера игнорируется. */
+  member: string | null;
+  /** Только `waits`: 300, 900 или 3600. */
+  windowS?: number;
+}
+
+// Сессии и idle in transaction (`pg_advisor::rules::sessions`).
+export interface SessionRow {
+  pid: number;
+  leaderPid: number | null;
+  backendType: string | null;
+  database: string | null;
+  user: string | null;
+  application: string | null;
+  clientAddr: string | null;
+  clientPort: number | null;
+  /** `backend_start` в микросекундах эпохи: вместе с `pid` — ключ сессии. */
+  backendStartUs: number | null;
+  xactAgeS: number | null;
+  queryAgeS: number | null;
+  stateAgeS: number | null;
+  state: string | null;
+  waitEventType: string | null;
+  waitEvent: string | null;
+  backendXid: string | null;
+  xminAge: number | null;
+  /** PostgreSQL 14+. */
+  queryId: number | null;
+  query: string | null;
+  /** Текст обрезан по пределу списка (16 384 символа). */
+  queryTruncated: boolean;
+  /** Кто блокирует сессию — только у ждущих блокировку. */
+  blockedBy: number[];
+  locksHeld: number;
+  /** Соединение самой Glafira. */
+  glafira: boolean;
+}
+export interface SessionsData {
+  rows: SessionRow[];
+  settings: { idleInTransactionSessionTimeoutMs: number | null; trackActivityQuerySize: number | null };
+}
+
+// Пульс (`diag::pulse`, `pg_advisor::rules::pulse`).
+export interface ConnectionsByState {
+  active: number;
+  idle: number;
+  idleInTransaction: number;
+  other: number;
+}
+export interface PulseFacts {
+  used: number;
+  /** Доступно обычным ролям: `max_connections` без резервов. */
+  available: number;
+  byState: ConnectionsByState;
+  longestTransactionS: number | null;
+  longestQueryS: number | null;
+  longestIdleInTransactionS: number | null;
+  lockWaiting: number;
+  longestLockWaitS: number | null;
+  maxXidAge: number;
+  /** Доля от 2³¹, проценты. */
+  xidAgePct: number;
+  /** `null` — нет роли `pg_monitor`. */
+  walDirBytes: number | null;
+  maxWalSizeBytes: number | null;
+  /** Из топологии, не из SQL узла. */
+  lagBytes: number | null;
+  replayDelayMs: number | null;
+}
+/** Скорости и приросты между двумя снимками счётчиков; без сравнимого снимка поля пусты. */
+export interface PulseRates {
+  tps: number | null;
+  commitsPerS: number | null;
+  rollbacksPerS: number | null;
+  cacheHitPct: number | null;
+  tempFilesPerS: number | null;
+  tempBytesPerS: number | null;
+  walBytesPerS: number | null;
+  deadlocks: number | null;
+  tempFiles: number | null;
+  blksRead: number | null;
+}
+export interface PulseNode {
+  member: string;
+  role: Role;
+  /** Достижимость по топологии; при `error` факты пусты. */
+  reachable: boolean;
+  error: AppError | null;
+  facts: PulseFacts | null;
+  rates: PulseRates | null;
+}
+export interface PulseData {
+  nodes: PulseNode[];
+}
+
+// Профиль ожиданий (`pg_advisor::ash`).
+export type WaitClass = "cpu" | "lock" | "lwlock" | "io" | "ipc" | "client" | "timeout" | "bufferPin" | "extension" | "activity" | "other";
+export interface WaitBucket {
+  startMs: number;
+  /** Сколько секунд интервала работал сэмплер. */
+  sampledS: number;
+  /** Среднее число активных сессий по классам; отсутствующий класс — 0. */
+  aas: Partial<Record<WaitClass, number>>;
+}
+/** Промежуток в истории: сэмплер не работал. */
+export interface WaitGap {
+  fromMs: number;
+  toMs: number;
+}
+export interface TopEvent {
+  class: WaitClass;
+  /** У `cpu` пусто. */
+  event: string | null;
+  samples: number;
+  /** Доля сэмплов, 0..1. */
+  share: number;
+}
+export interface TopQuery {
+  /** `id:<query_id>` или `text:<хэш>`. */
+  key: string;
+  queryId: number | null;
+  text: string;
+  samples: number;
+  share: number;
+  /** `Тип:событие`, `Тип` или `CPU*`. */
+  topEvent: string | null;
+}
+export interface TopName {
+  name: string;
+  samples: number;
+  share: number;
+}
+export interface WaitsData {
+  windowS: number;
+  bucketS: number;
+  samplerRunning: boolean;
+  /** Окно длиннее накопленной истории. */
+  truncated: boolean;
+  totalSamples: number;
+  buckets: WaitBucket[];
+  gaps: WaitGap[];
+  topEvents: TopEvent[];
+  topQueries: TopQuery[];
+  byApplication: TopName[];
+  byUser: TopName[];
+  byDatabase: TopName[];
+  byClient: TopName[];
+}
+
+// Блокировки (`pg_advisor::locktree`).
+export interface LockSession {
+  pid: number;
+  backendStartUs: number | null;
+  user: string | null;
+  application: string | null;
+  database: string | null;
+  state: string | null;
+  query: string | null;
+  xactAgeS: number | null;
+  queryAgeS: number | null;
+}
+/** Блокировка, которую сессия запросила и не получила. */
+export interface WaitingLock {
+  locktype: string | null;
+  mode: string | null;
+  /** Имя — только для отношения БД соединения. */
+  relation: string | null;
+  relationOid: number | null;
+  /** Для отношения другой БД `relation` пуст: показывается «oid N в БД X». */
+  relationDatabase: string | null;
+  waitS: number | null;
+  /** Ожидание оценено по `state_change` (PostgreSQL 13), а не измерено. */
+  approx: boolean;
+}
+export interface LockNode {
+  session: LockSession;
+  /** У корня-блокирующего пусто; у ждущего корня (чей блокирующий не виден) задано. */
+  lock: WaitingLock | null;
+  /** Остальные блокирующие; 0 — подготовленная транзакция или уже завершившаяся сессия. */
+  alsoBlockedBy: number[];
+  /** Сколько сессий в поддереве (без самого узла); у ждущего корня может быть 0. */
+  victims: number;
+  children: LockNode[];
+}
+/** DDL в очереди: ждёт блокировку отношения и сам задерживает других. */
+export interface DdlQueueItem {
+  session: LockSession;
+  /** Кого ждёт сам DDL; `null` — блокирующий не виден (подготовленная транзакция). */
+  waitsFor: number | null;
+  waitS: number | null;
+  /** Сколько сессий стоит за DDL. */
+  queued: number;
+  relation: string | null;
+  relationOid: number | null;
+  relationDatabase: string | null;
+  mode: string;
+}
+export interface LocksData {
+  roots: LockNode[];
+  /** Циклы ожидания: pid участников по возрастанию. */
+  cycles: number[][];
+  ddlQueue: DdlQueueItem[];
+}
+
+// Горизонт xmin (`pg_advisor::rules::horizon`).
+export type HolderKind = "session" | "preparedXact" | "slot" | "standbyFeedback";
+export interface Holder {
+  kind: HolderKind;
+  /** Сессия — `pid`, prepared transaction — `gid`, слот — имя, обратная связь — `application_name`. */
+  name: string;
+  /** Участник топологии: у `standbyFeedback` и у слота с активным отправителем WAL. */
+  member: string | null;
+  xminAge: number;
+  durationS: number | null;
+  pid: number | null;
+  backendStartUs: number | null;
+  user: string | null;
+  application: string | null;
+  database: string | null;
+  state: string | null;
+  gid: string | null;
+  slotType: string | null;
+  active: boolean | null;
+  /** Слот держит горизонт каталога, а не данных. */
+  catalog: boolean;
+  clientAddr: string | null;
+}
+export interface HorizonData {
+  /** По убыванию `xminAge`. */
+  holders: Holder[];
+  hotStandbyFeedback: boolean | null;
+}
+
+// Реплики (`pg_advisor::rules::replication`).
+export interface Sender {
+  pid: number;
+  user: string | null;
+  application: string | null;
+  /** Участник топологии по `application_name` (без DNS); не сопоставился — `null`. */
+  member: string | null;
+  clientAddr: string | null;
+  state: string | null;
+  syncState: string | null;
+  syncPriority: number | null;
+  sentLagBytes: number | null;
+  writeLagBytes: number | null;
+  flushLagBytes: number | null;
+  replayLagBytes: number | null;
+  writeLagS: number | null;
+  flushLagS: number | null;
+  replayLagS: number | null;
+  /** Сколько прошло с последнего ответа реплики. */
+  replyAgeS: number | null;
+  slotName: string | null;
+  xminAge: number | null;
+}
+export interface Receiver {
+  status: string | null;
+  senderHost: string | null;
+  senderPort: number | null;
+  slotName: string | null;
+  receivedTli: number | null;
+  lastMsgAgeS: number | null;
+  latestEndAgeS: number | null;
+}
+export interface Replay {
+  receiveReplayGapBytes: number | null;
+  replayDelayS: number | null;
+  /** `not paused` / `pause requested` / `paused`. */
+  pause: string | null;
+}
+export interface Conflicts {
+  tablespace: number;
+  lock: number;
+  snapshot: number;
+  bufferpin: number;
+  deadlock: number;
+  /** PostgreSQL 16+. */
+  activeLogicalslot: number | null;
+  /** Прирост с прошлого запроса того же узла; без сравнимого снимка — `null`. */
+  growth: number | null;
+}
+export interface ReplicationData {
+  inRecovery: boolean;
+  senders: Sender[];
+  synchronousStandbyNames: string | null;
+  synchronousCommit: string | null;
+  receiver: Receiver | null;
+  replay: Replay | null;
+  conflicts: Conflicts | null;
+  hotStandbyFeedback: boolean | null;
+  /** `-1` — ждать без предела. */
+  maxStandbyStreamingDelayMs: number | null;
+  /** Роль без `pg_monitor`: сведения чужих сессий скрыты, пустые поля не признак поломки. */
+  detailsHidden: boolean;
+}
+
+// Слоты и подписки (`pg_advisor::rules::slots`).
+export type PatroniSlot = "member" | "permanent";
+export interface Slot {
+  name: string;
+  /** `physical` / `logical`. */
+  slotType: string;
+  plugin: string | null;
+  database: string | null;
+  temporary: boolean;
+  active: boolean;
+  activePid: number | null;
+  xminAge: number | null;
+  catalogXminAge: number | null;
+  restartLsn: string | null;
+  confirmedFlushLsn: string | null;
+  /** `reserved` / `extended` / `unreserved` / `lost`. */
+  walStatus: string | null;
+  safeWalSize: number | null;
+  retainedBytes: number | null;
+  /** PostgreSQL 14+. */
+  twoPhase: boolean | null;
+  /** PostgreSQL 16+. */
+  conflicting: boolean | null;
+  /** PostgreSQL 17+: момент (мс эпохи), с которого слот неактивен. */
+  inactiveSinceMs: number | null;
+  /** PostgreSQL 17+. */
+  invalidationReason: string | null;
+  /** PostgreSQL 17+. */
+  failover: boolean | null;
+  /** PostgreSQL 17+. */
+  synced: boolean | null;
+  /** Только у подключения `patroni`. */
+  patroni: PatroniSlot | null;
+}
+export interface Subscription {
+  name: string;
+  /** Нет процесса применения — подписка не работает. */
+  pid: number | null;
+  receivedLsn: string | null;
+  lastMsgAgeS: number | null;
+  latestEndAgeS: number | null;
+  /** PostgreSQL 15+. */
+  applyErrorCount: number | null;
+  syncErrorCount: number | null;
+}
+export interface SlotsData {
+  slots: Slot[];
+  subscriptions: Subscription[];
+  /** Мегабайты; `-1` — без ограничения. */
+  maxSlotWalKeepSizeMb: number | null;
+  subscriptionErrorsGrowth: number | null;
+}
+
+// Готовность к failover (`pg_advisor::failover`) и матрица health (`diag::patroni`).
+export type SyncMode = "off" | "on" | "quorum";
+export interface DynConfig {
+  maximumLagOnFailover: number;
+  synchronousMode: SyncMode;
+  synchronousModeStrict: boolean;
+  synchronousNodeCount: number | null;
+  ttl: number | null;
+  loopWait: number | null;
+  retryTimeout: number | null;
+  /** Имена постоянных слотов. */
+  permanentSlots: string[];
+}
+export type FailoverReason = "unreachable" | "notStreaming" | "lagTooHigh" | "lagUnknown" | "noFailoverTag" | "zeroPriority" | "notSynchronous";
+export interface Candidate {
+  member: string;
+  ready: boolean;
+  reasons: FailoverReason[];
+  lagBytes: number | null;
+  pendingRestart: boolean;
+}
+export interface FailoverData {
+  paused: boolean;
+  config: DynConfig;
+  candidates: Candidate[];
+  readyCount: number;
+}
+export interface HealthCell {
+  endpoint: string;
+  /** HTTP-код; `null` — API не ответил (причина в `error`). */
+  status: number | null;
+  error: AppError | null;
+}
+export interface HealthMember {
+  member: string;
+  apiUrl: string | null;
+  cells: HealthCell[];
+}
+export interface HealthData {
+  endpoints: string[];
+  members: HealthMember[];
+}
+
+/** Данные инструмента; `kind` — id инструмента Rust. */
+export type DiagData =
+  | ({ kind: "pulse" } & PulseData)
+  | ({ kind: "sessions" } & SessionsData)
+  | ({ kind: "waits" } & WaitsData)
+  | ({ kind: "locks" } & LocksData)
+  | ({ kind: "horizon" } & HorizonData)
+  | ({ kind: "replication" } & ReplicationData)
+  | ({ kind: "slots" } & SlotsData)
+  | ({ kind: "failover" } & FailoverData)
+  | ({ kind: "health" } & HealthData);
+/** Конверт отчёта. У инструментов кластера `member`, `serverVersionNum` и `inRecovery` пусты. */
+export interface DiagReport<D extends DiagData = DiagData> {
+  tool: RustTool;
+  member: string | null;
+  followsLeader: boolean;
+  /** Время сервера (узловые) или приложения (кластера), мс эпохи. */
+  observedAtMs: number;
+  serverVersionNum: number | null;
+  inRecovery: boolean | null;
+  data: D;
+  findings: Finding[];
+  unavailable: Unavailable[];
+}
+
+/** События сэмплера узла (канал `start_sampler`). */
+export type SamplerEvent =
+  | { kind: "tick"; atMs: number; active: number; waiting: number }
+  | { kind: "gap"; fromMs: number; toMs: number }
+  | { kind: "error"; error: AppError }
+  | { kind: "stopped" };

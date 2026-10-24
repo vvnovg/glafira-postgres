@@ -7,6 +7,7 @@ import { SequenceTab } from "./catalog/SequenceTab";
 import { TableTab } from "./catalog/TableTab";
 import { ViewTab } from "./catalog/ViewTab";
 import { ConnectionFormTab } from "./connections/ConnectionFormTab";
+import { DiagTab } from "./diag/DiagTab";
 import { Overview } from "./overview/Overview";
 import { SettingsPanel } from "./settings/SettingsPanel";
 
@@ -56,5 +57,7 @@ export function TabContent({ tab, active = true }: { tab: Tab; active?: boolean 
       return <FunctionTab connectionId={tab.connectionId} database={tab.database} oid={tab.oid} name={tab.name} />;
     case "sequence":
       return <SequenceTab connectionId={tab.connectionId} database={tab.database} schema={tab.schema} name={tab.name} />;
+    case "diag":
+      return <DiagTab connectionId={tab.connectionId} tool={tab.tool} member={tab.member ?? null} active={active} tabId={tab.id} />;
   }
 }

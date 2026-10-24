@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { i18n } from "../i18n";
-import { formatBytes, formatCount, formatInt64, formatPercent, formatTimestamp } from "./format";
+import { formatBytes, formatCount, formatDuration, formatInt64, formatPercent, formatTimestamp } from "./format";
 
 describe("format", () => {
   it("timestamp в UTC с миллисекундами", () => {
@@ -83,5 +83,17 @@ describe("форматы по языку", () => {
     expect(formatPercent(49.5)).toBe("49.5 %");
     expect(formatInt64(1234567)).toBe("1,234,567");
     expect(formatInt64(2 ** 63)).toBe("9,223,372,036,854,775,807");
+  });
+
+  it("длительность — две старшие единицы", async () => {
+    await i18n.changeLanguage("ru");
+    expect([formatDuration(null), formatDuration(0.4), formatDuration(42), formatDuration(3725), formatDuration(90061)]).toEqual(["—", "0 с", "42 с", "1 ч 2 мин", "1 д 1 ч"]);
+    await i18n.changeLanguage("en");
+    expect(formatDuration(125)).toBe("2 min 5 s");
+  });
+
+  it("длительность: отрицательное значение сервера (−0,001 с) показывается как 0, нулевые единицы пропускаются", async () => {
+    await i18n.changeLanguage("ru");
+    expect([formatDuration(-0.001), formatDuration(-5), formatDuration(3600), formatDuration(86_400 + 5)]).toEqual(["0 с", "0 с", "1 ч", "1 д 5 с"]);
   });
 });

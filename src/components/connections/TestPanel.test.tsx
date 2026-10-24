@@ -133,6 +133,7 @@ describe("TestPanel", () => {
         observedAtMs: 0,
         scope: null,
         paused: null,
+        scheduledSwitchover: null,
         members: [],
         warnings: [{ kind: "multiplePrimaries", members: ["a", "b"] }, { kind: "memberUnreachable", name: "c" }],
       },

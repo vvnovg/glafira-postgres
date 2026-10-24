@@ -64,6 +64,21 @@ describe("CatalogNodes", () => {
     expect(await screen.findByText("events_2026_10")).toBeInTheDocument();
   });
 
+  it("группа «Диагностика» — после «Ролей»; у сервера без инструментов Patroni, у Patroni с ними", async () => {
+    const user = userEvent.setup();
+    const { unmount } = renderWithClient(<CatalogNodes connection={conn} view={topologyView()} />);
+    const toggles = screen.getAllByRole("button").map((b) => b.textContent?.replace(/^[▸▾]/, ""));
+    expect(toggles.slice(-3)).toEqual(["Базы данных (с узла pg-1)", "Роли", "Диагностика"]);
+    await user.click(screen.getByRole("button", { name: "Диагностика" }));
+    expect(screen.getByRole("button", { name: "Матрица health" })).toBeInTheDocument();
+    unmount();
+
+    renderWithClient(<CatalogNodes connection={{ ...conn, kind: "server" }} view={topologyView({ topology: { ...topologyView().topology!, kind: "server" } })} />);
+    await user.click(screen.getByRole("button", { name: "Диагностика" }));
+    expect(screen.getByRole("button", { name: "Слоты репликации" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Матрица health" })).not.toBeInTheDocument();
+  });
+
   it("фильтр объектов уходит в запрос", async () => {
     const user = userEvent.setup();
     // Поле фильтра появляется у групп больше 20 объектов.

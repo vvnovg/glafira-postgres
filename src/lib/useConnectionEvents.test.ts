@@ -111,6 +111,17 @@ describe("события наблюдения", () => {
     expect(qc.getQueryData(["memberFacts", "other", "pg-1"])).toBeDefined();
   });
 
+  it("отчёты инструментов диагностики: отключение удаляет их у своего подключения, у чужого остаются", () => {
+    const qc = new QueryClient();
+    qc.setQueryData(["diag", "c", "locks", "", 0], { tool: "locks" });
+    qc.setQueryData(["diag", "c", "waits", "pg-2", 900], { tool: "waits" });
+    qc.setQueryData(["diag", "other", "locks", "", 0], { tool: "locks" });
+    applyState(qc, { connectionId: "c", state: "disconnected", error: null });
+    expect(qc.getQueryData(["diag", "c", "locks", "", 0])).toBeUndefined();
+    expect(qc.getQueryData(["diag", "c", "waits", "pg-2", 900])).toBeUndefined();
+    expect(qc.getQueryData(["diag", "other", "locks", "", 0])).toEqual({ tool: "locks" });
+  });
+
   it("вкладки объектов: смена узла каталога и отключение затрагивают только их подключение", () => {
     const qc = new QueryClient();
     const keys = [
@@ -136,6 +147,7 @@ describe("события наблюдения", () => {
       ["catalog", "c", "table", "orders", "shop", "events"],
       ["catalog", "c", "function", "orders", 16401],
       ["memberFacts", "c", "pg-1"],
+      ["diag", "c", "sessions", "pg-1", 0],
     ];
     const rest = [["catalog", "other", "table", "orders", "shop", "events"], ["topology", "c"], ["connections"]];
     for (const k of [...mine, ...rest]) qc.setQueryData(k, {});

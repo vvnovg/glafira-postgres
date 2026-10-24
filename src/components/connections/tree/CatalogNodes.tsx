@@ -1,5 +1,4 @@
 import { useQuery } from "@tanstack/react-query";
-import { type ReactNode, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../../../api/client";
 import type { ConnectionProfile, ObjectKind, SchemaInfo, TopologyView } from "../../../api/types";
@@ -8,31 +7,12 @@ import { roleLabel } from "../../../lib/topology";
 import { useWorkspace } from "../../../state/workspace";
 import { ErrorBanner } from "../../common/ErrorBanner";
 import { Glyph } from "../../common/Glyph";
+import { DiagnosticsNodes } from "./DiagnosticsNodes";
 import { ObjectList } from "./ObjectList";
+import { TreeGroup } from "./TreeGroup";
 
 /** Лаг реплики, начиная с которого узел помечается предупреждением. */
 const LAG_WARN_BYTES = 16 * 1024 * 1024;
-
-/** Ленивый узел дерева: содержимое строится только в раскрытом виде. */
-export function TreeGroup({ label, extra, children }: { label: string; extra?: ReactNode; children: () => ReactNode }) {
-  const [open, setOpen] = useState(false);
-  const toggleId = useId();
-  return (
-    <li>
-      <div className="tree-conn tree-wrap">
-        <button type="button" id={toggleId} className="tree-folder-toggle" aria-expanded={open} onClick={() => setOpen(!open)}>
-          <span className="tree-caret" aria-hidden="true">
-            {open ? "▾" : "▸"}
-          </span>
-          <span className="tree-name">{label}</span>
-        </button>
-        {extra}
-      </div>
-      {/* Список назван по кнопке-заголовку: вложенные «Таблицы» разных схем различимы. */}
-      {open && <ul aria-labelledby={toggleId}>{children()}</ul>}
-    </li>
-  );
-}
 
 /**
  * Настройка «Показывать системные объекты». Пока она не прочитана, запросы каталога не стартуют:
@@ -236,6 +216,8 @@ export function CatalogNodes({ connection, view }: { connection: ConnectionProfi
           <TreeGroup label={t("sidebar.roles")}>
             {() => (member ? <RoleList connectionId={connection.id} /> : <li className="tree-notice">{t("sidebar.noCatalogNode")}</li>)}
           </TreeGroup>
+          {/* Инструменты диагностики сами выбирают узел («за лидером»), узел каталога им не нужен. */}
+          <DiagnosticsNodes connectionId={connection.id} kind={connection.kind} />
         </>
       )}
     </ul>

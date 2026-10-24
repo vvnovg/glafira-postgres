@@ -206,3 +206,38 @@ tr.invalid { color: var(--danger-text); }
 .tree-wrap .tree-folder-toggle.caret-only { flex: none; }
 /* Имя объекта в списке — кнопка, открывающая вкладку: при наведении и фокусе подчёркнуто. */
 button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decoration: underline; }
+
+/* Вкладка инструмента диагностики: шапка, находки и тело. */
+.diag-head { gap: 12px; }
+.diag-head select { max-width: 100%; }
+.diag-note { margin: 0; padding: 4px 8px; border-left: 3px solid var(--accent); background: var(--bg-alt); }
+.diag-closed { display: flex; align-items: center; gap: 12px; }
+.diag-closed p { margin: 0; }
+.diag-body { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+/* Отчёт прошлого узла на время загрузки нового. */
+.diag-pending { opacity: 0.6; }
+.diag-unavailable p { margin: 0 0 2px; }
+.diag-unavailable-node { font-weight: 600; }
+.diag-raw { max-height: 60vh; overflow: auto; padding: 8px; background: var(--bg-alt); border: 1px solid var(--border); border-radius: 4px; word-break: normal; overflow-wrap: anywhere; }
+.findings { border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; }
+.findings-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.findings-head h3 { margin: 0; font-size: 13px; }
+.findings-head button.icon { font-size: 16px; line-height: 1; color: var(--muted); }
+.findings > p { margin: 4px 0 0; }
+.findings-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+/* Строгость: цвет полосы слева плюс текстовая метка — смысл не держится на одном цвете. */
+.finding { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px 6px 10px; border-left: 4px solid var(--border); border-radius: 0 4px 4px 0; background: var(--bg-alt); }
+.finding-main { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; }
+.finding-sev { font-size: 11px; font-weight: 600; }
+.finding-title { min-width: 0; overflow-wrap: anywhere; }
+.finding details { color: var(--muted); }
+.finding summary { cursor: pointer; }
+.finding details p { margin: 4px 0 0; color: var(--fg); overflow-wrap: anywhere; }
+.finding-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.sev-critical { border-left-color: var(--danger); }
+/* Метки подмешивают цвет текста: чистые --danger-text / --warn / --accent на сером фоне карточки дают контраст ниже 4,5:1. */
+.sev-critical .finding-sev { color: color-mix(in srgb, var(--danger-text) 85%, var(--fg)); }
+.sev-warning { border-left-color: var(--warn); }
+.sev-warning .finding-sev { color: color-mix(in srgb, var(--warn) 55%, var(--fg)); }
+.sev-info { border-left-color: var(--accent); }
+.sev-info .finding-sev { color: color-mix(in srgb, var(--accent) 70%, var(--fg)); }

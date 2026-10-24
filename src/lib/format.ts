@@ -1,4 +1,4 @@
-import { currentLocale } from "../i18n";
+import { currentLocale, i18n } from "../i18n";
 
 const pad = (n: number, w = 2) => String(n).padStart(w, "0");
 
@@ -56,4 +56,23 @@ export function formatInt64(n: number | null): string {
   // Intl дописывает нули после 17 значащих цифр (…776 000); через BigInt печатается точное значение числа.
   if (Math.abs(n) > Number.MAX_SAFE_INTEGER) return BigInt(n).toLocaleString(locale);
   return num(n);
+}
+
+/**
+ * Длительность в секундах — две старшие ненулевые единицы («1 ч 2 мин», «42 с»); null — «—».
+ * Сервер может отдать небольшое отрицательное значение (−0,001 с: `now()` — начало транзакции, а событие позже): оно показывается как «0 с».
+ */
+export function formatDuration(seconds: number | null): string {
+  if (seconds === null) return "—";
+  const s = Math.max(0, Math.floor(seconds));
+  const units: [number, string][] = [[86_400, "d"], [3_600, "h"], [60, "m"], [1, "s"]];
+  const parts: string[] = [];
+  let rest = s;
+  for (const [size, key] of units) {
+    const n = Math.floor(rest / size);
+    if (n > 0 || (key === "s" && parts.length === 0)) parts.push(i18n.t(`diag.duration.${key}`, { n }));
+    rest -= n * size;
+    if (parts.length === 2) break;
+  }
+  return parts.join(" ");
 }

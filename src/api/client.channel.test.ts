@@ -46,6 +46,35 @@ describe("testConnection", () => {
   });
 });
 
+describe("startSampler", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("события канала доходят до onEvent, команда — start_sampler, итог — id сессии", async () => {
+    const got: unknown[] = [];
+    vi.mocked(invoke).mockImplementation(async (_cmd, args) => {
+      const ch = (args as { channel: { onmessage: (e: unknown) => void } }).channel;
+      ch.onmessage({ kind: "tick", atMs: 5, active: 2, waiting: 1 });
+      ch.onmessage({ kind: "stopped" });
+      return "session-1";
+    });
+    const id = await api.startSampler("c", "pg-1", (e) => got.push(e));
+    expect(id).toBe("session-1");
+    expect(got).toEqual([{ kind: "tick", atMs: 5, active: 2, waiting: 1 }, { kind: "stopped" }]);
+    const [cmd, args] = vi.mocked(invoke).mock.calls[0] as [string, { id: string; member: string | null; channel: unknown }];
+    expect(cmd).toBe("start_sampler");
+    expect(args).toMatchObject({ id: "c", member: "pg-1" });
+    expect(args.channel).toBeDefined();
+  });
+
+  it("узел «за лидером» уходит как null; ошибка команды приходит как AppError", async () => {
+    vi.mocked(invoke).mockRejectedValue({ code: "NOT_FOUND", message: "x", retryable: false });
+    await expect(api.startSampler("c", null, () => {})).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(vi.mocked(invoke).mock.calls[0][1]).toMatchObject({ id: "c", member: null });
+  });
+});
+
 // Имена команд и аргументов должны совпадать с Rust: Tauri переводит camelCase аргументов в snake_case параметров.
 describe("команды и аргументы", () => {
   beforeEach(() => {
@@ -90,6 +119,8 @@ describe("команды и аргументы", () => {
     ["getUiSettings", () => api.getUiSettings(), "get_ui_settings", undefined],
     ["setUiSettings", () => api.setUiSettings({ showSystemObjects: true }), "set_ui_settings", { settings: { showSystemObjects: true } }],
     ["exportDiagnostics", () => api.exportDiagnostics("/tmp/d.zip"), "export_diagnostics", { path: "/tmp/d.zip" }],
+    ["runDiagnostic", () => api.runDiagnostic("c", { tool: "pulse", member: null }), "run_diagnostic", { id: "c", request: { tool: "pulse", member: null } }],
+    ["stopSession", () => api.stopSession("s"), "stop_session", { sessionId: "s" }],
     ["listFolders", () => api.listFolders(), "list_folders", undefined],
     ["createFolder", () => api.createFolder("f", null), "create_folder", { name: "f", parentId: null }],
     ["renameFolder", () => api.renameFolder("f1", "g"), "rename_folder", { id: "f1", name: "g" }],

@@ -1,0 +1,173 @@
+import { useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { api, toAppError } from "../../api/client";
+import type { AppError, DiagReport, DiagTool } from "../../api/types";
+import { tr } from "../../i18n/text";
+import { defaultIntervalS, isClusterTool, useDiagnostic } from "../../lib/useDiagnostic";
+import { refreshAfterConnect, useTopology } from "../../lib/useConnectionEvents";
+import { ErrorBanner } from "../common/ErrorBanner";
+import { DiagHeader } from "./DiagHeader";
+import { FindingsPanel } from "./FindingsPanel";
+
+/** Окно профиля ожиданий, секунды: по умолчанию 15 минут (выбор окна — в шапке инструмента «Профиль ожиданий»). */
+const DEFAULT_WAITS_WINDOW_S = 900;
+
+/**
+ * Тело инструмента. Виды данных подставляют свои компоненты по `report.data.kind` (задачи 11–13); до них — JSON отчёта.
+ * `tool` отличает вкладку `idleTx` от `sessions`: данные у них одни.
+ */
+function ToolBody({ report }: { tool: DiagTool; report: DiagReport; connectionId: string }) {
+  switch (report.data.kind) {
+    case "pulse":
+    case "sessions":
+    case "waits":
+    case "locks":
+    case "horizon":
+    case "replication":
+    case "slots":
+    case "failover":
+    case "health":
+      return <pre className="diag-raw">{JSON.stringify(report.data, null, 2)}</pre>;
+  }
+}
+
+/**
+ * Вкладка инструмента диагностики (спец. P2 §7.2): шапка с выбором узла и интервала, находки, недоступное и тело
+ * инструмента. `member` из спеки вкладки — начальный выбор узла (`null` — «за лидером»); `active` — вкладка видна
+ * (скрытая не опрашивает сервер). `tabId` вкладки нужен справке (F1 открывает главу инструмента).
+ */
+export function DiagTab({ connectionId, tool, member, active }: { connectionId: string; tool: DiagTool; member: string | null; active: boolean; tabId: string }) {
+  const { t } = useTranslation();
+  const qc = useQueryClient();
+  const view = useTopology(connectionId);
+  const [selected, setSelected] = useState<string | null>(member);
+  const [intervalS, setIntervalS] = useState<number | null>(defaultIntervalS(tool));
+  const [connectError, setConnectError] = useState<AppError | null>(null);
+  const [busy, setBusy] = useState(false);
+  // Лидер, на котором прошлый отчёт «за лидером» был получен; смена объявляется строкой, пока пользователь не выберет узел сам.
+  const lastLeader = useRef<string | null>(null);
+  const [moved, setMoved] = useState<{ from: string; to: string } | null>(null);
+
+  const cluster = isClusterTool(tool);
+  const state = view.data?.state;
+  const live = state === "connected" || state === "degraded";
+  // Отчёты кластера узла не берут; остальные ждут выбранный узел (null — лидер).
+  const q = useDiagnostic(connectionId, tool, cluster ? null : selected, {
+    active,
+    intervalS,
+    windowS: tool === "waits" ? DEFAULT_WAITS_WINDOW_S : undefined,
+    live,
+  });
+  const report = q.data;
+
+  const pick = (m: string | null) => {
+    lastLeader.current = null;
+    setMoved(null);
+    setSelected(m);
+  };
+
+  // Открытие инструмента из другого места (находка, клетка пульса) с другим узлом обновляет вкладку: выбор следует за спекой.
+  const specMember = useRef(member);
+  useEffect(() => {
+    if (specMember.current === member) return;
+    specMember.current = member;
+    lastLeader.current = null;
+    setMoved(null);
+    setSelected(member);
+  }, [member]);
+
+  // Placeholder — отчёт прошлого узла на время загрузки нового: лидером «за лидером» он не считается.
+  const placeholder = q.isPlaceholderData;
+  useEffect(() => {
+    if (!report || placeholder || cluster || !report.followsLeader || report.member === null) return;
+    const prev = lastLeader.current;
+    lastLeader.current = report.member;
+    if (prev !== null && prev !== report.member) setMoved({ from: prev, to: report.member });
+  }, [report, placeholder, cluster]);
+
+  const connect = async () => {
+    setBusy(true);
+    setConnectError(null);
+    try {
+      qc.setQueryData(["topology", connectionId], await api.connect(connectionId));
+      // Данные подключения, прочитанные раньше (в том числе отчёты инструментов), перечитываются.
+      refreshAfterConnect(qc, connectionId);
+    } catch (e) {
+      setConnectError(toAppError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (view.data === undefined) {
+    return view.error ? <ErrorBanner error={view.error} onRetry={() => void view.refetch()} /> : <p className="empty">{t("common.loading")}</p>;
+  }
+  if (!live) {
+    return (
+      <div className="page diag-tab">
+        <DiagHeader tool={tool} />
+        {state === "connecting" ? (
+          <p className="muted" role="status">
+            {t("sidebar.state.connecting")}
+          </p>
+        ) : (
+          <div className="diag-closed">
+            <p className="muted">{t("diag.closed")}</p>
+            <button type="button" className="primary" disabled={busy} onClick={() => void connect()}>
+              {t("diag.connect")}
+            </button>
+          </div>
+        )}
+        {(connectError ?? view.data.error) && <ErrorBanner error={connectError ?? view.data.error} />}
+      </div>
+    );
+  }
+
+  const topo = view.data.topology;
+  // Выбор узла — у узловых инструментов; у одиночного сервера узел один, у инструментов кластера узел не берётся.
+  const members = !cluster && topo && topo.kind !== "server" ? topo.members : null;
+  return (
+    <div className="page diag-tab">
+      <DiagHeader
+        tool={tool}
+        controls={{
+          members,
+          kind: topo?.kind ?? "server",
+          selected,
+          leader: report?.followsLeader ? report.member : null,
+          onSelect: pick,
+          intervalS,
+          onInterval: setIntervalS,
+          onRefresh: () => void q.refetch(),
+          observedAtMs: report?.observedAtMs ?? null,
+          stale: q.isError && report !== undefined,
+        }}
+      />
+      {moved && (
+        <p className="diag-note" role="status">
+          {t("diag.header.nodeChanged", { from: moved.from, to: moved.to })}
+        </p>
+      )}
+      {q.error && <ErrorBanner error={q.error} />}
+      {report ? (
+        <div className={placeholder ? "diag-body diag-pending" : "diag-body"} aria-busy={placeholder}>
+          <FindingsPanel connectionId={connectionId} findings={report.findings} showMember={cluster} />
+          {report.unavailable.length > 0 && (
+            <div className="diag-unavailable">
+              {report.unavailable.map((u, i) => (
+                <p key={`${u.part}:${u.member ?? ""}:${i}`} className="muted">
+                  {u.member && <span className="diag-unavailable-node">{u.member}: </span>}
+                  {tr(u.reason)}
+                </p>
+              ))}
+            </div>
+          )}
+          <ToolBody tool={tool} report={report} connectionId={connectionId} />
+        </div>
+      ) : (
+        !q.error && <p className="empty">{t("common.loading")}</p>
+      )}
+    </div>
+  );
+}

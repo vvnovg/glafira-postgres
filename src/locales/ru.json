@@ -368,7 +368,9 @@
       "connected": "Подключено",
       "degraded": "Часть узлов недоступна",
       "failed": "Не удалось подключиться"
-    }
+    },
+    "diagnostics": "Диагностика",
+    "pulse": "Пульс"
   },
   "tabs": {
     "settings": "Настройки",
@@ -378,7 +380,8 @@
     "newConnection": "Новое подключение",
     "copyConnection": "Копия: {{name}}",
     "overview": "Обзор: {{conn}}",
-    "unknownConnection": "?"
+    "unknownConnection": "?",
+    "diag": "{{tool}} — {{conn}}"
   },
   "settings": {
     "title": "Настройки",
@@ -774,6 +777,204 @@
       "version": "{{part}}: PostgreSQL {{version}}+",
       "privilege": "{{part}}: нужна роль pg_monitor",
       "patroniConfig": "{{part}}: не удалось прочитать конфигурацию Patroni"
+    },
+    "tools": {
+      "pulse": "Пульс",
+      "sessions": "Сессии",
+      "idleTx": "Idle in transaction",
+      "waits": "Профиль ожиданий",
+      "locks": "Блокировки",
+      "horizon": "Горизонт xmin",
+      "replication": "Реплики",
+      "slots": "Слоты репликации",
+      "failover": "Готовность к failover",
+      "health": "Матрица health"
+    },
+    "header": {
+      "node": "Узел",
+      "followLeader": "За лидером ({{member}})",
+      "followLeaderPending": "За лидером",
+      "interval": "Обновление",
+      "seconds": "{{n}} с",
+      "pause": "Пауза",
+      "refresh": "Обновить",
+      "updated": "Обновлено {{time}}",
+      "stale": "устарело",
+      "nodeChanged": "Узел сменился: {{from}} → {{to}}"
+    },
+    "closed": "Подключение закрыто",
+    "connect": "Подключиться",
+    "findings": {
+      "title": "Находки",
+      "none": "Проблем не найдено",
+      "fix": "Что сделать",
+      "open": "Открыть «{{tool}}»",
+      "copy": "Скопировать команду",
+      "collapse": "Свернуть находки"
+    },
+    "severity": {
+      "info": "Сведения",
+      "warning": "Внимание",
+      "critical": "Критично"
+    },
+    "duration": {
+      "d": "{{n}} д",
+      "h": "{{n}} ч",
+      "m": "{{n}} мин",
+      "s": "{{n}} с"
+    },
+    "horizon": {
+      "kinds": {
+        "session": "сессия",
+        "preparedXact": "prepared transaction",
+        "slot": "слот",
+        "standbyFeedback": "feedback реплики"
+      }
+    },
+    "locks": {
+      "otherDb": "oid {{oid}} в БД {{db}}"
+    }
+  },
+  "findings": {
+    "connectionsSaturated": {
+      "title": "Соединения заняты на {{usedPct}} ({{used}} из {{available}})",
+      "fix": "Посмотрите, кто держит соединения, в «Сессиях» с группировкой по приложению; нужен пулер или меньшие пулы приложений."
+    },
+    "idleInTransaction": {
+      "title": "Простой в транзакции {{maxS}}",
+      "fix": "Такие транзакции держат блокировки и горизонт xmin: найдите в приложении пропущенный COMMIT, задайте idle_in_transaction_session_timeout."
+    },
+    "longQuery": {
+      "title": "Запрос выполняется {{maxS}}",
+      "fix": "Проверьте план и блокировки запроса; отмените его, если он мешает другим."
+    },
+    "longTransaction": {
+      "title": "Транзакция открыта {{maxS}}",
+      "fix": "Долгие транзакции держат горизонт xmin и раздувают таблицы: найдите сессию и приложение."
+    },
+    "xidAge": {
+      "title": "Возраст XID — {{agePct}} от предела wraparound",
+      "fix": "Найдите, что держит vacuum (горизонт xmin), и дайте autovacuum заморозить самые старые таблицы."
+    },
+    "lockWait": {
+      "title": "Ждут блокировку: {{count}}, дольше всех — {{maxS}}",
+      "fix": "Откройте «Блокировки» и найдите корневого блокирующего."
+    },
+    "walDirSize": {
+      "title": "pg_wal — {{walDirBytes}} при max_wal_size {{maxWalSizeBytes}}",
+      "fix": "WAL обычно держит неактивный слот репликации или сбой архивирования: проверьте «Слоты репликации»."
+    },
+    "deadlocks": {
+      "title": "Взаимных блокировок за интервал: {{count}}",
+      "fix": "Подробности — только в логе сервера; приложение должно брать блокировки в одном порядке."
+    },
+    "lockShare": {
+      "title": "Ожидание блокировок — {{sharePct}} активного времени",
+      "fix": "Откройте «Блокировки» и найдите, кто блокирует."
+    },
+    "rootBlocker": {
+      "title": "Сессия {{pid}} блокирует сессий: {{count}}, дольше всех ждут {{maxS}}",
+      "fix": "Посмотрите на её транзакцию; отмена или завершение освобождает цепочку."
+    },
+    "ddlQueue": {
+      "title": "DDL на {{relation}} стоит в очереди и блокирует сессий: {{count}}",
+      "fix": "Отмените DDL, чтобы снять очередь, или запрос, которого он ждёт; запускайте миграции с lock_timeout."
+    },
+    "xminHorizon": {
+      "title": "Горизонт xmin держит {{kindLabel}} {{name}} (транзакций: {{xminAge}})",
+      "fix": "Vacuum не чистит строки новее горизонта: завершите транзакцию, удалите или почините слот, откатите prepared transaction."
+    },
+    "replicaLag": {
+      "title": "Лаг реплики: {{lag}}",
+      "fix": "Проверьте нагрузку реплики, сеть и конфликты применения в «Репликах»."
+    },
+    "replicaNotStreaming": {
+      "title": "Реплик не в потоковом режиме: {{count}} (состояние {{state}})",
+      "fix": "Реплика в catchup или backup ещё не кандидат на failover."
+    },
+    "replicaReplyStale": {
+      "title": "Реплик без ответа {{maxS}}: {{count}}",
+      "fix": "Реплика перестала подтверждать WAL: проверьте сеть и wal_receiver_status_interval."
+    },
+    "syncStandbyMissing": {
+      "title": "synchronous_standby_names задан, но синхронной реплики нет",
+      "fix": "Коммиты ждут синхронную реплику: верните её или измените synchronous_standby_names."
+    },
+    "walReceiverDown": {
+      "title": "WAL receiver не в потоковом режиме",
+      "fix": "Реплика не получает WAL: проверьте primary_conninfo, слот и сеть."
+    },
+    "replayPaused": {
+      "title": "Применение WAL на паузе",
+      "fix": "Если пауза не нарочная, снимите её: pg_wal_replay_resume()."
+    },
+    "recoveryConflicts": {
+      "title": "Новых конфликтов recovery: {{count}}",
+      "fix": "Запросы на реплике отменяются ради применения WAL: подумайте о hot_standby_feedback или max_standby_streaming_delay."
+    },
+    "recoveryConflictsTotal": {
+      "title": "Конфликтов recovery с момента сброса статистики: {{count}}",
+      "fix": "Новых конфликтов сейчас нет; следите за счётчиком."
+    },
+    "slotRetainsWal": {
+      "title": "Неактивный слот {{name}} держит {{retainedBytes}} WAL",
+      "fix": "Если потребителя нет, удалите слот; иначе верните потребителя; задайте max_slot_wal_keep_size."
+    },
+    "slotLost": {
+      "title": "Слот {{name}} потерял нужный ему WAL",
+      "fix": "Потребитель не продолжит: удалите слот и пересинхронизируйте потребителя."
+    },
+    "subscriptionErrors": {
+      "title": "Новых ошибок подписок: {{count}}",
+      "fix": "Подробности — в логе сервера подписчика."
+    },
+    "failoverCandidates": {
+      "title": "Готовых кандидатов на failover: {{count}}",
+      "fix": "Причины по каждой реплике — в «Готовности к failover»."
+    },
+    "clusterPaused": {
+      "title": "Кластер на паузе: автоматический failover выключен",
+      "fix": "Снимите паузу, когда обслуживание закончено."
+    },
+    "syncModeWithoutSync": {
+      "title": "synchronous_mode включён, синхронной реплики нет",
+      "fix": "Failover невозможен, а при synchronous_mode_strict встаёт запись: верните реплику в sync."
+    },
+    "patroniTiming": {
+      "title": "ttl {{ttlS}} меньше loop_wait {{loopWaitS}} + 2 × retry_timeout {{retryTimeoutS}}",
+      "fix": "Ключ лидера может истечь при сбое DCS: увеличьте ttl (patronictl edit-config)."
+    },
+    "healthPrimary": {
+      "title": "Адрес лидера отвечает 200 у участников: {{count}}",
+      "fix": "Балансировщик отправит запись не туда или никуда: проверьте топологию."
+    },
+    "healthUnhealthy": {
+      "title": "{{member}}: /health не отвечает 200",
+      "fix": "PostgreSQL участника не работает."
+    },
+    "replicaOutOfPool": {
+      "title": "{{member}} — реплика, но /replica не отвечает 200",
+      "fix": "Балансировщик исключил её из чтения: лаг, тег noloadbalance или реплика остановлена."
+    },
+    "cacheHitLow": {
+      "title": "Cache hit за интервал: {{hitPct}}",
+      "fix": "Чтения идут с диска: проверьте тяжёлые запросы и shared_buffers."
+    },
+    "tempFiles": {
+      "title": "Временных файлов за интервал: {{count}}",
+      "fix": "Сортировки и хэши уходят на диск: посмотрите work_mem для тяжёлых запросов."
+    },
+    "noIdleTimeout": {
+      "title": "idle_in_transaction_session_timeout выключен",
+      "fix": "Задайте его роли приложения: {{command}}"
+    },
+    "hiddenQueries": {
+      "title": "Скрыты тексты сессий: {{count}}",
+      "fix": "Выдайте роли диагностики pg_monitor."
+    },
+    "lockCycle": {
+      "title": "Сессий ждут друг друга: {{count}}",
+      "fix": "Deadlock detector разрешит это за deadlock_timeout; подробности — в логе сервера."
     }
   },
   "hints": {

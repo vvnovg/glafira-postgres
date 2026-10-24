@@ -113,6 +113,7 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
   const members = view.topology?.members ?? [];
   const menu: FolderMenuItem[] = [
     { label: t("sidebar.overview"), onSelect: () => open({ kind: "overview", connectionId: c.id }) },
+    { label: t("sidebar.pulse"), onSelect: () => open({ kind: "diag", connectionId: c.id, tool: "pulse" }) },
     { label: t("sidebar.editConnection"), onSelect: () => open({ kind: "connection-form", connectionId: c.id }) },
     {
       label: t("sidebar.duplicateConnection"),

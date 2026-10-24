@@ -5,6 +5,8 @@ import type {
   ConnectionFolder,
   ConnectionProfile,
   DatabaseInfo,
+  DiagReport,
+  DiagRequest,
   ExportSummary,
   ExtensionInfo,
   FunctionDetails,
@@ -16,6 +18,7 @@ import type {
   ParsedConnection,
   PolicyStatus,
   RoleInfo,
+  SamplerEvent,
   SchemaInfo,
   SecretsInput,
   SecretsSet,
@@ -111,6 +114,15 @@ export const api = {
   getSequence: (id: string, db: string, schema: string, name: string) => call<SequenceDetails>("get_sequence", { id, db, schema, name }),
   listExtensions: (id: string, db: string) => call<ExtensionInfo[]>("list_extensions", { id, db }),
   listRoles: (id: string, includeSystem: boolean) => call<RoleInfo[]>("list_roles", { id, includeSystem }),
+
+  runDiagnostic: (id: string, request: DiagRequest) => call<DiagReport>("run_diagnostic", { id, request }),
+  /** Подписка на сэмплер узла: события — в `onEvent`, итог — id сессии для `stopSession`. */
+  startSampler: (id: string, member: string | null, onEvent: (e: SamplerEvent) => void) => {
+    const channel = new Channel<SamplerEvent>();
+    channel.onmessage = onEvent;
+    return call<string>("start_sampler", { id, member, channel });
+  },
+  stopSession: (sessionId: string) => call<boolean>("stop_session", { sessionId }),
 
   getUiSettings: () => call<UiSettings>("get_ui_settings"),
   setUiSettings: (settings: UiSettings) => call<UiSettings>("set_ui_settings", { settings }),

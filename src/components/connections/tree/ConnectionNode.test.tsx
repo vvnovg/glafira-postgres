@@ -118,6 +118,19 @@ describe("ConnectionNode", () => {
     expect(useWorkspace.getState().tabs).toEqual([{ kind: "overview", connectionId: "c", id: "overview:c" }]);
   });
 
+  it("меню: «Пульс» открывает вкладку пульса подключения", async () => {
+    const user = userEvent.setup();
+    renderNode();
+    await screen.findByRole("img", { name: "Не подключено" });
+    await user.click(screen.getByRole("button", { name: "Действия с подключением billing" }));
+    await user.click(screen.getByRole("menuitem", { name: "Пульс" }));
+    const { tabs, activeId } = useWorkspace.getState();
+    expect(tabs).toEqual([{ kind: "diag", connectionId: "c", tool: "pulse", id: "diag:c:pulse" }]);
+    expect(activeId).toBe("diag:c:pulse");
+    // Вкладка сама показывает «Подключение закрыто»: подключение меню не открывает.
+    expect(api.connect).not.toHaveBeenCalled();
+  });
+
   it("меню: узел каталога меняется, кэш каталога перечитывается", async () => {
     vi.mocked(api.getTopology).mockResolvedValue(topologyView());
     vi.mocked(api.setCatalogMember).mockResolvedValue(topologyView({ catalogMember: "pg-2" }));
@@ -131,6 +144,7 @@ describe("ConnectionNode", () => {
     const menu = screen.getByRole("menu");
     expect(within(menu).getAllByRole("menuitem").map((m) => m.textContent)).toEqual([
       "Обзор",
+      "Пульс",
       "Изменить подключение",
       "Дублировать подключение",
       "Каталог — с узла по умолчанию",
@@ -272,7 +286,7 @@ describe("ConnectionNode", () => {
     await screen.findByRole("img", { name: "Подключено" });
     await user.click(screen.getByRole("button", { name: "Действия с подключением billing" }));
     const items = within(screen.getByRole("menu")).getAllByRole("menuitem");
-    expect(items.map((m) => m.textContent)).toEqual(["Обзор", "Изменить подключение", "Дублировать подключение", "Переподключить", "Отключиться"]);
+    expect(items.map((m) => m.textContent)).toEqual(["Обзор", "Пульс", "Изменить подключение", "Дублировать подключение", "Переподключить", "Отключиться"]);
     expect(within(screen.getByRole("menu")).queryByRole("menuitem", { name: /Каталог/ })).not.toBeInTheDocument();
   });
 
@@ -331,6 +345,7 @@ describe("ConnectionNode", () => {
     const menu = screen.getByRole("menu");
     expect(within(menu).getAllByRole("menuitem").map((m) => m.textContent)).toEqual([
       "Обзор",
+      "Пульс",
       "Изменить подключение",
       "Дублировать подключение",
       "Повторить подключение",
