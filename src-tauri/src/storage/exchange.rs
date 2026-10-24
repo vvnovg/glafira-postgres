@@ -14,7 +14,8 @@ use crate::conn::profile::{
 use crate::error::{AppResult, ErrorCode};
 use crate::i18n::LocalizedText;
 use crate::secrets::{
-    PATRONI_KEY_PASSWORD, PATRONI_PASSWORD, PG_KEY_PASSWORD, PG_PASSWORD, SecretStore, secret_key,
+    PATRONI_KEY_PASSWORD, PATRONI_PASSWORD, PG_KEY_PASSWORD, PG_PASSWORD, SSH_PASSPHRASE,
+    SSH_PASSWORD, SecretStore, secret_key,
 };
 use crate::storage::connections::{
     ConnectionFolder, ConnectionStore, StoreData, check_tree, folder_not_found, unique_name,
@@ -32,11 +33,15 @@ pub struct NeedsPassword {
     pub pg_key: bool,
     pub patroni: bool,
     pub patroni_key: bool,
+    /// Пароль SSH (способ «пароль»).
+    pub ssh: bool,
+    /// Пассфраза ключа SSH (способ «ключ»).
+    pub ssh_key: bool,
 }
 
 impl NeedsPassword {
     pub fn any(&self) -> bool {
-        self.pg || self.pg_key || self.patroni || self.patroni_key
+        self.pg || self.pg_key || self.patroni || self.patroni_key || self.ssh || self.ssh_key
     }
 }
 
@@ -85,6 +90,8 @@ fn needs_password(secrets: &dyn SecretStore, p: &ConnectionProfile) -> AppResult
         pg_key: check(PG_KEY_PASSWORD)?,
         patroni: check(PATRONI_PASSWORD)?,
         patroni_key: check(PATRONI_KEY_PASSWORD)?,
+        ssh: check(SSH_PASSWORD)?,
+        ssh_key: check(SSH_PASSPHRASE)?,
     })
 }
 
@@ -665,7 +672,7 @@ mod tests {
     use super::*;
     use crate::conn::profile::{
         ApiTls, CertFormat, ClientCert, ConnectionKind, Environment, HostOverride, PatroniSettings,
-        sample_profile,
+        SshAuth, SshSettings, sample_profile,
     };
     use crate::secrets::MemoryStore;
 
@@ -926,6 +933,74 @@ mod tests {
         });
         secrets.set(&secret_key("a", PG_KEY_PASSWORD), "k").unwrap();
         assert!(needs_password(&secrets, &p).unwrap().pg_key);
+
+        // SSH: секрет нужен только тому способу, который выбран.
+        let mut p = sample_profile("s");
+        p.ssh = Some(SshSettings {
+            target: "bastion".into(),
+            port: None,
+            user: None,
+            auth: SshAuth::Password,
+            key_path: None,
+        });
+        secrets.set(&secret_key("s", SSH_PASSWORD), "pw").unwrap();
+        secrets
+            .set(&secret_key("s", SSH_PASSPHRASE), "old")
+            .unwrap();
+        let np = needs_password(&secrets, &p).unwrap();
+        assert!(
+            np.ssh && !np.ssh_key,
+            "пассфраза без способа «ключ» не нужна"
+        );
+        assert!(np.any());
+        assert_eq!(serde_json::to_value(&np).unwrap()["ssh"], true);
+        p.ssh.as_mut().unwrap().auth = SshAuth::Key;
+        p.ssh.as_mut().unwrap().key_path = Some(abs("id_ed25519"));
+        let np = needs_password(&secrets, &p).unwrap();
+        assert!(!np.ssh && np.ssh_key);
+        assert_eq!(serde_json::to_value(&np).unwrap()["sshKey"], true);
+        p.ssh.as_mut().unwrap().auth = SshAuth::Agent;
+        assert!(!needs_password(&secrets, &p).unwrap().any());
+    }
+
+    #[test]
+    fn ssh_settings_are_exported_and_compared_on_import() {
+        let (_d, s) = store();
+        let mut p = sample_profile("a");
+        p.ssh = Some(SshSettings {
+            target: "bastion".into(),
+            port: Some(2222),
+            user: Some("tester".into()),
+            auth: SshAuth::Key,
+            key_path: Some(abs("id_ed25519")),
+        });
+        s.upsert(p.clone()).unwrap();
+        let secrets = MemoryStore::default();
+        secrets
+            .set(&secret_key("a", SSH_PASSPHRASE), "s3cr3t-pp")
+            .unwrap();
+        let out = build_export(&s, &secrets, None, "1", "now").unwrap();
+        let json = serde_json::to_string(&out).unwrap();
+        // Настройки туннеля уходят в файл как есть, секрет — нет.
+        assert!(!json.contains("s3cr3t"));
+        assert!(json.contains("\"target\":\"bastion\""));
+        let parsed = parse_exchange(json.as_bytes()).unwrap();
+        assert!(parsed.skipped.is_empty(), "{:?}", parsed.skipped);
+        assert_eq!(parsed.connections[0].0.ssh, p.ssh);
+        assert_eq!(
+            parsed.connections[0].1,
+            NeedsPassword {
+                ssh_key: true,
+                ..Default::default()
+            }
+        );
+        // Другая цель туннеля — другие настройки: ослабить их импортом нельзя.
+        let mut other = p.clone();
+        other.ssh.as_mut().unwrap().target = "elsewhere".into();
+        assert!(same_settings(&p, &p.clone()));
+        assert!(!same_settings(&p, &other));
+        other.ssh = None;
+        assert!(!same_settings(&p, &other));
     }
 
     #[test]

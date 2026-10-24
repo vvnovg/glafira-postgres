@@ -19,6 +19,7 @@ export function newProfile(): ConnectionProfile {
       connectTimeoutS: 10,
       databases: null,
     },
+    ssh: null,
     folderId: null,
     order: 0,
   };

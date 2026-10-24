@@ -22,6 +22,7 @@ vi.mock("../api/client", async (importOriginal) => {
     targetServerType: "primary",
     patroni: null,
     pg: { username: "u", database: "postgres", sslMode: "prefer", tls: { caPath: null, clientCert: null }, connectTimeoutS: 10, databases: null },
+    ssh: null,
   } as ConnectionProfile;
   return { ...actual, api: { ...actual.api, listConnections: vi.fn().mockResolvedValue([conn]) } };
 });

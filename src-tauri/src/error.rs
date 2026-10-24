@@ -18,6 +18,10 @@ pub enum ErrorCode {
     PatroniError,
     /// Узел не отвечает или пока не принимает соединения (запускается, в восстановлении).
     NodeUnavailable,
+    /// Туннель ssh: нет клиента, ключ хоста, вход, проброс, процесс (вид — в `params.kind`).
+    SshError,
+    /// Возможность недоступна в этой среде (например, OpenSSH старше 8.4 для askpass).
+    FeatureUnavailable,
     Internal,
 }
 
@@ -123,6 +127,18 @@ mod tests {
     }
 
     #[test]
+    fn ssh_codes_serialize_for_frontend() {
+        let v = |code| {
+            serde_json::to_value(AppError::localized(code, LocalizedText::raw("x"))).unwrap()
+        };
+        assert_eq!(v(ErrorCode::SshError)["code"], "SSH_ERROR");
+        assert_eq!(
+            v(ErrorCode::FeatureUnavailable)["code"],
+            "FEATURE_UNAVAILABLE"
+        );
+    }
+
+    #[test]
     fn retryable_codes() {
         for (code, retry) in [
             (ErrorCode::ConnectionFailed, true),
@@ -130,6 +146,9 @@ mod tests {
             (ErrorCode::NodeUnavailable, true),
             (ErrorCode::AuthFailed, false),
             (ErrorCode::PatroniError, false),
+            // Перезапускаемость `SshError` задаётся при создании ошибки (только вид `exited`).
+            (ErrorCode::SshError, false),
+            (ErrorCode::FeatureUnavailable, false),
         ] {
             assert_eq!(
                 AppError::localized(code, LocalizedText::raw("x")).retryable,

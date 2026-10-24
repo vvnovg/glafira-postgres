@@ -6,7 +6,10 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult, ErrorCode};
-use crate::secrets::{PATRONI_KEY_PASSWORD, PATRONI_PASSWORD, PG_KEY_PASSWORD, PG_PASSWORD};
+use crate::secrets::{
+    PATRONI_KEY_PASSWORD, PATRONI_PASSWORD, PG_KEY_PASSWORD, PG_PASSWORD, SSH_PASSPHRASE,
+    SSH_PASSWORD,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -147,6 +150,29 @@ pub struct PatroniSettings {
     pub host_overrides: Vec<HostOverride>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SshAuth {
+    Agent,
+    Key,
+    Password,
+}
+
+/// Туннель через системный OpenSSH (спец. P1 §3.1, §5). `target` — хост или алиас из `~/.ssh/config`;
+/// `port` и `user` — `None` = как в конфиге ssh; `key_path` — только для `Key`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshSettings {
+    pub target: String,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub user: Option<String>,
+    pub auth: SshAuth,
+    #[serde(default)]
+    pub key_path: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionProfile {
@@ -163,6 +189,9 @@ pub struct ConnectionProfile {
     #[serde(default)]
     pub patroni: Option<PatroniSettings>,
     pub pg: PgSettings,
+    /// Туннель SSH до кластера; `None` — подключение напрямую (профили P1a без поля).
+    #[serde(default)]
+    pub ssh: Option<SshSettings>,
     #[serde(default)]
     pub folder_id: Option<String>,
     #[serde(default)]
@@ -182,15 +211,20 @@ impl ConnectionProfile {
             PG_KEY_PASSWORD => self.pg.tls.client_cert.is_some(),
             PATRONI_PASSWORD => self.patroni.as_ref().is_some_and(|p| p.username.is_some()),
             PATRONI_KEY_PASSWORD => api_tls.is_some_and(|t| t.client_cert.is_some()),
+            SSH_PASSWORD => self
+                .ssh
+                .as_ref()
+                .is_some_and(|s| s.auth == SshAuth::Password),
+            SSH_PASSPHRASE => self.ssh.as_ref().is_some_and(|s| s.auth == SshAuth::Key),
             _ => false,
         }
     }
 }
 
 /// Совпадают ли настройки, от которых зависит соединение с кластером: вид, адреса, целевой узел,
-/// Patroni и PostgreSQL. Имя, цвет, окружение, read-only, папка и порядок в дереве на соединение не
-/// влияют: их правка не должна его переоткрывать. Поля перечислены явно — новое поле профиля не
-/// скомпилируется, пока его не отнесут к одной из групп.
+/// Patroni, PostgreSQL и туннель SSH. Имя, цвет, окружение, read-only, папка и порядок в дереве на
+/// соединение не влияют: их правка не должна его переоткрывать. Поля перечислены явно — новое поле
+/// профиля не скомпилируется, пока его не отнесут к одной из групп.
 pub fn same_connection_settings(a: &ConnectionProfile, b: &ConnectionProfile) -> bool {
     let ConnectionProfile {
         id: _,
@@ -203,6 +237,7 @@ pub fn same_connection_settings(a: &ConnectionProfile, b: &ConnectionProfile) ->
         target_server_type,
         patroni,
         pg,
+        ssh,
         folder_id: _,
         order: _,
         extra: _,
@@ -212,6 +247,7 @@ pub fn same_connection_settings(a: &ConnectionProfile, b: &ConnectionProfile) ->
         && *target_server_type == b.target_server_type
         && *patroni == b.patroni
         && *pg == b.pg
+        && *ssh == b.ssh
 }
 
 fn trim_opt(v: &mut Option<String>) {
@@ -260,6 +296,16 @@ pub fn normalize_profile(p: &mut ConnectionProfile) {
             if let Some(u) = &mut o.api_url {
                 *u = u.trim_end_matches('/').to_string();
             }
+        }
+    }
+    if let Some(s) = &mut p.ssh {
+        s.target = s.target.trim().to_string();
+        trim_opt(&mut s.user);
+        // Путь ключа нужен только способу «ключ»: от других способов он не должен оставаться в файле.
+        if s.auth == SshAuth::Key {
+            trim_opt(&mut s.key_path);
+        } else {
+            s.key_path = None;
         }
     }
     p.pg.username = p.pg.username.trim().to_string();
@@ -465,7 +511,50 @@ pub fn validate_profile(p: &ConnectionProfile) -> AppResult<()> {
             "Connection timeout must be from 1 to 120 seconds"
         )));
     }
-    validate_tls(p.pg.tls.ca_path.as_ref(), p.pg.tls.client_cert.as_ref())
+    validate_tls(p.pg.tls.ca_path.as_ref(), p.pg.tls.client_cert.as_ref())?;
+    validate_ssh(p.ssh.as_ref())
+}
+
+/// Цель и пользователь попадают в командную строку ssh как отдельные аргументы: пробелы и ведущий «-»
+/// превратили бы их в опции.
+fn ssh_argument_ok(s: &str) -> bool {
+    !s.is_empty() && !s.starts_with('-') && !s.chars().any(char::is_whitespace)
+}
+
+fn validate_ssh(ssh: Option<&SshSettings>) -> AppResult<()> {
+    let Some(s) = ssh else { return Ok(()) };
+    if !ssh_argument_ok(&s.target) {
+        return Err(invalid(ltext!(
+            "errors.connections.sshTarget",
+            "SSH target must be a host name or an alias from ~/.ssh/config without spaces"
+        )));
+    }
+    if let Some(u) = &s.user
+        && !ssh_argument_ok(u)
+    {
+        return Err(invalid(ltext!(
+            "errors.connections.sshUser",
+            "SSH user name must not contain spaces or start with “-”"
+        )));
+    }
+    if s.port == Some(0) {
+        return Err(invalid(ltext!(
+            "errors.connections.sshPort",
+            "SSH port must be from 1 to 65535"
+        )));
+    }
+    if s.auth == SshAuth::Key {
+        match &s.key_path {
+            None => {
+                return Err(invalid(ltext!(
+                    "errors.connections.sshKeyPath",
+                    "Choose the private key file for the “key” method"
+                )));
+            }
+            Some(path) => validate_path(path)?,
+        }
+    }
+    Ok(())
 }
 
 fn validate_patroni(pt: Option<&PatroniSettings>) -> AppResult<()> {
@@ -536,6 +625,7 @@ pub fn sample_profile(id: &str) -> ConnectionProfile {
             connect_timeout_s: 10,
             databases: None,
         },
+        ssh: None,
         folder_id: None,
         order: 0,
         extra: Default::default(),
@@ -545,7 +635,10 @@ pub fn sample_profile(id: &str) -> ConnectionProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::secrets::{PATRONI_KEY_PASSWORD, PATRONI_PASSWORD, PG_KEY_PASSWORD, PG_PASSWORD};
+    use crate::secrets::{
+        PATRONI_KEY_PASSWORD, PATRONI_PASSWORD, PG_KEY_PASSWORD, PG_PASSWORD, SSH_PASSPHRASE,
+        SSH_PASSWORD,
+    };
 
     /// Название случая (ключ ожидаемой ошибки) и правка профиля.
     type Case = (&'static str, Box<dyn Fn(&mut ConnectionProfile)>);
@@ -1122,5 +1215,136 @@ mod tests {
             assert!(!same_connection_settings(&base, &changed), "{what}");
             assert!(!same_connection_settings(&changed, &base), "{what}");
         }
+    }
+
+    #[test]
+    fn ssh_settings_round_trip_and_old_files_without_ssh() {
+        let mut p = sample_profile("a");
+        p.ssh = Some(SshSettings {
+            target: "bastion-prod".into(),
+            port: Some(2222),
+            user: Some("tester".into()),
+            auth: SshAuth::Key,
+            key_path: Some("/home/me/.ssh/id_ed25519".into()),
+        });
+        let json = serde_json::to_value(&p).unwrap();
+        assert_eq!(json["ssh"]["auth"], "key");
+        assert_eq!(json["ssh"]["keyPath"], "/home/me/.ssh/id_ed25519");
+        let back: ConnectionProfile = serde_json::from_value(json).unwrap();
+        assert_eq!(back.ssh, p.ssh);
+        // Файл P1a без поля ssh читается: подключение напрямую.
+        let mut old = serde_json::to_value(sample_profile("b")).unwrap();
+        old.as_object_mut().unwrap().remove("ssh");
+        assert_eq!(
+            serde_json::from_value::<ConnectionProfile>(old)
+                .unwrap()
+                .ssh,
+            None
+        );
+    }
+
+    #[test]
+    fn ssh_secrets_follow_the_auth_method() {
+        let mut p = sample_profile("a");
+        assert!(!p.uses_secret(SSH_PASSWORD) && !p.uses_secret(SSH_PASSPHRASE));
+        p.ssh = Some(SshSettings {
+            target: "b".into(),
+            port: None,
+            user: None,
+            auth: SshAuth::Password,
+            key_path: None,
+        });
+        assert!(p.uses_secret(SSH_PASSWORD) && !p.uses_secret(SSH_PASSPHRASE));
+        p.ssh.as_mut().unwrap().auth = SshAuth::Key;
+        assert!(!p.uses_secret(SSH_PASSWORD) && p.uses_secret(SSH_PASSPHRASE));
+        p.ssh.as_mut().unwrap().auth = SshAuth::Agent;
+        assert!(!p.uses_secret(SSH_PASSWORD) && !p.uses_secret(SSH_PASSPHRASE));
+    }
+
+    #[test]
+    fn ssh_changes_the_connection_settings() {
+        let a = sample_profile("a");
+        let mut b = a.clone();
+        b.ssh = Some(SshSettings {
+            target: "b".into(),
+            port: None,
+            user: None,
+            auth: SshAuth::Agent,
+            key_path: None,
+        });
+        assert!(!same_connection_settings(&a, &b));
+    }
+
+    #[test]
+    fn ssh_validation() {
+        let ssh = |target: &str, user: Option<&str>, auth: SshAuth, key: Option<&str>| {
+            let mut p = sample_profile("a");
+            p.ssh = Some(SshSettings {
+                target: target.into(),
+                port: None,
+                user: user.map(String::from),
+                auth,
+                key_path: key.map(String::from),
+            });
+            validate_profile(&p).map_err(|e| e.key)
+        };
+        assert_eq!(
+            ssh("", None, SshAuth::Agent, None),
+            Err("errors.connections.sshTarget".into())
+        );
+        // Аргументы ssh: ни пробелов, ни ведущего «-» — иначе цель или пользователь стали бы опцией ssh.
+        assert_eq!(
+            ssh("-oProxyCommand=x", None, SshAuth::Agent, None),
+            Err("errors.connections.sshTarget".into())
+        );
+        assert_eq!(
+            ssh("bastion x", None, SshAuth::Agent, None),
+            Err("errors.connections.sshTarget".into())
+        );
+        assert_eq!(
+            ssh("bastion", Some("-v"), SshAuth::Agent, None),
+            Err("errors.connections.sshUser".into())
+        );
+        assert_eq!(
+            ssh("bastion", None, SshAuth::Key, None),
+            Err("errors.connections.sshKeyPath".into())
+        );
+        assert_eq!(
+            ssh("bastion", None, SshAuth::Key, Some("relative/key")),
+            Err("errors.connections.pathNotAbsolute".into())
+        );
+        // Файл ключа из файла обмена не должен вести на сетевой ресурс.
+        assert_eq!(
+            ssh("bastion", None, SshAuth::Key, Some("//server/share/id")),
+            Err("errors.connections.pathNetwork".into())
+        );
+        // `abs`: на Windows путь с одним «/» не абсолютный.
+        let key = abs("k/id_ed25519");
+        assert!(ssh("bastion", Some("tester"), SshAuth::Key, Some(&key)).is_ok());
+        assert!(ssh("user@host-alias.example", None, SshAuth::Password, None).is_ok());
+        // Порт 0 не бывает; пустой «порт по конфигу ssh» (`None`) допустим.
+        let mut zero = sample_profile("a");
+        zero.ssh = Some(SshSettings {
+            target: "bastion".into(),
+            port: Some(0),
+            user: None,
+            auth: SshAuth::Agent,
+            key_path: None,
+        });
+        assert_eq!(
+            validate_profile(&zero).map_err(|e| e.key),
+            Err("errors.connections.sshPort".into())
+        );
+        // Ключ без способа «ключ» не хранится.
+        let mut p = sample_profile("a");
+        p.ssh = Some(SshSettings {
+            target: "b".into(),
+            port: Some(22),
+            user: None,
+            auth: SshAuth::Agent,
+            key_path: Some("/k".into()),
+        });
+        normalize_profile(&mut p);
+        assert_eq!(p.ssh.as_ref().unwrap().key_path, None);
     }
 }

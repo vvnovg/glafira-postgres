@@ -23,6 +23,7 @@ const profile: ConnectionProfile = {
   targetServerType: "primary",
   patroni: null,
   pg: { username: "u", database: "postgres", sslMode: "prefer", tls: { caPath: null, clientCert: null }, connectTimeoutS: 10, databases: null },
+  ssh: null,
 };
 
 describe("testConnection", () => {

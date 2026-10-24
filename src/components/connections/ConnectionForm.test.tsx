@@ -36,8 +36,8 @@ const saved = (id: string): ConnectionProfile => ({ ...newProfile(), id });
 /** Существующее подключение (id задан), по умолчанию dev. */
 const existing = (patch: Partial<ConnectionProfile> = {}): ConnectionProfile => ({ ...newProfile(), id: "c1", name: "dev-1", environment: "dev", ...patch });
 
-const NO_SECRETS: SecretsSet = { pgPassword: false, pgKeyPassword: false, patroniPassword: false, patroniKeyPassword: false };
-const ALL_SECRETS: SecretsSet = { pgPassword: true, pgKeyPassword: true, patroniPassword: true, patroniKeyPassword: true };
+const NO_SECRETS: SecretsSet = { pgPassword: false, pgKeyPassword: false, patroniPassword: false, patroniKeyPassword: false, sshPassword: false, sshPassphrase: false };
+const ALL_SECRETS: SecretsSet = { pgPassword: true, pgKeyPassword: true, patroniPassword: true, patroniKeyPassword: true, sshPassword: true, sshPassphrase: true };
 
 function deferred<T>() {
   let resolve!: (v: T) => void;
@@ -611,7 +611,7 @@ describe("ConnectionForm", () => {
   });
 
   it("«оставить сохранённый» и «Удалить сохранённый» показываются только у сохранённых секретов", async () => {
-    vi.mocked(api.connectionSecrets).mockResolvedValue({ pgPassword: true, pgKeyPassword: false, patroniPassword: false, patroniKeyPassword: false });
+    vi.mocked(api.connectionSecrets).mockResolvedValue({ ...NO_SECRETS, pgPassword: true });
     renderWithClient(<ConnectionForm initial={existing()} tabId="t" />);
     await waitFor(() => expect(screen.getByLabelText("Пароль")).toHaveAttribute("placeholder", "оставить сохранённый"));
     expect(screen.getByRole("checkbox", { name: /Удалить сохранённый.*Пароль/ })).toBeInTheDocument();

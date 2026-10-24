@@ -298,11 +298,12 @@ mod tests {
 
     use super::*;
     use crate::conn::profile::{
-        ApiTls, CertFormat, ClientCert, ConnectionKind, PatroniSettings, SslMode, sample_profile,
+        ApiTls, CertFormat, ClientCert, ConnectionKind, PatroniSettings, SshAuth, SshSettings,
+        SslMode, sample_profile,
     };
     use crate::secrets::{
         CONNECTION_SECRET_FIELDS, MemoryStore, PATRONI_KEY_PASSWORD, PATRONI_PASSWORD,
-        PG_KEY_PASSWORD, PG_PASSWORD, SecretStore, secret_key,
+        PG_KEY_PASSWORD, PG_PASSWORD, SSH_PASSPHRASE, SecretStore, secret_key,
     };
     use crate::state::tests::Closed;
 
@@ -522,7 +523,7 @@ mod tests {
 
     // ---- импорт недоверенного файла и сохранённые пароли ----
 
-    /// Все четыре секрета подключения в keychain.
+    /// Все секреты подключения (`CONNECTION_SECRET_FIELDS`) в keychain.
     fn set_all_secrets(secrets: &dyn SecretStore, id: &str) {
         for f in CONNECTION_SECRET_FIELDS {
             secrets
@@ -538,7 +539,12 @@ mod tests {
             .collect()
     }
 
-    /// Подключение Patroni, которому нужны все четыре секрета (пароль и клиентский сертификат у PG и у API).
+    /// Сколько секретов из `CONNECTION_SECRET_FIELDS` использует `patroni_with_all_secrets`: пароль SSH и
+    /// пассфраза ключа SSH взаимоисключающие, поэтому все шесть не нужны ни одному профилю.
+    const USED_BY_PATRONI: usize = CONNECTION_SECRET_FIELDS.len() - 1;
+
+    /// Подключение Patroni, которому нужны все секреты, какие возможны разом: пароль и клиентский
+    /// сертификат у PG и у API, пароль SSH (без пассфразы ключа).
     fn patroni_with_all_secrets(id: &str, dir: &Path) -> ConnectionProfile {
         let cert = |name: &str| ClientCert {
             format: CertFormat::Pkcs12,
@@ -559,8 +565,19 @@ mod tests {
             }),
             host_overrides: vec![],
         });
+        p.ssh = Some(SshSettings {
+            target: "bastion".into(),
+            port: None,
+            user: None,
+            auth: SshAuth::Password,
+            key_path: None,
+        });
         for f in CONNECTION_SECRET_FIELDS {
-            assert!(p.uses_secret(f), "предпосылка: профиль использует {f}");
+            assert_eq!(
+                p.uses_secret(f),
+                f != SSH_PASSPHRASE,
+                "предпосылка: профиль использует {f}"
+            );
         }
         p
     }
@@ -626,7 +643,11 @@ mod tests {
         assert_eq!(reset.params["count"], "3");
         // Предпросмотр ничего не удаляет.
         for id in ["host", "url", "ssl", "keep"] {
-            assert_eq!(secrets_left(secrets.as_ref(), id).len(), 4, "{id}");
+            assert_eq!(
+                secrets_left(secrets.as_ref(), id).len(),
+                CONNECTION_SECRET_FIELDS.len(),
+                "{id}"
+            );
         }
 
         let applied = import_from_file(&st, &path, None, true, true).unwrap();
@@ -647,7 +668,10 @@ mod tests {
         for id in ["host", "url", "ssl"] {
             assert!(secrets_left(secrets.as_ref(), id).is_empty(), "{id}");
         }
-        assert_eq!(secrets_left(secrets.as_ref(), "keep").len(), 4);
+        assert_eq!(
+            secrets_left(secrets.as_ref(), "keep").len(),
+            CONNECTION_SECRET_FIELDS.len()
+        );
         // Следующий экспорт честно отмечает, что паролей у этих подключений нет.
         let out = dir.path().join("out.json");
         export_to_file(&st, &out, None, "now").unwrap();
@@ -741,10 +765,33 @@ mod tests {
         );
         assert_eq!(st.connections.get("a").unwrap().name, "renamed");
         // Используемые секреты на месте; неиспользуемые профилем (у сервера — всё, кроме пароля PG) убраны.
-        assert_eq!(secrets_left(secrets.as_ref(), "p").len(), 4);
+        assert_eq!(secrets_left(secrets.as_ref(), "p").len(), USED_BY_PATRONI);
         assert_eq!(secrets_left(secrets.as_ref(), "a"), [PG_PASSWORD]);
         // Подключение при правке оформления не закрывается.
         assert!(closed.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn imported_tunnel_change_deletes_saved_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(MemoryStore::default());
+        let st = AppState::new(dir.path(), secrets.clone()).unwrap();
+        let certs = tempfile::tempdir().unwrap();
+        let p = patroni_with_all_secrets("t", certs.path());
+        st.connections.upsert(p.clone()).unwrap();
+        set_all_secrets(secrets.as_ref(), "t");
+        // Файл ведёт то же подключение через другой бастион: пароль SSH ушёл бы на чужой адрес.
+        let mut rerouted = json_of(&p);
+        rerouted["ssh"]["target"] = "other-bastion".into();
+        let path = write_exchange(certs.path(), vec![], vec![rerouted]);
+
+        let preview = import_from_file(&st, &path, None, true, true).unwrap();
+        assert_eq!(preview.needs_passwords, 1);
+        assert_eq!(
+            st.connections.get("t").unwrap().ssh.unwrap().target,
+            "other-bastion"
+        );
+        assert!(secrets_left(secrets.as_ref(), "t").is_empty());
     }
 
     #[test]
@@ -1048,7 +1095,11 @@ mod tests {
             .iter()
             .filter(|(k, _, _)| k.starts_with("a/"))
             .collect();
-        assert_eq!(of_a.len(), 4, "все секреты `a`: {seen:?}");
+        assert_eq!(
+            of_a.len(),
+            CONNECTION_SECRET_FIELDS.len(),
+            "все секреты `a`: {seen:?}"
+        );
         for (key, host, locked) in &of_a {
             assert!(
                 !locked,

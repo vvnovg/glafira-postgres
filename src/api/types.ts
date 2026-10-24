@@ -8,6 +8,8 @@ export type ErrorCode =
   | "NOT_FOUND"
   | "PATRONI_ERROR"
   | "NODE_UNAVAILABLE"
+  | "SSH_ERROR"
+  | "FEATURE_UNAVAILABLE"
   | "INTERNAL";
 
 /** Текст из Rust: ключ словаря, параметры и английский текст (запасной вариант). */
@@ -73,6 +75,15 @@ export interface PatroniSettings {
   tls: ApiTls | null;
   hostOverrides: HostOverride[];
 }
+export type SshAuth = "agent" | "key" | "password";
+export interface SshSettings {
+  /** Хост или алиас из ~/.ssh/config. */
+  target: string;
+  port: number | null;
+  user: string | null;
+  auth: SshAuth;
+  keyPath: string | null;
+}
 export interface ConnectionProfile {
   id: string;
   name: string;
@@ -84,6 +95,8 @@ export interface ConnectionProfile {
   targetServerType: TargetServerType;
   patroni: PatroniSettings | null;
   pg: PgSettings;
+  /** Туннель SSH до кластера; null — подключение напрямую. */
+  ssh: SshSettings | null;
   folderId?: string | null;
   order?: number;
 }
@@ -93,6 +106,8 @@ export interface SecretsInput {
   pgKeyPassword?: string | null;
   patroniPassword?: string | null;
   patroniKeyPassword?: string | null;
+  sshPassword?: string | null;
+  sshPassphrase?: string | null;
 }
 /** Какие секреты подключения сохранены в keychain (значения не передаются). */
 export interface SecretsSet {
@@ -100,6 +115,8 @@ export interface SecretsSet {
   pgKeyPassword: boolean;
   patroniPassword: boolean;
   patroniKeyPassword: boolean;
+  sshPassword: boolean;
+  sshPassphrase: boolean;
 }
 export interface ProfilePatch {
   kind: ConnectionKind;

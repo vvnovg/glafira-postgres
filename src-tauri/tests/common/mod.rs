@@ -47,6 +47,7 @@ pub fn server_profile(id: &str, addr: &str) -> ConnectionProfile {
             connect_timeout_s: 5,
             databases: None,
         },
+        ssh: None,
         folder_id: None,
         order: 0,
         extra: Default::default(),

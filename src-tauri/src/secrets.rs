@@ -19,12 +19,19 @@ pub const PATRONI_PASSWORD: &str = "patroniPassword";
 /// Пароль клиентского ключа Patroni REST API.
 pub const PATRONI_KEY_PASSWORD: &str = "patroniKeyPassword";
 
+/// Пароль SSH (`ssh.auth = password`).
+pub const SSH_PASSWORD: &str = "sshPassword";
+/// Пассфраза зашифрованного ключа SSH (`ssh.auth = key`).
+pub const SSH_PASSPHRASE: &str = "sshPassphrase";
+
 /// Все секреты подключения в keychain (для удаления).
-pub const CONNECTION_SECRET_FIELDS: [&str; 4] = [
+pub const CONNECTION_SECRET_FIELDS: [&str; 6] = [
     PG_PASSWORD,
     PG_KEY_PASSWORD,
     PATRONI_PASSWORD,
     PATRONI_KEY_PASSWORD,
+    SSH_PASSWORD,
+    SSH_PASSPHRASE,
 ];
 
 pub fn secret_key(connection_id: &str, field: &str) -> String {

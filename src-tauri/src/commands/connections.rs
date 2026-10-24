@@ -10,7 +10,7 @@ use crate::error::AppResult;
 use crate::readiness::check::{TestEvent, TestReport};
 use crate::secrets::{
     CONNECTION_SECRET_FIELDS, MemoryStore, OverlayStore, PATRONI_KEY_PASSWORD, PATRONI_PASSWORD,
-    PG_KEY_PASSWORD, PG_PASSWORD, SecretStore, secret_key,
+    PG_KEY_PASSWORD, PG_PASSWORD, SSH_PASSPHRASE, SSH_PASSWORD, SecretStore, secret_key,
 };
 use crate::state::AppState;
 use crate::sync::MutexExt;
@@ -27,6 +27,10 @@ pub struct SecretsInput {
     pub patroni_password: Option<String>,
     #[serde(default)]
     pub patroni_key_password: Option<String>,
+    #[serde(default)]
+    pub ssh_password: Option<String>,
+    #[serde(default)]
+    pub ssh_passphrase: Option<String>,
 }
 
 /// Значения в отладочный вывод не попадают: видно только, что с полем делают (оставить, удалить, задать).
@@ -42,6 +46,8 @@ impl std::fmt::Debug for SecretsInput {
             .field("pg_key_password", &op(&self.pg_key_password))
             .field("patroni_password", &op(&self.patroni_password))
             .field("patroni_key_password", &op(&self.patroni_key_password))
+            .field("ssh_password", &op(&self.ssh_password))
+            .field("ssh_passphrase", &op(&self.ssh_passphrase))
             .finish()
     }
 }
@@ -53,6 +59,8 @@ impl SecretsInput {
             PG_KEY_PASSWORD => self.pg_key_password.as_ref(),
             PATRONI_PASSWORD => self.patroni_password.as_ref(),
             PATRONI_KEY_PASSWORD => self.patroni_key_password.as_ref(),
+            SSH_PASSWORD => self.ssh_password.as_ref(),
+            SSH_PASSPHRASE => self.ssh_passphrase.as_ref(),
             _ => None,
         }
     }
@@ -281,6 +289,8 @@ pub struct SecretsSet {
     pub pg_key_password: bool,
     pub patroni_password: bool,
     pub patroni_key_password: bool,
+    pub ssh_password: bool,
+    pub ssh_passphrase: bool,
 }
 
 /// Пустая запись keychain сохранённым секретом не считается: оставлять в ней нечего.
@@ -295,6 +305,8 @@ fn secrets_set(store: &dyn SecretStore, id: &str) -> AppResult<SecretsSet> {
         pg_key_password: has(PG_KEY_PASSWORD)?,
         patroni_password: has(PATRONI_PASSWORD)?,
         patroni_key_password: has(PATRONI_KEY_PASSWORD)?,
+        ssh_password: has(SSH_PASSWORD)?,
+        ssh_passphrase: has(SSH_PASSPHRASE)?,
     })
 }
 
@@ -455,6 +467,8 @@ mod tests {
             pg_key_password: Some(String::new()),
             patroni_password: Some("s3cr3t-api".into()),
             patroni_key_password: None,
+            ssh_password: Some("s3cr3t-ssh".into()),
+            ssh_passphrase: Some("s3cr3t-key".into()),
         };
         let input = ConnectionInput {
             profile: sample_profile("a"),
@@ -468,6 +482,10 @@ mod tests {
             assert!(!shown.contains("s3cr3t"), "{shown}");
             assert!(
                 shown.contains("***") && shown.contains("delete") && shown.contains("keep"),
+                "{shown}"
+            );
+            assert!(
+                shown.contains("ssh_password") && shown.contains("ssh_passphrase"),
                 "{shown}"
             );
         }
@@ -955,13 +973,16 @@ mod tests {
             .set(&secret_key("a", PATRONI_KEY_PASSWORD), "kp")
             .unwrap();
         store.set(&secret_key("a", PG_KEY_PASSWORD), "").unwrap();
+        store.set(&secret_key("a", SSH_PASSPHRASE), "pp").unwrap();
         assert_eq!(
             secrets_set(store.as_ref(), "a").unwrap(),
             SecretsSet {
                 pg_password: true,
                 pg_key_password: false,
                 patroni_password: false,
-                patroni_key_password: true
+                patroni_key_password: true,
+                ssh_password: false,
+                ssh_passphrase: true
             }
         );
         assert_eq!(

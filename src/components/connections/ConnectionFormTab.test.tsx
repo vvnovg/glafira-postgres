@@ -10,7 +10,7 @@ vi.mock("../../api/client", async (importOriginal) => {
     api: {
       listConnections: vi.fn(),
       listFolders: vi.fn(() => Promise.resolve([{ id: "f1", name: "Прод", parentId: null, order: 0 }])),
-      connectionSecrets: vi.fn(() => Promise.resolve({ pgPassword: false, pgKeyPassword: false, patroniPassword: false, patroniKeyPassword: false })),
+      connectionSecrets: vi.fn(() => Promise.resolve({ pgPassword: false, pgKeyPassword: false, patroniPassword: false, patroniKeyPassword: false, sshPassword: false, sshPassphrase: false })),
     },
   };
 });

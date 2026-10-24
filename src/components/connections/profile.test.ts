@@ -31,6 +31,10 @@ function walk(start: ConnectionProfile, ...kinds: ConnectionProfile["kind"][]) {
 }
 
 describe("модель формы", () => {
+  it("новый профиль — без SSH", () => {
+    expect(newProfile().ssh).toBeNull();
+  });
+
   it("копия подключения — новый профиль с теми же настройками в той же папке", () => {
     const source: ConnectionProfile = {
       ...newProfile(),

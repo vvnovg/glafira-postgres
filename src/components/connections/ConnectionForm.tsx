@@ -15,7 +15,7 @@ import { folderPaths } from "./tree/folderTree";
 const ENVIRONMENTS: Environment[] = ["local", "dev", "test", "stage", "prod"];
 const KINDS: ConnectionKind[] = ["server", "hostList", "patroni"];
 /** Ничего не сохранено: у нового подключения и копии, пока ответ не пришёл и если keychain не прочитался. */
-const NO_SECRETS: SecretsSet = { pgPassword: false, pgKeyPassword: false, patroniPassword: false, patroniKeyPassword: false };
+const NO_SECRETS: SecretsSet = { pgPassword: false, pgKeyPassword: false, patroniPassword: false, patroniKeyPassword: false, sshPassword: false, sshPassphrase: false };
 
 /** copyOf — имя подключения, копия которого создаётся: заголовок и напоминание, что пароли не скопированы. */
 export function ConnectionForm({ initial, tabId, copyOf }: { initial: ConnectionProfile; tabId: string; copyOf?: string }) {
