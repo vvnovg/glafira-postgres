@@ -468,7 +468,7 @@ async fn demo_schema_on_every_node() {
 /// (`AcquireRewriteLocks`), в тест вкладка представления не входит; запрос вкладки идёт отдельной
 /// транзакцией, и они снимаются, как только запрос ответил.
 #[tokio::test]
-async fn table_details_keep_no_locks_on_plain_tables() {
+async fn table_details_keep_no_locks() {
     for addr in addrs() {
         let c = client(&addr, "orders").await;
         c.batch_execute("BEGIN READ ONLY").await.unwrap();
