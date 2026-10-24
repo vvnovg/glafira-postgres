@@ -34,6 +34,8 @@
 5. **Тестовые ключи `bastion` генерируются**, а не хранятся в репозитории (`dev/ssh/gen-keys.sh` → `dev/ssh/keys/`, в `.gitignore`): приватный ключ в публичном репозитории поймал бы gitleaks.
 6. **Поддельный `ssh` для unit-тестов** — `src-tauri/examples/fake_ssh.rs` (собирается `cargo test`): супервизор, SOCKS-путь, перезапуск и разбор ошибок проверяются без стенда на всех трёх ОС; настоящий OpenSSH — в интеграционных тестах со стендом (Linux).
 7. **Размер и статистика партиционированной таблицы во вкладке** считаются суммой по `pg_partition_tree` (блокировки всех партиций на один запрос пользователя допустимы; в списках дерева по-прежнему не считаются).
+8. **Туннель изолирован от разделения соединений ssh** (решение по ревью задачи 2): к фиксированным опциям добавлены `-o ControlMaster=no -o ControlPath=none`. С `ControlMaster auto` в `~/.ssh/config` проброс `-D` ушёл бы в уже открытую сессию пользователя и пережил бы приложение как SOCKS-прокси без аутентификации, либо приложение стало бы мастером и закрытие туннеля рвало бы сессии пользователя.
+9. **Ошибки ssh читаются из лога `-E`** (решение по задаче 2): настоящий OpenSSH с `-E` пишет ошибки в лог-файл, а stderr оставляет пустым (кроме баннера сервера). Классификация берёт последние 10 строк stderr и последние 20 строк лога этого запуска.
 
 ---
 
@@ -329,6 +331,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
                 "-N", "-T", "-E", "/logs/ssh-c1.log",
                 "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
                 "-o", "StrictHostKeyChecking=ask", "-o", "NumberOfPasswordPrompts=1", "-o", "BatchMode=no",
+                "-o", "ControlMaster=no", "-o", "ControlPath=none",
                 "-o", "UserKnownHostsFile=/tmp/kh",
                 "-p", "2222", "-l", "tester", "-i", "/keys/id_ed25519", "-o", "IdentitiesOnly=yes",
                 "-D", "127.0.0.1:40123", "--", "bastion",
@@ -573,6 +576,10 @@ impl SshArgs {
             "StrictHostKeyChecking=ask",
             "NumberOfPasswordPrompts=1",
             "BatchMode=no",
+            // Разделение соединений из ~/.ssh/config (ControlMaster) не используется: иначе порт -D достался бы
+            // чужой сессии пользователя и пережил бы приложение (отступление 8).
+            "ControlMaster=no",
+            "ControlPath=none",
         ] {
             a.push("-o".into());
             a.push(o.into());
