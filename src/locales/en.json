@@ -50,6 +50,7 @@
     },
     "connections": {
       "noId": "The connection has no ID",
+      "id": "Invalid connection ID: up to 64 Latin letters, digits, “_” and “-”",
       "emptyName": "Connection name cannot be empty",
       "notFound": "Connection {{id}} not found",
       "serverHosts": "A server connection needs exactly one host",
@@ -67,8 +68,8 @@
       "patroniUrlCredentials": "The Patroni API address must not contain “@”, a user name or a password: use the “API user” and “API password” fields",
       "overrideMember": "Specify the member name for the address override",
       "overrideDuplicate": "Address override for {{member}} is specified twice",
-      "sshTarget": "SSH target must be a host name or an alias from ~/.ssh/config without spaces",
-      "sshUser": "SSH user name must not contain spaces or start with “-”",
+      "sshTarget": "SSH target must be a host name or an alias from ~/.ssh/config: Latin letters, digits, “.”, “_” and “-”, not starting with “-”",
+      "sshUser": "SSH user name may contain only Latin letters, digits, “.”, “_” and “-”, not starting with “-”",
       "sshPort": "SSH port must be from 1 to 65535",
       "sshKeyPath": "Choose the private key file for the “key” method"
     },

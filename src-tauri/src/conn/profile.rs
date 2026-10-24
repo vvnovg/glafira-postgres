@@ -447,11 +447,27 @@ fn validate_http_url(url: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Id подключения становится частью имён файлов (`ssh-<id>.log`, отчёт askpass, файл секретов проверки) и ключей
+/// keychain, а из файла обмена приходит любым: `..\x` на Windows вывел бы путь из каталога. Приложение выдаёт UUID
+/// (`unsaved-<uuid>` у проверки), поэтому допустимы только ASCII-буквы, цифры, «_» и «-», не длиннее 64 символов.
+fn connection_id_ok(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+}
+
 pub fn validate_profile(p: &ConnectionProfile) -> AppResult<()> {
     if p.id.trim().is_empty() {
         return Err(invalid(ltext!(
             "errors.connections.noId",
             "The connection has no ID"
+        )));
+    }
+    if !connection_id_ok(&p.id) {
+        return Err(invalid(ltext!(
+            "errors.connections.id",
+            "Invalid connection ID: up to 64 Latin letters, digits, “_” and “-”"
         )));
     }
     if p.name.trim().is_empty() {
@@ -515,10 +531,17 @@ pub fn validate_profile(p: &ConnectionProfile) -> AppResult<()> {
     validate_ssh(p.ssh.as_ref())
 }
 
-/// Цель и пользователь попадают в командную строку ssh как отдельные аргументы: пробелы и ведущий «-»
-/// превратили бы их в опции.
+/// Цель и пользователь попадают в командную строку ssh как отдельные аргументы, а значения могут прийти из файла
+/// обмена. Допускаются только ASCII-буквы, цифры, «.», «_» и «-», и не первым «-» (иначе аргумент стал бы опцией).
+/// Это строже `valid_hostname`/`valid_ruser` OpenSSH 9.6: клиенты до 9.6 (в том числе штатные 8.1–9.5 в Windows)
+/// подставляют `%h` и `%u` в `ProxyCommand` и `Match exec` через оболочку, и кавычки, `$`, `;`, `|`, `&`, `` ` ``,
+/// скобки, `\`, `<`, `>`, пробелы или управляющие символы в цели или имени пользователя стали бы командой оболочки
+/// (класс CVE-2023-51385). «@» не нужен: пользователь передаётся отдельно (`-l`), цель — хост или алиас.
 fn ssh_argument_ok(s: &str) -> bool {
-    !s.is_empty() && !s.starts_with('-') && !s.chars().any(char::is_whitespace)
+    !s.is_empty()
+        && !s.starts_with('-')
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
 pub(crate) fn validate_ssh(ssh: Option<&SshSettings>) -> AppResult<()> {
@@ -526,7 +549,7 @@ pub(crate) fn validate_ssh(ssh: Option<&SshSettings>) -> AppResult<()> {
     if !ssh_argument_ok(&s.target) {
         return Err(invalid(ltext!(
             "errors.connections.sshTarget",
-            "SSH target must be a host name or an alias from ~/.ssh/config without spaces"
+            "SSH target must be a host name or an alias from ~/.ssh/config: Latin letters, digits, “.”, “_” and “-”, not starting with “-”"
         )));
     }
     if let Some(u) = &s.user
@@ -534,7 +557,7 @@ pub(crate) fn validate_ssh(ssh: Option<&SshSettings>) -> AppResult<()> {
     {
         return Err(invalid(ltext!(
             "errors.connections.sshUser",
-            "SSH user name must not contain spaces or start with “-”"
+            "SSH user name may contain only Latin letters, digits, “.”, “_” and “-”, not starting with “-”"
         )));
     }
     if s.port == Some(0) {
@@ -759,6 +782,16 @@ mod tests {
     #[test]
     fn validation_rules() {
         let cases: Vec<Case> = vec![
+            ("errors.connections.noId", Box::new(|p| p.id = " ".into())),
+            // Id — часть имён файлов: из файла обмена не должен прийти путь.
+            ("errors.connections.id", Box::new(|p| p.id = "..\\x".into())),
+            (
+                "errors.connections.id",
+                Box::new(|p| p.id = "../../etc/x".into()),
+            ),
+            ("errors.connections.id", Box::new(|p| p.id = "a b".into())),
+            ("errors.connections.id", Box::new(|p| p.id = "ид".into())),
+            ("errors.connections.id", Box::new(|p| p.id = "a".repeat(65))),
             (
                 "errors.connections.emptyName",
                 Box::new(|p| p.name = " ".into()),
@@ -918,6 +951,12 @@ mod tests {
             assert_eq!(err.code, crate::error::ErrorCode::InvalidInput);
         }
         validate_profile(&sample_profile("a")).unwrap();
+        // Id, которые выдаёт приложение: UUID и временный id проверки.
+        validate_profile(&sample_profile("0b5f9c2e-6a1d-4f7e-9b3a-2c4d6e8f0a1b")).unwrap();
+        validate_profile(&sample_profile(
+            "unsaved-0b5f9c2e-6a1d-4f7e-9b3a-2c4d6e8f0a1b",
+        ))
+        .unwrap();
         validate_profile(&patroni(sample_profile("p")))
             .map(|_| ())
             .unwrap_or_else(|e| {
@@ -1321,7 +1360,52 @@ mod tests {
         // `abs`: на Windows путь с одним «/» не абсолютный.
         let key = abs("k/id_ed25519");
         assert!(ssh("bastion", Some("tester"), SshAuth::Key, Some(&key)).is_ok());
-        assert!(ssh("user@host-alias.example", None, SshAuth::Password, None).is_ok());
+        // Допустимые цели: хост, полное имя, IPv4, алиас из ~/.ssh/config с «-» и «_».
+        for target in [
+            "bastion",
+            "bastion.corp.example",
+            "10.0.0.5",
+            "jump-host_prod-01",
+        ] {
+            assert!(
+                ssh(target, Some("svc_user.ops-1"), SshAuth::Password, None).is_ok(),
+                "{target}"
+            );
+        }
+        // Метасимволы оболочки, кавычки, управляющие символы, «@» и не-ASCII: клиенты OpenSSH до 9.6 подставляют
+        // `%h` и `%u` в ProxyCommand и Match exec через оболочку (класс CVE-2023-51385).
+        for bad in [
+            "host;id",
+            "host`id`",
+            "host$(id)",
+            "host${IFS}x",
+            "host\nx",
+            "host\tx",
+            "host\u{7f}x",
+            "host|id",
+            "host&id",
+            "host>x",
+            "host<x",
+            "host'x",
+            "host\"x",
+            "host\\x",
+            "host(x)",
+            "host{x}",
+            "user@host-alias.example",
+            "хост",
+            "-oProxyCommand=sh -c id",
+        ] {
+            assert_eq!(
+                ssh(bad, None, SshAuth::Agent, None),
+                Err("errors.connections.sshTarget".into()),
+                "{bad:?}"
+            );
+            assert_eq!(
+                ssh("bastion", Some(bad), SshAuth::Agent, None),
+                Err("errors.connections.sshUser".into()),
+                "{bad:?}"
+            );
+        }
         // Порт 0 не бывает; пустой «порт по конфигу ssh» (`None`) допустим.
         let mut zero = sample_profile("a");
         zero.ssh = Some(SshSettings {

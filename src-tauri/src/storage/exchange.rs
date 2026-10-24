@@ -1793,6 +1793,55 @@ mod tests {
         assert_eq!(p.preview.needs_passwords, 0);
     }
 
+    /// Id подключения становится частью имён файлов, а цель и пользователь ssh — аргументами командной строки:
+    /// подключение файла с id-путём или с метасимволами оболочки в настройках ssh пропускается, остальные
+    /// импортируются.
+    #[test]
+    fn path_ids_and_shell_metacharacters_in_ssh_settings_are_skipped() {
+        use crate::conn::profile::{SshAuth, SshSettings};
+        let ok = conn_json("ok", "OK", None);
+        let windows_path = conn_json("..\\x", "WinPath", None);
+        let unix_path = conn_json("../x", "UnixPath", None);
+        let ssh = |name: &str, target: &str, user: Option<&str>| {
+            let mut v = conn_json(name, name, None);
+            v["ssh"] = serde_json::to_value(SshSettings {
+                target: target.into(),
+                port: None,
+                user: user.map(String::from),
+                auth: SshAuth::Agent,
+                key_path: None,
+            })
+            .unwrap();
+            v
+        };
+        let parsed = parse_exchange(&file(
+            vec![],
+            vec![
+                ok,
+                windows_path,
+                unix_path,
+                ssh("Target", "bastion$(id)", None),
+                ssh("User", "bastion", Some("u;id")),
+            ],
+        ))
+        .unwrap();
+        assert_eq!(ids(&parsed.connections, |c| c.0.id.as_str()), ["ok"]);
+        let reasons: Vec<(&str, &str)> = parsed
+            .skipped
+            .iter()
+            .map(|s| (s.name.as_str(), s.reason.key.as_str()))
+            .collect();
+        assert_eq!(
+            reasons,
+            [
+                ("WinPath", "errors.connections.id"),
+                ("UnixPath", "errors.connections.id"),
+                ("Target", "errors.connections.sshTarget"),
+                ("User", "errors.connections.sshUser"),
+            ]
+        );
+    }
+
     #[test]
     fn parse_exchange_tolerates_unknown_fields_and_skips_unsupported() {
         let mut ok = conn_json("ok", "OK", None);
