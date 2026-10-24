@@ -1293,7 +1293,7 @@ pub(crate) mod tests {
                 ("FAKE_SSH_RUNS", log.to_string_lossy().into_owned()),
             ],
             Arc::new(MemoryStore::default()),
-            |cfg| cfg.backoff = vec![Duration::from_millis(800)],
+            |cfg| cfg.backoff = vec![Duration::from_millis(1500)],
         );
         let p = profile(SshAuth::Agent);
         reg.open(&p, Duration::from_secs(5)).await.unwrap();
@@ -1303,9 +1303,10 @@ pub(crate) mod tests {
         reg.restart_if_down(&p, Duration::from_secs(5))
             .await
             .unwrap();
-        // Второе падение: пауза 800 мс выдерживается, перезапуск не начинается сразу.
+        // Второе падение: пауза 1,5 с выдерживается, перезапуск не начинается сразу (запас 900 мс — на медленный
+        // раннер CI).
         eventually("второе падение", || down(&reg).is_some()).await;
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        tokio::time::sleep(Duration::from_millis(600)).await;
         assert_eq!(runs(&log), 2, "пауза не пропущена");
         assert!(down(&reg).is_some());
         reg.close("c1");
