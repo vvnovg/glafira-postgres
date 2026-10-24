@@ -1,6 +1,6 @@
 [package]
 name = "glafira-pg"
-version = "0.1.0"
+version = "0.2.0"
 description = "Glafira for PostgreSQL — диагностика PostgreSQL и кластеров Patroni"
 authors = ["Glafira for PostgreSQL contributors"]
 edition = "2024"
