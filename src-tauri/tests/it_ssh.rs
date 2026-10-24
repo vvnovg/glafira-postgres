@@ -2,6 +2,9 @@
 //! ключ, ключ с пассфразой и пароль через askpass, неизвестный ключ хоста и доверие, неверный пароль,
 //! недоступный узел за бастионом, Patroni и список узлов через туннель. Имена узлов (`pg-single`, `patroni1`…)
 //! разрешает бастион. Тесты запускают настоящий OpenSSH из PATH.
+//!
+//! Запускать с `--test-threads=1`: туннели занимают свободные порты и делят каталог подготовленных секретов.
+//! Нужны обе переменные, `GPG_IT_BASTION` и `GPG_IT_SSH_KEYS`: без любой из них каждый тест пропускается.
 
 mod common;
 
@@ -204,7 +207,7 @@ async fn unreachable_upstream_behind_the_bastion_is_forward_failed() {
     let socks = open_trusting(&s).await;
     // Имя не разрешается на бастионе и закрытый порт узла сети compose: канал не открылся, `ssh -D` закрывает
     // соединение с клиентом — сбой проброса, а не ошибка PostgreSQL.
-    for (host, port) in [("nonexistent-host", 5432), ("pg-single", 5999)] {
+    for (host, port) in [("nonexistent.invalid", 5432), ("pg-single", 5999)] {
         let e = spec_via(&s.profile, host, port, socks)
             .connect()
             .await
@@ -215,7 +218,7 @@ async fn unreachable_upstream_behind_the_bastion_is_forward_failed() {
     // Patroni через тот же туннель: недоступный адрес API — тот же сбой проброса, а не общая ошибка Patroni.
     let target = s.profile.ssh.as_ref().unwrap().target.clone();
     let settings = PatroniSettings {
-        urls: vec!["http://nonexistent-host:8008".into()],
+        urls: vec!["http://nonexistent.invalid:8008".into()],
         username: None,
         tls: None,
         host_overrides: vec![],
@@ -224,10 +227,10 @@ async fn unreachable_upstream_behind_the_bastion_is_forward_failed() {
         .unwrap()
         .with_ssh_target(&target);
     let e = http
-        .get_json("http://nonexistent-host:8008/cluster")
+        .get_json("http://nonexistent.invalid:8008/cluster")
         .await
         .unwrap_err();
-    assert_forward_failed(&e, "nonexistent-host", 8008);
+    assert_forward_failed(&e, "nonexistent.invalid", 8008);
     // Туннель после недоступных узлов жив: соединение с настоящим узлом проходит.
     assert!(
         query_version(socks, &s.profile)
@@ -284,6 +287,12 @@ async fn patroni_and_host_list_are_observed_through_the_tunnel() {
         socks: Some(socks),
     };
     let t = observe_hosts("ssh", ConnectionKind::HostList, &hl.hosts, &nodes, 0).await;
+    assert!(
+        t.members.len() >= 2,
+        "через туннель наблюдались не все узлы: {:?}",
+        t.members
+    );
     assert!(t.members.iter().any(|m| m.role == Role::Primary));
+    assert!(t.members.iter().any(|m| m.role == Role::Replica));
     s.reg.close("ssh");
 }

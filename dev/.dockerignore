@@ -1,4 +1,4 @@
 # Контекст сборки образов стенда — каталог dev. Приватные тестовые ключи bastion в него не попадают:
 # образу нужны только публичные ключи (ssh/keys/*.pub).
-ssh/keys/tester_ed25519
-ssh/keys/tester_ed25519_pass
+ssh/keys/*
+!ssh/keys/*.pub

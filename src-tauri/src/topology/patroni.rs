@@ -183,9 +183,19 @@ fn refused(e: &reqwest::Error) -> bool {
 /// Порт туннеля принял соединение, но рукопожатие SOCKS5 оборвалось (клиент reqwest/hyper-util пишет «io error
 /// during SOCKS handshake» и не отдаёт исходную ошибку ввода-вывода в цепочке причин). OpenSSH 10.x отвечает SOCKS5
 /// только после открытия канала к узлу, а когда бастион до узла не достучался (имя не разрешилось, порт закрыт),
-/// закрывает соединение без ответа.
+/// закрывает соединение без ответа. Кроме этого текста сбоем проброса считается любая ошибка SOCKS-клиента в цепочке
+/// («SOCKS error: …»: ответ SOCKS с отказом, разбор ответа в других версиях клиента), кроме отказа соединиться с
+/// самим портом туннеля — тот остаётся делом `refused`.
 fn handshake_dropped(e: &reqwest::Error) -> bool {
-    chain(e).contains("io error during SOCKS handshake")
+    socks_failure_text(&chain(e))
+}
+
+/// Текст цепочки причин — сбой SOCKS-клиента после соединения с портом туннеля (чистая функция: проверяется без сети).
+fn socks_failure_text(text: &str) -> bool {
+    if text.contains("failed to create underlying connection") {
+        return false;
+    }
+    text.contains("io error during SOCKS handshake") || text.contains("SOCKS error:")
 }
 
 fn request_error(url: &str, e: &reqwest::Error) -> AppError {
@@ -1445,12 +1455,13 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(
-            (e.code, e.key.as_str(), e.params["kind"].as_str()),
-            (
-                ErrorCode::SshError,
-                "errors.ssh.forwardFailed",
-                "forwardFailed"
-            ),
+            (e.code, e.key.as_str()),
+            (ErrorCode::SshError, "errors.ssh.forwardFailed"),
+            "{e:?}"
+        );
+        assert_eq!(
+            e.params.get("kind"),
+            Some(&"forwardFailed".to_string()),
             "{e:?}"
         );
         assert_eq!(e.params["target"], "bastion");
@@ -1504,12 +1515,13 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(
-            (e.code, e.key.as_str(), e.params["kind"].as_str()),
-            (
-                ErrorCode::SshError,
-                "errors.ssh.forwardFailed",
-                "forwardFailed"
-            ),
+            (e.code, e.key.as_str()),
+            (ErrorCode::SshError, "errors.ssh.forwardFailed"),
+            "{e:?}"
+        );
+        assert_eq!(
+            e.params.get("kind"),
+            Some(&"forwardFailed".to_string()),
             "{e:?}"
         );
         assert_eq!(e.params["target"], "bastion");
@@ -1517,6 +1529,27 @@ mod tests {
             e.details.as_deref().unwrap().contains("patroni1:8008"),
             "{e:?}"
         );
+    }
+
+    /// Сбой SOCKS-клиента после соединения с портом туннеля — сбой проброса; отказ соединиться с самим портом
+    /// туннеля («failed to create underlying connection») и посторонние ошибки — нет.
+    #[test]
+    fn socks_failure_text_recognizes_client_variants() {
+        for text in [
+            "error sending request: SOCKS error: io error during SOCKS handshake",
+            "error sending request: SOCKS error: failed parsing server response: bad version",
+            "error sending request: SOCKS error: host unreachable",
+            "SOCKS error: could not resolve to acceptable address type",
+        ] {
+            assert!(socks_failure_text(text), "{text}");
+        }
+        for text in [
+            "error sending request: SOCKS error: failed to create underlying connection: Connection refused",
+            "error sending request: operation timed out",
+            "error sending request: connection closed before message completed",
+        ] {
+            assert!(!socks_failure_text(text), "{text}");
+        }
     }
 
     /// HTTPS-сервер на 127.0.0.1 (отвечает `{"state":"running"}`); `ca` — если задан, требует клиентский сертификат от него.

@@ -286,7 +286,7 @@
     "newConnection": "New connection",
     "editConnection": "Edit connection",
     "duplicateConnection": "Duplicate connection",
-    "emptyHint": "Add your first connection. Local test bench: <code>docker compose -f dev/docker-compose.yml up -d</code>, server <code>localhost:5460</code>, user <code>glafira_diag</code>.",
+    "emptyHint": "Add your first connection. Local test bench: <code>dev/ssh/gen-keys.sh && docker compose -f dev/docker-compose.yml up -d</code>, server <code>localhost:5460</code>, user <code>glafira_diag</code>.",
     "help": "Help",
     "about": "About",
     "filter": "Filter connections",

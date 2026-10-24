@@ -1,6 +1,6 @@
 # Смоук «Открытый код» (Apache 2.0, без ключей, «Поддержать проект», автообновление)
 
-Сборка: `pnpm tauri dev`. Стенд: `docker compose -f dev/docker-compose.yml up -d` и `scripts/wait-stand.sh`
+Сборка: `pnpm tauri dev`. Стенд: `dev/ssh/gen-keys.sh && docker compose -f dev/docker-compose.yml up -d` и `scripts/wait-stand.sh`
 (сервер `localhost:5460`, роль `glafira_diag` / `glafira-secret`).
 Каталог данных — строка «Данные:» в «О программе» (macOS: `~/Library/Application Support/io.github.vvnovg.glafira.postgres`),
 лог — файл `app.log` в каталоге из строки «Логи:» (`~/Library/Logs/io.github.vvnovg.glafira.postgres`).

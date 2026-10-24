@@ -288,7 +288,7 @@
     "newConnection": "Новое подключение",
     "editConnection": "Изменить подключение",
     "duplicateConnection": "Дублировать подключение",
-    "emptyHint": "Добавьте первое подключение. Локальный стенд: <code>docker compose -f dev/docker-compose.yml up -d</code>, сервер <code>localhost:5460</code>, пользователь <code>glafira_diag</code>.",
+    "emptyHint": "Добавьте первое подключение. Локальный стенд: <code>dev/ssh/gen-keys.sh && docker compose -f dev/docker-compose.yml up -d</code>, сервер <code>localhost:5460</code>, пользователь <code>glafira_diag</code>.",
     "help": "Справка",
     "about": "О программе",
     "filter": "Фильтр подключений",
