@@ -44,7 +44,10 @@ pub fn slots_sql(caps: Caps) -> String {
 }
 
 /// Подписки (строка основного процесса применения: `relid IS NULL`; подписка без процесса — строка с пустым `pid`).
-/// Колонки: 0 имя, 1 pid, 2 `received_lsn`, 3–4 возраст последнего сообщения и последней позиции отправителя в секундах,
+/// На 16+ параллельные воркеры применения (`streaming = parallel`) тоже идут с `relid IS NULL`, но у них задан
+/// `leader_pid`: без `leader_pid IS NULL` подписка попала бы в список несколько раз, а её счётчики ошибок из
+/// `pg_stat_subscription_stats` повторились бы на каждой строке и задвоили сумму — отсюда ложный «рост» при
+/// появлении и исчезновении воркеров. Колонки: 0 имя, 1 pid, 2 `received_lsn`, 3–4 возраст последнего сообщения и последней позиции отправителя в секундах,
 /// 5–6 число ошибок применения и синхронизации (15+).
 pub fn subscriptions_sql(caps: Caps) -> String {
     let (stats, apply, sync) = if caps.at_least(V15) {
@@ -56,10 +59,16 @@ pub fn subscriptions_sql(caps: Caps) -> String {
     } else {
         ("", "NULL::bigint", "NULL::bigint")
     };
+    // Колонка `leader_pid` появилась в 16: на более старых версиях параллельных воркеров применения нет.
+    let leaders = if caps.at_least(V16) {
+        " AND s.leader_pid IS NULL"
+    } else {
+        ""
+    };
     format!(
         "SELECT s.subname::text, s.pid, s.received_lsn::text, extract(epoch FROM now() - s.last_msg_receipt_time)::float8, \
                 extract(epoch FROM now() - s.latest_end_time)::float8, {apply}, {sync} \
-         FROM pg_stat_subscription s {stats} WHERE s.relid IS NULL ORDER BY s.subname"
+         FROM pg_stat_subscription s {stats} WHERE s.relid IS NULL{leaders} ORDER BY s.subname"
     )
 }
 
@@ -91,6 +100,7 @@ pub fn mark_patroni(d: &mut SlotsData, member_names: &[String], permanent: &[Str
 /// нему. Не прочитался — отметки лишь у слотов участников и причина для `unavailable`.
 fn mark_by_config(
     d: &mut SlotsData,
+    id: &str,
     members: &[String],
     config: AppResult<DynConfig>,
 ) -> Option<Unavailable> {
@@ -99,7 +109,9 @@ fn mark_by_config(
             mark_patroni(d, members, &config.permanent_slots);
             None
         }
-        Err(_) => {
+        Err(e) => {
+            // Причина (таймаут, TLS, отказ узла) в `unavailable` не попадает — оставляем её в журнале.
+            tracing::warn!(connection = %id, "Patroni /config not read for slot marks: {}", e.message);
             mark_patroni(d, members, &[]);
             Some(Unavailable {
                 part: "patroniSlots".to_string(),
@@ -209,7 +221,7 @@ pub async fn report(st: &AppState, id: &str, target: &DiagTarget) -> AppResult<D
             .map(|m| m.name.clone())
             .collect();
         let config = patroni::dyn_config(st, target).await;
-        unavailable.extend(mark_by_config(&mut data, &members, config));
+        unavailable.extend(mark_by_config(&mut data, id, &members, config));
     }
     let findings = rules::evaluate(member, &data);
     Ok(make_report(
@@ -280,7 +292,7 @@ mod tests {
             permanent_slots: vec!["debezium".into()],
             ..Default::default()
         };
-        assert!(mark_by_config(&mut d, &members, Ok(config)).is_none());
+        assert!(mark_by_config(&mut d, "conn-1", &members, Ok(config)).is_none());
         assert_eq!(
             marks(&d),
             [
@@ -293,7 +305,8 @@ mod tests {
 
         let mut d = slots(&["patroni1", "debezium"]);
         let err = crate::error::AppError::internal_with("no /config");
-        let u = mark_by_config(&mut d, &members, Err(err)).expect("причина в unavailable");
+        let u =
+            mark_by_config(&mut d, "conn-1", &members, Err(err)).expect("причина в unavailable");
         assert_eq!((u.part.as_str(), u.member), ("patroniSlots", None));
         assert_eq!(u.reason.key, "diag.unavailable.patroniConfig");
         assert_eq!(
@@ -320,5 +333,22 @@ mod tests {
         assert!(slots_sql(Caps::new(170000)).contains("invalidation_reason"));
         assert!(subscriptions_sql(Caps::new(140000)).contains("NULL::bigint"));
         assert!(subscriptions_sql(Caps::new(150000)).contains("st.apply_error_count"));
+    }
+
+    #[test]
+    fn parallel_apply_workers_are_left_out_of_subscriptions_on_16_and_newer() {
+        // Параллельные воркеры применения (16+) — строки с `relid IS NULL` и заданным `leader_pid`: не считаем их.
+        for v in [160000, 170000, 180000] {
+            let sql = subscriptions_sql(Caps::new(v));
+            assert!(sql.contains("s.leader_pid IS NULL"), "{v}");
+            assert!(sql.contains("s.relid IS NULL"), "{v}");
+        }
+        // До 16 колонки `leader_pid` нет — условие сломало бы запрос.
+        for v in [130000, 140000, 150000] {
+            assert!(
+                !subscriptions_sql(Caps::new(v)).contains("leader_pid"),
+                "{v}"
+            );
+        }
     }
 }

@@ -115,11 +115,13 @@ pub fn evaluate(member: Option<&str>, d: &SlotsData) -> Vec<Finding> {
         );
     }
     // Неактивный слот держит WAL: оценка по объёму, а `unreserved` (WAL вот-вот удалят) — всегда critical.
-    // Активный слот копит WAL, пока реплика его читает, — это лаг, а не забытый слот.
+    // Активный слот копит WAL, пока реплика его читает, — это лаг, а не забытый слот. Синхронизированный слот
+    // (`synced`, копия слота failover на реплике PostgreSQL 17+) неактивен по устройству и на реплике не удаляется:
+    // забытым он быть не может, поэтому в оценку не идёт (в списке данных остаётся).
     let inactive = d
         .slots
         .iter()
-        .filter(|s| !s.active && s.wal_status.as_deref() != Some("lost"));
+        .filter(|s| !s.active && s.synced != Some(true) && s.wal_status.as_deref() != Some("lost"));
     let graded: Vec<(&Slot, Severity)> = inactive
         .filter_map(|s| {
             let by_bytes = s.retained_bytes.and_then(|b| {
@@ -276,6 +278,46 @@ mod tests {
             (&3.into(), &"reserved".into())
         );
         assert_eq!(r.links.len(), 1, "кнопка ведёт на вкладку слотов узла");
+    }
+
+    #[test]
+    fn synced_standby_copies_of_failover_slots_are_not_forgotten_slots() {
+        let synced = |synced: Option<bool>| {
+            let mut s = slot("failover_copy", false, 20 * GIB, "reserved");
+            s.synced = synced;
+            s
+        };
+        let ids = |s: Slot| -> Vec<String> {
+            let d = SlotsData {
+                slots: vec![s],
+                ..Default::default()
+            };
+            evaluate(Some("pg-2"), &d)
+                .into_iter()
+                .map(|f| f.id)
+                .collect()
+        };
+        // Неактивный синхронизированный слот с 20 ГиБ — находки нет; такой же не синхронизированный — есть.
+        assert!(ids(synced(Some(true))).is_empty());
+        assert_eq!(ids(synced(Some(false))), ["slotRetainsWal"]);
+        assert_eq!(ids(synced(None)), ["slotRetainsWal"]);
+        // Синхронизированный слот не прячет соседний забытый: цель находки — тот, что не синхронизирован.
+        let d = SlotsData {
+            slots: vec![
+                synced(Some(true)),
+                slot("forgotten", false, 2 * GIB, "reserved"),
+            ],
+            ..Default::default()
+        };
+        let f = evaluate(None, &d);
+        assert_eq!(f.len(), 1);
+        assert_eq!(
+            f[0].target,
+            Some(FindingTarget::Slot {
+                name: "forgotten".into()
+            })
+        );
+        assert_eq!(f[0].params["count"], 1);
     }
 
     #[test]
