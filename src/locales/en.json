@@ -68,8 +68,8 @@
       "patroniUrlCredentials": "The Patroni API address must not contain “@”, a user name or a password: use the “API user” and “API password” fields",
       "overrideMember": "Specify the member name for the address override",
       "overrideDuplicate": "Address override for {{member}} is specified twice",
-      "sshTarget": "SSH target must be a host name or an alias from ~/.ssh/config: Latin letters, digits, “.”, “_” and “-”, not starting with “-”",
-      "sshUser": "SSH user name may contain only Latin letters, digits, “.”, “_” and “-”, not starting with “-”",
+      "sshTarget": "SSH target is a host name or an alias from ~/.ssh/config, without a user name (enter the user in the “SSH user” field): Latin letters, digits, “.”, “_” and “-”, not starting with “-”",
+      "sshUser": "SSH user name may contain only Latin letters, digits, “.”, “_”, “-” and “@” (for example name@domain), not starting with “-” or “@”",
       "sshPort": "SSH port must be from 1 to 65535",
       "sshKeyPath": "Choose the private key file for the “key” method"
     },
@@ -753,7 +753,7 @@
       "pgpass": "If no password is set, ~/.pgpass is used, as in psql.",
       "environment": "Marks the connection with a color. prod connections ask you to type the connection name before any change.",
       "readOnly": "Blocks everything that changes data or the cluster. Recommended for prod.",
-      "sshTarget": "A host or an alias from ~/.ssh/config: ProxyJump, the agent and hardware keys are honored. Port and user come from the config when left empty."
+      "sshTarget": "A host or an alias from ~/.ssh/config, not user@host: enter the user in the “SSH user” field. ProxyJump, the agent and hardware keys are honored. Port and user come from the config when empty."
     },
     "import": {
       "target": "Where new folders and connections go. Existing ones stay where they are.",

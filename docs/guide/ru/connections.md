@@ -37,7 +37,7 @@
 **Поля.**
 
 - [[ui:connections.form.ssh.target]] — имя хоста или алиас из `~/.ssh/config`. Ваш `~/.ssh/config` читается, поэтому работают ProxyJump, SSH-агент, аппаратные ключи и параметры отдельных хостов. Но несколько опций приложение задаёт в командной строке `ssh`, и они главнее файла: `ControlMaster=no` и `ControlPath=none` (туннель никогда не присоединяется к общему соединению), `StrictHostKeyChecking=ask`, `ServerAliveInterval=15` с `ServerAliveCountMax=3`, `NumberOfPasswordPrompts=1`, `BatchMode=no`, `ExitOnForwardFailure=yes` и, для способов [[ui:connections.form.ssh.auths.key]] и [[ui:connections.form.ssh.auths.password]], `PreferredAuthentications` (с `IdentitiesOnly=yes`, когда выбран файл ключа).
-- [[ui:connections.form.ssh.port]] и [[ui:connections.form.ssh.user]] — оставьте пустыми, чтобы взять значения из `~/.ssh/config`. В цели и имени пользователя допустимы только латинские буквы, цифры, «.», «_» и «-».
+- [[ui:connections.form.ssh.port]] и [[ui:connections.form.ssh.user]] — оставьте пустыми, чтобы взять значения из `~/.ssh/config`. Имя пользователя вводите в поле [[ui:connections.form.ssh.user]], а не как `user@host` в цели; полное имя вида `name@domain` там допустимо. В цели допустимы только латинские буквы, цифры, «.», «_» и «-», в имени пользователя ещё и «@».
 - [[ui:connections.form.ssh.auth]] — как входить на бастион:
   - [[ui:connections.form.ssh.auths.agent]] — ключи из SSH-агента, включая агентов менеджеров паролей и аппаратные ключи. В приложении ничего не хранится.
   - [[ui:connections.form.ssh.auths.key]] — файл закрытого ключа; выберите его в поле, которое появится ниже. Серверу предлагается только этот ключ. Для зашифрованного ключа введите ещё и [[ui:connections.form.ssh.passphrase]].

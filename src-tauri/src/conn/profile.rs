@@ -536,7 +536,7 @@ pub fn validate_profile(p: &ConnectionProfile) -> AppResult<()> {
 /// Это строже `valid_hostname`/`valid_ruser` OpenSSH 9.6: клиенты до 9.6 (в том числе штатные 8.1–9.5 в Windows)
 /// подставляют `%h` и `%u` в `ProxyCommand` и `Match exec` через оболочку, и кавычки, `$`, `;`, `|`, `&`, `` ` ``,
 /// скобки, `\`, `<`, `>`, пробелы или управляющие символы в цели или имени пользователя стали бы командой оболочки
-/// (класс CVE-2023-51385). «@» не нужен: пользователь передаётся отдельно (`-l`), цель — хост или алиас.
+/// (класс CVE-2023-51385). Для цели «@» не нужен: пользователь передаётся отдельно (`-l`), цель — хост или алиас.
 fn ssh_argument_ok(s: &str) -> bool {
     !s.is_empty()
         && !s.starts_with('-')
@@ -544,20 +544,32 @@ fn ssh_argument_ok(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
+/// Имя пользователя: правило цели плюс «@» не первым символом. Бастионы в AD с SSSD и
+/// `use_fully_qualified_names = True` пускают только под полным именем `ivanov@corp.example.com`. «@» не метасимвол
+/// оболочки, а `valid_ruser` OpenSSH 9.6 его разрешает; пользователь уходит отдельным аргументом `-l`, поэтому
+/// второй «@» не путает разбор цели.
+fn ssh_user_ok(s: &str) -> bool {
+    !s.starts_with('@')
+        && !s.is_empty()
+        && !s.starts_with('-')
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'@'))
+}
+
 pub(crate) fn validate_ssh(ssh: Option<&SshSettings>) -> AppResult<()> {
     let Some(s) = ssh else { return Ok(()) };
     if !ssh_argument_ok(&s.target) {
         return Err(invalid(ltext!(
             "errors.connections.sshTarget",
-            "SSH target must be a host name or an alias from ~/.ssh/config: Latin letters, digits, “.”, “_” and “-”, not starting with “-”"
+            "SSH target is a host name or an alias from ~/.ssh/config, without a user name (enter the user in the “SSH user” field): Latin letters, digits, “.”, “_” and “-”, not starting with “-”"
         )));
     }
     if let Some(u) = &s.user
-        && !ssh_argument_ok(u)
+        && !ssh_user_ok(u)
     {
         return Err(invalid(ltext!(
             "errors.connections.sshUser",
-            "SSH user name may contain only Latin letters, digits, “.”, “_” and “-”, not starting with “-”"
+            "SSH user name may contain only Latin letters, digits, “.”, “_”, “-” and “@” (for example name@domain), not starting with “-” or “@”"
         )));
     }
     if s.port == Some(0) {
@@ -1372,8 +1384,8 @@ mod tests {
                 "{target}"
             );
         }
-        // Метасимволы оболочки, кавычки, управляющие символы, «@» и не-ASCII: клиенты OpenSSH до 9.6 подставляют
-        // `%h` и `%u` в ProxyCommand и Match exec через оболочку (класс CVE-2023-51385).
+        // Метасимволы оболочки, кавычки, управляющие символы и не-ASCII — и в цели, и в пользователе: клиенты
+        // OpenSSH до 9.6 подставляют `%h` и `%u` в ProxyCommand и Match exec через оболочку (класс CVE-2023-51385).
         for bad in [
             "host;id",
             "host`id`",
@@ -1391,7 +1403,6 @@ mod tests {
             "host\\x",
             "host(x)",
             "host{x}",
-            "user@host-alias.example",
             "хост",
             "-oProxyCommand=sh -c id",
         ] {
@@ -1403,6 +1414,39 @@ mod tests {
             assert_eq!(
                 ssh("bastion", Some(bad), SshAuth::Agent, None),
                 Err("errors.connections.sshUser".into()),
+                "{bad:?}"
+            );
+        }
+        // «@» допустим только в имени пользователя и не первым: бастион в AD с SSSD (`use_fully_qualified_names`)
+        // ждёт `ivanov@corp.example.com`; в цели «@» — это привычка `ssh user@bastion`, пользователь идёт в своё поле.
+        for user in ["ivanov@corp.example.com", "svc_pg-ro", "a@b", "name@domain"] {
+            assert!(
+                ssh("bastion", Some(user), SshAuth::Agent, None).is_ok(),
+                "{user}"
+            );
+        }
+        for bad in [
+            "@user",
+            "@",
+            "user;x",
+            "user x",
+            "-user",
+            "-@user",
+            "user@host;id",
+            "user@host x",
+            "user@хост",
+            "user@host\n",
+        ] {
+            assert_eq!(
+                ssh("bastion", Some(bad), SshAuth::Agent, None),
+                Err("errors.connections.sshUser".into()),
+                "{bad:?}"
+            );
+        }
+        for bad in ["user@host", "user@host-alias.example", "@host", "a@b"] {
+            assert_eq!(
+                ssh(bad, None, SshAuth::Agent, None),
+                Err("errors.connections.sshTarget".into()),
                 "{bad:?}"
             );
         }
