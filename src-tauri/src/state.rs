@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::conn::pool::{PoolRegistry, PooledClient};
+use crate::diag::memory::CounterMemory;
 use crate::error::AppResult;
 use crate::net::ssh::tunnel::{TunnelConfig, TunnelRegistry};
 use crate::secrets::SecretStore;
@@ -20,6 +21,11 @@ pub struct AppState {
     pub pools: Arc<PoolRegistry>,
     /// Открытые подключения: топология, журнал событий, узел каталога.
     pub runtimes: Arc<Runtimes>,
+    /// Источник топологии `runtimes` (тот же экземпляр): инструменты Patroni берут его клиента HTTP
+    /// (`LiveSource::http_for`), а не строят второй.
+    pub live: Arc<LiveSource>,
+    /// Прошлые счётчики диагностики (скорости и рост); стираются при закрытии подключения и уходе участника.
+    pub counters: Arc<CounterMemory>,
     /// Туннели ssh открытых подключений и проверок; доверенные ключи хостов.
     pub tunnels: Arc<TunnelRegistry>,
     /// Операции с секретами подключений (сохранение формы, импорт, удаление) идут по одной. Иначе импорт,
@@ -49,15 +55,14 @@ impl AppState {
             pools.clone(),
             secrets.clone(),
         );
-        let runtimes = Runtimes::new(
-            Arc::new(LiveSource::new(
-                secrets.clone(),
-                pools.clone(),
-                tunnels.clone(),
-            )),
+        let live = Arc::new(LiveSource::new(
+            secrets.clone(),
             pools.clone(),
             tunnels.clone(),
-        );
+        ));
+        let runtimes = Runtimes::new(live.clone(), pools.clone(), tunnels.clone());
+        let counters = Arc::new(CounterMemory::default());
+        runtimes.add_close_listener(counters.clone());
         Ok(Self {
             connections: Arc::new(ConnectionStore::open(data_dir)?),
             secrets,
@@ -65,6 +70,8 @@ impl AppState {
             settings: Arc::new(SettingsStore::open(data_dir)),
             pools,
             runtimes,
+            live,
+            counters,
             tunnels,
             secrets_lock: Arc::new(std::sync::Mutex::new(())),
         })

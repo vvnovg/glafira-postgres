@@ -220,6 +220,18 @@ pub fn tunnel_registry_for_tests(dir: &Path, pools: Arc<PoolRegistry>) -> Arc<Tu
     TunnelRegistry::new(cfg, pools, Arc::new(MemoryStore::default()))
 }
 
+/// Открытое подключение-сервер к `addr` под ролью диагностики (id `it`); каталог данных — во временной папке,
+/// которая живёт, пока жив возвращённый `TempDir`.
+pub async fn open_server(addr: &str) -> (tempfile::TempDir, glafira_pg_lib::state::AppState) {
+    let dir = tempfile::tempdir().unwrap();
+    let st = glafira_pg_lib::state::AppState::new(dir.path(), secrets_with_password("it")).unwrap();
+    let mut p = server_profile("it", addr);
+    p.pg.ssl_mode = SslMode::Disable;
+    st.connections.upsert(p.clone()).unwrap();
+    st.runtimes.connect(p).await.unwrap();
+    (dir, st)
+}
+
 pub fn secrets_with_password(id: &str) -> Arc<MemoryStore> {
     let s = MemoryStore::default();
     s.set(&secret_key(id, PG_PASSWORD), PG_PASSWORD_VALUE)

@@ -141,7 +141,8 @@
       "tcpFailed": "Не удалось связаться с {{host}}:{{port}}",
       "connectTimeout": "{{host}}:{{port}} не ответил за {{secs}} с",
       "noAnswer": "Узел не ответил за {{secs}} с",
-      "tlsSetup": "Не удалось подготовить параметры TLS"
+      "tlsSetup": "Не удалось подготовить параметры TLS",
+      "recoveryConflict": "Запрос на реплике отменён конфликтом recovery"
     },
     "tls": {
       "readFailed": "Не удалось прочитать {{path}}",
@@ -179,6 +180,11 @@
       "forwardFailed": "Бастион {{target}} не смог достучаться до {{host}}:{{port}}",
       "exited": "Процесс ssh к {{target}} завершился",
       "tunnelDown": "SSH-туннель к {{target}} не работает (локальный порт {{port}} отклонил соединение)"
+    },
+    "diag": {
+      "patroniOnly": "Инструмент доступен только для кластера Patroni",
+      "badWindow": "Окно — 300, 900 или 3600 секунд",
+      "notYet": "Инструмент {{tool}} пока недоступен"
     }
   },
   "connections": {
@@ -763,6 +769,11 @@
     "percentUsed": "Использовано диапазона",
     "ownedBy": "Владеющая колонка",
     "noPrivilege": "Нет права на чтение"
+  },
+  "diag": {
+    "unavailable": {
+      "version": "{{part}}: PostgreSQL {{version}}+"
+    }
   },
   "hints": {
     "label": "Подсказка: {{name}}",

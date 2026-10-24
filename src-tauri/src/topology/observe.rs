@@ -61,6 +61,17 @@ pub fn default_member(profile: &ConnectionProfile, t: &Topology) -> Option<Strin
     pick.map(|m| m.name.clone())
 }
 
+/// Узел «за лидером» для диагностики (спец. P2 §3.2, уточнение 1 плана P2a): лидер Patroni (или лидер standby-кластера),
+/// primary списка узлов независимо от `targetServerType`, единственный узел сервера. Только доступный.
+pub fn leader_member(kind: ConnectionKind, t: &Topology) -> Option<&Member> {
+    match kind {
+        ConnectionKind::Server => t.members.first(),
+        ConnectionKind::Patroni => t.leader(),
+        ConnectionKind::HostList => t.members.iter().find(|m| m.role == Role::Primary),
+    }
+    .filter(|m| m.reachable)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,6 +118,38 @@ mod tests {
         assert_eq!(
             default_member(&host_list(TargetServerType::PreferStandby), &only_primary).as_deref(),
             Some("p")
+        );
+    }
+
+    #[test]
+    fn leader_member_is_the_writable_node_regardless_of_target_server_type() {
+        use crate::topology::model::{member, topo};
+        let mut t = topo(vec![member("a", Role::Replica), member("b", Role::Primary)]);
+        assert_eq!(
+            leader_member(ConnectionKind::HostList, &t).map(|m| m.name.as_str()),
+            Some("b")
+        );
+        assert_eq!(
+            leader_member(ConnectionKind::Patroni, &t).map(|m| m.name.as_str()),
+            Some("b")
+        );
+        assert_eq!(
+            leader_member(ConnectionKind::Server, &t).map(|m| m.name.as_str()),
+            Some("a"),
+            "сервер — единственный (первый) узел"
+        );
+        t.members[1].reachable = false;
+        assert!(
+            leader_member(ConnectionKind::HostList, &t).is_none(),
+            "недоступный лидер не выбирается"
+        );
+        let s = topo(vec![
+            member("x", Role::StandbyLeader),
+            member("y", Role::Replica),
+        ]);
+        assert_eq!(
+            leader_member(ConnectionKind::Patroni, &s).map(|m| m.name.as_str()),
+            Some("x")
         );
     }
 

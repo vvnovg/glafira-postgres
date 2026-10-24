@@ -1,6 +1,7 @@
 pub mod app;
 pub mod catalog;
 pub mod connections;
+pub mod diag;
 pub mod folders;
 pub mod settings;
 pub mod topology;

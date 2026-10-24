@@ -64,7 +64,7 @@ async fn bounded<T>(
 /// Предел на получение соединения и запрос вместе: таймаут подключения профиля + [`COLLECT_TIMEOUT`],
 /// как у `PooledConnector::facts_within`. Холодный пул сначала подключается (до `connect_timeout_s`),
 /// и один `COLLECT_TIMEOUT` обрывал бы такое подключение, которое ещё успевает.
-fn catalog_limit(profile: &ConnectionProfile) -> Duration {
+pub(crate) fn catalog_limit(profile: &ConnectionProfile) -> Duration {
     Duration::from_secs(profile.pg.connect_timeout_s) + COLLECT_TIMEOUT
 }
 

@@ -21,7 +21,7 @@ use crate::topology::BoxFuture;
 use crate::topology::connector::PooledConnector;
 use crate::topology::journal::{Journal, TopologyEvent, diff};
 use crate::topology::model::{Member, Topology, now_ms};
-use crate::topology::observe::{default_member, observe};
+use crate::topology::observe::{default_member, leader_member, observe};
 use crate::topology::patroni::{PatroniHttp, ReqwestHttp};
 
 pub const POLL_INTERVAL: Duration = Duration::from_secs(10);
@@ -74,6 +74,27 @@ pub trait RuntimeSink: Send + Sync {
     );
 }
 
+/// Слушатель закрытий (спец. P2 §3.4): подключение закрыто, удалено или переоткрыто с другими настройками
+/// соединения; участник исчез из топологии или сменил адрес. Состояние, привязанное к подключению или узлу
+/// (прошлые счётчики диагностики, сэмплеры), стирается. Как и `RuntimeSink`, вызывается под внутренней
+/// блокировкой `Runtimes`: обработчик быстрый (std-мьютекс, без `await`) и не обращается к `Runtimes`.
+pub trait CloseListener: Send + Sync {
+    fn connection_closed(&self, connection_id: &str);
+    fn member_removed(&self, connection_id: &str, member: &str);
+}
+
+/// Что нужно инструменту диагностики: профиль, номер открытия, топология и узел.
+#[derive(Debug, Clone)]
+pub struct DiagTarget {
+    pub profile: ConnectionProfile,
+    pub generation: u64,
+    pub topology: Topology,
+    /// `None` — инструмент кластера.
+    pub member: Option<Member>,
+    /// Узел выбран правилом «за лидером», а не пользователем.
+    pub follows_leader: bool,
+}
+
 /// Откуда берётся топология: в приложении — Patroni и опрос узлов, в тестах — подмена.
 pub trait TopologySource: Send + Sync {
     fn observe<'a>(
@@ -111,7 +132,8 @@ impl LiveSource {
         }
     }
 
-    async fn http_for(&self, profile: &ConnectionProfile) -> AppResult<Arc<ReqwestHttp>> {
+    /// Клиент HTTP Patroni подключения (общий с опросом топологии): инструменты Patroni не строят второго.
+    pub async fn http_for(&self, profile: &ConnectionProfile) -> AppResult<Arc<ReqwestHttp>> {
         // Туннель упал или закрыт — его ошибка: напрямую к API не идём.
         let proxy = self.tunnels.route_for(profile)?;
         if let Some((route, h)) = self.http.lock_safe().get(&profile.id)
@@ -254,9 +276,10 @@ fn state_for(t: &Topology) -> ConnState {
 
 /// Порядок блокировок один, обратного нет — взаимной блокировки нет: замок подключения (`connect_locks`,
 /// tokio) → очередь опросов открытия (`Entry::observing`, tokio) → `entries` (std) → пулы, кэш клиентов
-/// HTTP, реестр туннелей, `connect_locks`, приёмник событий (std). `reconnect` берёт оба замка tokio, фоновый
-/// опрос — только очередь опросов, `connect` — только замок подключения, `disconnect`, `discard_stale` и
-/// `refresh_profile` — ни одного. std-мьютекс не держится через `await`.
+/// HTTP, реестр туннелей, `connect_locks`, приёмник событий, слушатели закрытия (std; обработчик слушателя
+/// берёт только свои std-мьютексы). `reconnect` берёт оба замка tokio, фоновый опрос — только очередь
+/// опросов, `connect` — только замок подключения, `disconnect`, `discard_stale` и `refresh_profile` — ни
+/// одного. std-мьютекс не держится через `await`.
 pub struct Runtimes {
     source: Arc<dyn TopologySource>,
     pools: Arc<PoolRegistry>,
@@ -268,6 +291,7 @@ pub struct Runtimes {
     entries: Mutex<HashMap<String, Entry>>,
     connect_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     sink: Mutex<Option<Arc<dyn RuntimeSink>>>,
+    listeners: Mutex<Vec<Arc<dyn CloseListener>>>,
 }
 
 fn not_connected() -> AppError {
@@ -307,6 +331,7 @@ impl Runtimes {
             entries: Mutex::new(HashMap::new()),
             connect_locks: Mutex::new(HashMap::new()),
             sink: Mutex::new(None),
+            listeners: Mutex::new(Vec::new()),
         })
     }
 
@@ -316,6 +341,27 @@ impl Runtimes {
 
     fn sink(&self) -> Option<Arc<dyn RuntimeSink>> {
         self.sink.lock_safe().clone()
+    }
+
+    pub fn add_close_listener(&self, listener: Arc<dyn CloseListener>) {
+        self.listeners.lock_safe().push(listener);
+    }
+
+    /// Слушатели — копией списка: блокировка списка не держится, пока они работают.
+    fn listeners(&self) -> Vec<Arc<dyn CloseListener>> {
+        self.listeners.lock_safe().clone()
+    }
+
+    fn notify_closed(&self, id: &str) {
+        for l in self.listeners() {
+            l.connection_closed(id);
+        }
+    }
+
+    fn notify_member_removed(&self, id: &str, member: &str) {
+        for l in self.listeners() {
+            l.member_removed(id, member);
+        }
     }
 
     fn emit_state(&self, id: &str, state: ConnState, error: Option<&AppError>) {
@@ -362,10 +408,12 @@ impl Runtimes {
                 e.profile = profile;
                 return Ok(e.view());
             }
-            if let Some(old) = entries.remove(&id)
-                && let Some(h) = old.poller
-            {
-                h.abort();
+            if let Some(old) = entries.remove(&id) {
+                if let Some(h) = old.poller {
+                    h.abort();
+                }
+                // Прежнее открытие закончилось: его состояние у слушателей к новому не относится.
+                self.notify_closed(&id);
             }
             self.pools.evict_connection(&id);
             self.source.forget(&id);
@@ -511,6 +559,7 @@ impl Runtimes {
                             .is_none_or(|n| n.host != m.host || n.port != m.port)
                         {
                             self.pools.evict_member(id, &m.name);
+                            self.notify_member_removed(id, &m.name);
                         }
                     }
                 }
@@ -544,10 +593,11 @@ impl Runtimes {
     /// полузакрытого состояния, а событие `Disconnected` не обгонит и не отстанет от изменений.
     pub fn disconnect(&self, id: &str) {
         let mut entries = self.entries.lock_safe();
-        if let Some(e) = entries.remove(id)
-            && let Some(h) = e.poller
-        {
-            h.abort();
+        if let Some(e) = entries.remove(id) {
+            if let Some(h) = e.poller {
+                h.abort();
+            }
+            self.notify_closed(id);
         }
         self.pools.evict_connection(id);
         self.source.forget(id);
@@ -686,6 +736,48 @@ impl Runtimes {
             )
         })?;
         Ok((m, e.profile.clone()))
+    }
+
+    /// Узел инструмента диагностики: `cluster` — без узла; `member` — названный участник; иначе «за лидером»
+    /// (`observe::leader_member`). Подключение не открыто — `notConnected`; лидера нет — `noNode`.
+    pub fn diag_target(
+        &self,
+        id: &str,
+        member: Option<&str>,
+        cluster: bool,
+    ) -> AppResult<DiagTarget> {
+        let entries = self.entries.lock_safe();
+        let e = entries.get(id).ok_or_else(not_connected)?;
+        let t = e.topology.clone().ok_or_else(not_connected)?;
+        let (m, follows_leader) = if cluster {
+            (None, false)
+        } else if let Some(name) = member {
+            let m = t.member(name).cloned().ok_or_else(|| {
+                app_err!(
+                    ErrorCode::InvalidInput,
+                    "errors.topology.unknownMember",
+                    "Node {{member}} is not part of the connection",
+                    member = name
+                )
+            })?;
+            (Some(m), false)
+        } else {
+            let m = leader_member(e.profile.kind, &t).cloned().ok_or_else(|| {
+                app_err!(
+                    ErrorCode::NodeUnavailable,
+                    "errors.topology.noNode",
+                    "No suitable node is available"
+                )
+            })?;
+            (Some(m), true)
+        };
+        Ok(DiagTarget {
+            profile: e.profile.clone(),
+            generation: e.generation,
+            topology: t,
+            member: m,
+            follows_leader,
+        })
     }
 
     /// Останавливает все опросы и туннели (выход из приложения, конец теста). Рантайм не нужен.
@@ -906,6 +998,64 @@ mod tests {
             )
             .unwrap(),
         );
+    }
+
+    #[derive(Default)]
+    struct Closed(Mutex<Vec<String>>);
+    impl CloseListener for Closed {
+        fn connection_closed(&self, id: &str) {
+            self.0.lock_safe().push(format!("conn:{id}"));
+        }
+        fn member_removed(&self, id: &str, member: &str) {
+            self.0.lock_safe().push(format!("member:{id}:{member}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn diag_target_follows_the_leader_or_takes_the_named_member() {
+        let (rt, _src, _rec, _pools) = manual(vec![Ok(two("b"))]);
+        rt.connect(patroni_profile()).await.unwrap();
+        let t = rt.diag_target("c", None, false).unwrap();
+        assert_eq!(
+            (t.member.as_ref().map(|m| m.name.as_str()), t.follows_leader),
+            (Some("b"), true)
+        );
+        let t = rt.diag_target("c", Some("a"), false).unwrap();
+        assert_eq!(
+            (t.member.as_ref().map(|m| m.name.as_str()), t.follows_leader),
+            (Some("a"), false)
+        );
+        let t = rt.diag_target("c", Some("a"), true).unwrap();
+        assert!(t.member.is_none(), "инструмент кластера узла не берёт");
+        assert_eq!(
+            rt.diag_target("c", Some("zz"), false).unwrap_err().key,
+            "errors.topology.unknownMember"
+        );
+        assert_eq!(
+            rt.diag_target("nope", None, false).unwrap_err().key,
+            "errors.topology.notConnected"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_listeners_hear_disconnect_reopen_and_removed_members() {
+        let (rt, src, _rec, _pools) = setup(vec![Ok(two("b"))]);
+        let heard = Arc::new(Closed::default());
+        rt.add_close_listener(heard.clone());
+        let mut p = patroni_profile();
+        rt.connect(p.clone()).await.unwrap();
+        // Участник «a» исчез из топологии: следующий фоновый опрос (раз в 40 мс) его не увидит.
+        src.then(vec![Ok(topo(vec![member("b", Role::Primary)]))]);
+        eventually("участник a убран", || {
+            heard.0.lock_safe().contains(&"member:c:a".to_string())
+        })
+        .await;
+        // Переоткрытие с другими настройками соединения и закрытие.
+        p.pg.connect_timeout_s += 1;
+        rt.connect(p).await.unwrap();
+        rt.disconnect("c");
+        let log = heard.0.lock_safe().clone();
+        assert_eq!(log.iter().filter(|e| *e == "conn:c").count(), 2, "{log:?}");
     }
 
     #[tokio::test]

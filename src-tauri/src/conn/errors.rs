@@ -98,6 +98,13 @@ pub(crate) fn classify_sqlstate(code: &SqlState) -> (ErrorCode, LocalizedText) {
     }
 }
 
+/// Конфликт recovery: запрос на реплике отменён, чтобы применить WAL (40001 — снимок, 40P01 — взаимная блокировка
+/// с буфером). Код один с ошибками сериализации, поэтому решает текст сервера.
+pub(crate) fn is_recovery_conflict(code: &SqlState, message: &str) -> bool {
+    (*code == SqlState::T_R_SERIALIZATION_FAILURE || *code == SqlState::T_R_DEADLOCK_DETECTED)
+        && message.contains("conflict with recovery")
+}
+
 /// Ошибка без ответа сервера (нет `DbError`): классификация по тексту цепочки причин.
 /// `closed` — `tokio_postgres::Error::is_closed()`. Порядок проверок важен: сообщение о несовпадении
 /// имени хоста содержит и `certificate verify failed`, поэтому идёт раньше.
@@ -156,6 +163,14 @@ pub fn from_pg(e: &tokio_postgres::Error) -> AppError {
             Some(d) => format!("{}: {} ({d})", code.code(), db.message()),
             None => format!("{}: {}", code.code(), db.message()),
         };
+        if is_recovery_conflict(code, db.message()) {
+            return app_err!(
+                ErrorCode::RecoveryConflict,
+                "errors.pg.recoveryConflict",
+                "The query on the replica was canceled by a recovery conflict"
+            )
+            .with_details(details);
+        }
         let (error_code, text) = classify_sqlstate(code);
         return AppError::localized(error_code, text).with_details(details);
     }
@@ -407,6 +422,21 @@ mod tests {
             (c, t.key.as_str()),
             (ErrorCode::Timeout, "errors.pg.lockTimeout")
         );
+    }
+
+    #[test]
+    fn recovery_conflict_is_recognized_by_code_and_text() {
+        let msg = "canceling statement due to conflict with recovery";
+        assert!(is_recovery_conflict(
+            &SqlState::T_R_SERIALIZATION_FAILURE,
+            msg
+        ));
+        assert!(is_recovery_conflict(&SqlState::T_R_DEADLOCK_DETECTED, msg));
+        assert!(!is_recovery_conflict(
+            &SqlState::T_R_SERIALIZATION_FAILURE,
+            "could not serialize access"
+        ));
+        assert!(!is_recovery_conflict(&SqlState::QUERY_CANCELED, msg));
     }
 
     #[test]

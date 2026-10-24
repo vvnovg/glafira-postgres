@@ -22,6 +22,8 @@ pub enum ErrorCode {
     SshError,
     /// Возможность недоступна в этой среде (например, OpenSSH старше 8.4 для askpass).
     FeatureUnavailable,
+    /// Запрос на узле в recovery отменён конфликтом с применением WAL.
+    RecoveryConflict,
     Internal,
 }
 
@@ -58,7 +60,10 @@ impl AppError {
     fn retryable_code(code: ErrorCode) -> bool {
         matches!(
             code,
-            ErrorCode::ConnectionFailed | ErrorCode::Timeout | ErrorCode::NodeUnavailable
+            ErrorCode::ConnectionFailed
+                | ErrorCode::Timeout
+                | ErrorCode::NodeUnavailable
+                | ErrorCode::RecoveryConflict
         )
     }
 
@@ -136,6 +141,7 @@ mod tests {
             v(ErrorCode::FeatureUnavailable)["code"],
             "FEATURE_UNAVAILABLE"
         );
+        assert_eq!(v(ErrorCode::RecoveryConflict)["code"], "RECOVERY_CONFLICT");
     }
 
     #[test]
@@ -149,6 +155,7 @@ mod tests {
             // Перезапускаемость `SshError` задаётся при создании ошибки (виды `exited`, `forwardFailed` и `bindFailed`).
             (ErrorCode::SshError, false),
             (ErrorCode::FeatureUnavailable, false),
+            (ErrorCode::RecoveryConflict, true),
         ] {
             assert_eq!(
                 AppError::localized(code, LocalizedText::raw("x")).retryable,

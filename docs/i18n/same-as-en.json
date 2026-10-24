@@ -3,6 +3,7 @@
     "connections.form.scoped",
     "connections.form.ssh.section",
     "connections.form.targets.primary",
+    "diag.unavailable.version",
     "object.constraintKinds.n",
     "object.ddl",
     "object.identity",

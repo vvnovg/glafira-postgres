@@ -1,0 +1,263 @@
+//! Каркас диагностики (спец. P2 §3): инструменты, запрос, конверт отчёта, узел «за лидером» и диспетчер
+//! `run_diagnostic`. Сбор фактов (SQL, HTTP) — здесь, правила и типы данных — в `pg_advisor::rules`.
+
+pub mod caps;
+pub mod memory;
+pub mod sessions;
+pub mod sql;
+
+use futures_util::future::BoxFuture;
+use pg_advisor::findings::Finding;
+use pg_advisor::rules::sessions::SessionsData;
+use serde::{Deserialize, Serialize};
+use tokio_postgres::Client;
+
+use crate::commands::catalog::{catalog_limit, on_catalog_node_within};
+use crate::conn::errors::from_pg;
+use crate::conn::profile::ConnectionKind;
+use crate::error::{AppError, AppResult, ErrorCode};
+use crate::i18n::LocalizedText;
+use crate::state::AppState;
+use crate::topology::runtime::DiagTarget;
+
+/// Инструмент диагностики. `idleTx` — вкладка фронтенда поверх `sessions`, отдельного инструмента в Rust нет.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Tool {
+    Pulse,
+    Sessions,
+    Waits,
+    Locks,
+    Horizon,
+    Replication,
+    Slots,
+    Failover,
+    Health,
+}
+
+impl Tool {
+    /// Инструмент кластера: опрашивает участников сам, узла не берёт (`member` запроса игнорируется).
+    pub fn is_cluster(self) -> bool {
+        matches!(self, Tool::Pulse | Tool::Failover | Tool::Health)
+    }
+
+    /// Только для кластера Patroni.
+    pub fn patroni_only(self) -> bool {
+        matches!(self, Tool::Failover | Tool::Health)
+    }
+}
+
+/// Окна профиля ожиданий, секунды.
+pub const WINDOWS_S: [u32; 3] = [300, 900, 3600];
+pub const DEFAULT_WINDOW_S: u32 = 900;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagRequest {
+    pub tool: Tool,
+    /// `None` — «следовать за лидером»; у инструментов кластера игнорируется.
+    pub member: Option<String>,
+    /// Только `waits`: одно из `WINDOWS_S`, по умолчанию `DEFAULT_WINDOW_S`.
+    pub window_s: Option<u32>,
+}
+
+/// Что не показано и почему (версия сервера, нет права).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Unavailable {
+    pub part: String,
+    /// Узел — у инструментов кластера; у узловых пусто и в JSON не выводится.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member: Option<String>,
+    pub reason: LocalizedText,
+}
+
+/// Данные инструмента; `kind` — id инструмента.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum DiagData {
+    Sessions(SessionsData),
+}
+
+/// Конверт отчёта (спец. P2 §3.2). У инструментов кластера `member`, `serverVersionNum` и `inRecovery` пусты.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagReport {
+    pub tool: Tool,
+    pub member: Option<String>,
+    pub follows_leader: bool,
+    /// Время сервера (узловые) или приложения (кластера), мс эпохи.
+    pub observed_at_ms: i64,
+    pub server_version_num: Option<i32>,
+    pub in_recovery: Option<bool>,
+    pub data: DiagData,
+    pub findings: Vec<Finding>,
+    pub unavailable: Vec<Unavailable>,
+}
+
+pub fn validate(req: &DiagRequest, kind: ConnectionKind) -> AppResult<()> {
+    if req.tool.patroni_only() && kind != ConnectionKind::Patroni {
+        return Err(app_err!(
+            ErrorCode::FeatureUnavailable,
+            "errors.diag.patroniOnly",
+            "This tool is available only for Patroni clusters"
+        ));
+    }
+    if let Some(w) = req.window_s
+        && !WINDOWS_S.contains(&w)
+    {
+        return Err(app_err!(
+            ErrorCode::InvalidInput,
+            "errors.diag.badWindow",
+            "The window must be 300, 900 or 3600 seconds"
+        ));
+    }
+    Ok(())
+}
+
+/// Первая строка узлового отчёта: версия, роль узла, время сервера.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Head {
+    pub version_num: i32,
+    pub in_recovery: bool,
+    pub now_ms: i64,
+}
+
+pub async fn head(c: &Client) -> AppResult<Head> {
+    let r = c
+        .query_one(sql::HEAD_SQL, &[])
+        .await
+        .map_err(|e| from_pg(&e))?;
+    Ok(Head {
+        version_num: r.get(0),
+        in_recovery: r.get(1),
+        now_ms: r.get(2),
+    })
+}
+
+/// Запрос узлового инструмента на его узле: соединение пула `Catalog`, предел — `catalog_limit` профиля.
+pub(crate) async fn on_member<T, F>(
+    st: &AppState,
+    id: &str,
+    target: &DiagTarget,
+    query: F,
+) -> AppResult<T>
+where
+    T: Send,
+    F: for<'a> FnOnce(&'a Client) -> BoxFuture<'a, AppResult<T>> + Send,
+{
+    let m = target
+        .member
+        .as_ref()
+        .map(|m| m.name.clone())
+        .ok_or_else(|| AppError::internal_with("node tool without a member"))?;
+    on_catalog_node_within(
+        catalog_limit(&target.profile),
+        st.client(id, Some(&m), None),
+        query,
+    )
+    .await
+}
+
+pub(crate) fn make_report(
+    tool: Tool,
+    target: &DiagTarget,
+    head: Option<&Head>,
+    data: DiagData,
+    mut findings: Vec<Finding>,
+    unavailable: Vec<Unavailable>,
+) -> DiagReport {
+    pg_advisor::findings::sort(&mut findings);
+    DiagReport {
+        tool,
+        member: target.member.as_ref().map(|m| m.name.clone()),
+        follows_leader: target.follows_leader,
+        observed_at_ms: head
+            .map(|h| h.now_ms)
+            .unwrap_or_else(crate::topology::model::now_ms),
+        server_version_num: head.map(|h| h.version_num),
+        in_recovery: head.map(|h| h.in_recovery),
+        data,
+        findings,
+        unavailable,
+    }
+}
+
+/// `run_diagnostic`: узел инструмента, проверка запроса, сбор и правила.
+pub async fn run(st: &AppState, id: &str, req: DiagRequest) -> AppResult<DiagReport> {
+    let target = st
+        .runtimes
+        .diag_target(id, req.member.as_deref(), req.tool.is_cluster())?;
+    validate(&req, target.profile.kind)?;
+    match req.tool {
+        Tool::Sessions => sessions::report(st, id, &target).await,
+        // Задачи 4–9 добавляют свои ветки; до тех пор инструмент недоступен.
+        other => Err(app_err!(
+            ErrorCode::FeatureUnavailable,
+            "errors.diag.notYet",
+            "The tool {{tool}} is not available yet",
+            tool = format!("{other:?}")
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_validation() {
+        let req = |tool, window_s| DiagRequest {
+            tool,
+            member: None,
+            window_s,
+        };
+        assert_eq!(
+            validate(&req(Tool::Failover, None), ConnectionKind::Server)
+                .unwrap_err()
+                .key,
+            "errors.diag.patroniOnly"
+        );
+        assert!(validate(&req(Tool::Health, None), ConnectionKind::Patroni).is_ok());
+        assert_eq!(
+            validate(&req(Tool::Waits, Some(60)), ConnectionKind::Server)
+                .unwrap_err()
+                .key,
+            "errors.diag.badWindow"
+        );
+        assert!(validate(&req(Tool::Waits, Some(3600)), ConnectionKind::Server).is_ok());
+        assert!(Tool::Pulse.is_cluster() && !Tool::Sessions.is_cluster());
+    }
+
+    #[test]
+    fn request_and_report_json() {
+        assert!(
+            serde_json::from_value::<DiagRequest>(serde_json::json!({"tool": "idleTx"})).is_err(),
+            "idleTx — вкладка фронтенда, в Rust это инструмент sessions"
+        );
+        let r: DiagRequest =
+            serde_json::from_value(serde_json::json!({"tool": "sessions", "member": null}))
+                .unwrap();
+        assert_eq!((r.tool, r.member, r.window_s), (Tool::Sessions, None, None));
+        let report = DiagReport {
+            tool: Tool::Sessions,
+            member: Some("pg-1".into()),
+            follows_leader: true,
+            observed_at_ms: 5,
+            server_version_num: Some(170004),
+            in_recovery: Some(false),
+            data: DiagData::Sessions(SessionsData {
+                rows: vec![],
+                settings: Default::default(),
+            }),
+            findings: vec![],
+            unavailable: vec![],
+        };
+        let v = serde_json::to_value(&report).unwrap();
+        assert_eq!(v["tool"], "sessions");
+        assert_eq!(v["followsLeader"], true);
+        assert_eq!(v["data"]["kind"], "sessions");
+        assert_eq!(v["data"]["rows"], serde_json::json!([]));
+        assert_eq!(v["serverVersionNum"], 170004);
+    }
+}

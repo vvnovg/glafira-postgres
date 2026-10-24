@@ -3,6 +3,7 @@ pub mod i18n;
 pub mod catalog;
 pub mod commands;
 pub mod conn;
+pub mod diag;
 pub mod diagnostics;
 pub mod error;
 pub mod logging;
@@ -98,6 +99,7 @@ pub fn run() {
             commands::connections::parse_connection_string,
             commands::connections::test_connection,
             commands::connections::trust_ssh_host_key,
+            commands::diag::run_diagnostic,
             commands::folders::list_folders,
             commands::folders::create_folder,
             commands::folders::rename_folder,
