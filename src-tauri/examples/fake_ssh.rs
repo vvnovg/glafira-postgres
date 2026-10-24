@@ -4,7 +4,7 @@
 //! `FAKE_SSH_UPSTREAM=unreachable` — бастион не видит узел: успех SOCKS5 и сразу закрытие соединения, без попытки
 //! соединиться. Так одинаково на любой ОС: на Windows отказ закрытого порта loopback приходит только через ~2 с —
 //! дольше срока подключения в тестах;
-//! `FAKE_SSH_DIE_MS=N` — завершиться с кодом 255 через N мс после готовности; `FAKE_SSH_VERSION` — ответ на `-V`;
+//! `FAKE_SSH_DIE_MS=N` — завершиться с кодом 255 через N мс после первого принятого соединения (пробы готовности); `FAKE_SSH_VERSION` — ответ на `-V`;
 //! `FAKE_SSH_BIND_FAIL_ONCE=<файл-маркер>` — первый запуск падает «Address already in use»;
 //! `FAKE_SSH_AUTH_FAIL_IF=<файл>` — пока файл есть, вход отклоняется (как `auth`): перезапуски туннеля не удаются;
 //! `FAKE_SSH_AUTH_AFTER_MARKER=<файл-маркер>` — первый запуск создаёт маркер и работает, следующие (маркер есть)
@@ -91,15 +91,24 @@ fn main() {
         std::thread::sleep(std::time::Duration::from_millis(ms.parse().unwrap()));
     }
     let listener = TcpListener::bind(&socks).expect("bind -D port");
-    if let Ok(ms) = std::env::var("FAKE_SSH_DIE_MS") {
-        let ms: u64 = ms.parse().unwrap();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(ms));
-            eprintln!("Connection to bastion closed by remote host.");
-            std::process::exit(255);
-        });
-    }
+    // Таймер смерти стартует с первого принятого соединения — это проба готовности приложения. Так готовность
+    // по построению видна раньше смерти, и тесты не зависят от того, насколько быстро загруженный раннер
+    // (Windows CI на двух ядрах) доберётся до пробы.
+    let die_ms: Option<u64> = std::env::var("FAKE_SSH_DIE_MS")
+        .ok()
+        .map(|ms| ms.parse().unwrap());
+    let mut die_started = false;
     for client in listener.incoming().flatten() {
+        if let Some(ms) = die_ms
+            && !die_started
+        {
+            die_started = true;
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+                eprintln!("Connection to bastion closed by remote host.");
+                std::process::exit(255);
+            });
+        }
         std::thread::spawn(move || {
             // Проба готовности (соединение без единого байта) и оборванные клиенты — не ошибка ssh: молча.
             let _ = serve(client);
