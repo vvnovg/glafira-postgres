@@ -162,6 +162,10 @@ impl SshArgs {
                     a.push("-o".into());
                     a.push("IdentitiesOnly=yes".into());
                 }
+                // Только ключ: без этого после отказа по ключу ssh перешёл бы к keyboard-interactive, где
+                // текст запроса задаёт сервер, и askpass мог бы отдать пассфразу в ответ на чужой вопрос.
+                a.push("-o".into());
+                a.push("PreferredAuthentications=publickey".into());
             }
             SshAuth::Password => {
                 a.push("-o".into());
@@ -583,22 +587,33 @@ mod tests {
                 "/keys/id_ed25519",
                 "-o",
                 "IdentitiesOnly=yes",
+                "-o",
+                "PreferredAuthentications=publickey",
                 "-D",
                 "127.0.0.1:40123",
                 "--",
                 "bastion",
             ]
         );
-        // Способ «агент»: без -i; «пароль» — тоже без -i, но с PreferredAuthentications=password.
+        // Способ «агент»: без -i и без ограничения способов входа; «пароль» — тоже без -i, но с
+        // PreferredAuthentications=password.
         let mut agent = settings();
         agent.auth = SshAuth::Agent;
         agent.key_path = None;
-        let line = SshArgs {
+        let line: Vec<String> = SshArgs {
             settings: agent,
             ..args.clone()
         }
-        .command_line();
+        .command_line()
+        .into_iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
         assert!(!line.iter().any(|a| a == "-i"));
+        assert!(
+            !line
+                .iter()
+                .any(|a| a.starts_with("PreferredAuthentications"))
+        );
         let mut pw = settings();
         pw.auth = SshAuth::Password;
         pw.key_path = None;
