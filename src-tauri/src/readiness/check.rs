@@ -640,7 +640,7 @@ mod tests {
     /// сбой проброса на шаге узла.
     #[tokio::test]
     async fn ssh_step_uses_a_temporary_tunnel_and_cleans_up() {
-        use crate::net::ssh::tunnel::tests::{closed_port, profile as ssh_profile, registry_with};
+        use crate::net::ssh::tunnel::tests::{UNREACHABLE, profile as ssh_profile, registry_with};
         let dir = tempfile::tempdir().unwrap();
         let keychain = Arc::new(Keychain::default());
         keychain
@@ -649,7 +649,7 @@ mod tests {
             .unwrap();
         let (tunnels, _) = registry_with(
             dir.path(),
-            vec![("FAKE_SSH_UPSTREAM", format!("127.0.0.1:{}", closed_port()))],
+            vec![("FAKE_SSH_UPSTREAM", UNREACHABLE.into())],
             keychain.clone(),
             |_| {},
         );
@@ -743,13 +743,13 @@ mod tests {
     /// Версию OpenSSH узнать не удалось, а туннель поднялся: шаг SSH говорит только о туннеле, без пустой версии.
     #[tokio::test]
     async fn ssh_step_without_a_known_version_says_only_that_the_tunnel_is_up() {
-        use crate::net::ssh::tunnel::tests::{closed_port, profile as ssh_profile, registry};
+        use crate::net::ssh::tunnel::tests::{UNREACHABLE, profile as ssh_profile, registry};
         let dir = tempfile::tempdir().unwrap();
         let (tunnels, _) = registry(
             dir.path(),
             vec![
                 ("FAKE_SSH_VERSION", "not an OpenSSH client".into()),
-                ("FAKE_SSH_UPSTREAM", format!("127.0.0.1:{}", closed_port())),
+                ("FAKE_SSH_UPSTREAM", UNREACHABLE.into()),
             ],
         );
         let mut profile = ssh_profile(SshAuth::Agent);

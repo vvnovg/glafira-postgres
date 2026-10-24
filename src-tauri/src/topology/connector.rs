@@ -395,12 +395,10 @@ mod tests {
     /// туннель — ошибка туннеля без попытки соединиться напрямую.
     #[tokio::test]
     async fn pooled_connection_goes_through_the_tunnel_only() {
-        use crate::net::ssh::tunnel::tests::{closed_port, profile as ssh_profile, registry};
+        use crate::net::ssh::tunnel::tests::{UNREACHABLE, profile as ssh_profile, registry};
         let dir = tempfile::tempdir().unwrap();
-        let (tunnels, pools) = registry(
-            dir.path(),
-            vec![("FAKE_SSH_UPSTREAM", format!("127.0.0.1:{}", closed_port()))],
-        );
+        let (tunnels, pools) =
+            registry(dir.path(), vec![("FAKE_SSH_UPSTREAM", UNREACHABLE.into())]);
         let mut p = ssh_profile(crate::conn::profile::SshAuth::Agent);
         p.pg.ssl_mode = SslMode::Disable;
         let socks = tunnels.open(&p, Duration::from_secs(5)).await.unwrap();

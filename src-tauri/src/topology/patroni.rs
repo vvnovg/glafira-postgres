@@ -1416,7 +1416,7 @@ mod tests {
     #[tokio::test]
     async fn reqwest_http_goes_through_the_tunnel() {
         use crate::conn::profile::SshAuth;
-        use crate::net::ssh::tunnel::tests::{closed_port, profile as ssh_profile, registry};
+        use crate::net::ssh::tunnel::tests::{UNREACHABLE, profile as ssh_profile, registry};
         let base = stub_server().await;
         let dir = tempfile::tempdir().unwrap();
         let (tunnels, _) = registry(
@@ -1436,10 +1436,7 @@ mod tests {
         tunnels.close("c1");
 
         let dir = tempfile::tempdir().unwrap();
-        let (tunnels, _) = registry(
-            dir.path(),
-            vec![("FAKE_SSH_UPSTREAM", format!("127.0.0.1:{}", closed_port()))],
-        );
+        let (tunnels, _) = registry(dir.path(), vec![("FAKE_SSH_UPSTREAM", UNREACHABLE.into())]);
         let socks = tunnels.open(&p, Duration::from_secs(5)).await.unwrap();
         let http = ReqwestHttp::new(&s, None, None, Some(socks), Some("bastion".into())).unwrap();
         let e = http

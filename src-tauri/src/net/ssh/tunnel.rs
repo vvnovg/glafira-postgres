@@ -835,15 +835,28 @@ pub(crate) mod tests {
     use crate::net::ssh::testutil::fake_ssh_bin;
     use crate::secrets::MemoryStore;
 
+    /// `FAKE_SSH_DIE_MS` тестов падения туннеля: процесс умирает через это время после открытия порта SOCKS. С
+    /// запасом на медленный раннер Windows: готовность видна там до ~300 мс позже открытия порта (`wait_ready`:
+    /// проба, начатая раньше, ждёт свой срок — отказ закрытого порта loopback приходит через ~2 с), а тесты ещё
+    /// должны успеть увидеть поднятый туннель.
+    pub(crate) const DIE_MS: &str = "1500";
+
+    /// `FAKE_SSH_UPSTREAM`: узел за бастионом недоступен — успех SOCKS5 и сразу закрытие соединения, как у
+    /// `ssh -D`. Без соединения с закрытым портом: на Windows его отказ приходит через ~2 с, позже срока
+    /// подключения PostgreSQL в тестах.
+    pub(crate) const UNREACHABLE: &str = "unreachable";
+
     pub(crate) fn profile(auth: SshAuth) -> ConnectionProfile {
         let mut p = sample_profile("c1");
         p.pg.connect_timeout_s = 2;
+        // Абсолютный путь на любой ОС (`/k/id` на Windows не абсолютный); файла нет — поддельному ssh он не нужен.
+        let key = std::env::temp_dir().join("glafira-fake-key").join("id");
         p.ssh = Some(SshSettings {
             target: "bastion".into(),
             port: None,
             user: Some("tester".into()),
             auth,
-            key_path: (auth == SshAuth::Key).then(|| "/k/id".to_string()),
+            key_path: (auth == SshAuth::Key).then(|| key.to_string_lossy().into_owned()),
         });
         p
     }
@@ -887,15 +900,6 @@ pub(crate) mod tests {
         addr
     }
 
-    /// Порт, на котором никто не слушает.
-    pub(crate) fn closed_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
-    }
-
     /// Записи о процессах в `tunnels.json` (файла нет — ни одной).
     fn pids(dir: &Path) -> usize {
         std::fs::read_to_string(dir.join("data").join("tunnels.json"))
@@ -923,8 +927,10 @@ pub(crate) mod tests {
         }
     }
 
+    /// Срок — с запасом на медленный раннер Windows: там и проверка «порт закрыт» идёт ~2 с (отказ закрытого порта
+    /// loopback). Удачному ожиданию длинный срок времени не добавляет.
     async fn eventually(what: &str, mut cond: impl FnMut() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(10);
         while !cond() {
             assert!(Instant::now() < deadline, "не дождались: {what}");
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -991,11 +997,10 @@ pub(crate) mod tests {
         use crate::conn::pg::ConnectSpec;
         use crate::conn::profile::SslMode;
         let dir = tempfile::tempdir().unwrap();
-        let (reg, _) = registry(
-            dir.path(),
-            vec![("FAKE_SSH_UPSTREAM", format!("127.0.0.1:{}", closed_port()))],
-        );
-        let p = profile(SshAuth::Agent);
+        let (reg, _) = registry(dir.path(), vec![("FAKE_SSH_UPSTREAM", UNREACHABLE.into())]);
+        let mut p = profile(SshAuth::Agent);
+        // Срок с запасом: отказ закрытого порта туннеля (конец теста) на Windows приходит через ~2 с.
+        p.pg.connect_timeout_s = 10;
         let socks = reg.open(&p, Duration::from_secs(5)).await.unwrap();
         let spec = |mode: SslMode| {
             let mut p = p.clone();
@@ -1184,7 +1189,7 @@ pub(crate) mod tests {
         let (reg, pools) = registry(
             dir.path(),
             vec![
-                ("FAKE_SSH_DIE_MS", "300".into()),
+                ("FAKE_SSH_DIE_MS", DIE_MS.into()),
                 ("FAKE_SSH_UPSTREAM", echo.to_string()),
             ],
         );
@@ -1208,8 +1213,8 @@ pub(crate) mod tests {
             )
             .unwrap(),
         );
-        // Процесс умирает через 300 мс: статус Down с ошибкой, пулы вытеснены, маршрута нет.
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // Процесс умирает через `DIE_MS`: статус Down с ошибкой, пулы вытеснены, маршрута нет.
+        let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             if let Some(TunnelStatus::Down { .. }) = reg.status("c1") {
                 break;
@@ -1245,7 +1250,7 @@ pub(crate) mod tests {
         let (reg, _) = registry(
             dir.path(),
             vec![
-                ("FAKE_SSH_DIE_MS", "300".into()),
+                ("FAKE_SSH_DIE_MS", DIE_MS.into()),
                 ("FAKE_SSH_UPSTREAM", echo.to_string()),
                 (
                     "FAKE_SSH_AUTH_AFTER_MARKER",
@@ -1294,7 +1299,7 @@ pub(crate) mod tests {
         let (reg, _) = registry_with(
             dir.path(),
             vec![
-                ("FAKE_SSH_DIE_MS", "300".into()),
+                ("FAKE_SSH_DIE_MS", DIE_MS.into()),
                 ("FAKE_SSH_READY_DELAY_MS", "500".into()),
                 ("FAKE_SSH_UPSTREAM", echo.to_string()),
                 ("FAKE_SSH_RUNS", log.to_string_lossy().into_owned()),
@@ -1303,6 +1308,8 @@ pub(crate) mod tests {
             |cfg| cfg.backoff = vec![Duration::from_millis(1500)],
         );
         let p = profile(SshAuth::Agent);
+        // Время от запуска: порт открыт ~0,5 с, падение ~2 с (`DIE_MS`), пауза 1,5 с — перезапуск ~3,5 с, он готов
+        // ~4 с; второе падение ~5,5 с, проверка ~6,1 с, следующий перезапуск — не раньше ~7 с.
         reg.open(&p, Duration::from_secs(5)).await.unwrap();
         // Первое падение, пауза, перезапуск запущен и ещё входит (готовность через 500 мс): тут «Переподключить».
         eventually("перезапуск идёт", || runs(&log) == 2).await;
@@ -1350,7 +1357,7 @@ pub(crate) mod tests {
         let (reg, _) = registry_with(
             dir.path(),
             vec![
-                ("FAKE_SSH_DIE_MS", "300".into()),
+                ("FAKE_SSH_DIE_MS", DIE_MS.into()),
                 ("FAKE_SSH_UPSTREAM", echo.to_string()),
             ],
             Arc::new(MemoryStore::default()),
@@ -1383,7 +1390,7 @@ pub(crate) mod tests {
         let (reg, _) = registry_with(
             dir.path(),
             vec![
-                ("FAKE_SSH_DIE_MS", "300".into()),
+                ("FAKE_SSH_DIE_MS", DIE_MS.into()),
                 ("FAKE_SSH_UPSTREAM", echo.to_string()),
                 (
                     "FAKE_SSH_AUTH_FAIL_IF",

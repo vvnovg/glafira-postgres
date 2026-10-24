@@ -2014,7 +2014,10 @@ mod tests {
         let (rt, _src, rec, tunnels) = with_fake_ssh(
             dir.path(),
             vec![
-                ("FAKE_SSH_DIE_MS", "300".into()),
+                (
+                    "FAKE_SSH_DIE_MS",
+                    crate::net::ssh::tunnel::tests::DIE_MS.into(),
+                ),
                 (
                     "FAKE_SSH_AUTH_FAIL_IF",
                     refuse.to_string_lossy().into_owned(),

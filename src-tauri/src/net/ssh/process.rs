@@ -25,8 +25,14 @@ const LOG_LINES: usize = 20;
 const LOG_TAIL_BYTES: u64 = 64 * 1024;
 /// Ожидание `ssh -V`.
 const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
-/// Одна проба порта SOCKS при ожидании готовности.
-const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+/// Одна проба порта SOCKS при ожидании готовности. Короткая, потому что на Windows соединение с портом loopback,
+/// который ещё никто не слушает, отклоняется не сразу, а через ~2 с (стек повторяет SYN после RST); на Linux и
+/// macOS — за микросекунды. Проба, начатая до открытия порта, бросается по сроку, и следующая (через
+/// `PROBE_PAUSE`) уже застаёт слушателя: готовность видна в пределах ~300 мс после открытия порта на любой ОС, а
+/// выход процесса замечается не позже чем через одну пробу.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+/// Пауза между пробами порта SOCKS.
+const PROBE_PAUSE: Duration = Duration::from_millis(50);
 /// Дочитать stderr после выхода процесса: последние строки (причина выхода) нужны для разбора ошибки.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -273,7 +279,7 @@ impl SshChild {
                 self.drain_stderr().await;
                 return Err(None);
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(PROBE_PAUSE).await;
         }
     }
 

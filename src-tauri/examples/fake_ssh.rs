@@ -1,6 +1,9 @@
 //! Поддельный OpenSSH для unit-тестов туннеля: разбирает те же аргументы, что настоящий ssh, держит SOCKS5 на
 //! порту из `-D` и ведёт себя по `FAKE_SSH_MODE`: `ok` (по умолчанию), `auth`, `hostkey`. Переменные:
 //! `FAKE_SSH_UPSTREAM=host:port` — куда идут все CONNECT (иначе — к запрошенному адресу);
+//! `FAKE_SSH_UPSTREAM=unreachable` — бастион не видит узел: успех SOCKS5 и сразу закрытие соединения, без попытки
+//! соединиться. Так одинаково на любой ОС: на Windows отказ закрытого порта loopback приходит только через ~2 с —
+//! дольше срока подключения в тестах;
 //! `FAKE_SSH_DIE_MS=N` — завершиться с кодом 255 через N мс после готовности; `FAKE_SSH_VERSION` — ответ на `-V`;
 //! `FAKE_SSH_BIND_FAIL_ONCE=<файл-маркер>` — первый запуск падает «Address already in use»;
 //! `FAKE_SSH_AUTH_FAIL_IF=<файл>` — пока файл есть, вход отклоняется (как `auth`): перезапуски туннеля не удаются;
@@ -140,8 +143,13 @@ fn serve(mut c: TcpStream) -> std::io::Result<()> {
     // Как `ssh -D`: успех отвечается до открытия канала к узлу.
     c.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0])?;
     let upstream = std::env::var("FAKE_SSH_UPSTREAM").unwrap_or(target);
-    let Ok(mut up) = TcpStream::connect(&upstream) else {
+    let up = match upstream.as_str() {
+        "unreachable" => None,
+        addr => TcpStream::connect(addr).ok(),
+    };
+    let Some(mut up) = up else {
         // Бастион не видит узел: канал не открылся, ssh закрывает соединение (клиент видит конец потока).
+        let _ = c.shutdown(std::net::Shutdown::Both);
         return Ok(());
     };
     let mut c2 = c.try_clone()?;
