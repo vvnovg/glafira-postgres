@@ -814,17 +814,83 @@ describe("ConnectionForm: SSH-туннель", () => {
 
   it("сохранённые пассфраза и пароль SSH: оставить, удалить; у каждого свой флажок", async () => {
     const user = userEvent.setup();
-    vi.mocked(api.connectionSecrets).mockResolvedValue({ ...NO_SECRETS, sshPassphrase: true });
+    vi.mocked(api.connectionSecrets).mockResolvedValue({ ...NO_SECRETS, sshPassword: true, sshPassphrase: true });
     vi.mocked(api.saveConnection).mockImplementation(async (p) => ({ ...p, id: "c1" }));
     renderWithClient(<ConnectionForm initial={existing({ ssh: { ...emptySsh(), target: "b", auth: "key", keyPath: "/k/id" } })} tabId="t" />);
+    // Способ «ключ»: сохранена пассфраза; свой флажок «удалить» — у неё.
     await waitFor(() => expect(screen.getByLabelText("Пассфраза ключа")).toHaveAttribute("placeholder", "оставить сохранённый"));
+    expect(screen.queryByLabelText("Пароль SSH")).not.toBeInTheDocument();
     await user.click(screen.getByLabelText("Удалить сохранённый: Пассфраза ключа"));
     expect(screen.getByLabelText("Пассфраза ключа")).toBeDisabled();
+
+    // Способ «пароль»: сохранён и пароль; у него свой флажок, отметка пассфразы его не задела.
+    await user.selectOptions(screen.getByLabelText("Вход на бастион"), "password");
+    expect(screen.queryByLabelText("Пассфраза ключа")).not.toBeInTheDocument();
+    const password = screen.getByLabelText("Пароль SSH");
+    expect(password).toHaveAttribute("placeholder", "оставить сохранённый");
+    expect(password).toBeEnabled();
+    const clearPassword = screen.getByLabelText("Удалить сохранённый: Пароль SSH");
+    expect(clearPassword).not.toBeChecked();
+    await user.click(clearPassword);
+    expect(password).toBeDisabled();
+    expect(clearPassword).toBeChecked();
+
+    // Обратно на «ключ»: отметка пассфразы сохранилась, она не перепутана с отметкой пароля.
+    await user.selectOptions(screen.getByLabelText("Вход на бастион"), "key");
+    expect(screen.getByLabelText("Пассфраза ключа")).toBeDisabled();
+    expect(screen.getByLabelText("Удалить сохранённый: Пассфраза ключа")).toBeChecked();
+
     await user.click(screen.getByRole("button", { name: "Сохранить" }));
     await waitFor(() => expect(api.saveConnection).toHaveBeenCalled());
     const [, secrets] = vi.mocked(api.saveConnection).mock.calls[0];
     expect(secrets.sshPassphrase).toBe("");
-    expect(secrets.sshPassword).toBeNull();
+    expect(secrets.sshPassword).toBe("");
+  });
+
+  it("сохранённый пароль SSH без отметки не трогается, а новый введённый заменяет его; пассфраза при этом остаётся нетронутой", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.connectionSecrets).mockResolvedValue({ ...NO_SECRETS, sshPassword: true, sshPassphrase: true });
+    vi.mocked(api.saveConnection).mockImplementation(async (p) => ({ ...p, id: "c1" }));
+    renderWithClient(<ConnectionForm initial={existing({ ssh: { ...emptySsh(), target: "b", auth: "password" } })} tabId="t" />);
+    await waitFor(() => expect(screen.getByLabelText("Пароль SSH")).toHaveAttribute("placeholder", "оставить сохранённый"));
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(api.saveConnection).toHaveBeenCalledTimes(1));
+    // Ни ввода, ни отметки: оба секрета остаются как есть (null — «не менять»).
+    expect(vi.mocked(api.saveConnection).mock.calls[0][1]).toMatchObject({ sshPassword: null, sshPassphrase: null });
+
+    await user.type(screen.getByLabelText("Пароль SSH"), "new-pass");
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(api.saveConnection).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(api.saveConnection).mock.calls[1][1]).toMatchObject({ sshPassword: "new-pass", sshPassphrase: null });
+  });
+
+  it("способы входа SSH показывают нужные поля: агент — без секрета и пути к ключу, ключ — путь и пассфраза, пароль — только пароль", async () => {
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionForm initial={withSsh()} tabId="t" />);
+    const keyPath = () => screen.queryByLabelText("Файл ключа");
+    const passphrase = () => screen.queryByLabelText("Пассфраза ключа");
+    const password = () => screen.queryByLabelText("Пароль SSH");
+
+    // Агент (по умолчанию): секретов и пути к ключу нет.
+    expect(screen.getByLabelText("Вход на бастион")).toHaveValue("agent");
+    expect(keyPath()).not.toBeInTheDocument();
+    expect(passphrase()).not.toBeInTheDocument();
+    expect(password()).not.toBeInTheDocument();
+
+    await user.selectOptions(screen.getByLabelText("Вход на бастион"), "key");
+    expect(keyPath()).toBeInTheDocument();
+    expect(passphrase()).toBeInTheDocument();
+    expect(password()).not.toBeInTheDocument();
+
+    await user.selectOptions(screen.getByLabelText("Вход на бастион"), "password");
+    expect(password()).toBeInTheDocument();
+    expect(keyPath()).not.toBeInTheDocument();
+    expect(passphrase()).not.toBeInTheDocument();
+
+    await user.selectOptions(screen.getByLabelText("Вход на бастион"), "agent");
+    expect(keyPath()).not.toBeInTheDocument();
+    expect(passphrase()).not.toBeInTheDocument();
+    expect(password()).not.toBeInTheDocument();
   });
 
   it("проверка отправляет и профиль с SSH, и новый секрет SSH из формы", async () => {

@@ -493,8 +493,26 @@ describe("ConnectionNode", () => {
       const dialog = await screen.findByRole("dialog", { name: "Неизвестный ключ хоста" });
       await user.click(within(dialog).getByRole("button", { name: "Отмена" }));
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(screen.getByRole("alert")).toHaveTextContent("Ключ хоста bastion ещё не известен (SHA256:abc)");
       expect(api.trustSshHostKey).not.toHaveBeenCalled();
       expect(api.connect).toHaveBeenCalledTimes(1);
+    });
+
+    it("«Переподключить»: другая ошибка туннеля из вида (смена ключа хоста) показывается под узлом, без диалога", async () => {
+      // Ответ reconnect — degraded с ошибкой в `view.error`, а не отказ команды; фоновая ошибка при degraded под узлом
+      // не показывается, поэтому действие пользователя поднимает её в локальную.
+      const changed = hostKeyError({ key: "errors.ssh.hostKeyChanged", message: "The host key of bastion has changed" }, { kind: "hostKeyChanged" });
+      vi.mocked(api.getTopology).mockResolvedValue(topologyView({ state: "degraded" }));
+      vi.mocked(api.reconnect).mockResolvedValue(topologyView({ state: "degraded", error: changed }));
+      const user = userEvent.setup();
+      renderNode();
+      await screen.findByRole("img", { name: "Часть узлов недоступна" });
+      await user.click(screen.getByRole("button", { name: toggleName }));
+      await user.click(screen.getByRole("button", { name: "Действия с подключением billing" }));
+      await user.click(screen.getByRole("menuitem", { name: "Переподключить" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("Ключ хоста bastion изменился: проверьте ~/.ssh/known_hosts сами");
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(api.trustSshHostKey).not.toHaveBeenCalled();
     });
 
     it("отказ команды доверия показывается в диалоге, подключение не повторяется", async () => {
