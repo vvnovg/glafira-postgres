@@ -294,7 +294,8 @@ pub struct Runtimes {
     listeners: Mutex<Vec<Arc<dyn CloseListener>>>,
 }
 
-fn not_connected() -> AppError {
+/// Подключение не открыто (или закрыто, пока шла операция).
+pub(crate) fn not_connected() -> AppError {
     app_err!(
         ErrorCode::NodeUnavailable,
         "errors.topology.notConnected",

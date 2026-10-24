@@ -52,15 +52,21 @@ pub trait SamplerSink: Send + Sync {
 /// Откуда берутся сэмплы: в приложении — запрос к узлу (`query::PoolSampleSource`), в тестах — подмена.
 pub trait SampleSource: Send + Sync {
     fn sample<'a>(&'a self) -> BoxFuture<'a, AppResult<Vec<RawSample>>>;
+
+    /// Предел одного сэмпла целиком (подключение и запрос), которым источник ограничивает себя сам и по
+    /// которому закрывает соединение. Задача сэмплера ждёт на секунду дольше — только как страховка.
+    fn limit(&self) -> Duration {
+        SAMPLE_TIMEOUT
+    }
 }
 
 /// Паузы после неудачных сэмплов подряд, секунды.
 const BACKOFF_S: [u64; 5] = [1, 2, 5, 10, 30];
-/// Предел одного сэмпла: молчащий узел не держит задачу.
+/// Предел самого запроса сэмпла (без подключения): молчащий узел не держит задачу.
 pub(crate) const SAMPLE_TIMEOUT: Duration = Duration::from_secs(5);
-/// Запас внешнего предела над `SAMPLE_TIMEOUT`. Источник сам ограничен `SAMPLE_TIMEOUT` и по таймауту закрывает
-/// соединение (`on_catalog_node_within`); внешний предел — страховка для источника без своего, и он не должен
-/// сработать раньше: брошенный на полуслове запрос вернул бы соединение в пул с недочитанным ответом.
+/// Запас внешнего предела над `SampleSource::limit`. Источник сам ограничен своим пределом и по таймауту
+/// закрывает соединение (`on_catalog_node_within`); внешний предел — страховка для источника без своего, и он
+/// не должен сработать раньше: брошенный на полуслове запрос вернул бы соединение в пул с недочитанным ответом.
 const SAMPLE_TIMEOUT_GRACE: Duration = Duration::from_secs(1);
 
 type Key = (String, String);
@@ -107,8 +113,9 @@ impl SamplerRegistry {
         })
     }
 
-    /// Подписка вкладки на сэмплер узла: узла нет или он от прошлого открытия подключения — новый буфер;
-    /// задача сэмплера запускается, если не идёт. Нужен рантайм tokio (`tokio::spawn`).
+    /// Подписка вкладки на сэмплер узла: узла нет или он от более раннего открытия подключения — новый буфер;
+    /// задача сэмплера запускается, если не идёт. Подписка от более раннего открытия, чем у узла, отклоняется:
+    /// узел не трогается, вкладке — `Stopped`, её сессия забывается. Нужен рантайм tokio (`tokio::spawn`).
     pub fn subscribe(
         self: &Arc<Self>,
         connection: &str,
@@ -121,6 +128,13 @@ impl SamplerRegistry {
         let key = (connection.to_string(), member.to_string());
         let stale = {
             let mut nodes = self.nodes.lock_safe();
+            if nodes.get(&key).is_some_and(|n| n.generation > generation) {
+                drop(nodes);
+                // Подписка запоздала: подключение уже переоткрыто, и узел принадлежит новому открытию.
+                sink.send(SamplerEvent::Stopped);
+                self.sessions.forget(session_id);
+                return;
+            }
             let node = nodes
                 .entry(key.clone())
                 .or_insert_with(|| Node::new(generation));
@@ -136,6 +150,24 @@ impl SamplerRegistry {
             stale
         };
         self.stop_nodes(stale.into_iter().collect());
+    }
+
+    /// Убирает узел открытия `generation`, если подписчиков у него не осталось (`true` — убран): так
+    /// отменённый запуск не оставляет узел с буфером закрытого подключения. Узел другого открытия или с
+    /// подписчиками не трогается; задача сэмплера пустого узла уже снята отпиской.
+    pub fn forget_empty_node(&self, connection: &str, member: &str, generation: u64) -> bool {
+        let mut nodes = self.nodes.lock_safe();
+        let key = (connection.to_string(), member.to_string());
+        let gone = nodes
+            .get(&key)
+            .is_some_and(|n| n.generation == generation && n.subscribers.is_empty());
+        if gone
+            && let Some(n) = nodes.remove(&key)
+            && let Some(t) = n.task
+        {
+            t.abort();
+        }
+        gone
     }
 
     /// Отписка вкладки; последняя — задача прерывается, буфер остаётся.
@@ -282,8 +314,9 @@ async fn run(
     let mut failures = 0usize;
     loop {
         tick.tick().await;
-        let result =
-            tokio::time::timeout(SAMPLE_TIMEOUT + SAMPLE_TIMEOUT_GRACE, source.sample()).await;
+        // Предел источника может быть больше `SAMPLE_TIMEOUT` (подключение по медленной сети), внешний — за ним.
+        let limit = source.limit();
+        let result = tokio::time::timeout(limit + SAMPLE_TIMEOUT_GRACE, source.sample()).await;
         let failed = !matches!(result, Ok(Ok(_)));
         let Some(reg) = weak.upgrade() else { return };
         let alive = match result {
@@ -324,7 +357,7 @@ async fn run(
                 &key,
                 me,
                 &SamplerEvent::Error {
-                    error: crate::topology::probe::no_answer(SAMPLE_TIMEOUT),
+                    error: crate::topology::probe::no_answer(limit),
                 },
             ),
         };
@@ -519,6 +552,139 @@ mod tests {
             sinks[2].0.lock_safe().len(),
             n,
             "после закрытия событий нет"
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_with_an_older_generation_is_refused_and_leaves_the_node() {
+        use crate::session::SessionKind;
+        let sessions = Arc::new(SessionRegistry::default());
+        let r = SamplerRegistry::new(Duration::from_millis(20), sessions.clone());
+        let src = Arc::new(Fake(Mutex::new(vec![Ok(vec![])]), AtomicUsize::new(0)));
+        let (fresh, late) = (Arc::new(Sink::default()), Arc::new(Sink::default()));
+        for sid in ["new", "late"] {
+            sessions.insert(sid.into(), "c", SessionKind::Sampler, Box::new(|| {}));
+        }
+        r.subscribe("c", 2, "m", "new", fresh.clone(), src.clone());
+        let buffer = r.buffer("c", "m").unwrap();
+
+        r.subscribe("c", 1, "m", "late", late.clone(), src.clone());
+        assert_eq!(
+            late.0.lock_safe()[..],
+            [SamplerEvent::Stopped],
+            "запоздавшей вкладке — только `Stopped`"
+        );
+        assert!(!sessions.stop("late"), "её сессия забыта");
+        assert!(
+            Arc::ptr_eq(&buffer, &r.buffer("c", "m").unwrap()) && r.is_running("c", "m"),
+            "узел нового открытия не тронут"
+        );
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(late.0.lock_safe().len(), 1, "тиков запоздавшей вкладке нет");
+        {
+            let events = fresh.0.lock_safe();
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, SamplerEvent::Tick { .. }))
+            );
+            assert!(!events.iter().any(|e| matches!(e, SamplerEvent::Stopped)));
+        }
+
+        // Пустой узел убирается только для своего открытия.
+        assert!(!r.forget_empty_node("c", "m", 2), "подписчик ещё есть");
+        r.unsubscribe("c", "m", "new");
+        assert!(!r.forget_empty_node("c", "m", 1), "узел другого открытия");
+        assert!(r.buffer("c", "m").is_some());
+        assert!(r.forget_empty_node("c", "m", 2));
+        assert!(r.buffer("c", "m").is_none() && !r.is_running("c", "m"));
+        assert!(!r.forget_empty_node("c", "m", 2), "узла уже нет");
+    }
+
+    /// Источник с собственным пределом больше `SAMPLE_TIMEOUT` (подключение по медленной сети): сэмпл дольше
+    /// 5 с, но в пределе источника — не ошибка; медленный тик пропускается, запросы не накладываются.
+    struct Slow {
+        limit: Duration,
+        takes: Duration,
+        running: AtomicUsize,
+        overlaps: AtomicUsize,
+        calls: AtomicUsize,
+    }
+    impl SampleSource for Slow {
+        fn sample<'a>(&'a self) -> BoxFuture<'a, AppResult<Vec<RawSample>>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                if self.running.fetch_add(1, Ordering::SeqCst) > 0 {
+                    self.overlaps.fetch_add(1, Ordering::SeqCst);
+                }
+                tokio::time::sleep(self.takes).await;
+                self.running.fetch_sub(1, Ordering::SeqCst);
+                Ok(vec![])
+            })
+        }
+        fn limit(&self) -> Duration {
+            self.limit
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_link_sample_within_the_source_limit_is_not_cut_and_ticks_never_overlap() {
+        let r = SamplerRegistry::new(Duration::from_secs(1), Arc::new(SessionRegistry::default()));
+        let src = Arc::new(Slow {
+            limit: Duration::from_secs(25),
+            takes: Duration::from_secs(8),
+            running: AtomicUsize::new(0),
+            overlaps: AtomicUsize::new(0),
+            calls: AtomicUsize::new(0),
+        });
+        let sink = Arc::new(Sink::default());
+        r.subscribe("c", 1, "m", "s1", sink.clone(), src.clone());
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        let events = sink.0.lock_safe().clone();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, SamplerEvent::Error { .. })),
+            "8 с в пределе источника (25 с): ошибки нет, {events:?}"
+        );
+        let ticks = events
+            .iter()
+            .filter(|e| matches!(e, SamplerEvent::Tick { .. }))
+            .count();
+        assert!((3..=4).contains(&ticks), "тик каждые ~8 с: {ticks}");
+        assert_eq!(
+            src.calls.load(Ordering::SeqCst),
+            ticks + usize::from(src.running.load(Ordering::SeqCst) > 0)
+        );
+        assert_eq!(
+            src.overlaps.load(Ordering::SeqCst),
+            0,
+            "запросы не накладываются"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn silent_source_is_cut_by_the_outer_guard_past_its_limit() {
+        let r = SamplerRegistry::new(Duration::from_secs(1), Arc::new(SessionRegistry::default()));
+        let src = Arc::new(Slow {
+            limit: Duration::from_secs(3),
+            takes: Duration::from_secs(60),
+            running: AtomicUsize::new(0),
+            overlaps: AtomicUsize::new(0),
+            calls: AtomicUsize::new(0),
+        });
+        let sink = Arc::new(Sink::default());
+        r.subscribe("c", 1, "m", "s1", sink.clone(), src);
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(
+            sink.0.lock_safe().is_empty(),
+            "до предела источника и запаса тишина"
+        );
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let events = sink.0.lock_safe().clone();
+        assert!(
+            matches!(&events[..], [SamplerEvent::Error { error }] if error.params["secs"] == "3"),
+            "{events:?}"
         );
     }
 

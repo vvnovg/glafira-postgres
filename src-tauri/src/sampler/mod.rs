@@ -6,9 +6,10 @@ pub mod registry;
 
 use std::sync::Arc;
 
-use crate::error::{AppError, AppResult, ErrorCode};
+use crate::error::{AppError, AppResult};
 use crate::session::SessionKind;
 use crate::state::AppState;
+use crate::topology::runtime::not_connected;
 use registry::SamplerSink;
 
 /// Подписка на сэмплер узла (`member = None` — «за лидером» на момент подписки). Возвращает id сессии для
@@ -52,13 +53,9 @@ pub fn start(
     let current = st.runtimes.diag_target(id, Some(&m), false);
     if current.as_ref().map(|t| t.generation).ok() != Some(target.generation) {
         st.sessions.stop(&session_id);
-        return Err(current.err().unwrap_or_else(|| {
-            app_err!(
-                ErrorCode::NodeUnavailable,
-                "errors.topology.notConnected",
-                "The connection is not open"
-            )
-        }));
+        // Узел, который подписка создала для закрытого открытия, — без подписчиков и никому не нужен.
+        st.samplers.forget_empty_node(id, &m, target.generation);
+        return Err(current.err().unwrap_or_else(not_connected));
     }
     Ok(session_id)
 }

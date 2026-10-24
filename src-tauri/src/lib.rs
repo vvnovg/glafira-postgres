@@ -24,6 +24,7 @@ pub mod topology;
 use std::sync::Arc;
 
 use tauri::Manager;
+use tauri::webview::PageLoadEvent;
 
 use crate::secrets::KeyringStore;
 use crate::state::AppState;
@@ -50,6 +51,18 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Перезагрузка страницы (F5, горячая замена Vite) теряет JS-состояние: id длительных сессий забыты, а
+        // канал сэмплера в Tauri 2.12 после перезагрузки принимает отправку без ошибки, так что «закрытый
+        // канал» не наступит. Начало загрузки страницы останавливает все сессии: сэмплеры не работают вхолостую
+        // до закрытия подключения. Окно одно, а новая страница начинает с `start_sampler` уже после `Started`;
+        // при первой загрузке сессий нет, вызов безвреден.
+        .on_page_load(|webview, payload| {
+            if payload.event() == PageLoadEvent::Started
+                && let Some(st) = webview.app_handle().try_state::<AppState>()
+            {
+                st.sessions.stop_all();
+            }
+        })
         .setup(|app| {
             crate::logging::init(&app.path().app_log_dir()?);
             tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting");

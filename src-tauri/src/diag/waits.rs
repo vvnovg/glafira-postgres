@@ -23,17 +23,22 @@ pub async fn report(
     let from = now - window_s as i64 * 1000;
     let running = st.samplers.is_running(id, &member);
     let data = match st.samplers.buffer(id, &member) {
+        // Агрегация держит буфер до ~100 мс (полный буфер — 500 000 строк): она идёт в `spawn_blocking`, а не на
+        // рабочем потоке tokio; блокировка берётся там же, наружу уходит готовый профиль.
         Some(b) => {
-            let b = b.lock_safe();
-            pg_advisor::ash::profile(
-                &b.samples(from),
-                &b.ticks(from),
-                &b.gaps(from),
-                window_s,
-                now,
-                b.oldest_tick(),
-                running,
-            )
+            crate::conn::run_blocking(move || {
+                let b = b.lock_safe();
+                Ok(pg_advisor::ash::profile(
+                    &b.samples(from),
+                    &b.ticks(from),
+                    &b.gaps(from),
+                    window_s,
+                    now,
+                    b.oldest_tick(),
+                    running,
+                ))
+            })
+            .await?
         }
         None => pg_advisor::ash::profile(&[], &[], &[], window_s, now, None, running),
     };

@@ -1,10 +1,11 @@
 //! Запрос сэмплера (спец. P2 §6): активные сессии узла на соединении пула `Sampler`.
 
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 
-use crate::commands::catalog::on_catalog_node_within;
+use crate::commands::catalog::{catalog_limit, on_catalog_node_split};
 use crate::conn::errors::from_pg;
 use crate::conn::pool::PoolPurpose;
 use crate::diag::caps::{Caps, V14};
@@ -45,14 +46,27 @@ impl PoolSampleSource {
             caps: OnceLock::new(),
         }
     }
+
+    /// Предел получения соединения — как у каталога (таймаут подключения профиля + 10 с): холодное
+    /// подключение через туннель или по медленной сети не обрывается на 5 с каждый раз. Подключение не открыто —
+    /// сэмпл и так закончится ошибкой `notConnected` сразу.
+    fn acquire_limit(&self) -> Duration {
+        self.st
+            .runtimes
+            .target(&self.connection_id, Some(&self.member))
+            .map(|(_, profile)| catalog_limit(&profile))
+            .unwrap_or(SAMPLE_TIMEOUT)
+    }
 }
 
 impl SampleSource for PoolSampleSource {
     fn sample<'a>(&'a self) -> BoxFuture<'a, AppResult<Vec<RawSample>>> {
         Box::pin(async move {
             let known = self.caps.get().copied();
-            // Предел — `SAMPLE_TIMEOUT`, и по таймауту соединение закрывается, а не возвращается в пул.
-            let (rows, caps) = on_catalog_node_within(
+            // Получение соединения — в пределе каталога, сам запрос (с версией при первом сэмпле) — не дольше
+            // `SAMPLE_TIMEOUT`. По таймауту запроса или обрыву соединение закрывается, а не возвращается в пул.
+            let (rows, caps) = on_catalog_node_split(
+                self.acquire_limit(),
                 SAMPLE_TIMEOUT,
                 self.st.client_with(
                     &self.connection_id,
@@ -93,6 +107,11 @@ impl SampleSource for PoolSampleSource {
                 })
                 .collect())
         })
+    }
+
+    /// Получение соединения плюс запрос: задача сэмплера не обрывает источник раньше его собственных пределов.
+    fn limit(&self) -> Duration {
+        self.acquire_limit() + SAMPLE_TIMEOUT
     }
 }
 

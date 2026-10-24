@@ -68,6 +68,35 @@ pub(crate) fn catalog_limit(profile: &ConnectionProfile) -> Duration {
     Duration::from_secs(profile.pg.connect_timeout_s) + COLLECT_TIMEOUT
 }
 
+/// Соединение от `acquire` не позже `deadline`; соединения ещё нет — закрывать нечего.
+async fn acquire_by(
+    deadline: Instant,
+    limit: Duration,
+    acquire: impl Future<Output = AppResult<PooledClient>>,
+) -> AppResult<PooledClient> {
+    timeout_at(deadline, acquire)
+        .await
+        .map_err(|_| no_answer(limit))?
+}
+
+/// Запрос на выданном соединении до `deadline`; таймаут и обрыв закрывают соединение, а не возвращают в пул.
+async fn query_by<T, F>(
+    c: PooledClient,
+    deadline: Instant,
+    limit: Duration,
+    query: F,
+) -> AppResult<T>
+where
+    T: Send,
+    F: for<'a> FnOnce(&'a Client) -> BoxFuture<'a, AppResult<T>> + Send,
+{
+    let (result, discard) = bounded(deadline, limit, query(&c)).await;
+    if discard {
+        c.discard();
+    }
+    result
+}
+
 /// Запрос каталога на соединении, которое выдаёт `acquire`, не дольше `limit` на получение (в том числе
 /// ожидание свободного места в пуле и подключение) и запрос вместе: серверный `statement_timeout`
 /// не защищает от молчащего пути. Таймаут и обрыв закрывают соединение, а не возвращают в пул.
@@ -83,15 +112,27 @@ where
     F: for<'a> FnOnce(&'a Client) -> BoxFuture<'a, AppResult<T>> + Send,
 {
     let deadline = Instant::now() + limit;
-    // Соединения ещё нет — закрывать нечего.
-    let c = timeout_at(deadline, acquire)
-        .await
-        .map_err(|_| no_answer(limit))??;
-    let (result, discard) = bounded(deadline, limit, query(&c)).await;
-    if discard {
-        c.discard();
-    }
-    result
+    let c = acquire_by(deadline, limit, acquire).await?;
+    query_by(c, deadline, limit, query).await
+}
+
+/// То же с раздельными пределами: `acquire_limit` — на получение соединения (ожидание места в пуле и холодное
+/// подключение, в том числе по медленной сети), `query_limit` — на один запрос, отсчитанный от выданного
+/// соединения. Долгое подключение не съедает срок запроса, а молчащий узел всё равно не держит запрос дольше
+/// `query_limit`, и такое соединение закрывается, а не возвращается в пул.
+pub(crate) async fn on_catalog_node_split<T, A, F>(
+    acquire_limit: Duration,
+    query_limit: Duration,
+    acquire: A,
+    query: F,
+) -> AppResult<T>
+where
+    T: Send,
+    A: Future<Output = AppResult<PooledClient>> + Send,
+    F: for<'a> FnOnce(&'a Client) -> BoxFuture<'a, AppResult<T>> + Send,
+{
+    let c = acquire_by(Instant::now() + acquire_limit, acquire_limit, acquire).await?;
+    query_by(c, Instant::now() + query_limit, query_limit, query).await
 }
 
 /// Запрос каталога на соединении узла каталога (`db = None` — БД профиля) открытого подключения `id`.
@@ -489,6 +530,79 @@ mod tests {
         );
         assert!(server.wait_closed(1, WAIT).await, "сокет закрыт");
         assert_eq!(server.accepted(), 1);
+    }
+
+    /// Долгое получение соединения не съедает срок запроса: отдельные пределы, запрос отсчитывается от выданного
+    /// соединения (медленная сеть до узла).
+    #[tokio::test]
+    async fn slow_acquire_does_not_eat_the_query_limit() {
+        let server = testutil::stalling_pg_server();
+        let pools = PoolRegistry::default();
+        let slow_node = async {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            node_client(&pools, server.port).await
+        };
+        let v = on_catalog_node_split(
+            Duration::from_secs(5),
+            Duration::from_millis(300),
+            slow_node,
+            |_| Box::pin(async { Ok(9) }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(v, 9);
+        assert_eq!(pools.get(&key()).unwrap().idle_count(), 1);
+        assert_eq!(server.closed(), 0);
+    }
+
+    /// Получение соединения не вышло в свой предел — ошибка с этим пределом; запрос не начинался.
+    #[tokio::test]
+    async fn acquire_past_its_limit_fails_with_that_limit() {
+        let ran = std::sync::atomic::AtomicBool::new(false);
+        let started = Instant::now();
+        let e = on_catalog_node_split(
+            Duration::from_millis(200),
+            Duration::from_secs(30),
+            async {
+                std::future::pending::<()>().await;
+                unreachable!()
+            },
+            |_| {
+                ran.store(true, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async { Ok(()) })
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.key, "errors.pg.noAnswer");
+        assert_eq!(e.params["secs"], "1");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// Запрос на молчащем узле обрывается по своему пределу, а не по пределу получения; соединение закрывается.
+    #[tokio::test]
+    async fn silent_query_is_cut_by_the_query_limit_and_discards_the_connection() {
+        let server = testutil::stalling_pg_server();
+        let pools = PoolRegistry::default();
+        let started = Instant::now();
+        let e = tokio::time::timeout(
+            Duration::from_secs(5),
+            on_catalog_node_split(
+                Duration::from_secs(30),
+                Duration::from_millis(300),
+                node_client(&pools, server.port),
+                |c| Box::pin(extensions::list(c)),
+            ),
+        )
+        .await
+        .expect("запрос на молчащем узле не должен висеть до предела получения")
+        .unwrap_err();
+        assert_eq!(e.key, "errors.pg.noAnswer");
+        assert_eq!(e.params["secs"], "1");
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        assert_eq!(pools.get(&key()).unwrap().idle_count(), 0);
+        assert!(server.wait_closed(1, WAIT).await, "сокет закрыт");
     }
 
     /// Парный случай: ответ получен вовремя — соединение возвращается в пул и остаётся открытым.

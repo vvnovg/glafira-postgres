@@ -140,12 +140,29 @@ impl Buffer {
 
     fn evict(&mut self, now_ms: i64) {
         let oldest = now_ms - self.max_age_ms;
-        while self.rows.front().is_some_and(|r| r.at_ms < oldest) || self.rows.len() > self.max_rows
-        {
+        while self.rows.front().is_some_and(|r| r.at_ms < oldest) {
             self.rows.pop_front();
         }
         while self.ticks.front().is_some_and(|t| *t < oldest) {
             self.ticks.pop_front();
+        }
+        // Лимит строк снимает тик целиком — вместе с его строками: иначе тик остался бы без части строк,
+        // и окно показывало бы секунды работы сэмплера (`sampled_s`) без их сэмплов, а `oldest_tick` —
+        // начало истории, которой уже нет. Один тик крупнее лимита вытесняется сам (на практике невозможно:
+        // лимит — сотни тысяч строк, а тик — число активных сессий узла).
+        while self.rows.len() > self.max_rows {
+            let Some(t) = self.ticks.pop_front() else {
+                // Строки без тика невозможны (`push` пишет тик раньше строк); на всякий случай — по строкам.
+                self.rows.pop_front();
+                continue;
+            };
+            while self.rows.front().is_some_and(|r| r.at_ms <= t) {
+                self.rows.pop_front();
+            }
+            // Тик с тем же временем (часы приложения с миллисекундным шагом) ушёл вместе со строками.
+            while self.ticks.front().is_some_and(|x| *x <= t) {
+                self.ticks.pop_front();
+            }
         }
         self.gaps.retain(|(_, to)| *to >= oldest);
         if self.strings.len() > self.compact_at {
@@ -288,12 +305,84 @@ mod tests {
         let mut b = Buffer::new(3, 10_000);
         b.push(1_000, vec![raw(1, "a"), raw(2, "b")]);
         b.push(2_000, vec![raw(3, "c"), raw(4, "d")]);
-        assert_eq!(b.len(), 3, "лимит строк");
+        assert_eq!(
+            (b.len(), b.oldest_tick(), b.ticks(0)),
+            (2, Some(2_000), vec![2_000]),
+            "лимит строк снимает тик целиком: его строки и сам тик"
+        );
+        assert_eq!(
+            b.samples(0).iter().map(|s| s.pid).collect::<Vec<_>>(),
+            [3, 4]
+        );
         b.push(20_000, vec![]);
         assert_eq!(
             (b.len(), b.oldest_tick()),
             (0, Some(20_000)),
             "старше срока хранения — вытеснено"
         );
+    }
+
+    #[test]
+    fn row_cap_drops_whole_ticks_and_the_profile_does_not_count_them() {
+        use pg_advisor::ash::profile;
+        let (now, window_s) = (1_000_000, 300);
+        let from = now - window_s as i64 * 1000;
+        let mut b = Buffer::new(3, 3_600_000);
+        // Первый тик — в начале окна: пока он в буфере, история полная (`truncated = false`).
+        b.push(from + 1_000, vec![raw(1, "a"), raw(2, "b")]);
+        let full = profile(
+            &b.samples(from),
+            &b.ticks(from),
+            &b.gaps(from),
+            window_s,
+            now,
+            b.oldest_tick(),
+            true,
+        );
+        assert!(!full.truncated);
+        assert_eq!(full.buckets.iter().map(|x| x.sampled_s).sum::<f64>(), 1.0);
+        b.push(from + 60_000, vec![raw(3, "c"), raw(4, "d")]);
+        let d = profile(
+            &b.samples(from),
+            &b.ticks(from),
+            &b.gaps(from),
+            window_s,
+            now,
+            b.oldest_tick(),
+            true,
+        );
+        assert!(d.truncated, "начало истории вытеснено лимитом");
+        assert_eq!(d.total_samples, 2);
+        assert_eq!(
+            d.buckets.iter().map(|x| x.sampled_s).sum::<f64>(),
+            1.0,
+            "секунды вытесненного тика не считаются"
+        );
+        assert_eq!(d.buckets[0].sampled_s, 0.0);
+        assert!(
+            d.buckets
+                .iter()
+                .all(|x| x.sampled_s > 0.0 || x.aas.is_empty()),
+            "нет интервала со средним без секунд работы сэмплера"
+        );
+    }
+
+    #[test]
+    fn row_cap_drops_only_as_many_ticks_as_needed_and_empty_ticks_go_in_turn() {
+        let mut b = Buffer::new(2, 3_600_000);
+        b.push(1_000, vec![raw(1, "a")]);
+        b.push(2_000, vec![]);
+        b.push(3_000, vec![raw(2, "b"), raw(3, "c")]);
+        assert_eq!(
+            (b.len(), b.ticks(0)),
+            (2, vec![2_000, 3_000]),
+            "снят только первый тик: лимит уже соблюдён"
+        );
+        // Пустой тик занимает место только в списке тиков.
+        b.push(4_000, vec![]);
+        assert_eq!((b.len(), b.ticks(0)), (2, vec![2_000, 3_000, 4_000]));
+        // Тик крупнее лимита вытесняется сам, буфер не превышает лимит.
+        b.push(5_000, vec![raw(4, "d"), raw(5, "e"), raw(6, "f")]);
+        assert_eq!((b.len(), b.ticks(0)), (0, vec![]));
     }
 }
