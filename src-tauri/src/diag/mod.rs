@@ -2,6 +2,7 @@
 //! `run_diagnostic`. Сбор фактов (SQL, HTTP) — здесь, правила и типы данных — в `pg_advisor::rules`.
 
 pub mod caps;
+pub mod locks;
 pub mod memory;
 pub mod pulse;
 pub mod sessions;
@@ -9,6 +10,7 @@ pub mod sql;
 
 use futures_util::future::BoxFuture;
 use pg_advisor::findings::Finding;
+use pg_advisor::locktree::LocksData;
 use pg_advisor::rules::sessions::SessionsData;
 use serde::{Deserialize, Serialize};
 use tokio_postgres::Client;
@@ -79,6 +81,7 @@ pub struct Unavailable {
 pub enum DiagData {
     Pulse(pulse::PulseData),
     Sessions(SessionsData),
+    Locks(LocksData),
 }
 
 /// Конверт отчёта (спец. P2 §3.2). У инструментов кластера `member`, `serverVersionNum` и `inRecovery` пусты.
@@ -194,6 +197,7 @@ pub async fn run(st: &AppState, id: &str, req: DiagRequest) -> AppResult<DiagRep
     match req.tool {
         Tool::Pulse => pulse::report(st, id, &target).await,
         Tool::Sessions => sessions::report(st, id, &target).await,
+        Tool::Locks => locks::report(st, id, &target).await,
         // Задачи 4–9 добавляют свои ветки; до тех пор инструмент недоступен.
         other => Err(app_err!(
             ErrorCode::FeatureUnavailable,

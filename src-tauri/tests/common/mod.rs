@@ -44,6 +44,15 @@ pub fn host_port(s: &str) -> (String, u16) {
     (h.to_string(), p.parse().expect("port"))
 }
 
+/// Ждёт, пока асинхронное условие станет истинным (опрос раз в 100 мс); по истечении `limit` — паника с `what`.
+pub async fn wait_until(what: &str, limit: Duration, mut cond: impl AsyncFnMut() -> bool) {
+    let deadline = Instant::now() + limit;
+    while !cond().await {
+        assert!(Instant::now() < deadline, "не дождались: {what}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 pub const SUPERUSER: &str = "postgres";
 pub const SUPERUSER_PASSWORD: &str = "postgres-secret";
 pub const APP_USER: &str = "glafira_app";
@@ -223,9 +232,19 @@ pub fn tunnel_registry_for_tests(dir: &Path, pools: Arc<PoolRegistry>) -> Arc<Tu
 /// Открытое подключение-сервер к `addr` под ролью диагностики (id `it`); каталог данных — во временной папке,
 /// которая живёт, пока жив возвращённый `TempDir`.
 pub async fn open_server(addr: &str) -> (tempfile::TempDir, glafira_pg_lib::state::AppState) {
+    open_server_in(addr, "postgres").await
+}
+
+/// То же, но подключение смотрит в базу `db`: имя отношения из `pg_locks` (`relation::regclass`) известно
+/// только для базы соединения, для таблиц другой базы остаются oid и имя базы.
+pub async fn open_server_in(
+    addr: &str,
+    db: &str,
+) -> (tempfile::TempDir, glafira_pg_lib::state::AppState) {
     let dir = tempfile::tempdir().unwrap();
     let st = glafira_pg_lib::state::AppState::new(dir.path(), secrets_with_password("it")).unwrap();
     let mut p = server_profile("it", addr);
+    p.pg.database = db.into();
     p.pg.ssl_mode = SslMode::Disable;
     st.connections.upsert(p.clone()).unwrap();
     st.runtimes.connect(p).await.unwrap();
