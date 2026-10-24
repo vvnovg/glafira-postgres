@@ -19,6 +19,14 @@ fn req(tool: Tool) -> DiagRequest {
     }
 }
 
+/// Находка относится к сессии `pid`.
+fn is_session(f: &pg_advisor::findings::Finding, pid: i32) -> bool {
+    matches!(
+        f.target,
+        Some(pg_advisor::findings::FindingTarget::Session { pid: p, .. }) if p == pid
+    )
+}
+
 /// Все узлы, на которых проверяется SQL: стенд и матрица.
 fn sql_addrs() -> Vec<String> {
     [
@@ -266,17 +274,7 @@ async fn lock_wait_is_collected_on_every_version_with_its_precision() {
         });
         let c =
             common::connect_as(&addr, "orders", common::PG_USER, common::PG_PASSWORD_VALUE).await;
-        common::wait_until("SELECT ждёт", Duration::from_secs(5), async || {
-            c.query_one(
-                "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND pid = $1",
-                &[&victim_pid],
-            )
-            .await
-            .unwrap()
-            .get::<_, i64>(0)
-                >= 1
-        })
-        .await;
+        common::wait_lock_wait(&c, victim_pid, "SELECT ждёт").await;
         tokio::time::sleep(Duration::from_millis(1200)).await;
         let h = diag::head(&c).await.unwrap();
         let rows = diag::locks::collect(&c, Caps::new(h.version_num))
@@ -347,18 +345,7 @@ async fn ddl_queue_behind_a_long_transaction_is_found() {
                 .await
         }));
         let probe = common::superuser(&addr, "postgres").await;
-        common::wait_until("ALTER ждёт", Duration::from_secs(5), async || {
-            probe
-                .query_one(
-                    "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND pid = $1",
-                    &[&ddl_pid],
-                )
-                .await
-                .unwrap()
-                .get::<_, i64>(0)
-                >= 1
-        })
-        .await;
+        common::wait_lock_wait(&probe, ddl_pid, "ALTER ждёт").await;
         let victim = common::app(&addr).await;
         let victim_pid: i32 = victim
             .query_one("SELECT pg_backend_pid()", &[])
@@ -371,18 +358,7 @@ async fn ddl_queue_behind_a_long_transaction_is_found() {
                 .await
                 .map(|_| ())
         }));
-        common::wait_until("SELECT встал за ALTER", Duration::from_secs(5), async || {
-            probe
-                .query_one(
-                    "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND pid = $1",
-                    &[&victim_pid],
-                )
-                .await
-                .unwrap()
-                .get::<_, i64>(0)
-                >= 1
-        })
-        .await;
+        common::wait_lock_wait(&probe, victim_pid, "SELECT встал за ALTER").await;
 
         // Диагностика смотрит в базу `orders`: только там `shop.orders` получает имя (см. `open_server_in`).
         let (_dir, st) = common::open_server_in(&addr, "orders").await;
@@ -419,14 +395,25 @@ async fn ddl_queue_behind_a_long_transaction_is_found() {
             (q.mode.as_str(), q.relation.as_deref(), q.queued),
             ("AccessExclusiveLock", Some("shop.orders"), 1)
         );
-        assert!(r.findings.iter().any(|f| f.id == "ddlQueue"
-            && f.severity == pg_advisor::findings::Severity::Critical));
+        let found = r
+            .findings
+            .iter()
+            .find(|f| f.id == "ddlQueue" && is_session(f, ddl_pid))
+            .expect("находка ddlQueue");
+        assert_eq!(found.severity, pg_advisor::findings::Severity::Critical);
+        assert_eq!(found.params["relation"], "shop.orders");
+        assert!(
+            !found.params.contains_key("relationOid")
+                && !found.params.contains_key("relationDatabase"),
+            "{:?}",
+            found.params
+        );
 
         // Из другой базы (`postgres`) имя отношения неизвестно: остаются oid и имя базы.
         let (_dir_other, other) = open_server(&addr).await;
-        let DiagData::Locks(d) = diag::run(&other, "it", req(Tool::Locks)).await.unwrap().data
-        else {
-            panic!()
+        let r = diag::run(&other, "it", req(Tool::Locks)).await.unwrap();
+        let DiagData::Locks(d) = &r.data else {
+            panic!("{:?}", r.data)
         };
         let ddl_node = &d
             .roots
@@ -440,6 +427,15 @@ async fn ddl_queue_behind_a_long_transaction_is_found() {
             (None, Some("orders"))
         );
         assert!(lock.relation_oid.is_some());
+        // В находке — без пустого имени: oid и база, из которых интерфейс составит «oid N в БД orders».
+        let found = r
+            .findings
+            .iter()
+            .find(|f| f.id == "ddlQueue" && is_session(f, ddl_pid))
+            .expect("находка ddlQueue");
+        assert!(!found.params.contains_key("relation"), "{:?}", found.params);
+        assert_eq!(found.params["relationOid"].as_i64(), lock.relation_oid);
+        assert_eq!(found.params["relationDatabase"], "orders");
     })
     .catch_unwind()
     .await;

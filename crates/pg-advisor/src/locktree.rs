@@ -54,9 +54,10 @@ pub struct LockRow {
 #[serde(rename_all = "camelCase")]
 pub struct LockNode {
     pub session: LockSession,
-    /// Что узел ждёт; у корня пусто.
+    /// Что узел ждёт; у корня-блокирующего пусто, у ждущего корня (чей блокирующий не виден) задано.
     pub lock: Option<WaitingLock>,
-    /// Остальные блокирующие: родитель — только первый из `pg_blocking_pids`.
+    /// Остальные блокирующие: родитель — только первый из `pg_blocking_pids`. У ждущего корня — pid, которых нет в
+    /// строках (0 — подготовленная транзакция, либо сессия уже завершилась).
     pub also_blocked_by: Vec<i32>,
     /// Сколько сессий в поддереве (без самого узла).
     pub victims: usize,
@@ -68,12 +69,16 @@ pub struct LockNode {
 #[serde(rename_all = "camelCase")]
 pub struct DdlQueueItem {
     pub session: LockSession,
-    /// Кого ждёт сам DDL (родитель в лесу); у корня-DDL не бывает, но поле допускает пусто.
+    /// Кого ждёт сам DDL (родитель в лесу); пусто, если блокирующий не виден (подготовленная транзакция).
     pub waits_for: Option<i32>,
     pub wait_s: Option<f64>,
     /// Сколько сессий стоит за DDL.
     pub queued: usize,
+    /// Имя отношения — только для отношения БД соединения.
     pub relation: Option<String>,
+    pub relation_oid: Option<i64>,
+    /// Имя БД отношения: для отношения другой БД `relation` пуст, и интерфейс показывает «oid N в БД X».
+    pub relation_database: Option<String>,
     pub mode: String,
 }
 
@@ -87,8 +92,11 @@ pub struct LocksData {
 }
 
 /// Лес «блокирующий → жертвы». Родитель жертвы — первый из её `pg_blocking_pids`, кто есть в строках; остальные —
-/// в `also_blocked_by`. Корень — сессия, которая сама не ждёт и кого-то держит. Ждущие, от которых по цепочке
-/// родителей не дойти до корня, — циклы (deadlock detector разрешит их за `deadlock_timeout`).
+/// в `also_blocked_by`. Корень — сессия без родителя: либо не ждущая и кого-то держащая, либо ждущая, чьих
+/// блокирующих нет в строках (pid 0 — подготовленная транзакция, или сессия уже завершилась): такая сессия — корень
+/// собственного поддерева, `lock` у неё задан, а невидимые pid перечислены в `also_blocked_by`, так что она и все,
+/// кто стоит за ней, не пропадают. Ждущие, чья цепочка родителей ведёт в цикл, — циклы (deadlock detector
+/// разрешит их за `deadlock_timeout`).
 pub fn build(rows: &[LockRow]) -> LocksData {
     let index: HashMap<i32, &LockRow> = rows.iter().map(|r| (r.session.pid, r)).collect();
     let parent = |r: &LockRow| {
@@ -107,7 +115,7 @@ pub fn build(rows: &[LockRow]) -> LocksData {
     let mut roots: Vec<LockNode> = rows
         .iter()
         .filter(|r| {
-            parent(r).is_none() && r.waiting.is_none() && children.contains_key(&r.session.pid)
+            parent(r).is_none() && (r.waiting.is_some() || children.contains_key(&r.session.pid))
         })
         .map(|r| grow(r.session.pid, &index, &children, &mut visited, None))
         .collect();
@@ -194,6 +202,8 @@ fn find_ddl(n: &LockNode, parent: Option<i32>, out: &mut Vec<DdlQueueItem>) {
             wait_s: l.wait_s,
             queued: n.victims,
             relation: l.relation.clone(),
+            relation_oid: l.relation_oid,
+            relation_database: l.relation_database.clone(),
             mode: l.mode.clone().unwrap_or_default(),
         });
     }
@@ -288,6 +298,84 @@ mod tests {
         );
         assert_eq!(d.roots[0].children[0].also_blocked_by, [1]);
         assert!(d.ddl_queue.is_empty(), "RowExclusiveLock — не DDL");
+    }
+
+    #[test]
+    fn a_waiter_behind_a_prepared_transaction_keeps_its_queue() {
+        // 2 ждёт подготовленную транзакцию (pid 0), 3 стоит за 2.
+        let rows = [
+            waiting(2, &[0], "AccessExclusiveLock", 40.0),
+            waiting(3, &[2], "AccessShareLock", 30.0),
+        ];
+        let d = build(&rows);
+        assert_eq!(d.roots.len(), 1);
+        let root = &d.roots[0];
+        assert_eq!((root.session.pid, root.victims), (2, 1));
+        assert!(root.lock.is_some(), "корень ждёт сам");
+        assert_eq!(root.also_blocked_by, [0]);
+        assert_eq!(root.children[0].session.pid, 3);
+        assert!(d.cycles.is_empty());
+        assert_eq!(d.ddl_queue.len(), 1, "DDL за подготовленной транзакцией");
+        assert_eq!(
+            (d.ddl_queue[0].session.pid, d.ddl_queue[0].waits_for),
+            (2, None)
+        );
+    }
+
+    #[test]
+    fn a_waiter_whose_blocker_has_ended_keeps_its_queue() {
+        // Блокирующего 9999 в строках нет (сессия успела завершиться).
+        let rows = [
+            waiting(2, &[9999], "ShareLock", 5.0),
+            waiting(3, &[2], "AccessShareLock", 3.0),
+        ];
+        let d = build(&rows);
+        assert_eq!(d.roots.len(), 1);
+        let root = &d.roots[0];
+        assert_eq!((root.session.pid, root.victims), (2, 1));
+        assert_eq!(root.also_blocked_by, [9999]);
+        assert!(d.cycles.is_empty());
+    }
+
+    #[test]
+    fn a_lone_waiter_with_an_unseen_blocker_is_still_listed() {
+        let d = build(&[waiting(7, &[0], "RowExclusiveLock", 2.0)]);
+        assert_eq!(d.roots.len(), 1);
+        assert_eq!((d.roots[0].session.pid, d.roots[0].victims), (7, 0));
+        assert!(d.ddl_queue.is_empty());
+    }
+
+    #[test]
+    fn a_waiter_behind_a_cycle_is_not_a_root() {
+        // 5 и 6 ждут друг друга, 8 стоит за 5: в цикле, а не в лесу.
+        let rows = [
+            waiting(5, &[6], "ShareLock", 1.0),
+            waiting(6, &[5], "ShareLock", 1.0),
+            waiting(8, &[5], "AccessShareLock", 1.0),
+        ];
+        let d = build(&rows);
+        assert!(d.roots.is_empty());
+        assert_eq!(d.cycles, [vec![5, 6]]);
+    }
+
+    #[test]
+    fn a_queued_ddl_on_another_database_keeps_the_oid_and_the_database() {
+        let mut ddl = waiting(2, &[1], "AccessExclusiveLock", 40.0);
+        if let Some(l) = ddl.waiting.as_mut() {
+            l.relation = None;
+            l.relation_oid = Some(16_450);
+            l.relation_database = Some("orders".into());
+        }
+        let rows = [holder(1), ddl, waiting(3, &[2], "AccessShareLock", 30.0)];
+        let q = &build(&rows).ddl_queue[0];
+        assert_eq!(
+            (
+                q.relation.as_deref(),
+                q.relation_oid,
+                q.relation_database.as_deref()
+            ),
+            (None, Some(16_450), Some("orders"))
+        );
     }
 
     #[test]

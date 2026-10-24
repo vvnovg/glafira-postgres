@@ -53,6 +53,23 @@ pub async fn wait_until(what: &str, limit: Duration, mut cond: impl AsyncFnMut()
     }
 }
 
+/// Ждёт (до 5 с), пока сессия `pid` встанет в ожидание тяжёлой блокировки (`wait_event_type = 'Lock'`); `what` — для
+/// сообщения при таймауте. Смотрит через `probe` — отдельное соединение, не участвующее в ожидании.
+pub async fn wait_lock_wait(probe: &tokio_postgres::Client, pid: i32, what: &str) {
+    wait_until(what, Duration::from_secs(5), async || {
+        probe
+            .query_one(
+                "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND pid = $1",
+                &[&pid],
+            )
+            .await
+            .unwrap()
+            .get::<_, i64>(0)
+            >= 1
+    })
+    .await;
+}
+
 pub const SUPERUSER: &str = "postgres";
 pub const SUPERUSER_PASSWORD: &str = "postgres-secret";
 pub const APP_USER: &str = "glafira_app";

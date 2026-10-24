@@ -19,21 +19,24 @@ fn max_wait(n: &LockNode) -> Option<f64> {
         .reduce(f64::max)
 }
 
-/// Ожидания всех ждущих в поддереве, включая сам узел.
-fn all_waits(n: &LockNode) -> Vec<f64> {
+/// Ожидания всех ждущих в поддереве, включая сам узел: по элементу на каждого, у кого задан `lock`; `None` — время
+/// ожидания неизвестно.
+fn all_waits(n: &LockNode) -> Vec<Option<f64>> {
     n.lock
         .as_ref()
-        .and_then(|l| l.wait_s)
+        .map(|l| l.wait_s)
         .into_iter()
         .chain(n.children.iter().flat_map(all_waits))
         .collect()
 }
 
 /// Находки инструмента «Блокировки» на узле `member`. `rootBlocker` и `ddlQueue` — по находке на корень и на
-/// элемент очереди (уточнение 2 плана P2a), `lockWait` и `lockCycle` — по узлу.
+/// элемент очереди (уточнение 2 плана P2a), `lockWait` и `lockCycle` — по узлу. `rootBlocker` — только для корня,
+/// который сам не ждёт: ждущий корень (его блокирующий не виден, например подготовленная транзакция) завершать
+/// нечего, его очередь учитывает `lockWait`.
 pub fn evaluate(member: Option<&str>, d: &LocksData) -> Vec<Finding> {
     let mut out = Vec::new();
-    for root in &d.roots {
+    for root in d.roots.iter().filter(|r| r.lock.is_none()) {
         let wait = max_wait(root).unwrap_or(0.0);
         let sev = if root.victims >= th::ROOT_BLOCKER_CRIT_VICTIMS {
             Some(Severity::Critical)
@@ -55,8 +58,18 @@ pub fn evaluate(member: Option<&str>, d: &LocksData) -> Vec<Finding> {
     for q in &d.ddl_queue {
         let mut f = Finding::new("ddlQueue", Severity::Critical)
             .member(member)
-            .param("count", q.queued)
-            .param("relation", q.relation.clone().unwrap_or_default());
+            .param("count", q.queued);
+        // Имя отношения известно только для БД соединения; иначе интерфейс собирает «oid N в БД X».
+        if let Some(name) = &q.relation {
+            f = f.param("relation", name.clone());
+        } else {
+            if let Some(oid) = q.relation_oid {
+                f = f.param("relationOid", oid);
+            }
+            if let Some(db) = &q.relation_database {
+                f = f.param("relationDatabase", db.clone());
+            }
+        }
         if let Some(w) = q.wait_s {
             f = f.param("maxS", w);
         }
@@ -65,8 +78,9 @@ pub fn evaluate(member: Option<&str>, d: &LocksData) -> Vec<Finding> {
         }
         out.push(f);
     }
-    let waiting: Vec<f64> = d.roots.iter().flat_map(all_waits).collect();
-    if let Some(max) = waiting.iter().copied().reduce(f64::max)
+    // `count` — все ждущие сессии леса, `maxS` — самое долгое из известных ожиданий.
+    let waiting: Vec<Option<f64>> = d.roots.iter().flat_map(all_waits).collect();
+    if let Some(max) = waiting.iter().copied().flatten().reduce(f64::max)
         && let Some(sev) = grade(max, th::LOCK_WAIT_S.0, th::LOCK_WAIT_S.1)
     {
         out.push(
@@ -90,6 +104,7 @@ pub fn evaluate(member: Option<&str>, d: &LocksData) -> Vec<Finding> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::locktree::build;
 
     #[test]
     fn root_blocker_and_ddl_queue_findings() {
@@ -159,5 +174,102 @@ mod tests {
         );
         let ddl = f.iter().find(|x| x.id == "ddlQueue").unwrap();
         assert_eq!(ddl.params["relation"], "shop.orders");
+    }
+
+    use crate::locktree::{LockRow, WaitingLock};
+
+    fn sess(pid: i32) -> LockSession {
+        LockSession {
+            pid,
+            backend_start_us: Some(pid as i64),
+            ..Default::default()
+        }
+    }
+
+    fn holder(pid: i32) -> LockRow {
+        LockRow {
+            session: sess(pid),
+            blocked_by: vec![],
+            waiting: None,
+        }
+    }
+
+    fn waiter(pid: i32, blocked_by: &[i32], mode: &str, wait_s: Option<f64>) -> LockRow {
+        LockRow {
+            session: sess(pid),
+            blocked_by: blocked_by.to_vec(),
+            waiting: Some(WaitingLock {
+                locktype: Some("relation".into()),
+                mode: Some(mode.into()),
+                relation: Some("shop.orders".into()),
+                wait_s,
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn a_waiting_root_is_no_root_blocker_but_its_queue_is_counted_in_lock_wait() {
+        // 2 ждёт подготовленную транзакцию (pid 0), 3 стоит за 2.
+        let rows = [
+            waiter(2, &[0], "AccessShareLock", Some(40.0)),
+            waiter(3, &[2], "AccessShareLock", Some(10.0)),
+        ];
+        let f = evaluate(None, &build(&rows));
+        assert!(
+            f.iter().all(|x| x.id != "rootBlocker"),
+            "ждущий корень завершать нечего: {f:?}"
+        );
+        let wait = f.iter().find(|x| x.id == "lockWait").expect("lockWait");
+        assert_eq!(
+            (
+                wait.severity,
+                wait.params["count"].as_u64(),
+                wait.params["maxS"].as_f64()
+            ),
+            (Severity::Warning, Some(2), Some(40.0))
+        );
+    }
+
+    #[test]
+    fn lock_wait_counts_every_waiter_even_without_a_known_wait() {
+        let rows = [
+            holder(1),
+            waiter(2, &[1], "AccessShareLock", None),
+            waiter(3, &[1], "AccessShareLock", Some(40.0)),
+        ];
+        let f = evaluate(None, &build(&rows));
+        let wait = f.iter().find(|x| x.id == "lockWait").expect("lockWait");
+        assert_eq!(
+            (wait.params["count"].as_u64(), wait.params["maxS"].as_f64()),
+            (Some(2), Some(40.0))
+        );
+    }
+
+    #[test]
+    fn no_lock_wait_when_no_waiter_has_a_known_wait() {
+        let rows = [holder(1), waiter(2, &[1], "AccessShareLock", None)];
+        let f = evaluate(None, &build(&rows));
+        assert!(f.iter().all(|x| x.id != "lockWait"), "{f:?}");
+    }
+
+    #[test]
+    fn ddl_queue_on_a_table_of_another_database_carries_oid_and_database() {
+        let mut ddl = waiter(2, &[1], "AccessExclusiveLock", Some(12.0));
+        if let Some(l) = ddl.waiting.as_mut() {
+            l.relation = None;
+            l.relation_oid = Some(16_450);
+            l.relation_database = Some("orders".into());
+        }
+        let rows = [
+            holder(1),
+            ddl,
+            waiter(3, &[2], "AccessShareLock", Some(5.0)),
+        ];
+        let f = evaluate(None, &build(&rows));
+        let q = f.iter().find(|x| x.id == "ddlQueue").expect("ddlQueue");
+        assert!(!q.params.contains_key("relation"), "{:?}", q.params);
+        assert_eq!(q.params["relationOid"], 16_450);
+        assert_eq!(q.params["relationDatabase"], "orders");
     }
 }
