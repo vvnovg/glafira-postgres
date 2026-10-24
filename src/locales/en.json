@@ -750,7 +750,8 @@
   },
   "diag": {
     "unavailable": {
-      "version": "{{part}}: PostgreSQL {{version}}+"
+      "version": "{{part}}: PostgreSQL {{version}}+",
+      "privilege": "{{part}}: needs the pg_monitor role"
     }
   },
   "hints": {

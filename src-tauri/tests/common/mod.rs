@@ -232,6 +232,26 @@ pub async fn open_server(addr: &str) -> (tempfile::TempDir, glafira_pg_lib::stat
     (dir, st)
 }
 
+/// Открытое подключение к кластеру Patroni стенда (`GPG_IT_PATRONI`, id `it`); без переменной — `None`.
+pub async fn open_patroni() -> Option<(tempfile::TempDir, glafira_pg_lib::state::AppState)> {
+    use glafira_pg_lib::secrets::PATRONI_PASSWORD;
+    let settings = patroni_settings()?;
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = secrets_with_password("it");
+    secrets
+        .set(&secret_key("it", PATRONI_PASSWORD), PATRONI_PASSWORD_VALUE)
+        .unwrap();
+    let st = glafira_pg_lib::state::AppState::new(dir.path(), secrets).unwrap();
+    let mut p = server_profile("it", "localhost:5441");
+    p.kind = ConnectionKind::Patroni;
+    p.hosts.clear();
+    p.patroni = Some(settings);
+    p.pg.ssl_mode = SslMode::Disable;
+    st.connections.upsert(p.clone()).unwrap();
+    st.runtimes.connect(p).await.unwrap();
+    Some((dir, st))
+}
+
 pub fn secrets_with_password(id: &str) -> Arc<MemoryStore> {
     let s = MemoryStore::default();
     s.set(&secret_key(id, PG_PASSWORD), PG_PASSWORD_VALUE)

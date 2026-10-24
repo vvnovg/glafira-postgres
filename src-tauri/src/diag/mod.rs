@@ -3,6 +3,7 @@
 
 pub mod caps;
 pub mod memory;
+pub mod pulse;
 pub mod sessions;
 pub mod sql;
 
@@ -76,6 +77,7 @@ pub struct Unavailable {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum DiagData {
+    Pulse(pulse::PulseData),
     Sessions(SessionsData),
 }
 
@@ -190,6 +192,7 @@ pub async fn run(st: &AppState, id: &str, req: DiagRequest) -> AppResult<DiagRep
         .diag_target(id, req.member.as_deref(), req.tool.is_cluster())?;
     validate(&req, target.profile.kind)?;
     match req.tool {
+        Tool::Pulse => pulse::report(st, id, &target).await,
         Tool::Sessions => sessions::report(st, id, &target).await,
         // Задачи 4–9 добавляют свои ветки; до тех пор инструмент недоступен.
         other => Err(app_err!(
