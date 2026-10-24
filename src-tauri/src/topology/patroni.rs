@@ -121,7 +121,7 @@ impl ReqwestHttp {
     }
 
     /// Ошибка запроса. Через туннель обрыв потока (`ssh -D` закрывает соединение, когда бастион не достучался до
-    /// узла) — сбой проброса, отказ порта туннеля (процесс ssh умер) — ошибка SOCKS; срок и TLS — как обычно.
+    /// узла: клиент OpenSSH 10.x — посреди рукопожатия SOCKS5, старый — сразу после его успеха) — сбой проброса, отказ порта туннеля (процесс ssh умер) — ошибка SOCKS; срок и TLS — как обычно.
     fn request_error(&self, url: &str, e: &reqwest::Error) -> AppError {
         if self.proxy.is_some() && !e.is_timeout() && !is_certificate_error(e) {
             let parsed = reqwest::Url::parse(url).ok();
@@ -141,7 +141,7 @@ impl ReqwestHttp {
             if refused(e) {
                 return crate::net::ssh::socks::socks_error(&host, port, &cause);
             }
-            if stream_closed(e) {
+            if stream_closed(e) || handshake_dropped(e) {
                 return crate::net::ssh::socks::forward_failed(
                     &self.ssh_target,
                     &host,
@@ -178,6 +178,14 @@ fn refused(e: &reqwest::Error) -> bool {
         cur = err.source();
     }
     chain(e).contains("failed to create underlying connection")
+}
+
+/// Порт туннеля принял соединение, но рукопожатие SOCKS5 оборвалось (клиент reqwest/hyper-util пишет «io error
+/// during SOCKS handshake» и не отдаёт исходную ошибку ввода-вывода в цепочке причин). OpenSSH 10.x отвечает SOCKS5
+/// только после открытия канала к узлу, а когда бастион до узла не достучался (имя не разрешилось, порт закрыт),
+/// закрывает соединение без ответа.
+fn handshake_dropped(e: &reqwest::Error) -> bool {
+    chain(e).contains("io error during SOCKS handshake")
 }
 
 fn request_error(url: &str, e: &reqwest::Error) -> AppError {
@@ -1467,6 +1475,46 @@ mod tests {
                 e.params["port"].as_str()
             ),
             ("errors.ssh.socks", "patroni1", "8008"),
+            "{e:?}"
+        );
+    }
+
+    /// OpenSSH 10.x отвечает SOCKS5 только после открытия канала к узлу, а когда бастион до узла не достучался,
+    /// закрывает соединение без ответа на запрос CONNECT: порт туннеля принял соединение, рукопожатие оборвалось.
+    /// Это сбой проброса (`forwardFailed` с узлом в `details`), а не «Patroni недоступен».
+    #[tokio::test]
+    async fn dropped_socks_handshake_is_a_forward_failure() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut tcp, _)) = listener.accept().await {
+                let mut buf = [0u8; 512];
+                let _ = tcp.read(&mut buf).await;
+                let _ = tcp.write_all(&[5, 0]).await;
+                let _ = tcp.read(&mut buf).await;
+            }
+        });
+        let s = settings(&["http://patroni1:8008"]);
+        let http = ReqwestHttp::new(&s, None, None, Some(proxy))
+            .unwrap()
+            .with_ssh_target("bastion");
+        let e = http
+            .get_json("http://patroni1:8008/cluster")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (e.code, e.key.as_str(), e.params["kind"].as_str()),
+            (
+                ErrorCode::SshError,
+                "errors.ssh.forwardFailed",
+                "forwardFailed"
+            ),
+            "{e:?}"
+        );
+        assert_eq!(e.params["target"], "bastion");
+        assert!(
+            e.details.as_deref().unwrap().contains("patroni1:8008"),
             "{e:?}"
         );
     }

@@ -11,10 +11,12 @@ use crate::net::ssh::process::{SshErrorKind, ssh_error};
 
 pub type SocksStream = Socks5Stream<TcpStream>;
 
-/// TCP к `proxy` (с keepalive, как прямое соединение), затем SOCKS5 CONNECT к `host:port` по имени. `ssh -D`
-/// отвечает успехом SOCKS5 ещё до того, как бастион откроет канал к узлу, поэтому недоступный узел виден не
-/// ошибкой `connect`, а концом потока (EOF) при первом чтении, и разбирает его вызывающий. Своего срока у
-/// `connect` нет: вызывающий оборачивает его в таймаут подключения.
+/// TCP к `proxy` (с keepalive, как прямое соединение), затем SOCKS5 CONNECT к `host:port` по имени. Недоступный с
+/// бастиона узел виден по-разному в зависимости от клиента OpenSSH: старый отвечает успехом SOCKS5 ещё до открытия
+/// канала, и узел виден концом потока (EOF) при первом чтении — его разбирает вызывающий; OpenSSH 10.x отвечает
+/// только после открытия канала и при отказе закрывает соединение без ответа — это ошибка `connect`
+/// (`socks_error`). Вид ошибки (`forwardFailed`) в обоих случаях один. Своего срока у `connect` нет: вызывающий
+/// оборачивает его в таймаут подключения.
 pub async fn connect(proxy: SocketAddr, host: &str, port: u16) -> AppResult<SocksStream> {
     let tcp = tcp_connect(&proxy.ip().to_string(), proxy.port())
         .await
@@ -24,8 +26,8 @@ pub async fn connect(proxy: SocketAddr, host: &str, port: u16) -> AppResult<Sock
         .map_err(|e| socks_error(host, port, &e.to_string()))
 }
 
-/// `SSH_ERROR` вида `forwardFailed`. На практике срабатывает, только когда порт туннеля закрыт (процесс `ssh`
-/// уже умер) или рукопожатие SOCKS5 оборвалось: недоступный узел сюда не попадает (см. `connect`, `forward_failed`).
+/// `SSH_ERROR` вида `forwardFailed`: порт туннеля закрыт (процесс `ssh` уже умер) или рукопожатие SOCKS5 оборвалось —
+/// у OpenSSH 10.x так выглядит и узел, до которого бастион не достучался (см. `connect`, `forward_failed`).
 pub(crate) fn socks_error(host: &str, port: u16, cause: &str) -> AppError {
     let mut e = app_err!(
         ErrorCode::SshError,
