@@ -329,7 +329,7 @@ test("подсказки: ключи есть, все используются, 
 });
 
 test("руководство продукта: список глав", () => {
-  assert.deepEqual(GUIDE_CHAPTERS, ["getting-started", "updates"]);
+  assert.deepEqual(GUIDE_CHAPTERS, ["getting-started", "connections", "objects", "updates"]);
 });
 
 test("руководство: структура, метки, ссылки", () => {

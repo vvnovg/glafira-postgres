@@ -33,7 +33,8 @@ Patroni (напрямую или через SSH), увидеть тополог�
 приложением:
 - **P1a:** пункты 1, 2, 4, 5, 6, 7, 9, 10 при прямом подключении; обзор кластера; стенд без `bastion` и без `matrix`; CI.
 - **P1b:** пункт 3 (SSH), вкладки объектов и генератор DDL (пункт 8, кроме обзора), `bastion` и матрица версий
-  на стенде, руководство.
+  на стенде, руководство. Реализация P1b (`docs/superpowers/plans/2026-10-24-glafira-postgres-p1b.md`) отступила от первоначального
+  текста в нескольких местах; спецификация приведена в соответствие с ней (§5, §6.2, §7, §9, §11, §15, §16).
 
 **Не входит (этап):** диагностика и пульс (P2, P5), сэмплер (P2), действия, guard и подтверждения (P2), тяжёлые запросы
 и EXPLAIN (P3), MCP и `llmAccess` (P4), Patroni `/config` и `/history` (P2, P5), оценка bloat во вкладке таблицы (P5),
@@ -212,63 +213,99 @@ Keychain, сервис `glafira-postgres`, ключ `<id>/<поле>`:
 ## 5. SSH-туннель
 
 Модуль `net/ssh`. Используется системный `ssh` (OpenSSH): учитываются `~/.ssh/config`, ProxyJump, агент, аппаратные
-ключи. Нет `ssh` в `PATH` → `SSH_ERROR` `notFound` с подсказкой (Windows: компонент «Клиент OpenSSH»).
+ключи. Нет `ssh` в `PATH` (на Windows — ещё и `%SystemRoot%\System32\OpenSSH`) → `SSH_ERROR` `notFound` с подсказкой
+(Windows: компонент «Клиент OpenSSH»).
 
-**Процесс.** На подключение — один или несколько процессов `ssh`, каждый с набором пробросов:
+**Процесс.** На подключение — один процесс `ssh` с динамическим пробросом (`-D`, SOCKS5 на `127.0.0.1`):
 
 ```
 ssh -N -T -E <каталог логов>/ssh-<id>.log
     -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3
-    -o StrictHostKeyChecking=ask -o NumberOfPasswordPrompts=1
-    [-p <port>] [-l <user>] [-i <keyPath> -o IdentitiesOnly=yes]
-    -L 127.0.0.1:<локальный порт>:<хост>:<порт> …  <target>
+    -o StrictHostKeyChecking=ask -o NumberOfPasswordPrompts=1 -o BatchMode=no
+    -o ControlMaster=no -o ControlPath=none
+    [-o UserKnownHostsFile=<файл>]                                               # только тесты
+    [-p <port>] [-l <user>]
+    [-i <keyPath> -o IdentitiesOnly=yes -o PreferredAuthentications=publickey]   # auth = key
+    [-o PreferredAuthentications=password]                                       # auth = password
+    -D 127.0.0.1:<порт SOCKS> -- <target>
 ```
 
-- **Цели проброса:** `server` и `hostList` — каждый хост; `patroni` — сначала адреса API из `urls`, после обнаружения —
-  PG-адрес и API каждого участника (с учётом `hostOverrides`). Адреса разрешаются на стороне бастиона.
-- **Локальные порты:** приложение открывает слушатель на `127.0.0.1:0`, запоминает порт и закрывает слушатель;
-  при гонке (`ExitOnForwardFailure` сработал на занятом порту) — одна повторная попытка с новыми портами.
-- **Готовность:** туннель готов, когда каждый локальный порт принимает TCP-соединение; если процесс завершился
-  раньше — ошибка по его stderr (§5.2). Ожидание — до `pg.connectTimeoutS` + 5 с.
-- **Новые цели** (новый участник Patroni, смена `apiUrl`) — дополнительный процесс `ssh` только с новыми пробросами;
-  работающие соединения не рвутся.
-- **Жизненный цикл:** процессы живут, пока подключение открыто; `disconnect` и выход из приложения завершают их.
-  Процесс упал (обрыв связи, ServerAlive) → состояние подключения `degraded`, автоматический перезапуск с паузами
-  1, 2, 5, 10, 30 с; узлы через упавший процесс помечаются недоступными.
-- **Сироты после сбоя приложения:** PID процессов пишутся в `tunnels.json` в каталоге данных (0600). При старте
-  приложение завершает процессы из файла, у которых в командной строке есть путь их `-E` лог-файла (так чужой процесс
-  с тем же PID не пострадает), и очищает файл.
+Аргументы собираются только из проверенных значений: цель и пользователь — без пробелов и без ведущего `-`, цель идёт после
+`--`; профиль проверяется при сохранении и ещё раз перед запуском, так что командная строка не допускает подстановку опций.
+
+- **Соединения.** PostgreSQL: TCP-поток к порту SOCKS и SOCKS5 CONNECT к хосту по имени (`tokio-socks`), TLS поверх него (§7).
+  Patroni REST: `reqwest` с прокси `socks5h://127.0.0.1:<порт>` (§6.2). Имена разрешает бастион: хосты узлов, участники Patroni
+  и адреса API остаются как в профиле, их не нужно подменять локальными адресами.
+- **Локальный порт.** Приложение открывает слушатель на `127.0.0.1:0`, запоминает порт и закрывает слушатель; при гонке
+  (`ExitOnForwardFailure` сработал на занятом порту) — одна повторная попытка с новым портом.
+- **Готовность:** туннель готов, когда порт SOCKS принимает TCP-соединение; если процесс завершился раньше — ошибка по его
+  выводу (§5.2). Ожидание — до `pg.connectTimeoutS` + 5 с, при перезапуске супервизором — до 30 с.
+- **Новые участники** (новый участник Patroni, смена `apiUrl`, подмена адресов) процессов и портов не требуют: адрес приходит
+  в запросе SOCKS5; работающие соединения не рвутся.
+- **Изоляция от настроек ssh.** `ControlMaster=no` и `ControlPath=none`: при `ControlMaster auto` в `~/.ssh/config` проброс `-D` ушёл бы
+  в уже открытый сеанс пользователя и пережил бы приложение как SOCKS-прокси без аутентификации, либо приложение само стало бы
+  мастером, и закрытие туннеля рвало бы сеансы пользователя. Опции командной строки главнее файла настроек.
+- **Файлы ssh.** `~/.ssh/config` и `~/.ssh/known_hosts` приложение не редактирует: ключ хоста в `known_hosts` пишет сам ssh после
+  ответа `yes`. Для тестов переменная `GLAFIRA_SSH_KNOWN_HOSTS` добавляет `-o UserKnownHostsFile=…`: тесты не трогают `known_hosts` разработчика.
+- **Жизненный цикл (супервизор).** Процесс живёт, пока подключение открыто; `disconnect` и выход из приложения завершают его. Процесс
+  упал (обрыв связи, три пропущенных ответа ServerAlive по 15 с, сбой проброса) → пулы подключения вытесняются (их соединения мертвы),
+  состояние `degraded`, узлы за туннелем помечаются недоступными, туннель перезапускается на новом порту с паузами 1, 2, 5, 10, затем 30 с.
+  Отказ, который повтор не исправит (`authFailed`, `hostKeyUnknown`, `hostKeyChanged`, `notFound`, `tooOld`), ставит супервизор
+  на **стоянку**: состояние остаётся `degraded` с этой ошибкой, новых попыток нет до «Переподключить» (после «Доверять и подключиться»
+  интерфейс повторяет действие сам). Иначе сменённый пароль или отозванный ключ давали бы неудачный вход раз в 30 с — этого хватает
+  `pam_faillock`, блокировке учётной записи AD и fail2ban. Так же ведёт себя временно заблокированный агент (1Password).
+- **Сироты после сбоя приложения.** PID процесса пишется в `tunnels.json` в каталоге данных (0600) сразу после запуска, вместе с путём
+  его `-E` лога. При старте и при выходе приложение завершает процессы из файла, у которых в командной строке есть этот путь (так
+  чужой процесс с тем же PID не пострадает), и очищает файл. Защиты от второго экземпляра приложения нет: второй запуск завершает
+  туннели первого (ограничение P1). На Windows завершение идёт через PowerShell (около секунды на процесс).
+- **Логи.** Вывод `ssh -E` — `ssh-<id>.log` в каталоге логов; лог прошлого запуска переносится в `ssh-<id>.1.log`; оба входят в архив
+  диагностики. Туннели проверки несохранённого профиля пишут `ssh-unsaved-….log`, следующий запуск приложения их убирает. Секретов в логах нет.
 
 ### 5.1 Askpass
 
 Пароль и пассфразу отдаёт сам бинарь `glafira-pg` в режиме askpass. Окружение процесса `ssh`:
 `SSH_ASKPASS=<путь к текущему бинарю>`, `SSH_ASKPASS_REQUIRE=force`, `DISPLAY=:0` (если не задан),
 `GLAFIRA_ASKPASS=<id подключения>`, `GLAFIRA_ASKPASS_REPORT=<файл 0600 в каталоге данных>`,
-`GLAFIRA_ASKPASS_TRUST=<отпечаток>` (только при подтверждении ключа хоста).
+`GLAFIRA_ASKPASS_TRUST=<отпечаток>` (только при подтверждении ключа хоста) и, только в тестах, где нет keychain,
+`GLAFIRA_ASKPASS_SECRET_FILE=<файл 0600 {поле: значение}>`: пока переменная задана, askpass не обращается к keychain никогда (при
+отсутствующем или негодном файле хранилище пусто, и ssh получает отказ). В приложении секреты всегда в keychain.
 
 `main()` до запуска Tauri: задана `GLAFIRA_ASKPASS` → режим askpass (Tauri, WebView, драйверы не инициализируются).
 ssh передаёт текст запроса единственным аргументом:
-- запрос содержит `password` или `passphrase` (без учёта регистра) → в stdout секрет `sshPassword` / `sshPassphrase`
-  из keychain, код 0; секрета нет → код 1;
 - запрос о неизвестном ключе хоста (`authenticity of host` … `fingerprint is SHA256:…`) → если отпечаток в запросе
-  совпадает с `GLAFIRA_ASKPASS_TRUST` — `yes`, иначе текст запроса пишется в `GLAFIRA_ASKPASS_REPORT` и ответ `no`;
-- любой другой запрос → код 1.
+  совпадает с `GLAFIRA_ASKPASS_TRUST` — `yes`, иначе текст запроса пишется в `GLAFIRA_ASKPASS_REPORT` и ответ `no`
+  (повторный запрос без отпечатка не затирает полный отчёт);
+- запрос начинается с `Enter passphrase for` (так OpenSSH просит пассфразу ключа) → в stdout `sshPassphrase` из keychain, код 0;
+- иной запрос со словом `password` (без учёта регистра) → `sshPassword`, код 0;
+- секрета нет, и любой другой запрос → код 1.
 
-Требуется OpenSSH 8.4+ (`SSH_ASKPASS_REQUIRE`). Проверка подключения читает `ssh -V`; на более старой версии способы
-`password` и `key` с пассфразой недоступны с объяснением, `agent` и ключ без пассфразы работают.
+Пассфраза отдаётся только на собственный запрос ssh: в режиме «ключ» добавлена `-o PreferredAuthentications=publickey`, иначе после
+неудачи с ключом ssh перешёл бы к keyboard-interactive, где текст запроса выбирает сервер, и скомпрометированный бастион мог бы
+попросить «passphrase» и получить пассфразу ключа. Пароль распознаётся по вхождению `password`: в режиме «пароль»
+`PreferredAuthentications=password` не оставляет серверу своего текста.
+
+Проверка несохранённого профиля кладёт секреты формы в keychain под временным id `unsaved-…` на время проверки и снимает их после; такие id
+записываются (без значений) в `staged-secrets.json` (0600), и если приложение упало посреди проверки, следующий запуск снимает эти записи.
+
+Требуется OpenSSH 8.4+ (`SSH_ASKPASS_REQUIRE`), но только когда запрос нужен: способ `password` и ключ с сохранённой пассфразой. Версия
+читается из `ssh -V` (один раз за работу приложения; её показывает шаг `ssh` проверки подключения). На более старой версии эти способы
+недоступны с объяснением (`FEATURE_UNAVAILABLE`, `kind = tooOld`), а `agent` и ключ без пассфразы работают на любой версии.
 
 ### 5.2 Ошибки ssh
 
-Код процесса и stderr превращаются в `SSH_ERROR` с `details.kind`:
+Код процесса и вывод превращаются в `SSH_ERROR` с `params.kind`; `params.target` — цель ssh (у `hostKeyUnknown` ещё `params.host` и
+`params.fingerprint`), `details` — строка: хвост вывода. Вывод — последние 10 строк stderr и последние 20 строк лога `-E` этого запуска:
+OpenSSH с `-E` пишет ошибки в лог, а stderr оставляет пустым (кроме баннера сервера); код выхода у всех ошибок один, поэтому решает текст.
 
 | kind | Признак | UI |
 |---|---|---|
-| `notFound` | нет `ssh` | подсказка по установке |
-| `hostKeyUnknown` | отчёт askpass с отпечатком | диалог: хост, отпечаток, «Доверять и подключиться» → повтор с `GLAFIRA_ASKPASS_TRUST`; ssh сам пишет ключ в `known_hosts` |
-| `hostKeyChanged` | `REMOTE HOST IDENTIFICATION HAS CHANGED` | только объяснение; обойти из приложения нельзя |
+| `notFound` | нет `ssh` или `ssh -V` не отвечает как OpenSSH | подсказка по установке |
+| `tooOld` (`FEATURE_UNAVAILABLE`) | OpenSSH ниже 8.4, а нужен askpass | объяснение: агент или ключ без пассфразы |
+| `hostKeyUnknown` | отчёт askpass с отпечатком (или `Host key verification failed`) | диалог: хост, отпечаток, «Доверять и подключиться» → `trust_ssh_host_key(target, fingerprint)`, затем интерфейс повторяет подключение, переподключение или проверку с `GLAFIRA_ASKPASS_TRUST`; ssh сам пишет ключ в `known_hosts` |
+| `hostKeyChanged` | `REMOTE HOST IDENTIFICATION HAS CHANGED` | только объяснение; обойти из приложения нельзя, `known_hosts` правят вручную |
 | `authFailed` | `Permission denied` | «Изменить подключение» |
-| `forwardFailed` | `channel … open failed` / `connect failed` | какой проброс: бастион не видит хост |
-| `exited` | прочее | хвост stderr в `details` |
+| `forwardFailed` | бастион не достучался до узла (`open failed`, `connect failed`); порт SOCKS закрыт или рукопожатие SOCKS5 оборвалось (у OpenSSH 10.x так выглядит и недоступный узел); занятый локальный порт | какой узел: бастион не видит хост; `retryable` |
+| `exited` | прочее, в том числе обрыв связи (`Timeout, server … not responding`, `Connection closed`, `Broken pipe`) | хвост вывода в `details`; `retryable` |
 
 ---
 
@@ -307,8 +344,8 @@ TopologyWarning = noPrimary | multiplePrimaries { members } | systemIdMismatch {
 ### 6.2 Кластер Patroni
 
 Клиент `reqwest`: таймаут запроса 5 с, basic auth (если задан `username`), TLS — CA, клиентский сертификат,
-проверка имени хоста. При туннеле URL переписывается на локальный порт с сохранением исходного имени хоста, а имя
-разрешается в `127.0.0.1` (`ClientBuilder::resolve`) — так SNI и проверка сертификата идут по исходному имени.
+проверка имени хоста. При туннеле клиент работает через прокси `socks5h://127.0.0.1:<порт туннеля>`: имя разрешает бастион,
+а URL, SNI и проверка сертификата остаются исходными, поэтому подмена адресов на локальные не нужна (§5).
 
 **Обнаружение:**
 1. `GET /cluster` по адресам из `urls` по порядку до первого успешного ответа. Все не ответили →
@@ -375,9 +412,13 @@ error }` (то же, что возвращают `connect` и `get_topology`).
 
 - **Сборка:** `tokio_postgres::Config` — пользователь, пароль, БД, `application_name = glafira-pg`,
   `connect_timeout`; параметр запуска `options = -c default_transaction_read_only=on -c statement_timeout=5000
-  -c lock_timeout=1000`.
-- **TLS:** `postgres-openssl` по `pg.sslMode` и `pg.tls`. При туннеле TCP-поток открывается к локальному порту,
-  а TLS проверяется по исходному имени хоста: `Config::connect_raw(stream, TlsConnector::new(ssl, исходный_хост))`.
+  -c lock_timeout=1000 -c search_path=pg_catalog -c DateStyle=ISO`. Последние два параметра нужны вкладкам объектов: иначе
+  `pg_get_constraintdef`, `pg_get_triggerdef`, `pg_get_expr` и `pg_get_viewdef` печатали бы имена из `search_path` без схемы
+  (`REFERENCES customers(id)` вместо `public.customers`), а граница партиции под `DateStyle = SQL, DMY` — `'01/03/2026'`; один и тот же
+  объект давал бы разный DDL в зависимости от роли и базы. Запросы приложения от `search_path` не зависят: имена в них схемные.
+- **TLS:** `postgres-openssl` по `pg.sslMode` и `pg.tls`. При туннеле TCP-поток открывается к порту SOCKS туннеля
+  (SOCKS5 CONNECT к исходному имени хоста: имя разрешает бастион), а TLS проверяется по исходному имени хоста:
+  `Config::connect_raw(stream, TlsConnector::new(ssl, исходный_хост))`; `~/.pgpass` ищется тоже по исходному имени.
   `prefer` — попытка TLS, при отказе сервера — без TLS.
 - **Пулы:** свой пул (`conn/pool.rs`, вместо `deadpool-postgres`: P1b нужен `connect_raw` к порту туннеля с
   проверкой TLS по исходному имени) на ключ (подключение, участник, БД, назначение): максимум 3 соединения для каталога и вкладок
@@ -386,7 +427,7 @@ error }` (то же, что возвращают `connect` и `get_topology`).
   пулы и туннели закрываются. Отказ во входе (`AUTH_FAILED`) каждый пул (каталога и опроса) запоминает сам: новых
   попыток входа нет, пока подключение не откроют заново (сохранение профиля или секретов, импорт, «Подключиться»)
   или не выберут «Переподключить». «Переподключить» (`reconnect`) у открытого подключения сбрасывает его пулы
-  с запомненным отказом во входе и клиент Patroni API и сразу опрашивает узлы заново, не теряя журнал и выбранный
+  с запомненным отказом во входе и клиент Patroni API, будит супервизор SSH-туннеля, стоящий на стоянке (§5), и сразу опрашивает узлы заново, не теряя журнал и выбранный
   узел каталога; неудача этого опроса оставляет `degraded` с фоновым опросом. Опросы одного открытия (фоновый и
   переподключения) идут по одному: переподключение сначала дожидается идущего опроса, иначе одно переключение
   попало бы в журнал дважды. Не открытое подключение (`disconnected`, `failed`) «Переподключить» закрывает и
@@ -455,6 +496,11 @@ error }` (то же, что возвращают `connect` и `get_topology`).
 - предупреждения топологии;
 - журнал событий (§6.4), новые сверху.
 
+Вкладки объектов открываются кликом по имени объекта в дереве (у партиционированной таблицы стрелка партиций — отдельная кнопка), по одной
+на объект; функция открывается по `oid`, потому что имена перегружены. Данные читаются с узла каталога при открытии; кнопка «Обновить»
+читает их заново, а когда подключение возвращается из недоступного состояния, открытые вкладки перечитываются сами. Объект, которого уже нет
+(удалён или переименован), даёт ошибку «не найден». Всё на вкладках только для чтения; для каталога и статистики отдельных прав на объекты не нужно.
+
 **Таблица** (`{ kind: "table", connectionId, database, schema, name }`), подвкладки:
 - **Колонки:** имя, тип (`format_type`), NOT NULL, default (`pg_get_expr`), identity / generated, collation,
   статистика колонки (`attstattarget`), storage, комментарий;
@@ -463,19 +509,35 @@ error }` (то же, что возвращают `connect` и `get_topology`).
 - **Ограничения:** тип, определение (`pg_get_constraintdef`); входящие внешние ключи (кто ссылается на таблицу);
 - **Размер и статистика:** heap, индексы, TOAST, всего; `reltuples`; из `pg_stat_user_tables` — seq / idx scans,
   `n_live_tup`, `n_dead_tup`, `n_mod_since_analyze`, `n_ins_since_vacuum` (13+), последние (auto)vacuum / analyze
-  и их счётчики; reloptions; табличное пространство, владелец;
+  и их счётчики; reloptions; табличное пространство, владелец. У партиционированной таблицы размеры и счётчики — сумма по дереву
+  партиций (в списках дерева они по-прежнему не считаются). Дерево обходится рекурсивно по `pg_inherits`, а не через `pg_partition_tree`:
+  та берёт `AccessShareLock` на каждую партицию до конца запроса, а для партиционированных индексов повторяет это на каждый индекс
+  (у таблицы с 2000 партиций и 4 индексами — около 8000 блокировок, при `max_locks_per_transaction = 64` это «out of shared memory»).
+  Счётчики суммируются по всему дереву вместе со строкой самого родителя, `last_*` — максимум по дереву; вкладка пишет, что цифры суммарные;
 - **Партиционирование:** ключ (`pg_get_partkeydef`), границы партиции (`pg_get_expr(relpartbound)`), список партиций;
 - **Триггеры:** имя, включён, `pg_get_triggerdef`;
-- **DDL:** сгенерирован по каталогу — `CREATE TABLE` с колонками, default, NOT NULL, identity / generated,
-  `PARTITION BY` / `PARTITION OF`, ограничения, `WITH (reloptions)`, индексы, триггеры, комментарии. Первая строка —
-  `-- DDL построен Glafira по каталогу; не замена pg_dump` (без прав, RLS-политик, владельцев). Кнопка «Копировать».
+- **DDL:** сгенерирован по каталогу чистой функцией `catalog/ddl.rs` (вход — только `TableDetails`: определения ограничений, индексов
+  и триггеров уже собраны сервером, поэтому результат проверяется снимками без стенда). Первая строка —
+  `-- DDL built by Glafira from the catalog; not a replacement for pg_dump (no privileges, RLS policies or owners)`. Порядок, как у `pg_dump`:
+  `CREATE [UNLOGGED] TABLE` с колонками, default, NOT NULL, identity / generated и проверенными PK, UNIQUE, EXCLUDE, CHECK (`PARTITION BY` /
+  `PARTITION OF`, `WITH (reloptions)`, табличное пространство); у партиционированной таблицы строка-комментарий `-- partitions:` с именами партиций;
+  индексы (`ON ONLY` у индексов партиционированной таблицы убирается; невалидный индекс помечается комментарием `-- INVALID`);
+  внешние ключи и непроверенные ограничения отдельными `ALTER TABLE … ADD CONSTRAINT …;`, потому что PostgreSQL принимает, но игнорирует
+  `NOT VALID` внутри `CREATE TABLE` (ограничение оказалось бы проверенным); `NOT ENFORCED` (PG 18) остаётся в строке ограничения;
+  триггеры (а для триггера не в состоянии «включён» — `ALTER TABLE … DISABLE | ENABLE REPLICA | ENABLE ALWAYS TRIGGER`, в том числе для
+  отфильтрованных унаследованных триггеров партиции); `COMMENT ON TABLE` / `COLUMN`. Идентификаторы в кавычках так, как это делает
+  `quote_ident()`; строковые константы рассчитаны на `standard_conforming_strings = on`, а строка с `\` выводится как `E'…'`. Текст внутри
+  `--`-комментариев очищается от переводов строки (имя партиции с `\n` иначе вышло бы из комментария, как в CVE-2012-0868 для `pg_dump`).
+  Внешняя таблица: вместо неполного оператора — комментарий (внешний сервер и его параметры каталог вкладки не читает). Кнопка «Копировать DDL».
 
-**Представление / мат. представление:** колонки, определение (`pg_get_viewdef(oid, true)`); для мат. представления —
-`ispopulated`, размер, индексы.
-**Функция:** сигнатура, язык, volatility, `SECURITY DEFINER`, владелец, определение (`pg_get_functiondef`;
-для агрегатов — только сигнатура).
-**Последовательность:** тип, `last_value`, min, max, шаг, cycle, процент использования
-(`(last_value - min) / (max - min)`), владеющая колонка.
+**Представление / мат. представление:** подвкладки «Определение» (`pg_get_viewdef(oid, true)`, кнопка «Копировать определение») и «Колонки»;
+для мат. представления — `ispopulated`, размер и подвкладка «Индексы».
+**Функция:** сигнатура, возвращаемый тип, язык, volatility, `SECURITY DEFINER`, владелец, определение (`pg_get_functiondef`, кнопка «Копировать
+определение»; для агрегатов — только сигнатура).
+**Последовательность:** тип, `last_value`, min, max, шаг, cycle, размер кэша, процент использования
+(`(last_value - min) / (max - min)` в сторону шага), владеющая колонка. `last_value` и процент берутся из `pg_sequences` и без права `SELECT` или
+`USAGE` на последовательность пусты при любом использовании, поэтому вкладка в этом случае пишет «Нет права на чтение», а не прочерк
+(право даёт `GRANT SELECT ON ALL SEQUENCES IN SCHEMA …` или роль `pg_read_all_data` в PG 14+; см. `docs/admin.md`).
 
 ---
 
@@ -521,15 +583,18 @@ CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 
 | Группа | Команды |
 |---|---|
-| Подключения | `list_connections`, `save_connection(profile, secrets)`, `delete_connection`, `parse_connection_string(text)`, `test_connection(profile, secrets, channel)`, `trust_ssh_host_key(connectionId \| profile, fingerprint)`, `connect(id) -> TopologyView`, `reconnect(id) -> TopologyView`, `disconnect(id)`, `connection_secrets(id) -> SecretsSet` |
+| Подключения | `list_connections`, `save_connection(profile, secrets)`, `delete_connection`, `parse_connection_string(text)`, `test_connection(profile, secrets, channel)`, `trust_ssh_host_key(target, fingerprint)`, `connect(id) -> TopologyView`, `reconnect(id) -> TopologyView`, `disconnect(id)`, `connection_secrets(id) -> SecretsSet` |
 | Топология | `get_topology(id)`, `list_topology_events(id)`, `set_catalog_member(id, member \| null)`, `get_member_facts(id, member)` |
 | Каталог | `list_databases(id)`, `list_schemas(id, db)`, `list_objects(id, db, schema, kind, filter?, offset, limit)`, `list_partitions(id, db, schema, table)`, `get_table(id, db, schema, name)`, `get_view(id, db, schema, name)`, `get_function(id, db, oid)`, `get_sequence(id, db, schema, name)`, `list_extensions(id, db)`, `list_roles(id)` |
 | Папки | как в Glafira Kafka: `list_folders`, `create_folder`, `rename_folder`, `delete_folder`, `move_items`, `export_connections`, `preview_import`, `apply_import` |
 | Приложение | `get_app_info`, `export_diagnostics`, `get_policy_status`, `get_license_status`, `set_license_key`, `remove_license_key`, `get_language_settings`, `set_language`, `get_ui_settings`, `set_ui_settings` |
 | События | `connection://state`, `topology://changed` |
 
-`trust_ssh_host_key` повторяет подключение (или проверку) с `GLAFIRA_ASKPASS_TRUST`. Все команды возвращают
-`Result<T, AppError>`.
+`trust_ssh_host_key(target, fingerprint)` запоминает в памяти приложения (до выхода) доверие отпечатку для цели ssh (`ssh.target`):
+следующий запуск туннеля к этой цели получает `GLAFIRA_ASKPASS_TRUST` (§5.1). Само действие — подключение, переподключение или проверку —
+повторяет интерфейс обычной командой, поэтому одна и та же логика работает и для несохранённого профиля в форме, и для открытого подключения.
+Вкладки объектов читают `get_table`, `get_view`, `get_function` (по `oid`) и `get_sequence` с узла каталога. Все команды возвращают
+`Result<T, AppError>`; у `AppError` поле `details` — строка (хвост вывода ssh, текст сервера), вид ошибки ssh — в `params.kind`.
 
 ---
 
@@ -554,7 +619,7 @@ CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 
 Модель и коды Glafira Kafka (`CONNECTION_FAILED`, `TLS_ERROR`, `AUTH_FAILED`, `NOT_AUTHORIZED`, `TIMEOUT`,
 `INVALID_INPUT`, `INTERNAL`) плюс новые: `SSH_ERROR` (§5.2), `PATRONI_ERROR` (`details`: адрес, HTTP-статус, текст
-ответа), `NODE_UNAVAILABLE`, `FEATURE_UNAVAILABLE`. Тексты — ключи i18n (`ltext!`), как в Glafira Kafka.
+ответа), `NODE_UNAVAILABLE`, `FEATURE_UNAVAILABLE` (способ недоступен в этой среде: OpenSSH ниже 8.4 для пароля и пассфразы, `kind = tooOld`, §5.2). Тексты — ключи i18n (`ltext!`), как в Glafira Kafka.
 
 | SQLSTATE / причина | code | Подсказка |
 |---|---|---|
@@ -584,11 +649,12 @@ postgres-patroni-diag/
   src-tauri/
     src/  main.rs lib.rs product.rs error.rs logging.rs settings.rs secrets.rs state.rs i18n.rs sync.rs
           policy/ license/ storage/{fs, connections, tree, exchange}
-          conn/{profile, connstr, pgpass, pg, pool}  net/{ssh, askpass}
+          conn/{profile, connstr, pgpass, pg, pool}  net/{askpass, ssh/{process, tunnel, socks, orphans}}
           topology/{model, patroni, probe, journal, poller}
           catalog/{databases, schemas, objects, table, view, function, sequence, extensions, roles, ddl}
           readiness/  commands/
-    tests/                  интеграционные
+    examples/fake_ssh.rs    поддельный ssh для unit-тестов (§15.2)
+    tests/                  интеграционные, снимки DDL
     license-public.key, tauri.conf.json, capabilities/
   crates/pg-advisor/        readiness (P1); правила и разбор планов — с P2/P3
   dev/                      docker-compose.yml, patroni/, ssh/, sql/
@@ -609,13 +675,14 @@ postgres-patroni-diag/
 | `patroni1..3` | Свой образ: `postgres:17` + `patroni[etcd3]`; `pg_stat_statements` в `shared_preload_libraries`; basic auth REST API | PG 5441–5443, API 8011–8013 |
 | `pg-primary`, `pg-replica` | `postgres:16`, потоковая репликация без Patroni (`hostList`) | 5451, 5452 |
 | `pg-single` | `postgres:15` (`server`), без `pg_stat_statements` — для «красного» чек-листа | 5460 |
-| `bastion` | OpenSSH-сервер во внутренней сети стенда: пользователь `tester`, тестовый ключ (без пассфразы и с пассфразой) и пароль | 2222 |
-| профиль `matrix`: `pg13`…`pg18` | Матрица версий для запросов каталога | 5513–5518 |
+| `bastion` | OpenSSH-сервер во внутренней сети стенда (видит `pg-single`, `pg-primary`, `pg-replica`, `patroni1..3` по именам): пользователь `tester`, пароль и тестовые ключи — без пассфразы (`tester_ed25519`) и с пассфразой (`tester_ed25519_pass`). Ключи **генерирует** `dev/ssh/gen-keys.sh` в `dev/ssh/keys/` (в `.gitignore`): приватный ключ в публичном репозитории поймал бы gitleaks; скрипт запускают до `docker compose up --build` | 2222 |
+| профиль `matrix`: `pg13`…`pg18` (`gp-pg13`…`gp-pg18`) | Матрица версий для запросов каталога; в обычный `up` не входит | 5513–5518 |
 
 `dev/sql/init.sql` на всех PG: роль `glafira_diag` (§10), демо-схема `shop` — таблицы с PK, FK, индексами, identity
 и generated-колонками, партиционированная таблица, представление, мат. представление, функция, процедура,
 последовательность, триггер. `dev/sql/many-tables.sql` — схема `wide` с 10 000 таблиц (запускается вручную).
-Тестовые ключи и пароли стенда — в `dev/ssh/README.md` и README.
+Профиль `matrix` поднимается командой `docker compose -f dev/docker-compose.yml --profile matrix up -d --no-recreate` (флаг не пересоздаёт
+работающие контейнеры стенда), готовность ждёт `scripts/wait-matrix.sh`. Тестовые ключи и пароли стенда — в `dev/ssh/README.md` и README.
 
 ### 15.2 Автотесты
 
@@ -627,7 +694,10 @@ postgres-patroni-diag/
   - разбор `/cluster` и `/patroni` по фикстурам Patroni 3.x и 4.x; соответствие ролей;
   - вычисление ролей и предупреждений списка узлов по фикстурам фактов;
   - журнал событий — разница двух топологий;
-  - askpass: выбор ответа по тексту запроса и `GLAFIRA_ASKPASS_TRUST`; разбор stderr ssh в `details.kind`;
+  - askpass: выбор ответа по тексту запроса (пассфраза — только на `Enter passphrase for`), `GLAFIRA_ASKPASS_TRUST` и `GLAFIRA_ASKPASS_SECRET_FILE`;
+    разбор вывода ssh (stderr и лог `-E`) в `params.kind`;
+  - туннель: аргументы `ssh`, супервизор (перезапуск с паузами, стоянка после отказа во входе, вытеснение пулов), проброс через SOCKS5,
+    сироты по `tunnels.json` — на **поддельном ssh** `src-tauri/examples/fake_ssh.rs` (собирается `cargo test`), без стенда и на всех трёх ОС;
   - генератор DDL — сравнение с эталонами `src-tauri/tests/snapshots/ddl/*.sql` по фикстурам `TableDetails`;
   - `product.rs` совпадает с `tauri.conf.json` (как в Glafira Kafka).
 - **`pg-advisor`:** `readiness::evaluate` на наборах фактов (суперпользователь, `pg_monitor` без сигналов,
@@ -637,16 +707,19 @@ postgres-patroni-diag/
     в журнале ≤ 15 с; остановка участника → `memberUnreachable`; `patronictl pause` → `paused`;
   - список узлов: primary и реплика с лагом; остановка primary → `noPrimary`; `pg_promote()` на реплике →
     новый primary;
-  - SSH: подключение к каждому виду через `bastion` — ключ, ключ с пассфразой (askpass), пароль (askpass);
+  - SSH (`it_ssh`, настоящий OpenSSH 8.4+ из `PATH`, `GPG_IT_BASTION` и `GPG_IT_SSH_KEYS`; свой `known_hosts` через `GLAFIRA_SSH_KNOWN_HOSTS`):
+    подключение к каждому виду через `bastion` — ключ, ключ с пассфразой (askpass), пароль (askpass);
     неизвестный ключ хоста → `hostKeyUnknown` с отпечатком → `trust_ssh_host_key` → успех; неверный пароль →
-    `authFailed`;
+    `authFailed`; недостижимый за бастионом узел → `forwardFailed`;
   - TLS: `verify-full` через туннель проверяет исходное имя хоста;
-  - каталог: каждый запрос §8–9 на демо-схеме для PG 13–18 (профиль `matrix`) без ошибок, с ожидаемыми объектами;
+  - каталог: каждый запрос §8–9 на демо-схеме для PG 13–18 (профиль `matrix`, `GPG_IT_MATRIX`) без ошибок, с ожидаемыми объектами;
+    DDL сверяется с эталонами, а `quote_ident` — с работающим сервером;
   - чек-лист: `pg-single` — `missing` для `pg_stat_statements`, `patroni1` — `ok`.
 - **Фронтенд** (Vitest + Testing Library, IPC замокан): форма (виды, вставка строки, переключение в Patroni,
   Pro-блокировка prod), дерево (ленивая загрузка, фильтр, системные объекты, партиции, состояние подключения),
   обзор (предупреждения, журнал), вкладка таблицы, диалог доверия ключу хоста, импорт.
-- **Скрипты:** `i18n-check` (все строки в `en` и `ru`, в Rust нет кириллицы в пользовательских сообщениях),
+- **Скрипты:** `i18n-check` (все строки в `en` и `ru`, в Rust нет кириллицы в пользовательских сообщениях; главы руководства —
+  якоря `{#id}` совпадают в `en` и `ru`, метки `[[ui:ключ]]` указывают на существующие ключи, ссылки между главами ведут на существующие якоря),
   `guide-publish`.
 
 ### 15.3 CI
@@ -659,12 +732,15 @@ ssh, askpass и завершения процессов должен собир�
 
 ## 16. Документация
 
-- `README.md`: назначение, требования, запуск, стенд и его учётные данные, тесты, где хранятся данные, пометка
-  о товарном знаке PostgreSQL.
-- `docs/admin.md`: политика (`licenseKey`, `language`), каталоги данных и логов, роль `glafira_diag`, сеть
-  (какие порты нужны напрямую и через бастион), версия OpenSSH.
-- Руководство (`docs/guide/{en,ru}`, F1): «Начало работы», «Подключения» (виды, строка подключения, SSH, Patroni,
-  подмена адресов, чек-лист готовности), «Дерево и объекты».
+- `README.md`: назначение, требования (в том числе OpenSSH), запуск, стенд (`bastion`, профиль `matrix`) и его учётные данные, тесты
+  (`GPG_IT_*`), где хранятся данные, пометка о товарном знаке PostgreSQL.
+- `docs/admin.md`: политика (`language`, обновления), каталоги данных и логов, роль `glafira_diag` (и право на последовательности), сеть
+  (какие порты нужны напрямую и через бастион; бастион должен разрешать проброс и имена узлов), раздел «OpenSSH» (версия 8.4+, команда
+  `ssh`, ключи хоста, логи туннелей, `tunnels.json`, ограничение на второй экземпляр).
+- Руководство (`docs/guide/{en,ru}`, F1; глава для вкладки выбирается `helpChapterFor`, список глав `GUIDE_CHAPTERS` — в `src/guide/chapters.ts`
+  и `scripts/i18n-check.mjs`): «Начало работы» (`getting-started`), «Подключения» (`connections`: виды, строка подключения, SSH, Patroni,
+  подмена адресов, чек-лист готовности), «Дерево и объекты» (`objects`: дерево, вкладки объектов, DDL), «Обновления и диагностика» (`updates`).
+  Форма подключения открывает «Подключения», вкладки таблицы, представления, функции и последовательности — «Дерево и объекты».
 
 ---
 
