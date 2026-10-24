@@ -627,7 +627,7 @@ pub(crate) fn plan_import(
     if !secrets_reset.is_empty() {
         preview.warnings.push(ltext!(
             "warnings.import.passwordsReset",
-            "Saved passwords of {{count}} connections will be removed because their connection settings (address, user, database, TLS, Patroni) change — enter them again",
+            "Saved passwords of {{count}} connections will be removed because their connection settings (address, user, database, TLS, Patroni, SSH) change — enter them again",
             count = secrets_reset.len()
         ));
     }
