@@ -138,8 +138,13 @@ fn constraint_def(k: &Constraint) -> String {
 }
 
 /// Слово перед `TABLE` в `CREATE`: у нежурналируемой таблицы (в Patroni она не реплицируется) — `UNLOGGED `.
+/// У партиционированной таблицы слово опускается: данных у неё нет, а PostgreSQL 18 такой `CREATE` отвергает.
 fn persistence(t: &TableDetails) -> &'static str {
-    if t.unlogged { "UNLOGGED " } else { "" }
+    if t.unlogged && t.relkind != "p" {
+        "UNLOGGED "
+    } else {
+        ""
+    }
 }
 
 /// `pg_get_indexdef` печатает у индекса партиционированной таблицы `CREATE INDEX … ON ONLY схема.таблица`
@@ -1017,6 +1022,13 @@ mod tests {
         part.partitioning.parent = Some("shop.t".into());
         part.partitioning.bound = Some("DEFAULT".into());
         assert!(table_ddl(&part).contains("CREATE UNLOGGED TABLE shop.p PARTITION OF shop.t\n"));
+        // Партиционированная таблица — без слова даже при relpersistence = 'u' (PG 18 такой CREATE отвергает).
+        let mut parent = table("t");
+        parent.unlogged = true;
+        parent.relkind = "p".into();
+        parent.partitioning.key = Some("RANGE (a)".into());
+        parent.columns = vec![column("a", "integer")];
+        assert!(table_ddl(&parent).contains("\nCREATE TABLE shop.t (\n"));
         // Обычная таблица без слова.
         t.unlogged = false;
         assert!(table_ddl(&t).contains("\nCREATE TABLE shop.t ();\n"));
