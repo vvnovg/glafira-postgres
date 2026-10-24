@@ -23,4 +23,4 @@ is set, `~/.pgpass` is used, as in `psql`.
 ## A role for diagnostics {#diagnostics-role}
 
 Full diagnostics need the `pg_monitor` and `pg_signal_backend` roles; the role creation script is in the
-connection test checklist. The last value of a sequence is shown only to a role with the `SELECT` privilege on it; see [Object tabs](objects.md#tabs).
+connection test checklist. The last value of a sequence is shown only to a role with the `SELECT` or `USAGE` privilege on it; see [Object tabs](objects.md#tabs).

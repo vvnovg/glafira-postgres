@@ -16,7 +16,7 @@ Long lists are loaded in pages of 500, and the page counter at the bottom says h
 
 System objects are hidden: the `pg_catalog` and `information_schema` schemas and the `pg_*` roles. To show them, turn on [[ui:settings.showSystemObjects]] in [[ui:sidebar.settings]]. The `pg_toast` and `pg_temp` schemas are never shown.
 
-A partitioned table has its own arrow next to the name: it expands the partitions, and the number of partitions is shown. Partitions are not repeated in the list of the schema. The size of a partitioned table is not computed in the tree (it shows a dash), because that would take a lock on every partition; the table tab shows it.
+A partitioned table has its own arrow next to the name: it expands the partitions, and the number of partitions is shown. Partitions are not repeated in the list of the schema. The size of a partitioned table is not computed in the tree (it shows a dash), because that would mean opening every partition for every such row of the list; the table tab shows it.
 
 The catalog is read from one node of the connection. By default it is the leader or the primary; the connection menu can switch it to another node (see the chapter [Connections](connections.md#kinds)).
 
@@ -31,7 +31,7 @@ Everything on the tabs is read-only. Data is read when the tab opens; [[ui:objec
 - [[ui:object.columns]] — name, type, `NOT NULL`, default, identity or generated expression, collation, statistics target, storage and comment.
 - [[ui:object.indexes]] — definition, flags (`PRIMARY KEY`, `UNIQUE`, and `INVALID` for an index that is not usable), size, and usage from the statistics: index scans, entries read and the time of the last scan.
 - [[ui:object.constraints]] — primary key, unique, foreign key, check and exclusion constraints with their definitions; a constraint that has not been validated is marked `NOT VALID`. Below, [[ui:object.incomingFks]] lists the tables that reference this one.
-- [[ui:object.stats]] — the table data, indexes, TOAST and the total size; the estimated number of rows; sequential and index scans; live and dead rows; rows changed since the last analyze; the time and the number of runs of vacuum, autovacuum, analyze and autoanalyze; storage parameters, tablespace and owner. For a partitioned table, sizes and counters are summed over the whole partition tree, without locking the partitions.
+- [[ui:object.stats]] — the table data, indexes, TOAST and the total size; the estimated number of rows; sequential and index scans; live and dead rows; rows changed since the last analyze; the time and the number of runs of vacuum, autovacuum, analyze and autoanalyze; storage parameters, tablespace and owner. For a partitioned table, sizes and counters are summed over the whole partition tree, partition by partition: each partition is opened only for the moment of the count (a short shared lock that is released at once), so the app never holds locks on all the partitions at the same time and does not exhaust the lock table of the server.
 - [[ui:object.partitioning]] — only for a partitioned table and for a partition: the partition key, the partition bound, the parent table and the list of partitions.
 - [[ui:object.triggers]] — name, state (enabled, disabled, replica only or always) and definition.
 - [[ui:object.ddl]] — see the next section.

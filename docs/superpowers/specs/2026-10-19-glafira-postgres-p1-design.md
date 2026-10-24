@@ -15,7 +15,7 @@ Patroni (напрямую или через SSH), увидеть тополог�
 ## 1. Объём
 
 **Входит:**
-1. Репозиторий, каркас Tauri 2 + React 19 из Glafira Kafka без Kafka; хранилище, keychain, политика, лицензия, i18n
+1. Репозиторий, каркас Tauri 2 + React 19 из Glafira Kafka без Kafka; хранилище, keychain, политика, i18n
    (ru + en), логи, «О программе», справка (F1).
 2. Профиль подключения трёх видов: сервер, список узлов, кластер Patroni; импорт строки подключения (JDBC, URI,
    conninfo); `~/.pgpass`.
@@ -26,7 +26,7 @@ Patroni (напрямую или через SSH), увидеть тополог�
 7. Дерево: папки → подключения → узлы / базы → схемы → объекты; роли; расширения.
 8. Вкладки: обзор кластера (или сервера), таблица, представление / мат. представление, функция, последовательность.
 9. Папки, перетаскивание, экспорт и импорт без секретов — как в Glafira Kafka.
-10. Флаги read-only и окружение с индикацией; создание prod-подключений — Pro.
+10. Флаги read-only и окружение с индикацией; создание prod-подключений без ограничений (Pro-блокировка снята, см. §2.1).
 11. Docker-стенд, интеграционные тесты, матрица версий PG 13–18, CI.
 
 **План реализации делится на две части** (как M2a / M2b в Glafira Kafka), каждая заканчивается работающим
@@ -49,16 +49,15 @@ Patroni (напрямую или через SSH), увидеть тополог�
 | `src-tauri/src/storage/{fs, tree, exchange}.rs` | Да | `exchange` — под новый профиль; формат файла экспорта со своим `format` (`glafira-postgres-connections`) |
 | `src-tauri/src/storage/connections.rs` | Логика хранения | Новая модель профиля (§3) |
 | `secrets.rs` | Да | Новые поля секретов (§3.2) |
-| `policy/`, `license/`, `i18n.rs`, `logging.rs`, `error.rs`, `sync.rs`, `settings.rs`, `product.rs` | Да | Ключи политики `licenseKey`, `language`; новые коды ошибок (§11); идентификаторы продукта (§2.1) |
-| `commands/{folders, app, license, settings}.rs` | Да | Без `check_update` / `install_update` (P6) |
+| `policy/`, `i18n.rs`, `logging.rs`, `error.rs`, `sync.rs`, `settings.rs`, `product.rs` | Да | Ключи политики `language`, `updatesEnabled`, `updateUrl`; новые коды ошибок (§11); идентификаторы продукта (§2.1) |
+| `commands/{folders, app, settings}.rs` | Да | `check_update` / `install_update` — в составе приложения (обновления, §11) |
 | `migrate.rs`, `kafka/`, `browse/`, `consume/`, `produce/`, `tls/jks.rs`, `mcp/`, `guard.rs` | Нет | JKS в PostgreSQL не нужен; guard — P2; MCP — P4 |
 | `src/components/{Layout, Sidebar, TabContent}` | Да | Новые виды вкладок |
 | `src/components/connections/tree/*` | Да | Узлы дерева под PG (§8) |
-| `src/components/common/{ErrorBanner, Hint, EnvBadge, ProLock}` | Да | `ConfirmDialog`, `ConfigTable`, `ConfigEditor` — с P2 |
-| `src/components/{settings, license, about, help}` | Да | Без MCP-раздела и уведомления об обновлении |
+| `src/components/common/{ErrorBanner, Hint, EnvBadge}` | Да | `ConfirmDialog`, `ConfigTable`, `ConfigEditor` — с P2 |
+| `src/components/{settings, about, help}` | Да | Без MCP-раздела и уведомления об обновлении |
 | `src/lib/*`, `src/state/workspace.ts`, `src/api/client.ts`, `src/i18n/*`, `src/guide/*`, `src/styles.css` | Да | Новые `TabSpec`; языки — `en`, `ru` |
 | `scripts/i18n-check.mjs`, `guide-publish.mjs` | Да | Список обязательных языков — `en`, `ru` |
-| `crates/license-format` | git-зависимость | Без изменений |
 
 Скопированные модули сохраняют имена, файлы и публичные функции, чтобы позже вынести их в общий монорепозиторий
 механически (концепция §2). Где модуль меняется, изменение делается так, чтобы его можно было вернуть в общий код
@@ -78,14 +77,9 @@ Patroni (напрямую или через SSH), увидеть тополог�
 Политика: macOS — домен `io.github.vvnovg.glafira.postgres`; Windows — `HKLM\SOFTWARE\Policies\Glafira\PostgreSQL`;
 Linux — `/etc/io.github.vvnovg.glafira.postgres/policy.json`.
 
-**Лицензия:** формат `license-format` без изменений, но своя пара Ed25519: `src-tauri/license-public.key` — открытый
-ключ продукта PostgreSQL. Ключ Glafira Kafka в этом приложении подпись не проходит, и наоборот. Выдача — существующая
-утилита `issue-license` из kafka-explorer (`keygen --out`, `issue --key <ключ PostgreSQL>`).
-
-**Зависимость:** `license-format = { git = "https://github.com/vvnovg/kafka-explorer", rev = … }`, где `rev` —
-коммит `main` kafka-explorer на момент начала P1 (закрепляется в `Cargo.toml` и обновляется осознанно);
-`.cargo/config.toml` — `net.git-fetch-with-cli = true`, чтобы работали системные учётные данные git; в CI — токен
-с доступом на чтение к kafka-explorer.
+**Лицензирование.** Первоначальный план P1a предусматривал Pro-блокировку prod-подключений (`license/`, `ProLock`, офлайн-ключ
+через `license-format`). Её убрали, когда проект стал открытым (v0.1.0, Apache-2.0, см. `2026-10-22-glafira-postgres-apache-2-design.md`):
+кода лицензирования в приложении нет, prod-подключения ничем не ограничены, ключ политики `licenseKey` игнорируется.
 
 ---
 
@@ -138,7 +132,7 @@ Linux — `/etc/io.github.vvnovg.glafira.postgres/policy.json`.
 | `folderId`, `order` | Место в дереве. В файл обмена пишутся только затем, чтобы связать подключения с папками файла; при импорте переназначаются, а у существующего подключения локальные значения не перезаписываются |
 
 Окружения, цвет, `readOnly` — как в Glafira Kafka. Новый профиль с `environment = prod` создаётся с `readOnly = true`;
-создание prod-профиля и перевод профиля в prod — Pro (`ProLock`, проверка в Rust при `save_connection`).
+создание prod-профиля и перевод профиля в prod ничем не ограничены (Pro-блокировка снята, §2.1).
 
 Превращение `hostList` в `patroni` — в форме: «Узлы под управлением Patroni» → переключает `kind`, адреса API
 предзаполняются из `hosts` с портом 8008, `hosts` очищается.
@@ -257,9 +251,9 @@ ssh -N -T -E <каталог логов>/ssh-<id>.log
 - **Сироты после сбоя приложения.** PID процесса пишется в `tunnels.json` в каталоге данных (0600) сразу после запуска, вместе с путём
   его `-E` лога. При старте и при выходе приложение завершает процессы из файла, у которых в командной строке есть этот путь (так
   чужой процесс с тем же PID не пострадает), и очищает файл. Защиты от второго экземпляра приложения нет: второй запуск завершает
-  туннели первого (ограничение P1). На Windows завершение идёт через PowerShell (около секунды на процесс).
+  туннели первого (ограничение P1). На Windows завершение идёт через PowerShell.
 - **Логи.** Вывод `ssh -E` — `ssh-<id>.log` в каталоге логов; лог прошлого запуска переносится в `ssh-<id>.1.log`; оба входят в архив
-  диагностики. Туннели проверки несохранённого профиля пишут `ssh-unsaved-….log`, следующий запуск приложения их убирает. Секретов в логах нет.
+  диагностики. Каждая проверка («Проверить»), в том числе сохранённого подключения, открывает свой временный туннель под id `unsaved-<uuid>` (чтобы не трогать туннель открытого подключения и его секреты) и пишет `ssh-unsaved-….log`; следующий запуск приложения эти файлы убирает. Поэтому каждая проверка делает один дополнительный вход на бастион (учитывать при fail2ban и `pam_faillock`). Секретов в логах нет.
 
 ### 5.1 Askpass
 
@@ -587,7 +581,7 @@ CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 | Топология | `get_topology(id)`, `list_topology_events(id)`, `set_catalog_member(id, member \| null)`, `get_member_facts(id, member)` |
 | Каталог | `list_databases(id)`, `list_schemas(id, db)`, `list_objects(id, db, schema, kind, filter?, offset, limit)`, `list_partitions(id, db, schema, table)`, `get_table(id, db, schema, name)`, `get_view(id, db, schema, name)`, `get_function(id, db, oid)`, `get_sequence(id, db, schema, name)`, `list_extensions(id, db)`, `list_roles(id)` |
 | Папки | как в Glafira Kafka: `list_folders`, `create_folder`, `rename_folder`, `delete_folder`, `move_items`, `export_connections`, `preview_import`, `apply_import` |
-| Приложение | `get_app_info`, `export_diagnostics`, `get_policy_status`, `get_license_status`, `set_license_key`, `remove_license_key`, `get_language_settings`, `set_language`, `get_ui_settings`, `set_ui_settings` |
+| Приложение | `get_app_info`, `export_diagnostics`, `check_update`, `install_update`, `get_policy_status`, `get_language_settings`, `set_language`, `get_ui_settings`, `set_ui_settings` |
 | События | `connection://state`, `topology://changed` |
 
 `trust_ssh_host_key(target, fingerprint)` запоминает в памяти приложения (до выхода) доверие отпечатку для цели ssh (`ssh.target`):
@@ -644,18 +638,18 @@ CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 ```
 postgres-patroni-diag/
   package.json, pnpm-lock.yaml, vite.config.ts, vitest.config.ts, tsconfig*.json, index.html
-  src/                      api/ components/{connections, tree, overview, catalog, settings, license, about, help, common}
+  src/                      api/ components/{connections, tree, overview, catalog, settings, about, help, common}
                             lib/ state/ i18n/ locales/{en,ru}.json guide/
   src-tauri/
     src/  main.rs lib.rs product.rs error.rs logging.rs settings.rs secrets.rs state.rs i18n.rs sync.rs
-          policy/ license/ storage/{fs, connections, tree, exchange}
-          conn/{profile, connstr, pgpass, pg, pool}  net/{askpass, ssh/{process, tunnel, socks, orphans}}
-          topology/{model, patroni, probe, journal, poller}
+          policy/ storage/{fs, connections, tree, exchange}
+          conn/{profile, connstr, pgpass, pg, pool, errors, tls}  net/{askpass, ssh/{process, tunnel, socks, orphans}}
+          topology/{model, patroni, probe, journal, connector, observe, runtime}
           catalog/{databases, schemas, objects, table, view, function, sequence, extensions, roles, ddl}
           readiness/  commands/
     examples/fake_ssh.rs    поддельный ssh для unit-тестов (§15.2)
     tests/                  интеграционные, снимки DDL
-    license-public.key, tauri.conf.json, capabilities/
+    tauri.conf.json, capabilities/
   crates/pg-advisor/        readiness (P1); правила и разбор планов — с P2/P3
   dev/                      docker-compose.yml, patroni/, ssh/, sql/
   docs/                     admin.md, guide/{en,ru}/, superpowers/{specs,plans}/
@@ -715,8 +709,8 @@ postgres-patroni-diag/
   - каталог: каждый запрос §8–9 на демо-схеме для PG 13–18 (профиль `matrix`, `GPG_IT_MATRIX`) без ошибок, с ожидаемыми объектами;
     DDL сверяется с эталонами, а `quote_ident` — с работающим сервером;
   - чек-лист: `pg-single` — `missing` для `pg_stat_statements`, `patroni1` — `ok`.
-- **Фронтенд** (Vitest + Testing Library, IPC замокан): форма (виды, вставка строки, переключение в Patroni,
-  Pro-блокировка prod), дерево (ленивая загрузка, фильтр, системные объекты, партиции, состояние подключения),
+- **Фронтенд** (Vitest + Testing Library, IPC замокан): форма (виды, вставка строки, переключение в Patroni),
+  дерево (ленивая загрузка, фильтр, системные объекты, партиции, состояние подключения),
   обзор (предупреждения, журнал), вкладка таблицы, диалог доверия ключу хоста, импорт.
 - **Скрипты:** `i18n-check` (все строки в `en` и `ru`, в Rust нет кириллицы в пользовательских сообщениях; главы руководства —
   якоря `{#id}` совпадают в `en` и `ru`, метки `[[ui:ключ]]` указывают на существующие ключи, ссылки между главами ведут на существующие якоря),
@@ -754,5 +748,5 @@ ssh, askpass и завершения процессов должен собир�
 5. Проверка подключения показывает шаги и чек-лист с верными статусами для `pg-single` и `patroni1`.
 6. Дерево доходит до таблицы демо-схемы на PG 13–18; вкладка таблицы показывает колонки, индексы, ограничения,
    размеры, статистику, партиции, триггеры и DDL; схема `wide` (10 000 таблиц) прокручивается без задержек.
-7. Папки, экспорт и импорт без секретов, переключение ru / en, Pro-блокировка prod работают.
+7. Папки, экспорт и импорт без секретов, переключение ru / en работают; prod-подключения не ограничены (§2.1).
 8. CI зелёный на всех трёх ОС.

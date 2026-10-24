@@ -46,10 +46,10 @@ The diagnostics archive collects what support needs to understand a problem. To 
 When the archive is saved, the screen shows its path. The ZIP file contains:
 
 - `info.json` — the app version and build, the operating system, the data and log folder paths and the policy status;
-- `connections.json` — connection profiles: names, environments, connection kinds, node and Patroni REST API addresses, user names, databases, certificate file paths and member address overrides;
-- `logs/` — the app log files.
+- `connections.json` — connection profiles: names, environments, connection kinds, node and Patroni REST API addresses, user names, databases, certificate file paths, member address overrides and the SSH tunnel settings of each profile (bastion, user, port, key file path);
+- `logs/` — the app log files and the SSH tunnel logs: `ssh-<connection id>.log` and `ssh-<connection id>.1.log` (the previous run), including the `ssh-unsaved-….log` files left by connection checks.
 
-The archive contains no passwords: they are kept in the system secret store, and passwords inside Patroni API addresses are removed. Certificate files are not included either. Host names, user names and file paths are stored as plain text, and the logs contain node addresses from PostgreSQL and Patroni error messages. Look through the archive before you send it outside your company.
+The archive contains no passwords or key passphrases, neither for PostgreSQL nor for SSH: they are kept in the system secret store, and passwords inside Patroni API addresses are removed. Certificate files and private keys are not included either, only the path to the key file. Host names, user names and file paths are stored as plain text, and the logs contain node addresses from PostgreSQL and Patroni error messages and the output of `ssh`. Look through the archive before you send it outside your company.
 
 The app sends nothing by itself. Attach the archive to your support request yourself.
 

@@ -36,7 +36,7 @@ If the nodes can be reached only through a bastion (a jump host), turn on [[ui:c
 
 **Fields.**
 
-- [[ui:connections.form.ssh.target]] — a host name or an alias from `~/.ssh/config`. Everything you configured there is honored: ProxyJump, the SSH agent, hardware keys, per-host options.
+- [[ui:connections.form.ssh.target]] — a host name or an alias from `~/.ssh/config`. Your `~/.ssh/config` is read, so ProxyJump, the SSH agent, hardware keys and per-host options work. The app, however, sets a few options on the `ssh` command line, and they win over the file: `ControlMaster=no` and `ControlPath=none` (the tunnel never joins a shared connection), `StrictHostKeyChecking=ask`, `ServerAliveInterval=15` with `ServerAliveCountMax=3`, `NumberOfPasswordPrompts=1`, `BatchMode=no`, `ExitOnForwardFailure=yes` and, for [[ui:connections.form.ssh.auths.key]] and [[ui:connections.form.ssh.auths.password]], `PreferredAuthentications` (with `IdentitiesOnly=yes` when a key file is chosen).
 - [[ui:connections.form.ssh.port]] and [[ui:connections.form.ssh.user]] — leave them empty to take the values from `~/.ssh/config`.
 - [[ui:connections.form.ssh.auth]] — how to log in to the bastion:
   - [[ui:connections.form.ssh.auths.agent]] — keys from the SSH agent, including password-manager agents and hardware keys. Nothing is stored in the app.
