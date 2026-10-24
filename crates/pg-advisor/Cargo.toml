@@ -2,13 +2,11 @@
 name = "pg-advisor"
 version = "0.1.0"
 edition = "2024"
-description = "Правила Glafira for PostgreSQL без ввода-вывода: готовность к диагностике (P1), дальше — проверки и разбор планов"
+description = "Правила Glafira for PostgreSQL без ввода-вывода: готовность (P1), находки и данные инструментов диагностики (P2)"
 license = "Apache-2.0"
 repository = "https://github.com/vvnovg/glafira-postgres"
 publish = false
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-
-[dev-dependencies]
 serde_json = "1"
