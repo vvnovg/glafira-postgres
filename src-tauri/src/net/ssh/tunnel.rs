@@ -971,16 +971,16 @@ pub(crate) mod tests {
         reg.close("c1");
         assert_eq!(reg.route("c1").unwrap(), None);
         assert_eq!(reg.status("c1"), None);
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(
-            tokio::net::TcpStream::connect(socks).await.is_err(),
-            "процесс завершён"
-        );
-        assert!(
+        // Процесс завершает задача супервизора при её прерывании: ждём, а не спим фиксированное время.
+        eventually("процесс завершён", || {
+            std::net::TcpStream::connect(socks).is_err()
+        })
+        .await;
+        eventually("PID снят из tunnels.json", || {
             std::fs::read_to_string(dir.path().join("data").join("tunnels.json"))
-                .unwrap()
-                .contains("\"pids\":[]")
-        );
+                .is_ok_and(|t| t.contains("\"pids\":[]"))
+        })
+        .await;
     }
 
     /// Узел, до которого бастион не достучался: `ssh -D` отвечает успехом SOCKS и закрывает поток. Это сбой
