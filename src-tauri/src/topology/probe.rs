@@ -279,6 +279,7 @@ pub fn assemble(
         observed_at_ms: now_ms,
         scope: None,
         paused: None,
+        scheduled_switchover: None,
         members,
         warnings,
     }

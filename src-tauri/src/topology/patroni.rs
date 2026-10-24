@@ -11,7 +11,10 @@ use crate::conn::tls;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::sync::MutexExt;
 use crate::topology::BoxFuture;
-use crate::topology::model::{Member, Role, Topology, TopologyWarning, system_id_warning};
+use crate::topology::model::{
+    Member, Role, ScheduledRestart, ScheduledSwitchover, Topology, TopologyWarning,
+    system_id_warning,
+};
 
 pub const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Общий предел обхода адресов `/cluster`: адресов API может быть много (профиль плюс прежние участники),
@@ -24,6 +27,8 @@ const BODY_SNIPPET: usize = 500;
 /// GET JSON из Patroni; трейт — чтобы подменять сеть в тестах.
 pub trait PatroniHttp: Send + Sync {
     fn get_json<'a>(&'a self, url: &'a str) -> BoxFuture<'a, AppResult<serde_json::Value>>;
+    /// HTTP-код ответа на GET (матрица health: тело не читается, авторизация не нужна).
+    fn get_status<'a>(&'a self, url: &'a str) -> BoxFuture<'a, AppResult<u16>>;
 }
 
 pub struct ReqwestHttp {
@@ -291,6 +296,20 @@ impl PatroniHttp for ReqwestHttp {
             }
         })
     }
+
+    /// HTTP-код ответа без чтения тела и без авторизации: адреса проверки здоровья её не требуют (то же видит
+    /// балансировщик). Ответ 503 — не ошибка запроса, а ответ участника «я не в этой роли».
+    fn get_status<'a>(&'a self, url: &'a str) -> BoxFuture<'a, AppResult<u16>> {
+        Box::pin(async move {
+            let resp = self
+                .client
+                .get(url)
+                .send()
+                .await
+                .map_err(|e| self.request_error(url, &e))?;
+            Ok(resp.status().as_u16())
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -323,6 +342,28 @@ pub struct MemberJson {
     pub tags: serde_json::Map<String, serde_json::Value>,
     #[serde(default)]
     pub pending_restart: Option<bool>,
+    #[serde(default)]
+    pub scheduled_restart: Option<ScheduledRestartJson>,
+}
+
+/// `scheduled_restart` участника из `/cluster`: время — в `schedule`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScheduledRestartJson {
+    #[serde(default)]
+    pub schedule: Option<String>,
+    #[serde(default)]
+    pub postgres_version: Option<String>,
+}
+
+/// `scheduled_switchover` из корня `/cluster`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScheduledSwitchoverJson {
+    #[serde(default)]
+    pub at: Option<String>,
+    #[serde(default)]
+    pub from: Option<String>,
+    #[serde(default)]
+    pub to: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -334,6 +375,8 @@ pub struct ClusterJson {
     pub pause: Option<bool>,
     #[serde(default)]
     pub scope: Option<String>,
+    #[serde(default)]
+    pub scheduled_switchover: Option<ScheduledSwitchoverJson>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -418,6 +461,13 @@ pub fn members_from_cluster(c: &ClusterJson, settings: &PatroniSettings) -> Vec<
                 lag_bytes(m.replay_lag.as_ref()).or_else(|| lag_bytes(m.lag.as_ref()));
             member.tags = m.tags.clone();
             member.pending_restart = m.pending_restart.unwrap_or(false);
+            // Расписание без времени — не действие: показывать нечего.
+            member.scheduled_restart = m.scheduled_restart.as_ref().and_then(|r| {
+                Some(ScheduledRestart {
+                    at: r.schedule.clone()?,
+                    postgres_version: r.postgres_version.clone(),
+                })
+            });
             member
         })
         .collect()
@@ -489,6 +539,40 @@ async fn fetch_cluster(
     }))
 }
 
+/// `GET /config` по адресам `bases` до первого ответа (лидер прошлого опроса — первым, как у `/cluster`). Как и обход
+/// `/cluster`, ограничен общим сроком `DISCOVER_TIMEOUT`: адресов бывает много, и каждый ждёт до `HTTP_TIMEOUT`.
+pub async fn fetch_config(
+    http: &dyn PatroniHttp,
+    bases: &[String],
+) -> AppResult<serde_json::Value> {
+    let walk = async {
+        let mut last = None;
+        for base in bases {
+            match http.get_json(&format!("{base}/config")).await {
+                Ok(v) => return Ok(v),
+                Err(e) => last = Some(e),
+            }
+        }
+        Err(last.unwrap_or_else(|| {
+            app_err!(
+                ErrorCode::PatroniError,
+                "errors.patroni.noUrls",
+                "No Patroni API addresses"
+            )
+        }))
+    };
+    tokio::time::timeout(DISCOVER_TIMEOUT, walk)
+        .await
+        .unwrap_or_else(|_| {
+            Err(app_err!(
+                ErrorCode::PatroniError,
+                "errors.patroni.discoverTimeout",
+                "Patroni API did not answer within {{secs}} s",
+                secs = DISCOVER_TIMEOUT.as_secs()
+            ))
+        })
+}
+
 pub async fn discover(
     http: &dyn PatroniHttp,
     settings: &PatroniSettings,
@@ -517,7 +601,8 @@ pub async fn discover(
     let cluster = match fetched {
         Ok(c) => c,
         Err(e) => {
-            // Первое подключение — ошибка; дальше — прошлые участники как недоступные.
+            // Первое подключение — ошибка; дальше — прошлые участники как недоступные, а запланированные действия
+            // (`scheduled_switchover`, `scheduled_restart`) остаются прежними: их отмена не наблюдалась.
             let Some(prev) = previous else { return Err(e) };
             let mut t = prev.clone();
             t.observed_at_ms = now_ms;
@@ -570,6 +655,14 @@ pub async fn discover(
         observed_at_ms: now_ms,
         scope: cluster.scope.clone(),
         paused: Some(cluster.pause.unwrap_or(false)),
+        // Расписание без времени — не действие: показывать нечего.
+        scheduled_switchover: cluster.scheduled_switchover.as_ref().and_then(|s| {
+            Some(ScheduledSwitchover {
+                at: s.at.clone()?,
+                from: s.from.clone(),
+                to: s.to.clone(),
+            })
+        }),
         members,
         warnings,
     })
@@ -586,6 +679,8 @@ mod tests {
 
     struct FakeHttp {
         answers: HashMap<String, AppResult<serde_json::Value>>,
+        /// Коды `get_status` по адресам; адрес без записи — 200, если у него есть успешный JSON-ответ.
+        statuses: HashMap<String, u16>,
         calls: Mutex<Vec<String>>,
     }
 
@@ -596,8 +691,14 @@ mod tests {
                     .into_iter()
                     .map(|(u, a)| (u.to_string(), a))
                     .collect(),
+                statuses: HashMap::new(),
                 calls: Mutex::new(vec![]),
             }
+        }
+
+        fn with_status(mut self, url: &str, code: u16) -> Self {
+            self.statuses.insert(url.to_string(), code);
+            self
         }
     }
 
@@ -609,6 +710,16 @@ mod tests {
                 .get(url)
                 .cloned()
                 .unwrap_or_else(|| Err(unreachable_err(url)));
+            Box::pin(async move { r })
+        }
+
+        fn get_status<'a>(&'a self, url: &'a str) -> BoxFuture<'a, AppResult<u16>> {
+            let r = match (self.statuses.get(url), self.answers.get(url)) {
+                (Some(code), _) => Ok(*code),
+                (None, Some(Ok(_))) => Ok(200),
+                (None, Some(Err(e))) => Err(e.clone()),
+                (None, None) => Err(unreachable_err(url)),
+            };
             Box::pin(async move { r })
         }
     }
@@ -717,6 +828,143 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scheduled_switchover_and_restart_are_parsed() {
+        let http = FakeHttp::new(vec![(
+            "http://a:8008/cluster",
+            Ok(serde_json::json!({
+                "members": [
+                    {"name": "a", "role": "leader", "state": "running", "host": "a", "port": 5432, "api_url": "http://a:8008/patroni", "timeline": 3},
+                    {"name": "b", "role": "replica", "state": "streaming", "host": "b", "port": 5432, "api_url": "http://b:8008/patroni",
+                     "scheduled_restart": {"schedule": "2026-10-25T03:00:00+00:00", "postgres_version": "17.2"}}
+                ],
+                "scheduled_switchover": {"at": "2026-10-25T02:00:00+00:00", "from": "a", "to": "b"}
+            })),
+        )]);
+        let t = discover(&http, &settings(&["http://a:8008"]), "c", None, 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            t.scheduled_switchover,
+            Some(ScheduledSwitchover {
+                at: "2026-10-25T02:00:00+00:00".into(),
+                from: Some("a".into()),
+                to: Some("b".into())
+            })
+        );
+        assert_eq!(
+            t.member("b")
+                .unwrap()
+                .scheduled_restart
+                .as_ref()
+                .map(|r| r.at.as_str()),
+            Some("2026-10-25T03:00:00+00:00")
+        );
+        assert_eq!(t.member("a").unwrap().scheduled_restart, None);
+    }
+
+    /// Пустое или неполное расписание из `/cluster` — не действие: без времени (`at`, `schedule`) его нет; `null` — тоже.
+    #[tokio::test]
+    async fn incomplete_schedules_are_ignored_and_kept_while_patroni_is_unreachable() {
+        let cluster = |extra: serde_json::Value| {
+            let mut c = serde_json::json!({
+                "members": [{"name": "a", "role": "leader", "state": "running", "host": "a", "port": 5432,
+                             "scheduled_restart": {"postgres_version": "17.2"}}]
+            });
+            c.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            c
+        };
+        let http = FakeHttp::new(vec![(
+            "http://a:8008/cluster",
+            Ok(cluster(
+                serde_json::json!({"scheduled_switchover": {"from": "a"}}),
+            )),
+        )]);
+        let t = discover(&http, &settings(&["http://a:8008"]), "c", None, 1)
+            .await
+            .unwrap();
+        assert_eq!(t.scheduled_switchover, None, "без `at` расписания нет");
+        assert_eq!(
+            t.member("a").unwrap().scheduled_restart,
+            None,
+            "без `schedule` расписания нет"
+        );
+        let http = FakeHttp::new(vec![(
+            "http://a:8008/cluster",
+            Ok(cluster(serde_json::json!({"scheduled_switchover": null}))),
+        )]);
+        let t = discover(&http, &settings(&["http://a:8008"]), "c", None, 1)
+            .await
+            .unwrap();
+        assert_eq!(t.scheduled_switchover, None);
+
+        // Patroni не ответил: прошлое расписание остаётся (участники — как раньше, но недоступные).
+        let mut prev = t.clone();
+        prev.scheduled_switchover = Some(ScheduledSwitchover {
+            at: "2026-10-25T02:00:00+00:00".into(),
+            from: None,
+            to: None,
+        });
+        let down = discover(
+            &FakeHttp::new(vec![]),
+            &settings(&["http://a:8008"]),
+            "c",
+            Some(&prev),
+            2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(down.scheduled_switchover, prev.scheduled_switchover);
+        assert_eq!(down.warnings, vec![TopologyWarning::PatroniUnreachable]);
+    }
+
+    #[tokio::test]
+    async fn config_is_read_from_the_first_answering_address() {
+        let http = FakeHttp::new(vec![(
+            "http://b:8008/config",
+            Ok(serde_json::json!({"ttl": 30, "maximum_lag_on_failover": 1_048_576})),
+        )]);
+        let bases = vec!["http://a:8008".to_string(), "http://b:8008".to_string()];
+        let v = fetch_config(&http, &bases).await.unwrap();
+        assert_eq!(v["ttl"], 30);
+        assert_eq!(
+            *http.calls.lock_safe(),
+            ["http://a:8008/config", "http://b:8008/config"]
+        );
+        // Ни один адрес не ответил — последняя ошибка; адресов нет — noUrls.
+        let err = fetch_config(&http, &bases[..1]).await.unwrap_err();
+        assert_eq!(err.key, "errors.patroni.unreachable");
+        let err = fetch_config(&http, &[]).await.unwrap_err();
+        assert_eq!(err.key, "errors.patroni.noUrls");
+    }
+
+    /// Адресов много, каждый ждёт до HTTP_TIMEOUT: чтение `/config` ограничено общим сроком, как обход `/cluster`.
+    #[tokio::test(start_paused = true)]
+    async fn config_walk_has_an_overall_deadline() {
+        let bases: Vec<String> = (1..=8).map(|i| format!("http://pg-{i}:8008")).collect();
+        let http = SlowHttp {
+            delay: HTTP_TIMEOUT,
+        };
+        let started = tokio::time::Instant::now();
+        let e = fetch_config(&http, &bases).await.unwrap_err();
+        assert_eq!(e.key, "errors.patroni.discoverTimeout");
+        assert_eq!(started.elapsed(), DISCOVER_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn fake_status_comes_from_the_table_or_from_the_json_answers() {
+        let http = FakeHttp::new(vec![("http://a:8008/ok", Ok(serde_json::json!({})))])
+            .with_status("http://a:8008/replica", 503);
+        assert_eq!(http.get_status("http://a:8008/replica").await.unwrap(), 503);
+        assert_eq!(http.get_status("http://a:8008/ok").await.unwrap(), 200);
+        assert_eq!(
+            http.get_status("http://a:8008/none").await.unwrap_err().key,
+            "errors.patroni.unreachable"
+        );
+    }
+
+    #[tokio::test]
     async fn discover_tries_next_url_and_fills_details() {
         let http = FakeHttp::new(vec![
             ("http://seed2:8008/cluster", Ok(cluster_v3())),
@@ -819,6 +1067,13 @@ mod tests {
                 Err(unreachable_err(url))
             })
         }
+
+        fn get_status<'a>(&'a self, url: &'a str) -> BoxFuture<'a, AppResult<u16>> {
+            Box::pin(async move {
+                tokio::time::sleep(self.delay).await;
+                Err(unreachable_err(url))
+            })
+        }
     }
 
     /// Адресов много, каждый ждёт до HTTP_TIMEOUT: обнаружение ограничено общим сроком.
@@ -877,6 +1132,20 @@ mod tests {
                 return self.answers.get_json(url);
             }
             self.answers.calls.lock_safe().push(url.to_string());
+            Box::pin(async move {
+                tokio::time::sleep(self.delay).await;
+                Err(unreachable_err(url))
+            })
+        }
+
+        fn get_status<'a>(&'a self, url: &'a str) -> BoxFuture<'a, AppResult<u16>> {
+            if !self
+                .hanging
+                .iter()
+                .any(|b| url.starts_with(&format!("{b}/")))
+            {
+                return self.answers.get_status(url);
+            }
             Box::pin(async move {
                 tokio::time::sleep(self.delay).await;
                 Err(unreachable_err(url))
@@ -1350,6 +1619,56 @@ mod tests {
             "errors.patroni.unauthorized"
         );
         assert!(is_https("HTTPS://x") && is_https(" https://x") && !is_https("http://x"));
+    }
+
+    /// Матрица health: код ответа возвращается как есть (в том числе 503 — это ответ балансировщику, не сбой), тело
+    /// не читается, пароль API не отправляется; недоступный адрес — ошибка запроса.
+    #[tokio::test]
+    async fn get_status_returns_the_code_without_credentials() {
+        let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let log = seen.clone();
+        let base = serve(move |path, auth| {
+            log.lock_safe().push(auth.to_string());
+            match path {
+                "/primary" => (200, "{}".to_string()),
+                "/replica" => (503, "{}".to_string()),
+                "/health" => (401, "no".to_string()),
+                _ => (500, "boom".to_string()),
+            }
+        })
+        .await;
+        let mut s = settings(&[&base]);
+        s.username = Some("patroni".into());
+        let http = ReqwestHttp::new(&s, Some("secret".into()), None, None, None).unwrap();
+        for (path, code) in [
+            ("primary", 200),
+            ("replica", 503),
+            ("health", 401),
+            ("x", 500),
+        ] {
+            assert_eq!(
+                http.get_status(&format!("{base}/{path}")).await.unwrap(),
+                code
+            );
+        }
+        assert!(
+            seen.lock_safe().iter().all(String::is_empty),
+            "{:?}",
+            seen.lock_safe()
+        );
+
+        let port = {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let err = http
+            .get_status(&format!("http://127.0.0.1:{port}/primary"))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (err.code, err.key.as_str()),
+            (ErrorCode::PatroniError, "errors.patroni.unreachable")
+        );
     }
 
     #[tokio::test]

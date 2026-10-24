@@ -903,3 +903,80 @@ async fn conflict_growth_appears_with_the_second_report() {
     let second = diag::run(&st, "it", req(Tool::Replication)).await.unwrap();
     assert_eq!(growth(second), Some(0));
 }
+
+#[tokio::test]
+async fn patroni_health_matrix_and_failover_readiness_on_the_stand() {
+    let Some((_dir, st)) = common::open_patroni().await else {
+        return;
+    };
+    let r = diag::run(&st, "it", req(Tool::Health)).await.unwrap();
+    let DiagData::Health(h) = &r.data else {
+        panic!()
+    };
+    assert_eq!(h.members.len(), 3);
+    let primary_ok = h
+        .members
+        .iter()
+        .filter(|m| {
+            m.cells
+                .iter()
+                .any(|c| c.endpoint == "primary" && c.status == Some(200))
+        })
+        .count();
+    assert_eq!(primary_ok, 1);
+    assert!(h.members.iter().all(|m| {
+        m.cells
+            .iter()
+            .any(|c| c.endpoint == "health" && c.status == Some(200))
+    }));
+    assert!(r.findings.is_empty(), "{:?}", r.findings);
+
+    let r = diag::run(&st, "it", req(Tool::Failover)).await.unwrap();
+    let DiagData::Failover(f) = &r.data else {
+        panic!()
+    };
+    assert_eq!(
+        (f.ready_count, f.paused, f.config.maximum_lag_on_failover),
+        (2, false, 1_048_576)
+    );
+    assert!(r.findings.is_empty(), "{:?}", r.findings);
+}
+
+#[tokio::test]
+async fn follow_leader_moves_to_the_new_leader_after_switchover() {
+    if common::env("GPG_IT_DOCKER").is_none() {
+        return;
+    }
+    let Some((_dir, st)) = common::open_patroni().await else {
+        return;
+    };
+    let _restore = common::restore_on_drop(common::wait_stand);
+    let before = diag::run(&st, "it", req(Tool::Sessions)).await.unwrap();
+    let leader = before.member.clone().unwrap();
+    let candidate = ["patroni1", "patroni2", "patroni3"]
+        .into_iter()
+        .find(|m| *m != leader)
+        .unwrap();
+    common::patronictl(&[
+        "switchover",
+        "--leader",
+        &leader,
+        "--candidate",
+        candidate,
+        "--force",
+    ]);
+    let started = std::time::Instant::now();
+    loop {
+        let r = diag::run(&st, "it", req(Tool::Sessions)).await;
+        if r.as_ref()
+            .is_ok_and(|r| r.member.as_deref() == Some(candidate) && r.follows_leader)
+        {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "вкладка «за лидером» не перешла на {candidate}: {r:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}

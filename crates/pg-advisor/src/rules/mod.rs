@@ -2,6 +2,7 @@
 
 pub mod horizon;
 pub mod locks;
+pub mod patroni;
 pub mod pulse;
 pub mod replication;
 pub mod sessions;

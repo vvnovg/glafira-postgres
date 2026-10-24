@@ -5,12 +5,14 @@ pub mod caps;
 pub mod horizon;
 pub mod locks;
 pub mod memory;
+pub mod patroni;
 pub mod pulse;
 pub mod replication;
 pub mod sessions;
 pub mod sql;
 
 use futures_util::future::BoxFuture;
+use pg_advisor::failover::FailoverData;
 use pg_advisor::findings::Finding;
 use pg_advisor::locktree::LocksData;
 use pg_advisor::rules::horizon::HorizonData;
@@ -92,6 +94,8 @@ pub enum DiagData {
     Locks(LocksData),
     Horizon(HorizonData),
     Replication(ReplicationData),
+    Failover(FailoverData),
+    Health(patroni::HealthData),
 }
 
 /// Конверт отчёта (спец. P2 §3.2). У инструментов кластера `member`, `serverVersionNum` и `inRecovery` пусты.
@@ -249,6 +253,8 @@ pub async fn run(st: &AppState, id: &str, req: DiagRequest) -> AppResult<DiagRep
         Tool::Locks => locks::report(st, id, &target).await,
         Tool::Horizon => horizon::report(st, id, &target).await,
         Tool::Replication => replication::report(st, id, &target).await,
+        Tool::Failover => patroni::failover_report(st, &target).await,
+        Tool::Health => patroni::health_report(st, &target).await,
         // Остальные задачи добавляют свои ветки; до тех пор инструмент недоступен.
         other => Err(app_err!(
             ErrorCode::FeatureUnavailable,
@@ -297,6 +303,38 @@ mod tests {
         let r = serde_json::to_value(DiagData::Replication(ReplicationData::default())).unwrap();
         assert_eq!(r["kind"], "replication");
         assert_eq!(r["inRecovery"], false);
+    }
+
+    #[test]
+    fn failover_and_health_data_are_tagged_with_the_tool_id() {
+        let f = serde_json::to_value(DiagData::Failover(FailoverData::default())).unwrap();
+        assert_eq!(
+            (
+                &f["kind"],
+                &f["readyCount"],
+                &f["config"]["maximumLagOnFailover"]
+            ),
+            (&"failover".into(), &0.into(), &1_048_576.into())
+        );
+        let h = serde_json::to_value(DiagData::Health(patroni::HealthData {
+            endpoints: vec!["primary".into()],
+            members: vec![patroni::HealthMember {
+                member: "a".into(),
+                api_url: Some("http://a:8008".into()),
+                cells: vec![patroni::HealthCell {
+                    endpoint: "primary".into(),
+                    status: Some(503),
+                    error: None,
+                }],
+            }],
+        }))
+        .unwrap();
+        assert_eq!(h["kind"], "health");
+        assert_eq!(
+            h["members"][0],
+            serde_json::json!({"member": "a", "apiUrl": "http://a:8008",
+                "cells": [{"endpoint": "primary", "status": 503, "error": null}]})
+        );
     }
 
     #[test]

@@ -27,6 +27,24 @@ impl Role {
     }
 }
 
+/// Запланированный switchover кластера (`scheduled_switchover` из `/cluster`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduledSwitchover {
+    /// Время из `/cluster` как есть (ISO 8601 со смещением).
+    pub at: String,
+    pub from: Option<String>,
+    pub to: Option<String>,
+}
+
+/// Запланированный restart участника (`scheduled_restart` из `/cluster`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduledRestart {
+    pub at: String,
+    pub postgres_version: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Member {
@@ -46,6 +64,7 @@ pub struct Member {
     pub upstream: Option<String>,
     pub tags: serde_json::Map<String, serde_json::Value>,
     pub pending_restart: bool,
+    pub scheduled_restart: Option<ScheduledRestart>,
     pub server_version: Option<String>,
     pub patroni_version: Option<String>,
     pub dcs_last_seen_ms: Option<i64>,
@@ -72,6 +91,7 @@ impl Member {
             upstream: None,
             tags: Default::default(),
             pending_restart: false,
+            scheduled_restart: None,
             server_version: None,
             patroni_version: None,
             dcs_last_seen_ms: None,
@@ -100,6 +120,7 @@ pub struct Topology {
     pub observed_at_ms: i64,
     pub scope: Option<String>,
     pub paused: Option<bool>,
+    pub scheduled_switchover: Option<ScheduledSwitchover>,
     pub members: Vec<Member>,
     pub warnings: Vec<TopologyWarning>,
 }
@@ -114,6 +135,7 @@ impl Topology {
             observed_at_ms: 1_000,
             scope: Some("demo".into()),
             paused: Some(false),
+            scheduled_switchover: None,
             members: Vec::new(),
             warnings: Vec::new(),
         }
@@ -155,6 +177,7 @@ impl Topology {
             && self.warnings == other.warnings
             && self.paused == other.paused
             && self.scope == other.scope
+            && self.scheduled_switchover == other.scheduled_switchover
     }
 }
 
@@ -275,6 +298,16 @@ mod tests {
         assert!(a.same_except_time(&b));
         b.members[0].lag_bytes = Some(1);
         assert!(!a.same_except_time(&b));
+        let mut c = a.clone();
+        c.scheduled_switchover = Some(ScheduledSwitchover {
+            at: "x".into(),
+            from: None,
+            to: None,
+        });
+        assert!(
+            !a.same_except_time(&c),
+            "запланированный switchover — изменение топологии"
+        );
     }
 
     #[test]
