@@ -162,8 +162,13 @@ impl ConnectSpec {
                 }
                 // Через туннель имя узла разрешает бастион; TLS ниже проверяется по тому же имени.
                 Some(proxy) => {
-                    let stream =
-                        crate::net::ssh::socks::connect(proxy, &self.host, self.port).await?;
+                    let stream = crate::net::ssh::socks::connect(
+                        proxy,
+                        self.ssh_target.as_deref().unwrap_or_default(),
+                        &self.host,
+                        self.port,
+                    )
+                    .await?;
                     self.handshake(stream).await
                 }
             }

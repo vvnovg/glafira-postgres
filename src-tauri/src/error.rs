@@ -146,7 +146,7 @@ mod tests {
             (ErrorCode::NodeUnavailable, true),
             (ErrorCode::AuthFailed, false),
             (ErrorCode::PatroniError, false),
-            // Перезапускаемость `SshError` задаётся при создании ошибки (виды `exited` и `forwardFailed`).
+            // Перезапускаемость `SshError` задаётся при создании ошибки (виды `exited`, `forwardFailed` и `bindFailed`).
             (ErrorCode::SshError, false),
             (ErrorCode::FeatureUnavailable, false),
         ] {

@@ -942,7 +942,7 @@ pub(crate) mod tests {
         assert_eq!(reg.route_for(&p).unwrap(), Some(socks));
         // Повторное открытие живого туннеля с теми же настройками — тот же порт, без нового процесса.
         assert_eq!(reg.open(&p, Duration::from_secs(5)).await.unwrap(), socks);
-        let mut s = crate::net::ssh::socks::connect(socks, "pg-single", 5432)
+        let mut s = crate::net::ssh::socks::connect(socks, "bastion", "pg-single", 5432)
             .await
             .unwrap();
         tokio::io::AsyncWriteExt::write_all(&mut s, b"ping")
@@ -984,8 +984,8 @@ pub(crate) mod tests {
     }
 
     /// Узел, до которого бастион не достучался: `ssh -D` отвечает успехом SOCKS и закрывает поток. Это сбой
-    /// проброса — и без TLS (конец потока на стартовом сообщении), и с TLS (на запросе SSLRequest). Порт самого
-    /// туннеля закрыт (процесс ssh умер) — ошибка SOCKS.
+    /// проброса к узлу — и без TLS (конец потока на стартовом сообщении), и с TLS (на запросе SSLRequest). Порт
+    /// самого туннеля закрыт (процесс ssh умер) — туннель не работает (`tunnelDown`, вид `exited`).
     #[tokio::test]
     async fn unreachable_node_behind_the_bastion_is_a_forward_failure() {
         use crate::conn::pg::ConnectSpec;
@@ -1021,14 +1021,16 @@ pub(crate) mod tests {
                 ),
                 "{mode:?}: {e:?}"
             );
-            assert_eq!(e.params["target"], "bastion");
-            assert!(
-                e.details
-                    .as_deref()
-                    .unwrap()
-                    .starts_with("pg-single:5432: "),
-                "{e:?}"
+            assert_eq!(
+                (
+                    e.params["target"].as_str(),
+                    e.params["host"].as_str(),
+                    e.params["port"].as_str()
+                ),
+                ("bastion", "pg-single", "5432"),
+                "{mode:?}: {e:?}"
             );
+            assert!(e.details.is_some(), "{e:?}");
             assert!(e.retryable);
         }
         reg.close("c1");
@@ -1037,7 +1039,12 @@ pub(crate) mod tests {
         })
         .await;
         let e = spec(SslMode::Disable).connect().await.unwrap_err();
-        assert_eq!(e.key, "errors.ssh.socks", "{e:?}");
+        assert_eq!(
+            (e.key.as_str(), e.params["kind"].as_str()),
+            ("errors.ssh.tunnelDown", "exited"),
+            "{e:?}"
+        );
+        assert_eq!(e.params["port"], socks.port().to_string());
     }
 
     /// Профиль с ssh без открытого туннеля напрямую не соединяется: имя узла разрешилось бы локально.

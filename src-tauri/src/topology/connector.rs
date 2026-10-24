@@ -423,7 +423,11 @@ mod tests {
             ),
             "{e:?}"
         );
-        assert!(e.details.as_deref().unwrap().contains("pg-single:5432"));
+        assert_eq!(
+            (e.params["host"].as_str(), e.params["port"].as_str()),
+            ("pg-single", "5432"),
+            "{e:?}"
+        );
         let pool = pools.get(&probe_key_of("c1", "m")).expect("пул создан");
         assert_eq!(pool.spec().socks, Some(socks));
 

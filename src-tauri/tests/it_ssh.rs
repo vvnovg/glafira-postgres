@@ -86,26 +86,34 @@ async fn query_version(socks: SocketAddr, p: &ConnectionProfile) -> String {
         .get::<_, String>(0)
 }
 
-/// Недоступный с бастиона узел — сбой проброса (`forwardFailed`), а не ошибка PostgreSQL или Patroni. Форма ошибки
-/// зависит от клиента OpenSSH: новый (10.x) отвечает SOCKS5 только после открытия канала и при отказе закрывает
-/// соединение посреди рукопожатия (`errors.ssh.socks`, узел — в `params`); старый отвечает успехом сразу и закрывает
-/// поток позже (`errors.ssh.forwardFailed`, узел — в `details`). Вид один и тот же.
-fn assert_forward_failed(e: &AppError, host: &str, port: u16) {
+/// Недоступный с бастиона узел — сбой проброса (`forwardFailed`), а не ошибка PostgreSQL или Patroni. Клиент OpenSSH
+/// 10.x отвечает SOCKS5 только после открытия канала и при отказе закрывает соединение посреди рукопожатия, старый
+/// отвечает успехом сразу и закрывает поток позже, — ошибка в обоих случаях одна: ключ `errors.ssh.forwardFailed`,
+/// цель ssh и узел в `params`.
+fn assert_forward_failed(e: &AppError, target: &str, host: &str, port: u16) {
     assert_eq!(
-        (e.code, e.params.get("kind").map(String::as_str)),
-        (ErrorCode::SshError, Some("forwardFailed")),
+        (
+            e.code,
+            e.key.as_str(),
+            e.params.get("kind").map(String::as_str)
+        ),
+        (
+            ErrorCode::SshError,
+            "errors.ssh.forwardFailed",
+            Some("forwardFailed")
+        ),
         "{e:?}"
     );
-    let in_params = e.params.get("host").map(String::as_str) == Some(host)
-        && e.params.get("port") == Some(&port.to_string());
-    let in_details = e
-        .details
-        .as_deref()
-        .is_some_and(|d| d.contains(&format!("{host}:{port}")));
-    assert!(
-        in_params || in_details,
-        "узел {host}:{port} не назван: {e:?}"
+    assert_eq!(
+        (
+            e.params.get("target").map(String::as_str),
+            e.params.get("host").map(String::as_str),
+            e.params.get("port").cloned()
+        ),
+        (Some(target), Some(host), Some(port.to_string())),
+        "{e:?}"
     );
+    assert!(e.retryable, "{e:?}");
 }
 
 #[tokio::test]
@@ -206,6 +214,7 @@ async fn password_login_uses_askpass_and_a_wrong_password_is_auth_failed() {
 async fn unreachable_upstream_behind_the_bastion_is_forward_failed() {
     let Some(s) = setup(SshAuth::Key) else { return };
     let socks = open_trusting(&s).await;
+    let target = s.profile.ssh.as_ref().unwrap().target.clone();
     // Имя не разрешается на бастионе и закрытый порт узла сети compose: канал не открылся, `ssh -D` закрывает
     // соединение с клиентом — сбой проброса, а не ошибка PostgreSQL.
     for (host, port) in [("nonexistent.invalid", 5432), ("pg-single", 5999)] {
@@ -214,24 +223,21 @@ async fn unreachable_upstream_behind_the_bastion_is_forward_failed() {
             .await
             .err()
             .unwrap_or_else(|| panic!("{host}:{port}: соединение установлено"));
-        assert_forward_failed(&e, host, port);
+        assert_forward_failed(&e, &target, host, port);
     }
     // Patroni через тот же туннель: недоступный адрес API — тот же сбой проброса, а не общая ошибка Patroni.
-    let target = s.profile.ssh.as_ref().unwrap().target.clone();
     let settings = PatroniSettings {
         urls: vec!["http://nonexistent.invalid:8008".into()],
         username: None,
         tls: None,
         host_overrides: vec![],
     };
-    let http = ReqwestHttp::new(&settings, None, None, Some(socks))
-        .unwrap()
-        .with_ssh_target(&target);
+    let http = ReqwestHttp::new(&settings, None, None, Some(socks), Some(target.clone())).unwrap();
     let e = http
         .get_json("http://nonexistent.invalid:8008/cluster")
         .await
         .unwrap_err();
-    assert_forward_failed(&e, "nonexistent.invalid", 8008);
+    assert_forward_failed(&e, &target, "nonexistent.invalid", 8008);
     // Туннель после недоступных узлов жив: соединение с настоящим узлом проходит.
     assert!(
         query_version(socks, &s.profile)
@@ -261,9 +267,9 @@ async fn patroni_and_host_list_are_observed_through_the_tunnel() {
         Some(common::PATRONI_PASSWORD_VALUE.into()),
         None,
         Some(socks),
+        Some("localhost".into()),
     )
-    .unwrap()
-    .with_ssh_target("localhost");
+    .unwrap();
     let t = discover(&http, &settings, "ssh", None, 0).await.unwrap();
     assert_eq!(t.members.len(), 3);
     assert!(t.leader().is_some());

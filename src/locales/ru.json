@@ -175,9 +175,10 @@
       "hostKeyUnknown": "Ключ хоста {{host}} ещё не известен ({{fingerprint}})",
       "hostKeyChanged": "Ключ хоста {{target}} изменился: проверьте ~/.ssh/known_hosts сами",
       "authFailed": "Вход по SSH на {{target}} отклонён: проверьте пользователя, ключ или пароль",
-      "forwardFailed": "Бастион {{target}} не смог достучаться до узла (проброс не удался)",
+      "bindFailed": "Не удалось занять локальный порт для SSH-туннеля",
+      "forwardFailed": "Бастион {{target}} не смог достучаться до {{host}}:{{port}}",
       "exited": "Процесс ssh к {{target}} завершился",
-      "socks": "Бастион не смог подключиться к {{host}}:{{port}}"
+      "tunnelDown": "SSH-туннель к {{target}} не работает (локальный порт {{port}} отклонил соединение)"
     }
   },
   "connections": {

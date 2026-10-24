@@ -15,6 +15,7 @@ async fn observe(prev: Option<&Topology>) -> Option<Topology> {
         Some(common::PATRONI_PASSWORD_VALUE.into()),
         None,
         None,
+        None,
     )
     .unwrap();
     Some(

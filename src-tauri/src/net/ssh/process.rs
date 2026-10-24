@@ -415,7 +415,13 @@ pub enum SshErrorKind {
     AuthFailed,
     /// Локальный порт SOCKS занят (гонка за портом): супервизор повторяет с новым портом.
     BindFailed,
-    ForwardFailed,
+    /// Бастион не достучался до узла `host:port` (сбой SOCKS после соединения с портом туннеля или обрыв потока сразу
+    /// после успеха SOCKS, см. `socks::forward_failed`). Из вывода ssh не выводится: неудачный CONNECT через `-D`
+    /// процесс не завершает.
+    ForwardFailed {
+        host: String,
+        port: u16,
+    },
     Exited,
 }
 
@@ -428,7 +434,8 @@ impl SshErrorKind {
             Self::HostKeyUnknown { .. } => "hostKeyUnknown",
             Self::HostKeyChanged => "hostKeyChanged",
             Self::AuthFailed => "authFailed",
-            Self::BindFailed | Self::ForwardFailed => "forwardFailed",
+            Self::BindFailed => "bindFailed",
+            Self::ForwardFailed { .. } => "forwardFailed",
             Self::Exited => "exited",
         }
     }
@@ -447,30 +454,12 @@ pub fn parse_host_key_report(report: &str) -> (Option<String>, Option<String>) {
     (host, fingerprint)
 }
 
-/// Обрыв соединения с бастионом (`ServerAlive`, сброс, закрытие сервером, таймаут).
-const DISCONNECT_MARKERS: [&str; 8] = [
-    "Timeout, server",
-    "closed by remote host",
-    "Read from remote host",
-    "Broken pipe",
-    "Connection closed by",
-    "Connection reset by",
-    "timed out",
-    "Disconnected from",
-];
-
-/// Есть ли в выводе признак обрыва. Строки «channel N: open failed: …» не считаются: в их причине («connect
-/// failed: Connection timed out», «…reset by peer») говорит бастион о недоступном узле, а не об обрыве самого
-/// соединения с бастионом.
-fn is_disconnect(s: &str) -> bool {
-    s.lines()
-        .filter(|l| !l.contains("open failed"))
-        .any(|l| DISCONNECT_MARKERS.iter().any(|m| l.contains(m)))
-}
-
 /// Вид ошибки по выводу ssh (`stderr_tail`) и отчёту askpass; код выхода у OpenSSH на все ошибки один (255),
-/// поэтому решает текст. Неудачные CONNECT через `-D` («open failed») процесс не завершают, а в логе остаются:
-/// если после них соединение оборвалось, причина — обрыв (`exited`), а не проброс.
+/// поэтому решает текст. Неудачные CONNECT через `-D` («channel N: open failed») процесс не завершают, а в логе
+/// остаются: процесс, завершившийся после них, завершился по другой причине — `exited` (обрыв или неизвестное),
+/// а не сбой проброса. «Too many authentication failures» (агент с шестью и больше ключами, среди которых нет
+/// принятого) — отказ во входе, хотя сервер при этом и разрывает соединение («Received disconnect … Disconnected
+/// from», что похоже на обрыв): как обрыв (`exited`) он перезапускался бы, и супервизор повторял бы вход раз в 30 с.
 pub fn classify_stderr(code: Option<i32>, stderr: &str, report: Option<&str>) -> SshErrorKind {
     let _ = code;
     let s = stderr;
@@ -487,16 +476,12 @@ pub fn classify_stderr(code: Option<i32>, stderr: &str, report: Option<&str>) ->
             host: None,
             fingerprint: None,
         }
-    } else if s.contains("Permission denied") {
+    } else if s.contains("Permission denied") || s.contains("Too many authentication failures") {
         SshErrorKind::AuthFailed
     } else if s.contains("Address already in use")
         || s.contains("Could not request local forwarding")
     {
         SshErrorKind::BindFailed
-    } else if is_disconnect(s) {
-        SshErrorKind::Exited
-    } else if s.contains("open failed") || s.contains("connect failed") {
-        SshErrorKind::ForwardFailed
     } else {
         SshErrorKind::Exited
     }
@@ -534,11 +519,18 @@ pub fn ssh_error(kind: SshErrorKind, target: &str, tail: &str) -> AppError {
             "SSH login to {{target}} was refused: check the user, the key or the password",
             target = target
         ),
-        SshErrorKind::BindFailed | SshErrorKind::ForwardFailed => app_err!(
+        SshErrorKind::BindFailed => app_err!(
+            ErrorCode::SshError,
+            "errors.ssh.bindFailed",
+            "Could not bind a local port for the SSH tunnel"
+        ),
+        SshErrorKind::ForwardFailed { host, port } => app_err!(
             ErrorCode::SshError,
             "errors.ssh.forwardFailed",
-            "The bastion {{target}} could not reach the node (the forward failed)",
-            target = target
+            "The bastion {{target}} could not reach {{host}}:{{port}}",
+            target = target,
+            host = host,
+            port = port
         ),
         SshErrorKind::Exited => app_err!(
             ErrorCode::SshError,
@@ -557,7 +549,7 @@ pub fn ssh_error(kind: SshErrorKind, target: &str, tail: &str) -> AppError {
     // Обрыв и сбой проброса проходят сами (перезапуск, повтор); ключ хоста, вход, клиент — нет.
     e.retryable = matches!(
         kind,
-        SshErrorKind::Exited | SshErrorKind::ForwardFailed | SshErrorKind::BindFailed
+        SshErrorKind::Exited | SshErrorKind::ForwardFailed { .. } | SshErrorKind::BindFailed
     );
     e
 }
@@ -699,13 +691,15 @@ mod tests {
             ),
             SshErrorKind::BindFailed
         ));
-        assert!(matches!(
+        // Неудачный CONNECT через -D процесс не завершает: процесс, завершившийся после него, завершился по другой
+        // причине — `exited`, а не сбой проброса (у того нет узла: он виден только соединению через SOCKS).
+        assert_eq!(
             c(
                 255,
                 "channel 2: open failed: connect failed: Connection refused\n"
             ),
-            SshErrorKind::ForwardFailed
-        ));
+            SshErrorKind::Exited
+        );
         assert!(matches!(
             c(
                 255,
@@ -740,20 +734,21 @@ mod tests {
                 "{line}"
             );
         }
-        // Но сбой одного канала с «timed out»/«reset by» в причине — это проброс, а не обрыв бастиона.
+        // Агент с шестью и больше ключами, ни один не принят: сервер разрывает соединение, но это отказ во входе —
+        // супервизор встаёт на стоянку, а не входит раз в 30 с.
         assert_eq!(
             c(
                 255,
-                "channel 2: open failed: connect failed: Connection timed out\n"
+                "Received disconnect from 10.0.0.5 port 22:2: Too many authentication failures\nDisconnected from 10.0.0.5 port 22\n"
             ),
-            SshErrorKind::ForwardFailed
+            SshErrorKind::AuthFailed
         );
         assert_eq!(
             c(
                 255,
-                "channel 2: open failed: connect failed: Connection reset by peer\n"
+                "Received disconnect from 10.0.0.5 port 22:2: Too many authentication failures\r\nDisconnected from authenticating user tester 10.0.0.5 port 22 [preauth]\r\nConnection closed by 10.0.0.5 port 22\r\n"
             ),
-            SshErrorKind::ForwardFailed
+            SshErrorKind::AuthFailed
         );
         // Отчёт askpass точнее stderr: в нём хост и отпечаток.
         let report = "The authenticity of host 'bastion (10.0.0.5)' can't be established.\nED25519 key fingerprint is SHA256:abcDEF+/=.\nAre you sure you want to continue connecting (yes/no/[fingerprint])?";
@@ -807,12 +802,36 @@ mod tests {
         assert_eq!(e.params["target"], "bastion");
         assert_eq!(e.details.as_deref(), Some("line 1\nline 2"));
         assert!(!e.retryable);
+        // Порт так и не занят (после повтора с новым портом) — свой текст, а не «бастион не достучался».
         let e = ssh_error(SshErrorKind::BindFailed, "bastion", "");
         assert_eq!(
-            (e.params["kind"].as_str(), e.retryable),
-            ("forwardFailed", true)
+            (e.key.as_str(), e.params["kind"].as_str(), e.retryable),
+            ("errors.ssh.bindFailed", "bindFailed", true)
         );
+        assert_eq!(e.message, "Could not bind a local port for the SSH tunnel");
         assert_eq!(e.details, None);
+        let e = ssh_error(
+            SshErrorKind::ForwardFailed {
+                host: "pg-1".into(),
+                port: 5432,
+            },
+            "bastion",
+            "early eof",
+        );
+        assert_eq!(
+            (e.key.as_str(), e.params["kind"].as_str(), e.retryable),
+            ("errors.ssh.forwardFailed", "forwardFailed", true)
+        );
+        assert_eq!(
+            (
+                e.params["target"].as_str(),
+                e.params["host"].as_str(),
+                e.params["port"].as_str()
+            ),
+            ("bastion", "pg-1", "5432")
+        );
+        assert_eq!(e.message, "The bastion bastion could not reach pg-1:5432");
+        assert_eq!(e.details.as_deref(), Some("early eof"));
         assert!(ssh_error(SshErrorKind::Exited, "bastion", "").retryable);
         let e = ssh_error(
             SshErrorKind::HostKeyUnknown {

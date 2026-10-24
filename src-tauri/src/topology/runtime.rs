@@ -130,11 +130,13 @@ impl LiveSource {
             })?;
             let password = s.get(&secret_key(&p.id, PATRONI_PASSWORD))?;
             let key_password = s.get(&secret_key(&p.id, PATRONI_KEY_PASSWORD))?;
-            let http = ReqwestHttp::new(settings, password, key_password.as_deref(), proxy)?;
-            Ok(match &p.ssh {
-                Some(ssh) => http.with_ssh_target(&ssh.target),
-                None => http,
-            })
+            ReqwestHttp::new(
+                settings,
+                password,
+                key_password.as_deref(),
+                proxy,
+                p.ssh.as_ref().map(|ssh| ssh.target.clone()),
+            )
         })
         .await?;
         let http = Arc::new(http);
