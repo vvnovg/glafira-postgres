@@ -25,6 +25,10 @@ pub struct SequenceDetails {
     /// Последнее выданное значение; `None` — последовательность ещё не использовалась или у роли нет права
     /// SELECT/USAGE на неё (так устроен `pg_sequences`).
     pub last_value: Option<i64>,
+    /// У роли есть право SELECT или USAGE на последовательность (предикат `pg_sequences` для `last_value`).
+    /// Нет права — `last_value` и `percent_used` пусты при любом использовании; вкладка отличает это от
+    /// «ещё не использовалась» (у роли `pg_monitor` без явных прав `readable` — `false` у всех).
+    pub readable: bool,
     pub percent_used: Option<f64>,
     /// Колонка-владелец (`OWNED BY`, serial, identity): `schema.table.column`.
     pub owned_by: Option<String>,
@@ -32,6 +36,8 @@ pub struct SequenceDetails {
 
 /// Строка последовательности (`$1` — OID); не последовательность — строки нет. `last_value` берётся из
 /// `pg_sequences`: без права на последовательность там NULL, а не ошибка, как у `pg_sequence_last_value`.
+/// `readable` — тот же предикат, что у `pg_sequences` (`COALESCE`: для исчезнувшей последовательности
+/// `has_sequence_privilege` вернул бы NULL).
 const SQL: &str = "SELECT n.nspname::text, c.relname::text, COALESCE(format_type(s.seqtypid, NULL), ''), \
     s.seqstart, s.seqincrement, s.seqmin, s.seqmax, s.seqcycle, s.seqcache, \
     (SELECT ps.last_value FROM pg_sequences ps WHERE ps.schemaname = n.nspname AND ps.sequencename = c.relname), \
@@ -39,7 +45,8 @@ const SQL: &str = "SELECT n.nspname::text, c.relname::text, COALESCE(format_type
        FROM pg_depend d JOIN pg_class t ON t.oid = d.refobjid JOIN pg_namespace tn ON tn.oid = t.relnamespace \
        JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid \
        WHERE d.objid = c.oid AND d.classid = 'pg_class'::regclass AND d.refclassid = 'pg_class'::regclass \
-         AND d.deptype IN ('a', 'i') LIMIT 1) \
+         AND d.deptype IN ('a', 'i') LIMIT 1), \
+    COALESCE(has_sequence_privilege(c.oid, 'SELECT,USAGE'), false) \
   FROM pg_sequence s JOIN pg_class c ON c.oid = s.seqrelid JOIN pg_namespace n ON n.oid = c.relnamespace \
   WHERE s.seqrelid = $1";
 
@@ -79,6 +86,7 @@ pub async fn get(c: &Client, schema: &str, name: &str) -> AppResult<SequenceDeta
         cycle: r.get(7),
         cache: r.get(8),
         last_value,
+        readable: r.get(11),
         percent_used: percent_used(last_value, min, max, increment),
         owned_by: r.get(10),
     })

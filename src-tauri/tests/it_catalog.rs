@@ -398,6 +398,18 @@ async fn demo_schema_on_every_node() {
             ("integer", 1, false)
         );
         assert_eq!(s.last_value, None, "последовательность не использовалась");
+        // `readable` — свойство права, а не использования: у неиспользованной последовательности он тот же.
+        let invoice_readable: bool = c
+            .query_one(
+                "SELECT has_sequence_privilege(c.oid, 'SELECT,USAGE') FROM pg_class c \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE n.nspname = 'shop' AND c.relname = 'invoice_seq'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(s.readable, invoice_readable, "{addr}: {s:?}");
         let owned = sequence::get(&c, "shop", "orders_id_seq").await.unwrap();
         assert_eq!(owned.owned_by.as_deref(), Some("shop.orders.id"));
         // `last_value` виден только с правом SELECT или USAGE на последовательность (так устроен
@@ -412,6 +424,9 @@ async fn demo_schema_on_every_node() {
             .await
             .unwrap()
             .get(0);
+        // `readable` — тот же предикат, по которому `pg_sequences` показывает `last_value`: вкладка по нему
+        // отличает «нет права» от «ещё не использовалась».
+        assert_eq!(owned.readable, readable, "{addr}: {owned:?}");
         if readable {
             assert!(
                 owned.last_value.is_some_and(|v| v >= 1000),
@@ -444,11 +459,14 @@ async fn demo_schema_on_every_node() {
     }
 }
 
-/// Вкладка обычной таблицы не оставляет блокировок отношений: размеры (`pg_relation_size` и т. п.) снимают
-/// свою блокировку сразу, разбор выражений и определений идёт по каталогу. Партиционированная таблица (сумма
-/// по `pg_partition_tree`, отступление 7 плана) держит блокировки партиций до конца своего запроса, а
-/// `pg_get_viewdef` у представления — блокировки самого представления и его таблиц (`AcquireRewriteLocks`):
-/// каждый запрос вкладки идёт отдельной транзакцией, и они снимаются, как только запрос ответил.
+/// Вкладка таблицы не оставляет блокировок отношений, в том числе у партиционированной: размеры
+/// (`pg_relation_size` и т. п.) снимают свою блокировку сразу, дерево партиций обходится по `pg_inherits`
+/// (`pg_partition_tree` держал бы `AccessShareLock` на каждой партиции до конца транзакции — на тысячах
+/// партиций это «out of shared memory» у других сеансов), разбор выражений и определений идёт по каталогу.
+/// Тест держит одну транзакцию на все вызовы, поэтому любая оставшаяся блокировка видна в `pg_locks`.
+/// Исключение — `pg_get_viewdef` у представления: он берёт блокировки самого представления и его таблиц
+/// (`AcquireRewriteLocks`), в тест вкладка представления не входит; запрос вкладки идёт отдельной
+/// транзакцией, и они снимаются, как только запрос ответил.
 #[tokio::test]
 async fn table_details_keep_no_locks_on_plain_tables() {
     for addr in addrs() {
@@ -457,8 +475,71 @@ async fn table_details_keep_no_locks_on_plain_tables() {
         table::get(&c, "shop", "orders").await.unwrap();
         table::get(&c, "shop", "customers").await.unwrap();
         table::get(&c, "shop", "events_2026_09").await.unwrap();
+        let plain = held_locks(&c).await;
+        // Партиционированная таблица: размеры и статистика считаются по всему дереву партиций.
+        let events = table::get(&c, "shop", "events").await.unwrap();
         let locks = held_locks(&c).await;
         c.batch_execute("ROLLBACK").await.unwrap();
-        assert!(locks.is_empty(), "{addr}: блокировки отношений: {locks:?}");
+        assert!(plain.is_empty(), "{addr}: блокировки отношений: {plain:?}");
+        assert_eq!(events.relkind, "p", "{addr}");
+        assert!(
+            locks.is_empty(),
+            "{addr}: вкладка партиционированной таблицы оставила блокировки: {locks:?}"
+        );
+    }
+}
+
+/// Агрегат (`prokind = 'a'`): `pg_get_functiondef` для него падает, поэтому определение не запрашивается;
+/// вкладка отдаёт сигнатуру без определения и без ошибки.
+#[tokio::test]
+async fn aggregate_has_signature_but_no_definition() {
+    for addr in addrs() {
+        let c = client(&addr, "orders").await;
+        for (sig, name) in [
+            ("pg_catalog.count()", "count"),
+            ("pg_catalog.sum(bigint)", "sum"),
+        ] {
+            let oid: i64 = c
+                .query_one("SELECT $1::text::regprocedure::oid::bigint", &[&sig])
+                .await
+                .unwrap()
+                .get(0);
+            let f = function::get(&c, oid)
+                .await
+                .unwrap_or_else(|e| panic!("{addr}: {sig}: {e:?}"));
+            assert_eq!(f.kind, "a", "{addr}: {sig}: {f:?}");
+            assert_eq!(f.definition, None, "{addr}: {sig}");
+            assert_eq!(f.returns, None, "{addr}: {sig}");
+            assert_eq!(f.name, name, "{addr}: {sig}");
+        }
+    }
+}
+
+/// `last_idx_scan` появился в PostgreSQL 16: до него время последнего сканирования — всегда `None`, запрос
+/// не обращается к отсутствующему столбцу. С 16 значение есть у каждого индекса, по которому уже сканировали
+/// (счётчик и время обновляются вместе); без сканирований время может быть пустым.
+#[tokio::test]
+async fn last_idx_scan_follows_the_server_version() {
+    for addr in addrs() {
+        let c = client(&addr, "orders").await;
+        let version: i32 = c
+            .query_one("SHOW server_version_num", &[])
+            .await
+            .unwrap()
+            .get::<_, String>(0)
+            .parse()
+            .unwrap();
+        let mut checked = 0;
+        for name in ["orders", "customers", "events", "events_2026_09"] {
+            for i in table::get(&c, "shop", name).await.unwrap().indexes {
+                checked += 1;
+                if version < 160000 {
+                    assert_eq!(i.last_idx_scan_ms, None, "{addr}: PG {version}: {i:?}");
+                } else if i.idx_scan.unwrap_or(0) > 0 {
+                    assert!(i.last_idx_scan_ms.is_some(), "{addr}: PG {version}: {i:?}");
+                }
+            }
+        }
+        assert!(checked > 0, "{addr}: у демо-таблиц есть индексы");
     }
 }

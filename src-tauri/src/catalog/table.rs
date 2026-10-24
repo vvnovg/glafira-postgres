@@ -153,7 +153,12 @@ pub(crate) const COLUMNS_SQL: &str = "SELECT a.attname::text, format_type(a.attt
 /// Индексы отношения (`$1` — OID). Статистика использования — `pg_stat_all_indexes`; `last_idx_scan`
 /// появился в 16: на старых версиях — NULL, иначе запрос не разберётся. У партиционированного индекса
 /// (`I`, у партиционированной таблицы) своего хранения и статистики нет: размер и счётчики — суммы по
-/// его партициям (`pg_partition_tree`, отступление 7 плана), время — самое позднее.
+/// его партициям (отступление 7 плана), время — самое позднее. Партиции индекса обходятся рекурсивно по
+/// `pg_inherits` (только каталог), а не `pg_partition_tree`: тот (`find_all_inheritors`) берёт
+/// `AccessShareLock` на каждого члена дерева до конца запроса, и на тысячах партиций с несколькими
+/// индексами общая таблица блокировок переполнялась бы (`out of shared memory` у других сеансов).
+/// `pg_relation_size` открывает отношение лишь на время подсчёта и для исчезнувшего вернёт NULL (`sum` его
+/// пропустит). `CASE` обходит дерево только у `I`: у остальных индексов подзапрос не выполняется.
 pub fn index_sql(version_num: i32) -> String {
     let last = if version_num >= 160000 {
         "(extract(epoch FROM max(s.last_idx_scan)) * 1000)::bigint"
@@ -167,7 +172,11 @@ pub fn index_sql(version_num: i32) -> String {
            x.scans, x.tup_read, x.last_ms \
          FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid \
          CROSS JOIN LATERAL (SELECT CASE WHEN ic.relkind = 'I' \
-             THEN ARRAY(SELECT relid::oid FROM pg_partition_tree(i.indexrelid)) \
+             THEN ARRAY(WITH RECURSIVE tree(relid) AS ( \
+                      SELECT i.indexrelid \
+                      UNION ALL \
+                      SELECT h.inhrelid FROM pg_inherits h JOIN tree tr ON h.inhparent = tr.relid) \
+                  SELECT relid FROM tree) \
              ELSE ARRAY[i.indexrelid] END AS rels) t \
          CROSS JOIN LATERAL (SELECT sum(s.idx_scan)::bigint AS scans, \
              sum(s.idx_tup_read)::bigint AS tup_read, {last} AS last_ms \
@@ -189,11 +198,20 @@ const INCOMING_FK_SQL: &str = "SELECT c.conname::text, n.nspname::text, r.relnam
   ORDER BY n.nspname, r.relname, c.conname";
 
 /// Заголовок, размеры и статистика (`$1` — OID). `t.rels` — отношения, по которым считаются размеры и
-/// статистика: у партиционированной таблицы — всё дерево партиций (`pg_partition_tree`, вместе с самим
-/// родителем; одна таблица по запросу пользователя — отступление 7 плана: блокировки всех партиций до конца
-/// этого запроса допустимы, в списках дерева так не делается), у остальных — только она сама.
-/// `CASE` не вызывает `pg_partition_tree` для обычной таблицы: у родителя по `INHERITS` он вернул бы и
-/// потомков. Счётчики `pg_stat_all_tables` по дереву — суммы, времена — самые поздние (`max`).
+/// статистика: у партиционированной таблицы — всё дерево партиций вместе с самим родителем, у остальных —
+/// только она сама. Дерево обходится рекурсивно по `pg_inherits` (только каталог), а не `pg_partition_tree`:
+/// тот (`find_all_inheritors`) держит `AccessShareLock` на каждой партиции до конца запроса, и на тысячах
+/// партиций у других сеансов кончалась бы общая таблица блокировок (`out of shared memory`). Размеры
+/// (`pg_relation_size` и т. п.) открывают отношение лишь на время подсчёта, а для исчезнувшего вернут NULL
+/// (`sum` его пропустит); `pg_stat_all_tables` и `pg_class` — каталог. `CASE` обходит дерево только у `p`:
+/// у обычной таблицы подзапрос не выполняется (EXPLAIN ANALYZE: `never executed`), а у родителя по
+/// `INHERITS` обход вернул бы и потомков.
+///
+/// У партиционированной таблицы своего хранения нет, и всё считается по дереву (отступление 7 плана):
+/// размеры и счётчики `pg_stat_all_tables` — суммы, `last_*` — `max`. В суммы входит и строка самого
+/// родителя, если у `p` она есть в `pg_stat_all_tables` (проверено на PostgreSQL 15). Поэтому ручной
+/// `ANALYZE` одной партиции двигает `last_analyze_ms` родителя, а `analyze_count` и прочие счётчики
+/// родителя — сумма по всему дереву, а не его собственные.
 /// Вкладка открывает обычную (`r`), партиционированную (`p`) и внешнюю (`f`) таблицу.
 const HEAD_SQL: &str = "SELECT n.nspname::text, c.relname::text, c.relkind::text, pg_get_userbyid(c.relowner)::text, \
     ts.spcname::text, obj_description(c.oid, 'pg_class'), COALESCE(c.reloptions, '{}'::text[]), \
@@ -218,7 +236,12 @@ const HEAD_SQL: &str = "SELECT n.nspname::text, c.relname::text, c.relkind::text
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
   LEFT JOIN pg_tablespace ts ON ts.oid = c.reltablespace \
   CROSS JOIN LATERAL (SELECT CASE WHEN c.relkind = 'p' \
-      THEN ARRAY(SELECT relid::oid FROM pg_partition_tree(c.oid)) ELSE ARRAY[c.oid] END AS rels) t \
+      THEN ARRAY(WITH RECURSIVE tree(relid) AS ( \
+               SELECT c.oid \
+               UNION ALL \
+               SELECT h.inhrelid FROM pg_inherits h JOIN tree tr ON h.inhparent = tr.relid) \
+           SELECT relid FROM tree) \
+      ELSE ARRAY[c.oid] END AS rels) t \
   CROSS JOIN LATERAL (SELECT sum(st.seq_scan)::bigint AS seq_scan, sum(st.idx_scan)::bigint AS idx_scan, \
       sum(st.n_live_tup)::bigint AS n_live_tup, sum(st.n_dead_tup)::bigint AS n_dead_tup, \
       sum(st.n_mod_since_analyze)::bigint AS n_mod_since_analyze, \
