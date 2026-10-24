@@ -1,11 +1,13 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::conn::pool::{PoolRegistry, PooledClient};
+use crate::conn::pool::{PoolPurpose, PoolRegistry, PooledClient};
 use crate::diag::memory::CounterMemory;
 use crate::error::AppResult;
 use crate::net::ssh::tunnel::{TunnelConfig, TunnelRegistry};
+use crate::sampler::registry::SamplerRegistry;
 use crate::secrets::SecretStore;
+use crate::session::SessionRegistry;
 use crate::settings::SettingsStore;
 use crate::storage::connections::{ConnectionProfile, ConnectionStore};
 use crate::sync::MutexExt;
@@ -26,6 +28,10 @@ pub struct AppState {
     pub live: Arc<LiveSource>,
     /// Прошлые счётчики диагностики (скорости и рост); стираются при закрытии подключения и уходе участника.
     pub counters: Arc<CounterMemory>,
+    /// Длительные сессии (сэмплер; наблюдение — P2b): `stop_session`, закрытие подключения, выход.
+    pub sessions: Arc<SessionRegistry>,
+    /// Сэмплеры активности узлов и их буферы.
+    pub samplers: Arc<SamplerRegistry>,
     /// Туннели ssh открытых подключений и проверок; доверенные ключи хостов.
     pub tunnels: Arc<TunnelRegistry>,
     /// Операции с секретами подключений (сохранение формы, импорт, удаление) идут по одной. Иначе импорт,
@@ -63,6 +69,12 @@ impl AppState {
         let runtimes = Runtimes::new(live.clone(), pools.clone(), tunnels.clone());
         let counters = Arc::new(CounterMemory::default());
         runtimes.add_close_listener(counters.clone());
+        let sessions = Arc::new(SessionRegistry::default());
+        let samplers = SamplerRegistry::new(std::time::Duration::from_secs(1), sessions.clone());
+        // Сэмплеры — раньше сессий: закрытие подключения сначала шлёт вкладкам `Stopped`, потом снимает сессии
+        // (их остановка — отписка от уже удалённого узла). В обратном порядке отписка опередила бы `Stopped`.
+        runtimes.add_close_listener(samplers.clone());
+        runtimes.add_close_listener(sessions.clone());
         Ok(Self {
             connections: Arc::new(ConnectionStore::open(data_dir)?),
             secrets,
@@ -72,6 +84,8 @@ impl AppState {
             runtimes,
             live,
             counters,
+            sessions,
+            samplers,
             tunnels,
             secrets_lock: Arc::new(std::sync::Mutex::new(())),
         })
@@ -90,6 +104,18 @@ impl AppState {
         member: Option<&str>,
         database: Option<&str>,
     ) -> AppResult<PooledClient> {
+        self.client_with(connection_id, member, database, PoolPurpose::Catalog)
+            .await
+    }
+
+    /// То же из пула назначения `purpose` (сэмплер — `PoolPurpose::Sampler`, одно соединение на узел).
+    pub async fn client_with(
+        &self,
+        connection_id: &str,
+        member: Option<&str>,
+        database: Option<&str>,
+        purpose: PoolPurpose,
+    ) -> AppResult<PooledClient> {
         let (m, profile) = self.runtimes.target(connection_id, member)?;
         let db = database
             .map(str::to_string)
@@ -104,7 +130,7 @@ impl AppState {
             &m.host,
             m.port,
             &db,
-            crate::conn::pool::PoolPurpose::Catalog,
+            purpose,
             socks,
         )
         .await

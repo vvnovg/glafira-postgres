@@ -136,6 +136,8 @@ pub mod thresholds {
     pub const WAL_DIR_RATIO: (f64, f64) = (2.0, 4.0);
     /// Доля сэмплов `Lock` в окне профиля ожиданий.
     pub const LOCK_SHARE: (f64, f64) = (0.20, 0.50);
+    /// Доля `Lock` оценивается, если в окне не меньше сэмплов.
+    pub const LOCK_SHARE_MIN_SAMPLES: u64 = 30;
     /// Ожидание жертв корневого блокирующего; число жертв, с которого — critical.
     pub const ROOT_BLOCKER_WAIT_S: (f64, f64) = (10.0, 60.0);
     pub const ROOT_BLOCKER_CRIT_VICTIMS: usize = 10;

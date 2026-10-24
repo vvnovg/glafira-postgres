@@ -11,8 +11,10 @@ pub mod replication;
 pub mod sessions;
 pub mod slots;
 pub mod sql;
+pub mod waits;
 
 use futures_util::future::BoxFuture;
+use pg_advisor::ash::WaitsData;
 use pg_advisor::failover::FailoverData;
 use pg_advisor::findings::Finding;
 use pg_advisor::locktree::LocksData;
@@ -93,6 +95,7 @@ pub struct Unavailable {
 pub enum DiagData {
     Pulse(pulse::PulseData),
     Sessions(SessionsData),
+    Waits(WaitsData),
     Locks(LocksData),
     Horizon(HorizonData),
     Replication(ReplicationData),
@@ -253,19 +256,15 @@ pub async fn run(st: &AppState, id: &str, req: DiagRequest) -> AppResult<DiagRep
     match req.tool {
         Tool::Pulse => pulse::report(st, id, &target).await,
         Tool::Sessions => sessions::report(st, id, &target).await,
+        Tool::Waits => {
+            waits::report(st, id, &target, req.window_s.unwrap_or(DEFAULT_WINDOW_S)).await
+        }
         Tool::Locks => locks::report(st, id, &target).await,
         Tool::Horizon => horizon::report(st, id, &target).await,
         Tool::Replication => replication::report(st, id, &target).await,
         Tool::Slots => slots::report(st, id, &target).await,
         Tool::Failover => patroni::failover_report(st, &target).await,
         Tool::Health => patroni::health_report(st, &target).await,
-        // Остальные задачи добавляют свои ветки; до тех пор инструмент недоступен.
-        other => Err(app_err!(
-            ErrorCode::FeatureUnavailable,
-            "errors.diag.notYet",
-            "The tool {{tool}} is not available yet",
-            tool = format!("{other:?}")
-        )),
     }
 }
 
@@ -307,6 +306,25 @@ mod tests {
         let r = serde_json::to_value(DiagData::Replication(ReplicationData::default())).unwrap();
         assert_eq!(r["kind"], "replication");
         assert_eq!(r["inRecovery"], false);
+    }
+
+    #[test]
+    fn waits_data_is_tagged_with_the_tool_id() {
+        let w = serde_json::to_value(DiagData::Waits(WaitsData {
+            window_s: 900,
+            bucket_s: 10,
+            ..Default::default()
+        }))
+        .unwrap();
+        assert_eq!(
+            (&w["kind"], &w["windowS"], &w["bucketS"], &w["topQueries"]),
+            (
+                &"waits".into(),
+                &900.into(),
+                &10.into(),
+                &serde_json::json!([])
+            )
+        );
     }
 
     #[test]

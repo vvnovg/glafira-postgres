@@ -28,13 +28,15 @@ const VALIDATE_AFTER: Duration = Duration::from_secs(30);
 pub enum PoolPurpose {
     Catalog,
     Probe,
+    /// Сэмплер активности — своё соединение, чтобы опрос раз в секунду не ждал страниц каталога.
+    Sampler,
 }
 
 impl PoolPurpose {
     fn max_connections(self) -> usize {
         match self {
             Self::Catalog => MAX_CONNECTIONS,
-            Self::Probe => 1,
+            Self::Probe | Self::Sampler => 1,
         }
     }
 }
@@ -553,6 +555,11 @@ mod tests {
         r.insert_if_absent(probe_key, spec());
         r.evict_connection("c");
         assert!(r.keys().is_empty());
+    }
+
+    #[test]
+    fn sampler_pool_has_a_single_connection() {
+        assert_eq!(PoolPurpose::Sampler.max_connections(), 1);
     }
 
     #[test]

@@ -12,7 +12,9 @@ pub mod net;
 pub mod policy;
 pub mod product;
 pub mod readiness;
+pub mod sampler;
 pub mod secrets;
+pub mod session;
 pub mod settings;
 pub mod state;
 pub mod storage;
@@ -100,6 +102,8 @@ pub fn run() {
             commands::connections::test_connection,
             commands::connections::trust_ssh_host_key,
             commands::diag::run_diagnostic,
+            commands::diag::start_sampler,
+            commands::diag::stop_session,
             commands::folders::list_folders,
             commands::folders::create_folder,
             commands::folders::rename_folder,
@@ -127,7 +131,9 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event
                 && let Some(st) = app.try_state::<AppState>()
             {
-                // Опросы и туннели; процессы ssh завершаются без рантайма — по PID из `tunnels.json`.
+                // Длительные сессии (сэмплеры), затем опросы и туннели; процессы ssh завершаются без рантайма —
+                // по PID из `tunnels.json`.
+                st.sessions.stop_all();
                 st.runtimes.shutdown();
                 st.tunnels.close_all_blocking();
             }

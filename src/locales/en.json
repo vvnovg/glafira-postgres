@@ -181,8 +181,7 @@
     },
     "diag": {
       "patroniOnly": "This tool is available only for Patroni clusters",
-      "badWindow": "The window must be 300, 900 or 3600 seconds",
-      "notYet": "The tool {{tool}} is not available yet"
+      "badWindow": "The window must be 300, 900 or 3600 seconds"
     }
   },
   "connections": {
