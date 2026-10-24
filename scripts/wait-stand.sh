@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Ждёт готовности стенда: все PG принимают соединения, у Patroni есть лидер и две потоковые реплики,
 # реплика без Patroni получила демо-базу и подключилась к primary (потоковая репликация), bastion
-# отвечает баннером SSH.
+# отвечает баннером SSH, подписка лаборатории pg-lab держит свой логический слот.
 set -euo pipefail
 # shellcheck source=scripts/lib-wait.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib-wait.sh"
 
-for c in gp-pg-single gp-pg-primary gp-pg-replica gp-patroni1 gp-patroni2 gp-patroni3; do
+for c in gp-pg-single gp-pg-primary gp-pg-replica gp-pg-lab gp-patroni1 gp-patroni2 gp-patroni3; do
   wait_for docker exec "$c" pg_isready -h localhost -p 5432 -U postgres -q
 done
 
@@ -36,4 +36,10 @@ pair_streaming() {
   [ "${n:-0}" -ge 1 ]
 }
 wait_for pair_streaming
+
+# Подписка лаборатории работает: воркер применения держит слот.
+lab_streaming() {
+  [ "$(docker exec gp-pg-lab psql -U postgres -d orders -tAc "select count(*) from pg_replication_slots where slot_name = 'lab_sub_slot' and active")" = "1" ]
+}
+wait_for bash -c "$(declare -f lab_streaming); lab_streaming"
 echo "stand is ready"

@@ -109,6 +109,34 @@ services:
       - ./sql/init.sql:/docker-entrypoint-initdb.d/20-init.sql:ro
     ports: ["127.0.0.1:5460:5432"]
 
+  # Лаборатория P2: логические слоты, подписка и prepared transactions — на остальных узлах они возможны только
+  # после рестарта с другими параметрами. Подписка — на себя: публикация в orders, подписчик — БД lab_sub.
+  # Init-скрипты запечены в образ (lab/Dockerfile), а не смонтированы: контейнер не зависит от пути рабочей копии.
+  pg-lab:
+    build:
+      context: .
+      dockerfile: lab/Dockerfile
+    image: glafira-pg-dev/lab:16
+    container_name: gp-pg-lab
+    hostname: pg-lab
+    environment:
+      POSTGRES_PASSWORD: postgres-secret
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_prepared_transactions=10
+      - -c
+      - max_replication_slots=10
+      - -c
+      - max_wal_senders=10
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - track_io_timing=on
+    ports: ["127.0.0.1:5470:5432"]
+
   # SSH-бастион для проверки туннеля: имена узлов (pg-single, patroni1…) разрешаются во внутренней сети compose.
   # Ключи tester генерирует dev/ssh/gen-keys.sh (до `up --build`), в репозитории их нет.
   bastion:

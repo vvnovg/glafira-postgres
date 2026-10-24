@@ -2,6 +2,9 @@
 CREATE ROLE glafira_diag LOGIN PASSWORD 'glafira-secret';
 GRANT pg_monitor TO glafira_diag;
 GRANT pg_signal_backend TO glafira_diag;
+-- Роль приложения для сценариев P2 (сессии, блокировки, idle in transaction): не суперпользователь, потому что
+-- pg_signal_backend роли диагностики завершает только такие сессии.
+CREATE ROLE glafira_app LOGIN PASSWORD 'app-secret';
 
 -- pg_stat_statements создаётся только там, где он загружен: pg-single нужен для «красного» чек-листа.
 DO $$
@@ -52,3 +55,6 @@ INSERT INTO shop.customers (email) SELECT 'user' || g || '@example.com' FROM gen
 INSERT INTO shop.orders (customer_id, total) SELECT 1 + g % 100, g FROM generate_series(1, 1000) g;
 REFRESH MATERIALIZED VIEW shop.order_totals;
 ANALYZE;
+GRANT USAGE ON SCHEMA shop TO glafira_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA shop TO glafira_app;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA shop TO glafira_app;

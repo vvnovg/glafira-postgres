@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use glafira_pg_lib::conn::pg::ConnectSpec;
 use glafira_pg_lib::conn::pool::PoolRegistry;
 use glafira_pg_lib::conn::profile::{
     ConnectionKind, ConnectionProfile, Environment, HostOverride, HostPort, PatroniSettings,
@@ -41,6 +42,112 @@ pub fn matrix_addrs() -> Vec<String> {
 pub fn host_port(s: &str) -> (String, u16) {
     let (h, p) = s.trim().rsplit_once(':').expect("host:port");
     (h.to_string(), p.parse().expect("port"))
+}
+
+pub const SUPERUSER: &str = "postgres";
+pub const SUPERUSER_PASSWORD: &str = "postgres-secret";
+pub const APP_USER: &str = "glafira_app";
+pub const APP_PASSWORD: &str = "app-secret";
+
+/// Соединение с узлом стенда под заданной ролью (без TLS), с параметрами сессии продукта (`SESSION_OPTIONS`):
+/// так сборщики диагностики проверяются в тех же условиях, что в приложении. Соединение живёт, пока жив клиент.
+pub async fn connect_as(
+    addr: &str,
+    db: &str,
+    user: &str,
+    password: &str,
+) -> tokio_postgres::Client {
+    let mut p = server_profile("it-as", addr);
+    p.pg.ssl_mode = SslMode::Disable;
+    p.pg.username = user.into();
+    let s = MemoryStore::default();
+    s.set(&secret_key("it-as", PG_PASSWORD), password).unwrap();
+    let (h, port) = host_port(addr);
+    ConnectSpec::build(&p, &h, port, db, &s)
+        .unwrap()
+        .connect()
+        .await
+        .unwrap_or_else(|e| panic!("{addr} {user}: {e:?}"))
+}
+
+/// Сессия для сценариев стенда без ограничений диагностики. `connect_as` открывает соединение с `SESSION_OPTIONS`
+/// продукта (только чтение, `statement_timeout`, `lock_timeout`, `search_path = pg_catalog`, `application_name =
+/// glafira-pg`): под ними нельзя писать и ждать блокировку дольше секунды, а сессия «приложения» не должна
+/// считаться собственной сессией Glafira. Стартовые параметры не сбрасываются через `RESET`, поэтому значения
+/// заданы явно.
+async fn unrestricted(c: tokio_postgres::Client) -> tokio_postgres::Client {
+    c.batch_execute(
+        "SET default_transaction_read_only = off; SET statement_timeout = 0; SET lock_timeout = 0; \
+         SET search_path = \"$user\", public; SET application_name = 'glafira-it'",
+    )
+    .await
+    .unwrap();
+    c
+}
+
+/// Суперпользователь стенда (`postgres`) — сессия без ограничений, см. `unrestricted`.
+pub async fn superuser(addr: &str, db: &str) -> tokio_postgres::Client {
+    unrestricted(connect_as(addr, db, SUPERUSER, SUPERUSER_PASSWORD).await).await
+}
+
+/// Сессия приложения (`glafira_app`) в демо-базе `orders` — без ограничений, см. `unrestricted`.
+pub async fn app(addr: &str) -> tokio_postgres::Client {
+    unrestricted(connect_as(addr, "orders", APP_USER, APP_PASSWORD).await).await
+}
+
+pub fn lab_addr() -> Option<String> {
+    env("GPG_IT_LAB")
+}
+
+/// Узел Patroni, принимающий запись: лидер может быть любым из трёх.
+pub async fn patroni_leader_addr() -> Option<String> {
+    env("GPG_IT_PATRONI")?;
+    for addr in ["localhost:5441", "localhost:5442", "localhost:5443"] {
+        let c = superuser(addr, "postgres").await;
+        let in_recovery: bool = c
+            .query_one("SELECT pg_is_in_recovery()", &[])
+            .await
+            .unwrap()
+            .get(0);
+        if !in_recovery {
+            return Some(addr.to_string());
+        }
+    }
+    None
+}
+
+/// Пишущие узлы стенда, для которых заданы переменные: одиночный, primary пары, лидер Patroni, лаборатория, матрица.
+pub async fn writable_addrs() -> Vec<String> {
+    let mut out: Vec<String> = ["GPG_IT_SINGLE", "GPG_IT_PRIMARY", "GPG_IT_LAB"]
+        .into_iter()
+        .filter_map(env)
+        .collect();
+    out.extend(patroni_leader_addr().await);
+    out.extend(matrix_addrs());
+    out
+}
+
+/// Роль `glafira_app` и её права на схему `shop` — на уже поднятом стенде, созданном до P2 (`init.sql` работает только
+/// при первой инициализации). Идемпотентно; только на пишущем узле.
+pub async fn ensure_fixtures(addr: &str) {
+    let c = superuser(addr, "postgres").await;
+    c.batch_execute(
+        "DO $$ BEGIN \
+           IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'glafira_app') THEN \
+             CREATE ROLE glafira_app LOGIN PASSWORD 'app-secret'; \
+           END IF; \
+         END $$",
+    )
+    .await
+    .unwrap();
+    let o = superuser(addr, "orders").await;
+    o.batch_execute(
+        "GRANT USAGE ON SCHEMA shop TO glafira_app; \
+         GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA shop TO glafira_app; \
+         GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA shop TO glafira_app;",
+    )
+    .await
+    .unwrap();
 }
 
 pub fn server_profile(id: &str, addr: &str) -> ConnectionProfile {
