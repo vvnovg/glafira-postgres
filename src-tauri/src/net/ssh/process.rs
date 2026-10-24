@@ -25,12 +25,13 @@ const LOG_LINES: usize = 20;
 const LOG_TAIL_BYTES: u64 = 64 * 1024;
 /// Ожидание `ssh -V`.
 const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
-/// Одна проба порта SOCKS при ожидании готовности. Короткая, потому что на Windows соединение с портом loopback,
-/// который ещё никто не слушает, отклоняется не сразу, а через ~2 с (стек повторяет SYN после RST); на Linux и
-/// macOS — за микросекунды. Проба, начатая до открытия порта, бросается по сроку, и следующая (через
-/// `PROBE_PAUSE`) уже застаёт слушателя: готовность видна в пределах ~300 мс после открытия порта на любой ОС, а
-/// выход процесса замечается не позже чем через одну пробу.
-const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+/// Одна проба порта SOCKS при ожидании готовности. Ограничена сроком, потому что на Windows соединение с портом
+/// loopback, который ещё никто не слушает, отклоняется не сразу, а через ~2 с (стек повторяет SYN после RST); на
+/// Linux и macOS — за микросекунды. Проба, начатая до открытия порта, бросается по сроку, и следующая (через
+/// `PROBE_PAUSE`) уже застаёт слушателя. Срок не короче секунды: на перегруженном раннере CI (Windows, два ядра)
+/// даже соединение с уже открытым портом завершалось позже 250 мс, и слишком короткая проба отменялась раз за
+/// разом, так что готовность не замечалась вовсе. Выход процесса замечается не позже чем через одну пробу.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(1000);
 /// Пауза между пробами порта SOCKS.
 const PROBE_PAUSE: Duration = Duration::from_millis(50);
 /// Дочитать stderr после выхода процесса: последние строки (причина выхода) нужны для разбора ошибки.
@@ -269,8 +270,13 @@ impl SshChild {
                 self.drain_stderr().await;
                 return Err(code);
             }
-            let probe =
-                tokio::time::timeout(PROBE_TIMEOUT, tokio::net::TcpStream::connect(socks)).await;
+            // Срок пробы не длиннее остатка общего срока: дедлайн соблюдается точно, а не с опозданием на пробу.
+            let left = deadline.saturating_duration_since(Instant::now());
+            let probe = tokio::time::timeout(
+                PROBE_TIMEOUT.min(left).max(Duration::from_millis(10)),
+                tokio::net::TcpStream::connect(socks),
+            )
+            .await;
             if matches!(probe, Ok(Ok(_))) {
                 return Ok(());
             }

@@ -943,11 +943,11 @@ pub(crate) mod tests {
         let echo = echo_server().await;
         let (reg, _) = registry(dir.path(), vec![("FAKE_SSH_UPSTREAM", echo.to_string())]);
         let p = profile(SshAuth::Agent);
-        let socks = reg.open(&p, Duration::from_secs(5)).await.unwrap();
+        let socks = reg.open(&p, Duration::from_secs(10)).await.unwrap();
         assert_eq!(reg.route("c1").unwrap(), Some(socks));
         assert_eq!(reg.route_for(&p).unwrap(), Some(socks));
         // Повторное открытие живого туннеля с теми же настройками — тот же порт, без нового процесса.
-        assert_eq!(reg.open(&p, Duration::from_secs(5)).await.unwrap(), socks);
+        assert_eq!(reg.open(&p, Duration::from_secs(10)).await.unwrap(), socks);
         let mut s = crate::net::ssh::socks::connect(socks, "bastion", "pg-single", 5432)
             .await
             .unwrap();
@@ -1001,7 +1001,7 @@ pub(crate) mod tests {
         let mut p = profile(SshAuth::Agent);
         // Срок с запасом: отказ закрытого порта туннеля (конец теста) на Windows приходит через ~2 с.
         p.pg.connect_timeout_s = 10;
-        let socks = reg.open(&p, Duration::from_secs(5)).await.unwrap();
+        let socks = reg.open(&p, Duration::from_secs(10)).await.unwrap();
         let spec = |mode: SslMode| {
             let mut p = p.clone();
             p.pg.ssl_mode = mode;
@@ -1069,7 +1069,7 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (reg, _) = registry(dir.path(), vec![("FAKE_SSH_MODE", "auth".into())]);
         let e = reg
-            .open(&profile(SshAuth::Password), Duration::from_secs(5))
+            .open(&profile(SshAuth::Password), Duration::from_secs(10))
             .await
             .unwrap_err();
         assert_eq!(
@@ -1107,7 +1107,7 @@ pub(crate) mod tests {
         let p = profile(SshAuth::Agent);
         let opening = tokio::spawn({
             let (reg, p) = (reg.clone(), p.clone());
-            async move { reg.open(&p, Duration::from_secs(5)).await }
+            async move { reg.open(&p, Duration::from_secs(10)).await }
         });
         eventually("PID записан до готовности", || {
             pids(dir.path()) == 1
@@ -1138,7 +1138,7 @@ pub(crate) mod tests {
             ],
         );
         let e = reg
-            .open(&profile(SshAuth::Agent), Duration::from_secs(5))
+            .open(&profile(SshAuth::Agent), Duration::from_secs(10))
             .await
             .unwrap_err();
         assert_eq!(e.key, "errors.ssh.hostKeyUnknown");
@@ -1151,7 +1151,7 @@ pub(crate) mod tests {
             "отчёт askpass прочитан и удалён"
         );
         reg.trust("bastion", "SHA256:fake");
-        reg.open(&profile(SshAuth::Agent), Duration::from_secs(5))
+        reg.open(&profile(SshAuth::Agent), Duration::from_secs(10))
             .await
             .unwrap();
         reg.close("c1");
@@ -1172,7 +1172,7 @@ pub(crate) mod tests {
                 ("FAKE_SSH_UPSTREAM", echo.to_string()),
             ],
         );
-        reg.open(&profile(SshAuth::Agent), Duration::from_secs(5))
+        reg.open(&profile(SshAuth::Agent), Duration::from_secs(10))
             .await
             .unwrap();
         assert!(
@@ -1194,7 +1194,7 @@ pub(crate) mod tests {
             ],
         );
         let first = reg
-            .open(&profile(SshAuth::Agent), Duration::from_secs(5))
+            .open(&profile(SshAuth::Agent), Duration::from_secs(10))
             .await
             .unwrap();
         pools.insert_if_absent(
@@ -1262,7 +1262,7 @@ pub(crate) mod tests {
         // Пауза перед перезапуском в тестах — 50 мс; ждём втрое-вшестеро дольше.
         let quiet = Duration::from_millis(300);
         let p = profile(SshAuth::Agent);
-        reg.open(&p, Duration::from_secs(5)).await.unwrap();
+        reg.open(&p, Duration::from_secs(10)).await.unwrap();
         // Процесс умер; первый перезапуск отклонён — и всё.
         eventually(
             "отказ во входе при перезапуске",
@@ -1279,7 +1279,7 @@ pub(crate) mod tests {
         assert_eq!(runs(&log), 2, "открытие и один перезапуск");
         // «Переподключить» — ровно одна попытка, и снова стоянка.
         let e = reg
-            .restart_if_down(&p, Duration::from_secs(5))
+            .restart_if_down(&p, Duration::from_secs(10))
             .await
             .unwrap_err();
         assert_eq!(e.params["kind"], "authFailed");
@@ -1311,11 +1311,11 @@ pub(crate) mod tests {
         // Время от запуска: порт открыт ~0,5 с, проба готовности сразу за ним, падение через `DIE_MS` после пробы
         // (~2 с), пауза 1,5 с — перезапуск ~3,5 с, он готов ~4 с; второе падение ~5,5 с, проверка ~6,1 с, следующий
         // перезапуск — не раньше ~7 с.
-        reg.open(&p, Duration::from_secs(5)).await.unwrap();
+        reg.open(&p, Duration::from_secs(10)).await.unwrap();
         // Первое падение, пауза, перезапуск запущен и ещё входит (готовность через 500 мс): тут «Переподключить».
         eventually("перезапуск идёт", || runs(&log) == 2).await;
         assert!(down(&reg).is_some(), "статус — прежний Down");
-        reg.restart_if_down(&p, Duration::from_secs(5))
+        reg.restart_if_down(&p, Duration::from_secs(10))
             .await
             .unwrap();
         // Второе падение: пауза 1,5 с выдерживается, перезапуск не начинается сразу (запас 900 мс — на медленный
@@ -1336,7 +1336,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&logs).unwrap();
         std::fs::write(logs.join("ssh-c1.log"), "old run\n").unwrap();
         let (reg, _) = registry(dir.path(), vec![("FAKE_SSH_UPSTREAM", echo.to_string())]);
-        reg.open(&profile(SshAuth::Agent), Duration::from_secs(5))
+        reg.open(&profile(SshAuth::Agent), Duration::from_secs(10))
             .await
             .unwrap();
         reg.close("c1");
@@ -1366,8 +1366,8 @@ pub(crate) mod tests {
             |cfg| cfg.backoff = vec![Duration::from_secs(60)],
         );
         let p = profile(SshAuth::Agent);
-        let first = reg.open(&p, Duration::from_secs(5)).await.unwrap();
-        reg.restart_if_down(&p, Duration::from_secs(5))
+        let first = reg.open(&p, Duration::from_secs(10)).await.unwrap();
+        reg.restart_if_down(&p, Duration::from_secs(10))
             .await
             .unwrap();
         assert_eq!(reg.route("c1").unwrap(), Some(first), "живой не тронут");
@@ -1375,7 +1375,7 @@ pub(crate) mod tests {
             matches!(reg.status("c1"), Some(TunnelStatus::Down { .. }))
         })
         .await;
-        reg.restart_if_down(&p, Duration::from_secs(5))
+        reg.restart_if_down(&p, Duration::from_secs(10))
             .await
             .unwrap();
         assert!(matches!(reg.status("c1"), Some(TunnelStatus::Up { .. })));
@@ -1402,14 +1402,14 @@ pub(crate) mod tests {
             |cfg| cfg.backoff = vec![Duration::from_secs(60)],
         );
         let p = profile(SshAuth::Agent);
-        reg.open(&p, Duration::from_secs(5)).await.unwrap();
+        reg.open(&p, Duration::from_secs(10)).await.unwrap();
         std::fs::write(&refuse, "1").unwrap();
         eventually("падение", || {
             matches!(reg.status("c1"), Some(TunnelStatus::Down { .. }))
         })
         .await;
         let e = reg
-            .restart_if_down(&p, Duration::from_secs(5))
+            .restart_if_down(&p, Duration::from_secs(10))
             .await
             .unwrap_err();
         assert_eq!(e.key, "errors.ssh.authFailed");
@@ -1418,7 +1418,7 @@ pub(crate) mod tests {
             Some(TunnelStatus::Down { attempt: 1, .. })
         ));
         std::fs::remove_file(&refuse).unwrap();
-        reg.restart_if_down(&p, Duration::from_secs(5))
+        reg.restart_if_down(&p, Duration::from_secs(10))
             .await
             .unwrap();
         assert!(matches!(reg.status("c1"), Some(TunnelStatus::Up { .. })));
@@ -1437,24 +1437,24 @@ pub(crate) mod tests {
             ],
         );
         let e = reg
-            .open(&profile(SshAuth::Password), Duration::from_secs(5))
+            .open(&profile(SshAuth::Password), Duration::from_secs(10))
             .await
             .unwrap_err();
         assert_eq!(
             (e.code, e.key.as_str()),
             (ErrorCode::FeatureUnavailable, "errors.ssh.tooOld")
         );
-        reg.open(&profile(SshAuth::Agent), Duration::from_secs(5))
+        reg.open(&profile(SshAuth::Agent), Duration::from_secs(10))
             .await
             .unwrap();
         // Ключ без пассфразы работает на любой версии; с пассфразой нужен askpass — OpenSSH 8.4+.
-        reg.open(&profile(SshAuth::Key), Duration::from_secs(5))
+        reg.open(&profile(SshAuth::Key), Duration::from_secs(10))
             .await
             .unwrap();
         reg.close("c1");
         reg.stage_secret("c1", SSH_PASSPHRASE, "pp").unwrap();
         let e = reg
-            .open(&profile(SshAuth::Key), Duration::from_secs(5))
+            .open(&profile(SshAuth::Key), Duration::from_secs(10))
             .await
             .unwrap_err();
         assert_eq!(e.key, "errors.ssh.tooOld");
@@ -1581,7 +1581,7 @@ pub(crate) mod tests {
         let echo = echo_server().await;
         let (reg, _) = registry(dir.path(), vec![("FAKE_SSH_UPSTREAM", echo.to_string())]);
         let socks = reg
-            .open(&profile(SshAuth::Agent), Duration::from_secs(5))
+            .open(&profile(SshAuth::Agent), Duration::from_secs(10))
             .await
             .unwrap();
         assert_eq!(reg.close_all_blocking(), 1);
