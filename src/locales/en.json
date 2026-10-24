@@ -751,7 +751,8 @@
   "diag": {
     "unavailable": {
       "version": "{{part}}: PostgreSQL {{version}}+",
-      "privilege": "{{part}}: needs the pg_monitor role"
+      "privilege": "{{part}}: needs the pg_monitor role",
+      "patroniConfig": "{{part}}: the Patroni configuration could not be read"
     }
   },
   "hints": {

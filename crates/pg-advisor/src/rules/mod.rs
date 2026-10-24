@@ -6,3 +6,4 @@ pub mod patroni;
 pub mod pulse;
 pub mod replication;
 pub mod sessions;
+pub mod slots;

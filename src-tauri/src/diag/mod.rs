@@ -9,6 +9,7 @@ pub mod patroni;
 pub mod pulse;
 pub mod replication;
 pub mod sessions;
+pub mod slots;
 pub mod sql;
 
 use futures_util::future::BoxFuture;
@@ -18,6 +19,7 @@ use pg_advisor::locktree::LocksData;
 use pg_advisor::rules::horizon::HorizonData;
 use pg_advisor::rules::replication::ReplicationData;
 use pg_advisor::rules::sessions::SessionsData;
+use pg_advisor::rules::slots::SlotsData;
 use serde::{Deserialize, Serialize};
 use tokio_postgres::Client;
 
@@ -94,6 +96,7 @@ pub enum DiagData {
     Locks(LocksData),
     Horizon(HorizonData),
     Replication(ReplicationData),
+    Slots(SlotsData),
     Failover(FailoverData),
     Health(patroni::HealthData),
 }
@@ -253,6 +256,7 @@ pub async fn run(st: &AppState, id: &str, req: DiagRequest) -> AppResult<DiagRep
         Tool::Locks => locks::report(st, id, &target).await,
         Tool::Horizon => horizon::report(st, id, &target).await,
         Tool::Replication => replication::report(st, id, &target).await,
+        Tool::Slots => slots::report(st, id, &target).await,
         Tool::Failover => patroni::failover_report(st, &target).await,
         Tool::Health => patroni::health_report(st, &target).await,
         // Остальные задачи добавляют свои ветки; до тех пор инструмент недоступен.
@@ -303,6 +307,29 @@ mod tests {
         let r = serde_json::to_value(DiagData::Replication(ReplicationData::default())).unwrap();
         assert_eq!(r["kind"], "replication");
         assert_eq!(r["inRecovery"], false);
+    }
+
+    #[test]
+    fn slots_data_is_tagged_with_the_tool_id() {
+        use pg_advisor::rules::slots::{PatroniSlot, Slot};
+        let d = SlotsData {
+            slots: vec![Slot {
+                name: "patroni2".into(),
+                slot_type: "physical".into(),
+                patroni: Some(PatroniSlot::Member),
+                ..Default::default()
+            }],
+            max_slot_wal_keep_size_mb: Some(-1),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(DiagData::Slots(d)).unwrap();
+        assert_eq!(v["kind"], "slots");
+        assert_eq!(v["maxSlotWalKeepSizeMb"], -1);
+        assert_eq!(
+            (&v["slots"][0]["slotType"], &v["slots"][0]["patroni"]),
+            (&"physical".into(), &"member".into())
+        );
+        assert_eq!(v["subscriptionErrorsGrowth"], serde_json::Value::Null);
     }
 
     #[test]

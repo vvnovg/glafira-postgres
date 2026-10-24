@@ -12,6 +12,7 @@ use glafira_pg_lib::diag::caps::Caps;
 use glafira_pg_lib::diag::{self, DiagData, DiagRequest, Tool};
 use glafira_pg_lib::topology::model::Topology;
 use pg_advisor::rules::horizon::HolderKind;
+use pg_advisor::rules::slots::PatroniSlot;
 
 fn req(tool: Tool) -> DiagRequest {
     DiagRequest {
@@ -979,4 +980,110 @@ async fn follow_leader_moves_to_the_new_leader_after_switchover() {
         );
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+}
+
+#[tokio::test]
+async fn slots_sql_runs_on_every_version() {
+    for addr in sql_addrs() {
+        let c = common::connect_as(
+            &addr,
+            "postgres",
+            common::PG_USER,
+            common::PG_PASSWORD_VALUE,
+        )
+        .await;
+        let h = diag::head(&c).await.unwrap();
+        diag::slots::collect(&c, Caps::new(h.version_num))
+            .await
+            .unwrap_or_else(|e| panic!("{addr}: {e:?}"));
+    }
+}
+
+/// Мёртвый физический слот держит WAL, активный слот реплики стенда (`replica1`) остаётся нетронутым. Слот удаляется
+/// при любом выходе (и до теста — на случай остатка от прерванного прогона); «уже нет» — не ошибка, а `replica1` запрос
+/// не касается: он выбирает слот только по имени `it_dead_slot`.
+#[tokio::test]
+async fn dead_slot_retains_wal_and_the_active_one_does_not_count() {
+    let Some(primary) = common::env("GPG_IT_PRIMARY") else {
+        return;
+    };
+    const DROP_SQL: &str = "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = 'it_dead_slot'";
+    let _drop = common::restore_on_drop({
+        let primary = primary.clone();
+        move || common::run_sql_blocking(&primary, "postgres", DROP_SQL)
+    });
+    let su = common::superuser(&primary, "postgres").await;
+    su.batch_execute(DROP_SQL).await.unwrap();
+    su.batch_execute("SELECT pg_create_physical_replication_slot('it_dead_slot', true)")
+        .await
+        .unwrap();
+    su.batch_execute(
+        "CREATE TABLE IF NOT EXISTS it_wal (x int); INSERT INTO it_wal SELECT generate_series(1, 100000); SELECT pg_switch_wal(); DROP TABLE it_wal;",
+    )
+    .await
+    .unwrap();
+    let (_dir, st) = open_server(&primary).await;
+    let DiagData::Slots(d) = diag::run(&st, "it", req(Tool::Slots)).await.unwrap().data else {
+        panic!()
+    };
+    let dead = d.slots.iter().find(|s| s.name == "it_dead_slot").unwrap();
+    assert!(!dead.active && dead.retained_bytes.unwrap_or(0) > 0);
+    assert!(d.slots.iter().any(|s| s.name == "replica1" && s.active));
+}
+
+#[tokio::test]
+async fn patroni_member_slots_are_marked_and_lab_subscription_is_seen() {
+    if let Some((_dir, st)) = common::open_patroni().await {
+        let DiagData::Slots(d) = diag::run(&st, "it", req(Tool::Slots)).await.unwrap().data else {
+            panic!()
+        };
+        assert!(
+            d.slots
+                .iter()
+                .filter(|s| s.name.starts_with("patroni"))
+                .all(|s| s.patroni == Some(PatroniSlot::Member)),
+            "{:?}",
+            d.slots
+        );
+        assert!(
+            d.slots
+                .iter()
+                .any(|s| s.patroni == Some(PatroniSlot::Member)),
+            "у лидера есть слоты реплик"
+        );
+    }
+    if let Some(lab) = common::lab_addr() {
+        let (_dir, st) = open_server(&lab).await;
+        let DiagData::Slots(d) = diag::run(&st, "it", req(Tool::Slots)).await.unwrap().data else {
+            panic!()
+        };
+        assert!(d.slots.iter().any(|s| s.name == "lab_sub_slot"
+            && s.slot_type == "logical"
+            && s.plugin.as_deref() == Some("pgoutput")));
+        assert!(
+            d.subscriptions
+                .iter()
+                .any(|s| s.name == "lab_sub" && s.pid.is_some())
+        );
+    }
+}
+
+/// Рост ошибок подписок — по двум отчётам одного узла: первый роста не знает, второй видит прирост (у спокойной
+/// подписки лаборатории — ноль, `pg-lab` — PostgreSQL 16, статистика подписок есть).
+#[tokio::test]
+async fn subscription_error_growth_appears_with_the_second_report() {
+    let Some(lab) = common::lab_addr() else {
+        return;
+    };
+    let (_dir, st) = open_server(&lab).await;
+    let growth = |r: diag::DiagReport| match r.data {
+        DiagData::Slots(d) => (d.subscription_errors_growth, d.max_slot_wal_keep_size_mb),
+        other => panic!("{other:?}"),
+    };
+    let first = diag::run(&st, "it", req(Tool::Slots)).await.unwrap();
+    assert_eq!(growth(first), (None, Some(-1)));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let second = diag::run(&st, "it", req(Tool::Slots)).await.unwrap();
+    assert!(second.findings.is_empty(), "{:?}", second.findings);
+    assert_eq!(growth(second), (Some(0), Some(-1)));
 }
