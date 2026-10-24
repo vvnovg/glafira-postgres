@@ -442,6 +442,7 @@
     "nodeOk": "{{role}}, PostgreSQL {{version}}",
     "patroniNotUsed": "Not used: this is not a Patroni cluster",
     "sshOk": "OpenSSH {{version}}, tunnel is up",
+    "sshOkNoVersion": "Tunnel is up",
     "sshNotUsed": "Not used: direct connection",
     "readinessNoNode": "Not checked: no node accepted the connection",
     "readinessTitle": "Readiness for diagnostics",

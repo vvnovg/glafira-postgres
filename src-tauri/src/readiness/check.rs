@@ -100,7 +100,8 @@ async fn bounded<T>(limit: Duration, query: impl Future<Output = AppResult<T>>) 
 }
 
 /// Туннель проверки закрывается, а секрет, положенный для askpass, снимается на любом выходе из проверки
-/// (и при её отмене).
+/// (и при её отмене). Если приложение упадёт посреди проверки, секрет снимет следующий запуск: id туннеля
+/// записан в `staged-secrets.json` (`TunnelRegistry::stage_secret`).
 struct TunnelGuard {
     tunnels: Arc<TunnelRegistry>,
     id: String,
@@ -264,21 +265,22 @@ pub async fn run(
         match opened {
             Ok(addr) => {
                 socks = Some(addr);
-                let version = tunnels
-                    .openssh_version()
-                    .await
-                    .map(|(a, b)| format!("{a}.{b}"))
-                    .unwrap_or_default();
+                // Версию узнать не удалось (`ssh -V` молчит или отвечает не по-OpenSSH) — только о туннеле, без
+                // пустого места под версию.
+                let message = match tunnels.openssh_version().await {
+                    Ok((major, minor)) => ltext!(
+                        "test.sshOk",
+                        "OpenSSH {{version}}, tunnel is up",
+                        version = format!("{major}.{minor}")
+                    ),
+                    Err(_) => ltext!("test.sshOkNoVersion", "Tunnel is up"),
+                };
                 event(
                     emit,
                     TestStep::Ssh,
                     None,
                     StepStatus::Ok,
-                    Some(ltext!(
-                        "test.sshOk",
-                        "OpenSSH {{version}}, tunnel is up",
-                        version = version
-                    )),
+                    Some(message),
                     None,
                 );
             }
@@ -734,6 +736,41 @@ mod tests {
             "записи сохранённого подключения не трогались"
         );
         tunnels.close("c1");
+    }
+
+    /// Версию OpenSSH узнать не удалось, а туннель поднялся: шаг SSH говорит только о туннеле, без пустой версии.
+    #[tokio::test]
+    async fn ssh_step_without_a_known_version_says_only_that_the_tunnel_is_up() {
+        use crate::net::ssh::tunnel::tests::{closed_port, profile as ssh_profile, registry};
+        let dir = tempfile::tempdir().unwrap();
+        let (tunnels, _) = registry(
+            dir.path(),
+            vec![
+                ("FAKE_SSH_VERSION", "not an OpenSSH client".into()),
+                ("FAKE_SSH_UPSTREAM", format!("127.0.0.1:{}", closed_port())),
+            ],
+        );
+        let mut profile = ssh_profile(SshAuth::Agent);
+        profile.pg.ssl_mode = SslMode::Disable;
+        let events = std::sync::Mutex::new(Vec::new());
+        let emit = |e: TestEvent| events.lock().unwrap().push(e);
+        run(
+            profile,
+            Arc::new(MemoryStore::default()),
+            tunnels.clone(),
+            &emit,
+        )
+        .await
+        .unwrap();
+        let events = events.into_inner().unwrap();
+        let ok = events
+            .iter()
+            .find(|e| e.step == TestStep::Ssh && e.status == StepStatus::Ok)
+            .and_then(|e| e.message.clone())
+            .expect("туннель поднят");
+        assert_eq!(ok.key, "test.sshOkNoVersion");
+        assert!(ok.params.is_empty(), "{ok:?}");
+        assert!(tunnels.open_ids().is_empty());
     }
 
     /// Туннель не поднялся — проверка останавливается на шаге SSH с его ошибкой.

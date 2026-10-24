@@ -3,7 +3,11 @@
 //! `FAKE_SSH_UPSTREAM=host:port` — куда идут все CONNECT (иначе — к запрошенному адресу);
 //! `FAKE_SSH_DIE_MS=N` — завершиться с кодом 255 через N мс после готовности; `FAKE_SSH_VERSION` — ответ на `-V`;
 //! `FAKE_SSH_BIND_FAIL_ONCE=<файл-маркер>` — первый запуск падает «Address already in use»;
-//! `FAKE_SSH_AUTH_FAIL_IF=<файл>` — пока файл есть, вход отклоняется (как `auth`): перезапуски туннеля не удаются.
+//! `FAKE_SSH_AUTH_FAIL_IF=<файл>` — пока файл есть, вход отклоняется (как `auth`): перезапуски туннеля не удаются;
+//! `FAKE_SSH_AUTH_AFTER_MARKER=<файл-маркер>` — первый запуск создаёт маркер и работает, следующие (маркер есть)
+//! отклоняются, как `auth` (пароль сменили, пока туннель был поднят);
+//! `FAKE_SSH_READY_DELAY_MS=N` — порт SOCKS открывается через N мс после запуска (вход на бастион идёт долго);
+//! `FAKE_SSH_RUNS=<файл>` — каждый запуск (кроме `-V`) дописывает строку: тесты считают попытки входа.
 //! Режим `hostkey`: отпечаток `SHA256:fake`; с `GLAFIRA_ASKPASS_TRUST=SHA256:fake` ведёт себя как `ok`, иначе пишет
 //! запрос в `GLAFIRA_ASKPASS_REPORT` и падает «Host key verification failed.» — как настоящий ssh после ответа
 //! askpass «no».
@@ -29,8 +33,26 @@ fn main() {
         .find(|w| w[0] == "-D")
         .map(|w| w[1].clone())
         .expect("-D 127.0.0.1:port");
-    let refuse =
-        std::env::var("FAKE_SSH_AUTH_FAIL_IF").is_ok_and(|f| std::path::Path::new(&f).exists());
+    if let Ok(runs) = std::env::var("FAKE_SSH_RUNS") {
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(runs)
+            .unwrap();
+        f.write_all(b"run\n").unwrap();
+    }
+    // Первый запуск создаёт маркер и работает; следующие видят маркер — вход отклонён.
+    let refused_after_first = std::env::var("FAKE_SSH_AUTH_AFTER_MARKER").is_ok_and(|f| {
+        let marker = std::path::Path::new(&f);
+        if marker.exists() {
+            true
+        } else {
+            std::fs::write(marker, b"1").unwrap();
+            false
+        }
+    });
+    let refuse = refused_after_first
+        || std::env::var("FAKE_SSH_AUTH_FAIL_IF").is_ok_and(|f| std::path::Path::new(&f).exists());
     let mode = if refuse {
         "auth".to_string()
     } else {
@@ -61,6 +83,9 @@ fn main() {
         );
         eprintln!("Could not request local forwarding.");
         std::process::exit(255);
+    }
+    if let Ok(ms) = std::env::var("FAKE_SSH_READY_DELAY_MS") {
+        std::thread::sleep(std::time::Duration::from_millis(ms.parse().unwrap()));
     }
     let listener = TcpListener::bind(&socks).expect("bind -D port");
     if let Ok(ms) = std::env::var("FAKE_SSH_DIE_MS") {

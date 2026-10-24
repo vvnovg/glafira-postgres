@@ -67,7 +67,8 @@ pub fn run() {
                 .set_sink(Arc::new(crate::commands::topology::TauriSink(
                     app.handle().clone(),
                 )));
-            // Сироты прошлого запуска (`ps`/PowerShell на каждый PID) — в фоне; первый туннель дождётся уборки.
+            // Сироты прошлого запуска (`ps`/PowerShell на каждый PID), логи и секреты его проверок подключения
+            // (keychain) — в фоне; первый туннель и первый секрет проверки дождутся уборки.
             let tunnels = st.tunnels.clone();
             tauri::async_runtime::spawn_blocking(move || {
                 tracing::info!(reaped = tunnels.reap_orphans(), "ssh orphans");

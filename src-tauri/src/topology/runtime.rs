@@ -600,10 +600,16 @@ impl Runtimes {
             self.pools.evict_connection(&id);
             self.source.forget(&id);
         }
-        // Упавший туннель поднимается сразу, не дожидаясь паузы супервизора; живой не трогается.
-        self.tunnels
+        // Упавший туннель поднимается сразу, не дожидаясь паузы супервизора; живой не трогается. Неудача
+        // перезапуска переподключение не обрывает: опрос ниже упрётся в ту же ошибку туннеля (маршрута нет) и
+        // оставит подключение `degraded` с ней, а итог объявится — как у любого неудачного опроса.
+        if let Err(e) = self
+            .tunnels
             .restart_if_down(&profile, tunnel_timeout(&profile))
-            .await?;
+            .await
+        {
+            tracing::warn!(connection = %id, "ssh tunnel restart on reconnect failed: {}", e.message);
+        }
         if !self.observe_entry(&id, generation, true).await {
             return Err(not_connected());
         }
@@ -716,6 +722,8 @@ mod tests {
         /// Выполняется, когда ответ готов: так опрос, не успевший закончиться до закрытия, заново
         /// создаёт то, что закрытие убрало (пул узла).
         on_finish: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+        /// Туннели, как у `LiveSource`: опрос профиля с ssh начинается с маршрута, упавший туннель — его ошибка.
+        tunnels: Mutex<Option<Arc<TunnelRegistry>>>,
     }
 
     impl Scripted {
@@ -731,6 +739,7 @@ mod tests {
                 delay: Mutex::new(delay),
                 log: Mutex::new(Vec::new()),
                 on_finish: Mutex::new(None),
+                tunnels: Mutex::new(None),
             })
         }
 
@@ -751,10 +760,14 @@ mod tests {
     impl TopologySource for Scripted {
         fn observe<'a>(
             &'a self,
-            _p: &'a ConnectionProfile,
+            p: &'a ConnectionProfile,
             _prev: Option<&'a Topology>,
         ) -> BoxFuture<'a, AppResult<Topology>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            let tunnels = self.tunnels.lock_safe().clone();
+            if let Some(Err(e)) = tunnels.map(|t| t.route_for(p)) {
+                return Box::pin(async move { Err(e) });
+            }
             let next = self.answers.lock_safe().pop_front();
             let r = match next {
                 Some(r) => {
@@ -1936,6 +1949,7 @@ mod tests {
     ) {
         let (tunnels, pools) = crate::net::ssh::tunnel::tests::registry(dir, env);
         let src = Scripted::new(answers);
+        *src.tunnels.lock_safe() = Some(tunnels.clone());
         let rt =
             Runtimes::with_interval(src.clone(), pools, tunnels.clone(), Duration::from_secs(60));
         let rec = Arc::new(Recorder::default());
@@ -1985,6 +1999,43 @@ mod tests {
         ));
         rt.disconnect("c1");
         assert_eq!(tunnels.status("c1"), None);
+        rt.shutdown();
+    }
+
+    /// «Переподключить», когда туннель не поднимается (вход на бастион отклонён после смены пароля): подключение
+    /// остаётся открытым, но `degraded` с ошибкой туннеля, и итог объявлен — как у любого неудачного опроса
+    /// переподключения.
+    #[tokio::test]
+    async fn reconnect_with_a_tunnel_that_cannot_restart_degrades_the_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let refuse = dir.path().join("refuse");
+        let (rt, _src, rec, tunnels) = with_fake_ssh(
+            dir.path(),
+            vec![
+                ("FAKE_SSH_DIE_MS", "300".into()),
+                (
+                    "FAKE_SSH_AUTH_FAIL_IF",
+                    refuse.to_string_lossy().into_owned(),
+                ),
+            ],
+            vec![Ok(two("a"))],
+        );
+        rt.connect(ssh_profile()).await.unwrap();
+        assert_eq!(rt.view("c1").state, ConnState::Connected);
+        std::fs::write(&refuse, "1").unwrap();
+        eventually("туннель упал", || {
+            matches!(
+                tunnels.status("c1"),
+                Some(crate::net::ssh::tunnel::TunnelStatus::Down { .. })
+            )
+        })
+        .await;
+        let states = rec.states.lock_safe().len();
+        let view = rt.reconnect(ssh_profile()).await.unwrap();
+        assert_eq!(view.state, ConnState::Degraded);
+        assert_eq!(view.error.unwrap().key, "errors.ssh.authFailed");
+        assert_eq!(rec.states.lock_safe()[states..], [ConnState::Degraded]);
+        assert_eq!(rt.view("c1").state, ConnState::Degraded);
         rt.shutdown();
     }
 

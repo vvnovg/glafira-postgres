@@ -458,6 +458,7 @@
     "nodeOk": "{{role}}, PostgreSQL {{version}}",
     "patroniNotUsed": "Не используется: это не кластер Patroni",
     "sshOk": "OpenSSH {{version}}, туннель поднят",
+    "sshOkNoVersion": "Туннель поднят",
     "sshNotUsed": "Не используется: прямое подключение",
     "readinessNoNode": "Не проверялась: ни один узел не принял подключение",
     "readinessTitle": "Готовность к диагностике",

@@ -36,7 +36,7 @@ fn write(dir: &Path, r: &Registry) -> std::io::Result<()> {
     crate::storage::fs::write_private(&dir.join(FILE), &data)
 }
 
-/// Запоминает процесс ssh туннеля (после готовности).
+/// Запоминает процесс ssh туннеля — сразу после запуска, ещё до готовности порта SOCKS.
 pub fn register(dir: &Path, pid: u32, log: &Path) -> std::io::Result<()> {
     let _g = LOCK.lock_safe();
     let mut r = read(dir);
