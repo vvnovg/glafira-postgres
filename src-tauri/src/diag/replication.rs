@@ -11,7 +11,10 @@ use tokio_postgres::Client;
 
 use crate::conn::errors::from_pg;
 use crate::diag::caps::{Caps, V14, V16};
-use crate::diag::{DiagData, DiagReport, Tool, head, make_report, on_member, sender_member};
+use crate::diag::{
+    DiagData, DiagReport, Tool, head, make_report, needs_monitor, on_member, reads_all_stats,
+    sender_member,
+};
 use crate::error::AppResult;
 use crate::state::AppState;
 use crate::topology::model::Topology;
@@ -97,8 +100,11 @@ pub async fn collect(
     topology: &Topology,
 ) -> AppResult<(ReplicationData, Option<CounterSnapshot>)> {
     let pg = |e: tokio_postgres::Error| from_pg(&e);
+    // Право читается раз за сбор: без `pg_read_all_stats` сервер отдаёт у приёмника и отправителей пустые состояние и
+    // LSN, и правила их не оценивают.
     let mut d = ReplicationData {
         in_recovery,
+        details_hidden: !reads_all_stats(c).await?,
         ..Default::default()
     };
     // Отправители есть и у каскадной реплики.
@@ -196,7 +202,7 @@ pub async fn report(st: &AppState, id: &str, target: &DiagTarget) -> AppResult<D
     }
     let findings = rules::evaluate(member, &data);
     let caps = Caps::new(h.version_num);
-    let unavailable = if h.in_recovery {
+    let mut unavailable: Vec<_> = if h.in_recovery {
         [
             caps.missing(V14, "replayPauseState"),
             caps.missing(V16, "conflictActiveLogicalSlot"),
@@ -207,6 +213,9 @@ pub async fn report(st: &AppState, id: &str, target: &DiagTarget) -> AppResult<D
     } else {
         Vec::new()
     };
+    if data.details_hidden {
+        unavailable.push(needs_monitor("replicationDetails"));
+    }
     Ok(make_report(
         Tool::Replication,
         target,

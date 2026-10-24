@@ -7,23 +7,30 @@ use tokio_postgres::Client;
 use crate::conn::errors::from_pg;
 use crate::diag::caps::{Caps, V17};
 use crate::diag::{
-    DiagData, DiagReport, Tool, head, make_report, on_member, sender_member, sql::BACKEND_START_US,
+    DiagData, DiagReport, Tool, head, make_report, needs_monitor, on_member, reads_all_stats,
+    sender_member, sql::BACKEND_START_US,
 };
 use crate::error::AppResult;
 use crate::state::AppState;
 use crate::topology::model::Topology;
 use crate::topology::runtime::DiagTarget;
 
-/// Сессии с `backend_xmin` или назначенным XID, кроме самой диагностики и отправителей WAL (их xmin — обратная связь
-/// реплики, она читается из `pg_stat_replication`). Колонки: 0 pid, 1 `backend_start`, 2 пользователь, 3 приложение,
-/// 4 БД, 5 состояние, 6 возраст xmin или XID (больший), 7 возраст транзакции в секундах.
+/// Сессии с `backend_xmin` или назначенным XID, кроме самой диагностики, отправителей WAL (их xmin — обратная связь
+/// реплики, она читается из `pg_stat_replication`) и VACUUM. Ленивый VACUUM, ручной и autovacuum, помечен
+/// `PROC_IN_VACUUM`: его xmin не удерживает горизонт других процессов, и показывать его держателем — ложная находка.
+/// Autovacuum отсекается по типу процесса, ручной VACUUM — по строке в `pg_stat_progress_vacuum` (там же, где его
+/// видит сервер; `VACUUM FULL` в нём нет — он обычная транзакция и горизонт держит). Колонки: 0 pid,
+/// 1 `backend_start`, 2 пользователь, 3 приложение, 4 БД, 5 состояние, 6 возраст xmin или XID (больший),
+/// 7 возраст транзакции в секундах.
 pub fn sessions_sql() -> String {
     format!(
         "SELECT a.pid, {BACKEND_START_US}, a.usename::text, a.application_name, a.datname::text, a.state, \
                 GREATEST(age(a.backend_xmin), age(a.backend_xid))::bigint, extract(epoch FROM now() - a.xact_start)::float8 \
          FROM pg_stat_activity a \
          WHERE (a.backend_xmin IS NOT NULL OR a.backend_xid IS NOT NULL) AND a.pid <> pg_backend_pid() \
-           AND a.backend_type IS DISTINCT FROM 'walsender'"
+           AND a.backend_type IS DISTINCT FROM 'walsender' \
+           AND a.backend_type IS DISTINCT FROM 'autovacuum worker' \
+           AND NOT EXISTS (SELECT 1 FROM pg_stat_progress_vacuum p WHERE p.pid = a.pid)"
     )
 }
 
@@ -32,16 +39,19 @@ pub const PREPARED_SQL: &str = "SELECT gid, owner::text, database::text, age(tra
     extract(epoch FROM now() - prepared)::float8 FROM pg_prepared_xacts";
 
 /// Слоты с xmin или `catalog_xmin`: 0 имя, 1 вид, 2 активен, 3 возраст xmin, 4 возраст `catalog_xmin`, 5 сколько
-/// неактивен, секунд (`inactive_since` — PostgreSQL 17+).
+/// неактивен, секунд (`inactive_since` — PostgreSQL 17+), 6–7 `application_name` и адрес отправителя WAL, который
+/// сейчас держит слот (у физического слота реплики это сама реплика; у неактивного слота пусто).
 pub fn slots_sql(caps: Caps) -> String {
     let inactive = caps.col(
         V17,
-        "extract(epoch FROM now() - inactive_since)::float8",
+        "extract(epoch FROM now() - s.inactive_since)::float8",
         "float8",
     );
     format!(
-        "SELECT slot_name::text, slot_type, active, age(xmin)::bigint, age(catalog_xmin)::bigint, {inactive} \
-         FROM pg_replication_slots WHERE xmin IS NOT NULL OR catalog_xmin IS NOT NULL"
+        "SELECT s.slot_name::text, s.slot_type, s.active, age(s.xmin)::bigint, age(s.catalog_xmin)::bigint, {inactive}, \
+                r.application_name, host(r.client_addr) \
+         FROM pg_replication_slots s LEFT JOIN pg_stat_replication r ON r.pid = s.active_pid \
+         WHERE s.xmin IS NOT NULL OR s.catalog_xmin IS NOT NULL"
     )
 }
 
@@ -53,29 +63,38 @@ pub const FEEDBACK_SQL: &str = "SELECT application_name, host(client_addr), age(
 pub const FEEDBACK_SETTING_SQL: &str =
     "SELECT setting = 'on' FROM pg_settings WHERE name = 'hot_standby_feedback'";
 
-/// Слот: возраст — больший из `xmin` и `catalog_xmin`; горизонт каталога — когда `catalog_xmin` старше `xmin`
-/// (или `xmin` пуст).
-fn slot_holder(
+/// Данные слота из `slots_sql`. У слота с активным отправителем WAL `application` и `client_addr` — отправителя.
+struct SlotRow {
     name: String,
     slot_type: Option<String>,
     active: Option<bool>,
     xmin_age: Option<i64>,
     catalog_xmin_age: Option<i64>,
     inactive_s: Option<f64>,
-) -> Holder {
-    let catalog = match (xmin_age, catalog_xmin_age) {
+    application: Option<String>,
+    client_addr: Option<String>,
+}
+
+/// Слот: возраст — больший из `xmin` и `catalog_xmin`; горизонт каталога — когда `catalog_xmin` старше `xmin`
+/// (или `xmin` пуст). Отправитель WAL слота сопоставляется с участником топологии: физический слот реплики с
+/// `hot_standby_feedback` держит горизонт её обратной связью.
+fn slot_holder(row: SlotRow, topology: &Topology) -> Holder {
+    let catalog = match (row.xmin_age, row.catalog_xmin_age) {
         (Some(x), Some(c)) => c > x,
         (None, Some(_)) => true,
         _ => false,
     };
     Holder {
         kind: HolderKind::Slot,
-        name,
-        xmin_age: xmin_age.max(catalog_xmin_age).unwrap_or(0),
-        duration_s: inactive_s,
-        slot_type,
-        active,
+        member: sender_member(topology, row.application.as_deref()),
+        name: row.name,
+        xmin_age: row.xmin_age.max(row.catalog_xmin_age).unwrap_or(0),
+        duration_s: row.inactive_s,
+        slot_type: row.slot_type,
+        active: row.active,
         catalog,
+        application: row.application,
+        client_addr: row.client_addr,
         ..Default::default()
     }
 }
@@ -131,12 +150,17 @@ pub async fn collect(c: &Client, caps: Caps, topology: &Topology) -> AppResult<H
     }
     for r in c.query(&slots_sql(caps), &[]).await.map_err(pg)? {
         holders.push(slot_holder(
-            r.get(0),
-            r.get(1),
-            r.get(2),
-            r.get(3),
-            r.get(4),
-            r.get(5),
+            SlotRow {
+                name: r.get(0),
+                slot_type: r.get(1),
+                active: r.get(2),
+                xmin_age: r.get(3),
+                catalog_xmin_age: r.get(4),
+                inactive_s: r.get(5),
+                application: r.get(6),
+                client_addr: r.get(7),
+            },
+            topology,
         ));
     }
     for r in c.query(FEEDBACK_SQL, &[]).await.map_err(pg)? {
@@ -162,20 +186,24 @@ pub async fn collect(c: &Client, caps: Caps, topology: &Topology) -> AppResult<H
 
 pub async fn report(st: &AppState, id: &str, target: &DiagTarget) -> AppResult<DiagReport> {
     let topology = target.topology.clone();
-    let (h, data) = on_member(st, id, target, |c| {
+    let (h, data, reads_all) = on_member(st, id, target, |c| {
         Box::pin(async move {
             let h = head(c).await?;
             let data = collect(c, Caps::new(h.version_num), &topology).await?;
-            Ok((h, data))
+            Ok((h, data, reads_all_stats(c).await?))
         })
     })
     .await?;
     let member = target.member.as_ref().map(|m| m.name.as_str());
     let findings = rules::evaluate(member, &data);
-    let unavailable = Caps::new(h.version_num)
+    let mut unavailable: Vec<_> = Caps::new(h.version_num)
         .missing(V17, "slotInactiveSince")
         .into_iter()
         .collect();
+    // Без `pg_read_all_stats` xmin и XID чужих сессий скрыты: в списке только собственные сессии роли.
+    if !reads_all {
+        unavailable.push(needs_monitor("otherSessionsXmin"));
+    }
     Ok(make_report(
         Tool::Horizon,
         target,
@@ -195,7 +223,7 @@ mod tests {
     fn inactive_since_exists_only_since_17() {
         assert!(slots_sql(Caps::new(160004)).contains("NULL::float8"));
         assert!(!slots_sql(Caps::new(160004)).contains("inactive_since"));
-        assert!(slots_sql(Caps::new(170000)).contains("now() - inactive_since"));
+        assert!(slots_sql(Caps::new(170000)).contains("now() - s.inactive_since"));
     }
 
     #[test]
@@ -207,8 +235,40 @@ mod tests {
     }
 
     #[test]
+    fn vacuum_is_not_a_horizon_holder() {
+        let sql = sessions_sql();
+        assert!(sql.contains("a.backend_type IS DISTINCT FROM 'autovacuum worker'"));
+        assert!(
+            sql.contains(
+                "NOT EXISTS (SELECT 1 FROM pg_stat_progress_vacuum p WHERE p.pid = a.pid)"
+            )
+        );
+    }
+
+    #[test]
+    fn slots_sql_takes_the_walsender_of_an_active_slot() {
+        let sql = slots_sql(Caps::new(170000));
+        assert!(sql.contains("LEFT JOIN pg_stat_replication r ON r.pid = s.active_pid"));
+        assert!(sql.contains("r.application_name, host(r.client_addr)"));
+    }
+
+    fn row(xmin: Option<i64>, catalog_xmin: Option<i64>) -> SlotRow {
+        SlotRow {
+            name: "s".into(),
+            slot_type: None,
+            active: None,
+            xmin_age: xmin,
+            catalog_xmin_age: catalog_xmin,
+            inactive_s: None,
+            application: None,
+            client_addr: None,
+        }
+    }
+
+    #[test]
     fn slot_horizon_is_the_older_of_data_and_catalog_and_flags_the_catalog() {
-        let h = |x, c| slot_holder("s".into(), None, None, x, c, None);
+        let t = Topology::empty_for_tests();
+        let h = |x, c| slot_holder(row(x, c), &t);
         assert_eq!(
             (h(Some(5), None).xmin_age, h(Some(5), None).catalog),
             (5, false)
@@ -227,16 +287,54 @@ mod tests {
         );
         assert!(!h(Some(7), Some(7)).catalog);
         let s = slot_holder(
-            "s".into(),
-            Some("physical".into()),
-            Some(false),
-            Some(1),
-            None,
-            Some(30.0),
+            SlotRow {
+                slot_type: Some("physical".into()),
+                active: Some(false),
+                inactive_s: Some(30.0),
+                ..row(Some(1), None)
+            },
+            &t,
         );
         assert_eq!(
             (s.kind, s.slot_type.as_deref(), s.active, s.duration_s),
             (HolderKind::Slot, Some("physical"), Some(false), Some(30.0))
+        );
+        assert_eq!((s.application, s.client_addr, s.member), (None, None, None));
+    }
+
+    #[test]
+    fn an_active_slot_carries_its_walsender_and_the_member() {
+        let mut m2 = Member::new("pg-2", "db2.example", 5432);
+        m2.role = Role::Replica;
+        let t = topo(vec![Member::new("pg-1", "db1.example", 5432), m2]);
+        let slot = |app: &str| {
+            slot_holder(
+                SlotRow {
+                    slot_type: Some("physical".into()),
+                    active: Some(true),
+                    application: Some(app.into()),
+                    client_addr: Some("10.0.0.2".into()),
+                    ..row(Some(4), None)
+                },
+                &t,
+            )
+        };
+        let by_name = slot("pg-2");
+        assert_eq!(
+            (
+                by_name.member.as_deref(),
+                by_name.application.as_deref(),
+                by_name.client_addr.as_deref(),
+                by_name.name.as_str()
+            ),
+            (Some("pg-2"), Some("pg-2"), Some("10.0.0.2"), "s")
+        );
+        assert_eq!(slot("db2.example").member.as_deref(), Some("pg-2"));
+        // Имя приложения не из топологии (`walreceiver` по умолчанию): отправитель известен, участник — нет.
+        let unknown = slot("walreceiver");
+        assert_eq!(
+            (unknown.member, unknown.application.as_deref()),
+            (None, Some("walreceiver"))
         );
     }
 

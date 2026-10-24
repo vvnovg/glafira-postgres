@@ -25,7 +25,8 @@ pub struct Holder {
     pub kind: HolderKind,
     /// Сессия — `pid`, prepared transaction — `gid`, слот — имя слота, обратная связь — `application_name`.
     pub name: String,
-    /// Участник топологии (сопоставление по `application_name`), только у `StandbyFeedback`.
+    /// Участник топологии (сопоставление по `application_name`): у `StandbyFeedback` и у слота с активным отправителем
+    /// WAL (физический слот реплики).
     pub member: Option<String>,
     pub xmin_age: i64,
     pub duration_s: Option<f64>,
@@ -97,11 +98,27 @@ pub fn evaluate(member: Option<&str>, d: &HorizonData) -> Vec<Finding> {
             }
             f.link_tool("sessions", member)
         }
-        HolderKind::Slot => f
-            .target(FindingTarget::Slot {
-                name: h.name.clone(),
-            })
-            .link_tool("slots", member),
+        HolderKind::Slot => {
+            // Тип слота и его состояние — в параметры: по ним интерфейс отличает «забытый» слот от живой реплики.
+            if let Some(t) = &h.slot_type {
+                f = f.param("slotType", t.clone());
+            }
+            if let Some(a) = h.active {
+                f = f.param("active", a);
+            }
+            match (&h.member, h.slot_type.as_deref(), h.active) {
+                // Обратная связь реплики через физический слот: xmin лежит в слоте, но держит горизонт реплика —
+                // чинить нужно на ней (её долгие запросы), поэтому цель и ссылка ведут к участнику.
+                (Some(m), Some("physical"), Some(true)) => f
+                    .target(FindingTarget::Member { name: m.clone() })
+                    .link_tool("horizon", Some(m)),
+                _ => f
+                    .target(FindingTarget::Slot {
+                        name: h.name.clone(),
+                    })
+                    .link_tool("slots", member),
+            }
+        }
         HolderKind::PreparedXact => f.param(
             "command",
             format!(
@@ -207,6 +224,101 @@ mod tests {
             }]
         );
         assert!(evaluate(None, &HorizonData::default()).is_empty());
+    }
+
+    #[test]
+    fn replica_feedback_through_a_physical_slot_points_at_the_replica() {
+        let mut slot = holder(HolderKind::Slot, "replica1", 20_000_000, None);
+        slot.slot_type = Some("physical".into());
+        slot.active = Some(true);
+        slot.application = Some("pg-2".into());
+        slot.member = Some("pg-2".into());
+        let f = evaluate(
+            Some("pg-1"),
+            &HorizonData {
+                holders: vec![slot.clone()],
+                hot_standby_feedback: None,
+            },
+        );
+        assert_eq!(
+            f[0].target,
+            Some(FindingTarget::Member {
+                name: "pg-2".into()
+            })
+        );
+        assert_eq!(
+            f[0].links,
+            [FindingLink::OpenTool {
+                tool: "horizon".into(),
+                member: Some("pg-2".into())
+            }]
+        );
+        assert_eq!(
+            (
+                &f[0].params["kind"],
+                &f[0].params["slotType"],
+                &f[0].params["active"]
+            ),
+            (&"slot".into(), &"physical".into(), &true.into())
+        );
+        // Отправитель не сопоставился с участником — цель слот, как у любого слота.
+        slot.member = None;
+        let f = evaluate(
+            Some("pg-1"),
+            &HorizonData {
+                holders: vec![slot.clone()],
+                hot_standby_feedback: None,
+            },
+        );
+        assert_eq!(
+            f[0].target,
+            Some(FindingTarget::Slot {
+                name: "replica1".into()
+            })
+        );
+        assert_eq!(
+            f[0].links,
+            [FindingLink::OpenTool {
+                tool: "slots".into(),
+                member: Some("pg-1".into())
+            }]
+        );
+        assert_eq!(
+            (&f[0].params["slotType"], &f[0].params["active"]),
+            (&"physical".into(), &true.into())
+        );
+        // Участник известен, но слот логический или неактивен: держит слот, а не реплика.
+        for (ty, active) in [("logical", true), ("physical", false)] {
+            let mut s = slot.clone();
+            s.member = Some("pg-2".into());
+            s.slot_type = Some(ty.into());
+            s.active = Some(active);
+            let f = evaluate(
+                Some("pg-1"),
+                &HorizonData {
+                    holders: vec![s],
+                    hot_standby_feedback: None,
+                },
+            );
+            assert_eq!(
+                f[0].target,
+                Some(FindingTarget::Slot {
+                    name: "replica1".into()
+                }),
+                "{ty} {active}"
+            );
+            assert_eq!(f[0].params["active"], active);
+        }
+        // Тип и состояние неизвестны — параметров нет.
+        let bare = holder(HolderKind::Slot, "s", 20_000_000, None);
+        let f = evaluate(
+            None,
+            &HorizonData {
+                holders: vec![bare],
+                hot_standby_feedback: None,
+            },
+        );
+        assert!(!f[0].params.contains_key("slotType") && !f[0].params.contains_key("active"));
     }
 
     #[test]

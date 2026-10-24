@@ -735,17 +735,26 @@ async fn standby_feedback_is_a_holder_on_the_primary() {
     let DiagData::Horizon(d) = diag::run(&st, "it", req(Tool::Horizon)).await.unwrap().data else {
         panic!()
     };
-    assert!(
-        d.holders.iter().any(|h| match h.kind {
+    let holder = d
+        .holders
+        .iter()
+        .find(|h| match h.kind {
             HolderKind::StandbyFeedback => true,
             HolderKind::Slot => {
                 h.slot_type.as_deref() == Some("physical") && h.active == Some(true) && !h.catalog
             }
             _ => false,
-        }),
-        "{:?}",
-        d.holders
+        })
+        .unwrap_or_else(|| panic!("{:?}", d.holders));
+    // Держатель — отправитель WAL, то есть сама реплика: у слота реплики известны приложение и адрес клиента, чтобы
+    // находка вела к реплике, а не к слоту. Имя приложения стенда (`walreceiver`) не совпадает ни с именем, ни с
+    // хостом единственного узла списка, поэтому участник не сопоставляется (сопоставление проверяют юнит-тесты).
+    assert!(
+        holder.application.as_deref().is_some_and(|a| !a.is_empty()),
+        "{holder:?}"
     );
+    assert!(holder.client_addr.is_some(), "{holder:?}");
+    assert_eq!(holder.member, None, "{holder:?}");
     // Горизонт на самой реплике: её настройка включена, а читающая транзакция видна как сессия.
     let (_dir_replica, st) = open_server(&replica).await;
     let DiagData::Horizon(d) = diag::run(&st, "it", req(Tool::Horizon)).await.unwrap().data else {
@@ -760,4 +769,137 @@ async fn standby_feedback_is_a_holder_on_the_primary() {
         d.holders
     );
     reader.batch_execute("ROLLBACK").await.unwrap();
+}
+
+/// Без `pg_read_all_stats` сервер прячет у чужих сессий состояние приёмника и отправителей WAL. Сборщик это замечает:
+/// данные помечены `detailsHidden`, пустые поля не превращаются в `walReceiverDown` и прочие ложные находки, а отчёт
+/// говорит, какой части не хватает. С `pg_monitor` (роль диагностики) ничего не скрыто. Роль `glafira_app` реплицируется
+/// на реплику вместе с остальными ролями primary.
+#[tokio::test]
+async fn hidden_statistics_are_reported_not_turned_into_findings() {
+    let (Some(primary), Some(replica)) =
+        (common::env("GPG_IT_PRIMARY"), common::env("GPG_IT_REPLICA"))
+    else {
+        return;
+    };
+    common::ensure_fixtures(&primary).await;
+    let probe = common::superuser(&replica, "postgres").await;
+    common::wait_until(
+        "роль glafira_app дошла до реплики",
+        Duration::from_secs(20),
+        async || {
+            probe
+                .query_one(
+                    "SELECT count(*) FROM pg_roles WHERE rolname = 'glafira_app'",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get::<_, i64>(0)
+                == 1
+        },
+    )
+    .await;
+    let false_alarms = [
+        "walReceiverDown",
+        "replicaNotStreaming",
+        "syncStandbyMissing",
+        "replicaReplyStale",
+    ];
+    let empty = Topology::empty_for_tests();
+    for addr in [&primary, &replica] {
+        // Сборщик: роль приложения ничего не видит, роль диагностики видит всё.
+        let app =
+            common::connect_as(addr, "postgres", common::APP_USER, common::APP_PASSWORD).await;
+        let h = diag::head(&app).await.unwrap();
+        let (d, _) =
+            diag::replication::collect(&app, Caps::new(h.version_num), h.in_recovery, &empty)
+                .await
+                .unwrap_or_else(|e| panic!("{addr}: {e:?}"));
+        assert!(d.details_hidden, "{addr}: {d:?}");
+        if h.in_recovery {
+            assert_eq!(
+                d.receiver.as_ref().and_then(|r| r.status.as_deref()),
+                None,
+                "{addr}: состояние приёмника скрыто"
+            );
+        }
+        let found = pg_advisor::rules::replication::evaluate(None, &d);
+        assert!(
+            found.iter().all(|f| !false_alarms.contains(&f.id.as_str())),
+            "{addr}: {found:?}"
+        );
+        let diag_role =
+            common::connect_as(addr, "postgres", common::PG_USER, common::PG_PASSWORD_VALUE).await;
+        let (d, _) =
+            diag::replication::collect(&diag_role, Caps::new(h.version_num), h.in_recovery, &empty)
+                .await
+                .unwrap_or_else(|e| panic!("{addr}: {e:?}"));
+        assert!(!d.details_hidden, "{addr}: {d:?}");
+        if h.in_recovery {
+            assert_eq!(
+                d.receiver.as_ref().and_then(|r| r.status.as_deref()),
+                Some("streaming"),
+                "{addr}"
+            );
+        }
+
+        // Отчёт: без права — пометка о недостающей части и ни одной ложной находки; с правом — пометок нет.
+        let (_dir, st) =
+            common::open_server_as(addr, "postgres", common::APP_USER, common::APP_PASSWORD).await;
+        let r = diag::run(&st, "it", req(Tool::Replication)).await.unwrap();
+        let hidden = r
+            .unavailable
+            .iter()
+            .find(|u| u.part == "replicationDetails");
+        assert_eq!(
+            hidden.map(|u| u.reason.key.as_str()),
+            Some("diag.unavailable.privilege"),
+            "{addr}: {:?}",
+            r.unavailable
+        );
+        assert!(
+            r.findings
+                .iter()
+                .all(|f| !false_alarms.contains(&f.id.as_str())),
+            "{addr}: {:?}",
+            r.findings
+        );
+        let r = diag::run(&st, "it", req(Tool::Horizon)).await.unwrap();
+        assert!(
+            r.unavailable.iter().any(|u| u.part == "otherSessionsXmin"),
+            "{addr}: {:?}",
+            r.unavailable
+        );
+        let (_dir, st) = open_server(addr).await;
+        for tool in [Tool::Replication, Tool::Horizon] {
+            let r = diag::run(&st, "it", req(tool)).await.unwrap();
+            assert!(
+                r.unavailable
+                    .iter()
+                    .all(|u| u.reason.key != "diag.unavailable.privilege"),
+                "{addr} {tool:?}: {:?}",
+                r.unavailable
+            );
+        }
+    }
+}
+
+/// Рост конфликтов recovery — по двум отчётам одного узла: первый роста не знает, второй видит прирост (на спокойной
+/// реплике — ноль).
+#[tokio::test]
+async fn conflict_growth_appears_with_the_second_report() {
+    let Some(replica) = common::env("GPG_IT_REPLICA") else {
+        return;
+    };
+    let (_dir, st) = open_server(&replica).await;
+    let growth = |r: diag::DiagReport| match r.data {
+        DiagData::Replication(d) => d.conflicts.expect("конфликты на реплике").growth,
+        other => panic!("{other:?}"),
+    };
+    let first = diag::run(&st, "it", req(Tool::Replication)).await.unwrap();
+    assert_eq!(growth(first), None);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let second = diag::run(&st, "it", req(Tool::Replication)).await.unwrap();
+    assert_eq!(growth(second), Some(0));
 }

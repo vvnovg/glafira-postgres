@@ -97,6 +97,11 @@ pub struct ReplicationData {
     pub hot_standby_feedback: Option<bool>,
     /// `-1` — ждать без предела.
     pub max_standby_streaming_delay_ms: Option<i64>,
+    /// Роль без `pg_read_all_stats` (входит в `pg_monitor`): сервер прячет сведения чужих сессий — состояние приёмника
+    /// и отправителей, их LSN, `sync_state`. Эти поля пусты не потому, что репликация сломана, поэтому правила,
+    /// которым они нужны, не выполняются.
+    #[serde(default)]
+    pub details_hidden: bool,
 }
 
 pub fn evaluate(member: Option<&str>, d: &ReplicationData) -> Vec<Finding> {
@@ -107,9 +112,10 @@ pub fn evaluate(member: Option<&str>, d: &ReplicationData) -> Vec<Finding> {
             secs.and_then(|s| grade(s, th::REPLICA_LAG_S.0, th::REPLICA_LAG_S.1)),
         )
     };
+    // Сведения отправителей скрыты — пустые поля не повод для находок, отправители не оцениваются вовсе.
+    let senders: &[Sender] = if d.details_hidden { &[] } else { &d.senders };
     // Отправители: одна находка на правило, цель — худшая реплика (уточнение 2 плана P2a).
-    let lagging: Vec<(&Sender, Severity)> = d
-        .senders
+    let lagging: Vec<(&Sender, Severity)> = senders
         .iter()
         .filter_map(|s| lag_sev(s.replay_lag_bytes, s.replay_lag_s).map(|v| (s, v)))
         .collect();
@@ -133,8 +139,7 @@ pub fn evaluate(member: Option<&str>, d: &ReplicationData) -> Vec<Finding> {
         }
         out.push(f);
     }
-    let not_streaming: Vec<&Sender> = d
-        .senders
+    let not_streaming: Vec<&Sender> = senders
         .iter()
         .filter(|s| s.state.as_deref() != Some("streaming"))
         .collect();
@@ -148,8 +153,7 @@ pub fn evaluate(member: Option<&str>, d: &ReplicationData) -> Vec<Finding> {
         }
         out.push(f);
     }
-    let stale: Vec<&Sender> = d
-        .senders
+    let stale: Vec<&Sender> = senders
         .iter()
         .filter(|s| s.reply_age_s.is_some_and(|a| a >= th::REPLY_STALE_S))
         .collect();
@@ -162,6 +166,7 @@ pub fn evaluate(member: Option<&str>, d: &ReplicationData) -> Vec<Finding> {
         );
     }
     if !d.in_recovery
+        && !d.details_hidden
         && d.synchronous_standby_names
             .as_deref()
             .is_some_and(|n| !n.trim().is_empty())
@@ -173,7 +178,9 @@ pub fn evaluate(member: Option<&str>, d: &ReplicationData) -> Vec<Finding> {
         out.push(Finding::new("syncStandbyMissing", Severity::Critical).member(member));
     }
     if d.in_recovery {
-        if d.receiver.as_ref().and_then(|r| r.status.as_deref()) != Some("streaming") {
+        if !d.details_hidden
+            && d.receiver.as_ref().and_then(|r| r.status.as_deref()) != Some("streaming")
+        {
             out.push(Finding::new("walReceiverDown", Severity::Critical).member(member));
         }
         if let Some(r) = &d.replay {
@@ -372,6 +379,66 @@ mod tests {
     }
 
     #[test]
+    fn hidden_details_do_not_become_findings() {
+        // Без `pg_read_all_stats` состояние приёмника и отправителей пусто — это не поломка репликации.
+        let primary = ReplicationData {
+            senders: vec![
+                sender("pg-2", "streaming", "async", 20 * 1024 * 1024),
+                sender("pg-3", "catchup", "async", 0),
+            ],
+            synchronous_standby_names: Some("ANY 1 (pg-2, pg-3)".into()),
+            ..Default::default()
+        };
+        assert_eq!(evaluate(Some("pg-1"), &primary).len(), 3);
+        let mut blank = Sender {
+            pid: 1,
+            ..Default::default()
+        };
+        blank.reply_age_s = Some(500.0);
+        let hidden = ReplicationData {
+            senders: [primary.senders.clone(), vec![blank]].concat(),
+            details_hidden: true,
+            ..primary
+        };
+        assert_eq!(ids(&evaluate(Some("pg-1"), &hidden)), []);
+        // Приёмник с пустым состоянием и нет строки приёмника: walReceiverDown не создаётся.
+        let replica = ReplicationData {
+            in_recovery: true,
+            details_hidden: true,
+            receiver: Some(Receiver::default()),
+            ..Default::default()
+        };
+        assert_eq!(ids(&evaluate(None, &replica)), []);
+        let no_row = ReplicationData {
+            receiver: None,
+            ..replica.clone()
+        };
+        assert_eq!(ids(&evaluate(None, &no_row)), []);
+        // Собственные сведения реплики видны и без права: пауза, задержка replay и конфликты остаются.
+        let own = ReplicationData {
+            replay: Some(Replay {
+                receive_replay_gap_bytes: Some(0),
+                replay_delay_s: Some(40.0),
+                pause: Some("paused".into()),
+            }),
+            conflicts: Some(Conflicts {
+                snapshot: 3,
+                growth: Some(2),
+                ..Default::default()
+            }),
+            ..replica
+        };
+        assert_eq!(
+            ids(&evaluate(Some("pg-2"), &own)),
+            [
+                ("recoveryConflicts", Severity::Warning),
+                ("replayPaused", Severity::Warning),
+                ("replicaLag", Severity::Warning)
+            ]
+        );
+    }
+
+    #[test]
     fn data_json_is_camel_case() {
         let d = ReplicationData {
             in_recovery: true,
@@ -390,5 +457,16 @@ mod tests {
         assert_eq!(v["senders"][0]["replayLagBytes"], 1);
         assert_eq!(v["replay"]["receiveReplayGapBytes"], 5);
         assert_eq!(v["maxStandbyStreamingDelayMs"], -1);
+        assert_eq!(v["detailsHidden"], false);
+        let back: ReplicationData = serde_json::from_value(v).unwrap();
+        assert!(!back.details_hidden);
+        // Данные без поля (прежний вид) читаются: скрытых сведений нет.
+        let old: ReplicationData = serde_json::from_value(serde_json::json!({
+            "inRecovery": false, "senders": [], "synchronousStandbyNames": null,
+            "synchronousCommit": null, "receiver": null, "replay": null, "conflicts": null,
+            "hotStandbyFeedback": null, "maxStandbyStreamingDelayMs": null
+        }))
+        .unwrap();
+        assert!(!old.details_hidden);
     }
 }

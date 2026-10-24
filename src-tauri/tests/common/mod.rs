@@ -259,10 +259,26 @@ pub async fn open_server_in(
     addr: &str,
     db: &str,
 ) -> (tempfile::TempDir, glafira_pg_lib::state::AppState) {
+    open_server_as(addr, db, PG_USER, PG_PASSWORD_VALUE).await
+}
+
+/// То же, но под произвольной ролью: так проверяется, что сборщики честно говорят о правах, которых роли не хватает
+/// (диагностика обычно идёт под `glafira_diag` с `pg_monitor`, а `glafira_app` — роль без него).
+pub async fn open_server_as(
+    addr: &str,
+    db: &str,
+    user: &str,
+    password: &str,
+) -> (tempfile::TempDir, glafira_pg_lib::state::AppState) {
     let dir = tempfile::tempdir().unwrap();
-    let st = glafira_pg_lib::state::AppState::new(dir.path(), secrets_with_password("it")).unwrap();
+    let secrets = MemoryStore::default();
+    secrets
+        .set(&secret_key("it", PG_PASSWORD), password)
+        .unwrap();
+    let st = glafira_pg_lib::state::AppState::new(dir.path(), Arc::new(secrets)).unwrap();
     let mut p = server_profile("it", addr);
     p.pg.database = db.into();
+    p.pg.username = user.into();
     p.pg.ssl_mode = SslMode::Disable;
     st.connections.upsert(p.clone()).unwrap();
     st.runtimes.connect(p).await.unwrap();

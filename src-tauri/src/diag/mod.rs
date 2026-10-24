@@ -150,6 +150,35 @@ pub async fn head(c: &Client) -> AppResult<Head> {
     })
 }
 
+/// Видит ли роль соединения сведения чужих сессий (`pg_read_all_stats`, входит в `pg_monitor`; суперпользователь — да).
+/// `USAGE`, а не `MEMBER`: привилегии роли доходят до сессии только при наследовании (`NOINHERIT` членство не
+/// открывает чужую статистику) — так же проверяет сам сервер.
+pub const READS_ALL_STATS_SQL: &str =
+    "SELECT pg_has_role(current_user, 'pg_read_all_stats', 'USAGE')";
+
+/// Один раз за сбор: без права сервер прячет чужие сессии (`backend_xmin` и `backend_xid`, состояние приёмника WAL и
+/// отправителей, их LSN), и пустые поля нельзя читать как «всё в порядке» или «всё сломано».
+pub async fn reads_all_stats(c: &Client) -> AppResult<bool> {
+    let r = c
+        .query_one(READS_ALL_STATS_SQL, &[])
+        .await
+        .map_err(|e| from_pg(&e))?;
+    Ok(r.get::<_, Option<bool>>(0).unwrap_or(false))
+}
+
+/// Пометка «часть скрыта: нужна роль `pg_monitor`».
+pub fn needs_monitor(part: &str) -> Unavailable {
+    Unavailable {
+        part: part.to_string(),
+        member: None,
+        reason: ltext!(
+            "diag.unavailable.privilege",
+            "{{part}}: needs the pg_monitor role",
+            part = part
+        ),
+    }
+}
+
 /// Участник топологии для `application_name` отправителя WAL (уточнение 5 плана P2a): имя участника или его хост.
 /// Без DNS: опрос топологии разрешает имена, диагностика — нет. Не сопоставилось — `None`.
 pub fn sender_member(t: &Topology, application: Option<&str>) -> Option<String> {
