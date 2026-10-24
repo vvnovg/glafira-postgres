@@ -55,6 +55,7 @@ pnpm tauri dev
 | Primary и реплика без Patroni (PG 16) | `localhost:5451`, `localhost:5452` |
 | Одиночный сервер без `pg_stat_statements` (PG 15) | `localhost:5460` |
 | SSH-бастион `bastion` (OpenSSH, пользователь `tester`) | `localhost:2222` |
+| Матрица версий PG 13…18 (профиль `matrix`, `gp-pg13`…`gp-pg18`) | `localhost:5513`…`localhost:5518` |
 
 Порты стенда опубликованы только на `127.0.0.1` (учётные данные известные), поэтому `localhost` в адресах стенда выше работает, а с другой машины стенд недоступен.
 
@@ -68,6 +69,23 @@ REST API Patroni `patroni` / `patroni-secret`. Демо-база `orders`, сх�
 (`tester_ed25519` без пассфразы, `tester_ed25519_pass` с пассфразой `test-passphrase`); `gen-keys.sh` нужно выполнить до
 `docker compose up --build`. Подробности — `dev/ssh/README.md`.
 
+### Матрица версий (профиль `matrix`)
+Шесть одиночных серверов PostgreSQL 13…18 с той же демо-схемой `shop` (роль `glafira_diag`, база `orders`, `pg_stat_statements`);
+порт — `55` и номер версии (`gp-pg13` — `localhost:5513`, …, `gp-pg18` — `localhost:5518`). В обычный `up` они не входят:
+```bash
+docker compose -f dev/docker-compose.yml --profile matrix up -d
+scripts/wait-matrix.sh        # можно назвать часть версий: scripts/wait-matrix.sh 15 16
+```
+Запуск профиля не трогает остальной стенд (у остальных сервисов конфигурация не меняется). Интеграционные тесты каталога
+проходят по узлам матрицы, если задать `GPG_IT_MATRIX=localhost:5513,localhost:5514,localhost:5515,localhost:5516,localhost:5517,localhost:5518`.
+
+Схема `wide` с 10 000 таблиц для проверки прокрутки и пагинации дерева создаётся вручную в нужной базе (на любом узле стенда или матрицы),
+по умолчанию ни в один сервис не входит; повторный запуск безопасен (около 10 секунд):
+```bash
+docker exec -i gp-pg-single psql -U postgres -d orders -v ON_ERROR_STOP=1 < dev/sql/many-tables.sql
+```
+Убрать схему целиком `DROP SCHEMA wide CASCADE` нельзя (не хватит блокировок): создайте её в отдельной базе и удаляйте базу.
+
 ## Тесты
 ```bash
 pnpm test                                               # фронтенд
@@ -79,10 +97,11 @@ cargo deny --manifest-path crates/pg-advisor/Cargo.toml --config deny.toml check
 GPG_IT_SINGLE=localhost:5460 GPG_IT_PRIMARY=localhost:5451 GPG_IT_REPLICA=localhost:5452 \
 GPG_IT_PATRONI=http://localhost:8011,http://localhost:8012,http://localhost:8013 GPG_IT_DOCKER=1 \
 GPG_IT_BASTION=localhost:2222 GPG_IT_SSH_KEYS=$PWD/dev/ssh/keys \
+GPG_IT_MATRIX=localhost:5513,localhost:5514,localhost:5515,localhost:5516,localhost:5517,localhost:5518 \
   cargo test --manifest-path src-tauri/Cargo.toml --tests -- --test-threads=1   # интеграционные (нужен стенд)
 ```
 Без переменной `GPG_IT_*` интеграционный тест пропускается (`it_ssh` — без `GPG_IT_BASTION` или `GPG_IT_SSH_KEYS`; он запускает
-настоящий OpenSSH 8.4+ из `PATH`). `GPG_IT_DOCKER=1` разрешает тестам останавливать контейнеры,
+настоящий OpenSSH 8.4+ из `PATH`; проход по матрице версий — без `GPG_IT_MATRIX`). `GPG_IT_DOCKER=1` разрешает тестам останавливать контейнеры,
 делать switchover и promote; после них стенд возвращается в исходное состояние.
 
 ## Релиз

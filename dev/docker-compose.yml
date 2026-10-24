@@ -7,6 +7,15 @@ x-patroni: &patroni
   image: glafira-pg-dev/patroni:17
   depends_on: [etcd]
 
+# Матрица версий: одиночные узлы PostgreSQL 13…18 с той же демо-схемой (профиль `matrix`, в обычный `up` не входит).
+x-matrix: &matrix
+  profiles: ["matrix"]
+  environment:
+    POSTGRES_PASSWORD: postgres-secret
+  command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements", "-c", "track_io_timing=on"]
+  volumes:
+    - ./sql/init.sql:/docker-entrypoint-initdb.d/20-init.sql:ro
+
 services:
   etcd:
     image: quay.io/coreos/etcd:v3.5.17
@@ -110,3 +119,36 @@ services:
     container_name: gp-bastion
     hostname: bastion
     ports: ["127.0.0.1:2222:22"]
+
+  # Матрица версий (профиль `matrix`): `docker compose -f dev/docker-compose.yml --profile matrix up -d`.
+  # Порты 127.0.0.1:5513…5518 — по номеру версии; роль glafira_diag и база orders — из sql/init.sql.
+  pg13:
+    <<: *matrix
+    image: postgres:13
+    container_name: gp-pg13
+    ports: ["127.0.0.1:5513:5432"]
+  pg14:
+    <<: *matrix
+    image: postgres:14
+    container_name: gp-pg14
+    ports: ["127.0.0.1:5514:5432"]
+  pg15:
+    <<: *matrix
+    image: postgres:15
+    container_name: gp-pg15
+    ports: ["127.0.0.1:5515:5432"]
+  pg16:
+    <<: *matrix
+    image: postgres:16
+    container_name: gp-pg16
+    ports: ["127.0.0.1:5516:5432"]
+  pg17:
+    <<: *matrix
+    image: postgres:17
+    container_name: gp-pg17
+    ports: ["127.0.0.1:5517:5432"]
+  pg18:
+    <<: *matrix
+    image: postgres:18
+    container_name: gp-pg18
+    ports: ["127.0.0.1:5518:5432"]

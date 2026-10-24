@@ -3,17 +3,8 @@
 # реплика без Patroni получила демо-базу и подключилась к primary (потоковая репликация), bastion
 # отвечает баннером SSH.
 set -euo pipefail
-deadline=$((SECONDS + 240))
-
-wait_for() {
-  until "$@" >/dev/null 2>&1; do
-    if [ "$SECONDS" -ge "$deadline" ]; then
-      echo "timeout: $*" >&2
-      exit 1
-    fi
-    sleep 2
-  done
-}
+# shellcheck source=scripts/lib-wait.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib-wait.sh"
 
 for c in gp-pg-single gp-pg-primary gp-pg-replica gp-patroni1 gp-patroni2 gp-patroni3; do
   wait_for docker exec "$c" pg_isready -h localhost -p 5432 -q

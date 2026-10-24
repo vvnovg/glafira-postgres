@@ -65,9 +65,11 @@ jobs:
       - name: Ключи bastion
         run: dev/ssh/gen-keys.sh
       - name: Стенд
+        # Профиль matrix — одиночные PostgreSQL 13…18 для проверки каталога на каждой поддерживаемой версии.
         run: |
-          docker compose -f dev/docker-compose.yml up -d --build
+          docker compose -f dev/docker-compose.yml --profile matrix up -d --build
           scripts/wait-stand.sh
+          scripts/wait-matrix.sh
       - name: Тесты Rust (unit + интеграционные)
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib --tests -- --test-threads=1
         env:
@@ -75,12 +77,13 @@ jobs:
           GPG_IT_PRIMARY: localhost:5451
           GPG_IT_REPLICA: localhost:5452
           GPG_IT_PATRONI: http://localhost:8011,http://localhost:8012,http://localhost:8013
+          GPG_IT_MATRIX: localhost:5513,localhost:5514,localhost:5515,localhost:5516,localhost:5517,localhost:5518
           GPG_IT_BASTION: localhost:2222
           GPG_IT_SSH_KEYS: ${{ github.workspace }}/dev/ssh/keys
           GPG_IT_DOCKER: "1"
       - name: Логи стенда при сбое
         if: failure()
-        run: docker compose -f dev/docker-compose.yml logs --tail=200
+        run: docker compose -f dev/docker-compose.yml --profile matrix logs --tail=200
 
   platforms:
     strategy:

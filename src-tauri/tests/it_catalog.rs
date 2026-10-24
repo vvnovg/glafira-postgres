@@ -1,5 +1,6 @@
-//! Каталог демо-схемы на узлах стенда: PG 15 (`GPG_IT_SINGLE`), 16 (`GPG_IT_PRIMARY`), 17 (Patroni).
-//! Вкладки объектов (таблица, представление, функция, последовательность) — на тех же узлах.
+//! Каталог демо-схемы на узлах стенда: PG 15 (`GPG_IT_SINGLE`), 16 (`GPG_IT_PRIMARY`), 17 (Patroni) и на
+//! узлах матрицы версий 13–18 (`GPG_IT_MATRIX`, профиль `matrix`). Вкладки объектов (таблица, представление,
+//! функция, последовательность) — на тех же узлах.
 
 mod common;
 
@@ -17,6 +18,7 @@ fn addrs() -> Vec<String> {
         .into_iter()
         .filter_map(common::env)
         .chain(common::env("GPG_IT_PATRONI").map(|_| "localhost:5441".to_string()))
+        .chain(common::matrix_addrs())
         .collect()
 }
 
@@ -681,5 +683,117 @@ async fn quote_ident_matches_the_server() {
                 .get(0);
             assert_eq!(quote_ident(n), server, "{addr}: {n:?}");
         }
+    }
+}
+
+/// Каждый запрос каталога и вкладок объектов на демо-схеме для PG 13–18 (`GPG_IT_MATRIX=localhost:5513,…,
+/// localhost:5518`). Остальные тесты этого файла тоже идут по узлам матрицы (`addrs()`); этот проверяет
+/// без привязки к деталям данных, что ни один запрос не падает на синтаксисе или отсутствующем столбце
+/// версии, и что каждый адрес — своя мажорная версия (иначе матрица на деле не проверяет ничего нового).
+#[tokio::test]
+async fn catalog_queries_on_every_supported_version() {
+    let mut majors = Vec::new();
+    for addr in common::matrix_addrs() {
+        let pg = client(&addr, "postgres").await;
+        let version = glafira_pg_lib::catalog::server_version_num(&pg)
+            .await
+            .unwrap();
+        assert!((130000..190000).contains(&version), "{addr}: {version}");
+        let banner: String = pg.query_one("SELECT version()", &[]).await.unwrap().get(0);
+        eprintln!("matrix {addr}: {banner}");
+        assert!(!majors.contains(&(version / 10000)), "{addr}: {version}");
+        majors.push(version / 10000);
+
+        let dbs = databases::list(&pg, None).await.unwrap();
+        assert!(dbs.iter().any(|d| d.name == "orders"), "{addr}");
+        let c = client(&addr, "orders").await;
+        let shop = schemas::list(&c, false)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|s| s.name == "shop")
+            .unwrap_or_else(|| panic!("{addr}: нет shop"));
+        assert_eq!(
+            (
+                shop.counts.tables,
+                shop.counts.views,
+                shop.counts.matviews,
+                shop.counts.sequences,
+                shop.counts.functions
+            ),
+            (3, 1, 1, 3, 3),
+            "{addr}"
+        );
+        for kind in [
+            ObjectKind::Tables,
+            ObjectKind::Views,
+            ObjectKind::Matviews,
+            ObjectKind::Functions,
+            ObjectKind::Sequences,
+        ] {
+            let page = objects::list(&c, "shop", kind, None, 0, 500)
+                .await
+                .unwrap_or_else(|e| panic!("{addr} {kind:?}: {e:?}"));
+            assert!(page.total > 0, "{addr} {kind:?}");
+        }
+        let parts = objects::partitions(&c, "shop", "events", 0, 500)
+            .await
+            .unwrap();
+        assert_eq!(parts.total, 2, "{addr}");
+        extensions::list(&c).await.unwrap();
+        roles::list(&c, false).await.unwrap();
+        roles::list(&c, true).await.unwrap();
+
+        let t = table::get(&c, "shop", "orders")
+            .await
+            .unwrap_or_else(|e| panic!("{addr}: {e:?}"));
+        assert_eq!(t.columns.len(), 5, "{addr}");
+        assert!(
+            t.indexes
+                .iter()
+                .all(|i| version >= 160000 || i.last_idx_scan_ms.is_none()),
+            "{addr}"
+        );
+        let events = table::get(&c, "shop", "events").await.unwrap();
+        let part = table::get(&c, "shop", "events_2026_09").await.unwrap();
+        for (name, ddl) in [
+            ("orders", &t.ddl),
+            ("events", &events.ddl),
+            ("events_2026_09", &part.ddl),
+        ] {
+            assert_eq!(ddl.lines().next(), Some(DDL_HEADER), "{addr}: {name}");
+            assert!(
+                ddl.contains(&format!("CREATE TABLE shop.{name} ")),
+                "{addr}: {name}: {ddl}"
+            );
+        }
+
+        let v = view::get(&c, "shop", "active_orders").await.unwrap();
+        assert_eq!((v.matview, v.columns.len()), (false, 5), "{addr}");
+        let mv = view::get(&c, "shop", "order_totals").await.unwrap();
+        assert_eq!((mv.matview, mv.populated), (true, Some(true)), "{addr}");
+
+        let funcs = objects::list(&c, "shop", ObjectKind::Functions, None, 0, 500)
+            .await
+            .unwrap();
+        for f in &funcs.items {
+            function::get(&c, f.oid)
+                .await
+                .unwrap_or_else(|e| panic!("{addr} {}: {e:?}", f.name));
+        }
+        // Агрегат: `pg_get_functiondef` для него падает, определение не запрашивается.
+        let count_oid: i64 = c
+            .query_one(
+                "SELECT 'pg_catalog.count()'::regprocedure::oid::bigint",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        let agg = function::get(&c, count_oid).await.unwrap();
+        assert_eq!((agg.kind.as_str(), agg.definition), ("a", None), "{addr}");
+
+        sequence::get(&c, "shop", "invoice_seq").await.unwrap();
+        sequence::get(&c, "shop", "orders_id_seq").await.unwrap();
     }
 }

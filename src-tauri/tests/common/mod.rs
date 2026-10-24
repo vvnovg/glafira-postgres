@@ -25,6 +25,19 @@ pub fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
 
+/// Адреса узлов матрицы версий PostgreSQL 13–18 (`GPG_IT_MATRIX=localhost:5513,…,localhost:5518`, профиль
+/// `matrix` стенда); без переменной список пуст и тесты матрицы ничего не проверяют.
+pub fn matrix_addrs() -> Vec<String> {
+    env("GPG_IT_MATRIX")
+        .map(|v| {
+            v.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn host_port(s: &str) -> (String, u16) {
     let (h, p) = s.trim().rsplit_once(':').expect("host:port");
     (h.to_string(), p.parse().expect("port"))
