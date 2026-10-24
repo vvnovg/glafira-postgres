@@ -1,15 +1,30 @@
-import { screen, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TableDetails } from "../../api/types";
+import { topologyView } from "../../test/fixtures";
 import { renderWithClient } from "../../test/render";
+import { newProfile } from "../connections/profile";
 
 vi.mock("../../api/client", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../../api/client")>();
-  return { ...orig, api: { getTable: vi.fn() } };
+  return {
+    ...orig,
+    api: {
+      getTable: vi.fn(),
+      getTopology: vi.fn(),
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      getUiSettings: vi.fn(),
+      listDatabases: vi.fn(),
+      listRoles: vi.fn(),
+    },
+  };
 });
 
 import { api } from "../../api/client";
+import { applyState, disconnectedView, refreshAfterConnect } from "../../lib/useConnectionEvents";
+import { ConnectionNode } from "../connections/tree/ConnectionNode";
 import { TableTab } from "./TableTab";
 
 const details: TableDetails = {
@@ -30,10 +45,22 @@ const details: TableDetails = {
   ddl: "-- DDL built by Glafira from the catalog; not a replacement for pg_dump (no privileges, RLS policies or owners)\nCREATE TABLE shop.orders (\n    id bigint\n);\n",
 };
 
+/** Подменяет буфер обмена (user-event.setup() ставит свою заглушку — подменять нужно после него). */
+function stubClipboard(clipboard: { writeText: (t: string) => Promise<void> } | undefined) {
+  Object.defineProperty(navigator, "clipboard", { value: clipboard, configurable: true });
+}
+
+/** Ошибка чтения каталога, пока подключение закрыто. */
+const notConnected = { code: "CONNECTION_FAILED", message: "not connected", retryable: true };
+
 beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(api.getTable).mockResolvedValue(details);
+  // Вкладка следит за состоянием подключения (топология), как и остальные части окна.
+  vi.mocked(api.getTopology).mockResolvedValue(topologyView());
 });
+
+afterEach(() => stubClipboard(undefined));
 
 describe("TableTab", () => {
   it("подвкладки: колонки по умолчанию, индексы с подсветкой INVALID, DDL с кнопкой копирования", async () => {
@@ -163,6 +190,145 @@ describe("TableTab", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Объект shop.orders не найден");
     await user.click(screen.getByRole("button", { name: "Повторить" }));
     expect(await screen.findByRole("table", { name: "Колонки" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+});
+
+describe("TableTab: обновление и возврат подключения", () => {
+  it("кнопка «Обновить» перечитывает таблицу; пока идёт чтение, она недоступна и занята", async () => {
+    const user = userEvent.setup();
+    renderWithClient(<TableTab connectionId="c" database="orders" schema="shop" name="orders" />);
+    await screen.findByRole("table", { name: "Колонки" });
+    expect(screen.getByRole("button", { name: "Обновить" })).toBeEnabled();
+    let finish: (d: TableDetails) => void = () => {};
+    vi.mocked(api.getTable).mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    await user.click(screen.getByRole("button", { name: "Обновить" }));
+    expect(api.getTable).toHaveBeenCalledTimes(2);
+    const busy = screen.getByRole("button", { name: "Обновить" });
+    expect(busy).toBeDisabled();
+    expect(busy).toHaveAttribute("aria-busy", "true");
+    await act(async () => finish({ ...details, columns: [{ ...details.columns[1], name: "created_at", dataType: "timestamptz" }] }));
+    expect(await screen.findByText("created_at")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Обновить" })).toBeEnabled();
+  });
+
+  it("подвкладка, которой больше нет после обновления, заменяется первой, и тело показано по ней же", async () => {
+    vi.mocked(api.getTable).mockResolvedValue({ ...details, relkind: "p", partitioning: { key: "RANGE (id)", bound: null, parent: null, partitions: ["shop.e1"] } });
+    const user = userEvent.setup();
+    renderWithClient(<TableTab connectionId="c" database="orders" schema="shop" name="events" />);
+    await user.click(await screen.findByRole("tab", { name: "Партиционирование" }));
+    expect(screen.getByText("RANGE (id)")).toBeInTheDocument();
+    // Таблица перестала быть партиционированной: подвкладки «Партиционирование» больше нет.
+    vi.mocked(api.getTable).mockResolvedValue(details);
+    await user.click(screen.getByRole("button", { name: "Обновить" }));
+    await waitFor(() => expect(screen.queryByRole("tab", { name: "Партиционирование" })).not.toBeInTheDocument());
+    // Подсвечены «Колонки» — и показаны колонки, а не панель исчезнувшей подвкладки.
+    expect(screen.getByRole("tab", { name: "Колонки" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tabpanel")).toHaveAccessibleName("Колонки");
+    expect(screen.getByRole("table", { name: "Колонки" })).toBeInTheDocument();
+    expect(screen.queryByText("RANGE (id)")).not.toBeInTheDocument();
+  });
+
+  it("«Копировать DDL» кладёт в буфер ровно текст DDL", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn(() => Promise.resolve());
+    stubClipboard({ writeText });
+    renderWithClient(<TableTab connectionId="c" database="orders" schema="shop" name="orders" />);
+    await user.click(await screen.findByRole("tab", { name: "DDL" }));
+    await user.click(screen.getByRole("button", { name: "Копировать DDL" }));
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(writeText).toHaveBeenCalledWith(details.ddl);
+    expect(await screen.findByText("Скопировано")).toBeInTheDocument();
+  });
+
+  it("ошибка чтения при закрытом подключении снимается, когда подключение возвращается", async () => {
+    vi.mocked(api.getTopology).mockResolvedValue(disconnectedView);
+    vi.mocked(api.getTable).mockRejectedValueOnce(notConnected);
+    const { client } = renderWithClient(<TableTab connectionId="c" database="orders" schema="shop" name="orders" />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("not connected");
+    await waitFor(() => expect(client.getQueryData(["topology", "c"])).toBeDefined());
+    expect(api.getTable).toHaveBeenCalledTimes(1);
+    // Событие Rust: подключение открыто. Кнопку «Повторить» нажимать не нужно.
+    act(() => applyState(client, { connectionId: "c", state: "connected", error: null }));
+    expect(await screen.findByRole("table", { name: "Колонки" })).toBeInTheDocument();
+    expect(api.getTable).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("подключение, открытое из дерева или обзора, перечитывает вкладку с ошибкой и без смены состояния", async () => {
+    vi.mocked(api.getTable).mockRejectedValueOnce(notConnected);
+    const { client } = renderWithClient(<TableTab connectionId="c" database="orders" schema="shop" name="orders" />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("not connected");
+    // Подключение всё время «подключено» (возврата живости нет): перечитывает только общий помощник подключения.
+    act(() => refreshAfterConnect(client, "c"));
+    expect(await screen.findByRole("table", { name: "Колонки" })).toBeInTheDocument();
+    expect(api.getTable).toHaveBeenCalledTimes(2);
+  });
+
+  /**
+   * Дерево и вкладка таблицы в одном окне, Rust читает каталог, только пока подключение открыто; после нового
+   * подключения в таблице другие колонки (col_v2).
+   */
+  async function renderTreeAndTab() {
+    const profile = { ...newProfile(), id: "c", name: "billing", kind: "server" as const };
+    let rustConnected = true;
+    let generation = 1;
+    vi.mocked(api.getTable).mockImplementation(async () => {
+      if (!rustConnected) throw notConnected;
+      return { ...details, columns: [{ ...details.columns[0], name: `col_v${generation}` }] };
+    });
+    vi.mocked(api.disconnect).mockImplementation(async () => {
+      rustConnected = false;
+    });
+    vi.mocked(api.connect).mockImplementation(async () => {
+      rustConnected = true;
+      generation = 2;
+      return topologyView();
+    });
+    vi.mocked(api.getUiSettings).mockResolvedValue({ showSystemObjects: false });
+    vi.mocked(api.listDatabases).mockResolvedValue([]);
+    vi.mocked(api.listRoles).mockResolvedValue([]);
+    const user = userEvent.setup();
+    const { client } = renderWithClient(
+      <>
+        <ul>
+          <ConnectionNode connection={profile} />
+        </ul>
+        <TableTab connectionId="c" database="orders" schema="shop" name="orders" />
+      </>,
+    );
+    expect(await screen.findByText("col_v1")).toBeInTheDocument();
+    await screen.findByRole("img", { name: "Подключено" });
+    const menu = async (item: string) => {
+      await user.click(screen.getByRole("button", { name: "Действия с подключением billing" }));
+      await user.click(screen.getByRole("menuitem", { name: item }));
+    };
+    const disconnect = async () => {
+      await menu("Отключиться");
+      // В приложении состояние «отключено» приходит событием Rust; оно же удаляет запросы каталога из кэша.
+      act(() => applyState(client, { connectionId: "c", state: "disconnected", error: null }));
+      await screen.findByRole("img", { name: "Не подключено" });
+    };
+    return { user, client, disconnect, connect: () => menu("Подключиться") };
+  }
+
+  it("отключить → подключить: вкладка не остаётся с данными до отключения и читает таблицу заново", async () => {
+    const { disconnect, connect } = await renderTreeAndTab();
+    await disconnect();
+    expect(api.getTable).toHaveBeenCalledTimes(1);
+    await connect();
+    expect(await screen.findByText("col_v2")).toBeInTheDocument();
+    expect(screen.queryByText("col_v1")).not.toBeInTheDocument();
+    expect(api.getTable).toHaveBeenCalledTimes(2);
+  });
+
+  it("отключить → обновить вкладку (отказ) → подключить: ошибка снимается без повтора вручную", async () => {
+    const { user, disconnect, connect } = await renderTreeAndTab();
+    await disconnect();
+    await user.click(screen.getByRole("button", { name: "Обновить" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("not connected");
+    await connect();
+    expect(await screen.findByText("col_v2")).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });

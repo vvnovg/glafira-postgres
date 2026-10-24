@@ -148,9 +148,11 @@ describe("ObjectList", () => {
     const user = userEvent.setup();
     renderList(2);
     expect(await screen.findByText("3 партиции")).toBeInTheDocument();
+    // Стрелка и кнопка открытия — разные кнопки с разными именами (скринридер их различает).
+    expect(screen.getByRole("button", { name: "Развернуть или свернуть партиции events" })).not.toBe(screen.getByRole("button", { name: "Открыть events" }));
     expect(screen.getByText("2,0 KB")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^t1/ })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /^events/ }));
+    await user.click(screen.getByRole("button", { name: "Развернуть или свернуть партиции events" }));
     expect(await screen.findByText("events_2026_10")).toBeInTheDocument();
     expect(api.listPartitions).toHaveBeenCalledWith("c", "orders", "shop", "events", 0, PAGE);
   });
@@ -175,7 +177,7 @@ describe("ObjectList", () => {
     });
     const user = userEvent.setup();
     renderList(1);
-    await user.click(await screen.findByRole("button", { name: /^events/ }));
+    await user.click(await screen.findByRole("button", { name: "Развернуть или свернуть партиции events" }));
     expect(useWorkspace.getState().tabs).toEqual([]);
     // Партиция открывается как таблица своей схемы — не схемы списка.
     await user.click(await screen.findByRole("button", { name: "Открыть archive.events_old" }));
@@ -262,16 +264,16 @@ describe("ObjectList", () => {
     vi.mocked(api.listPartitions).mockResolvedValue({ total: 1, nextOffset: null, items: [item(900, { name: "events_2026_10" })] });
     const user = userEvent.setup();
     const r = renderList(300);
-    await user.click(await screen.findByRole("button", { name: /^events/ }));
+    await user.click(await screen.findByRole("button", { name: "Развернуть или свернуть партиции events" }));
     expect(await screen.findByText("events_2026_10")).toBeInTheDocument();
 
     win.from = 100; // строка events вышла из окна и размонтирована
     rerenderList(r, 300);
-    await waitFor(() => expect(screen.queryByRole("button", { name: /^events/ })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Развернуть или свернуть партиции events" })).not.toBeInTheDocument());
 
     win.from = 0; // вернулась — всё ещё раскрыта
     rerenderList(r, 300);
-    expect(await screen.findByRole("button", { name: /^events/ })).toHaveAttribute("aria-expanded", "true");
+    expect(await screen.findByRole("button", { name: "Развернуть или свернуть партиции events" })).toHaveAttribute("aria-expanded", "true");
     expect(await screen.findByText("events_2026_10")).toBeInTheDocument();
   });
 
@@ -310,7 +312,7 @@ describe("ObjectList", () => {
     });
     const user = userEvent.setup();
     renderList(1);
-    await user.click(await screen.findByRole("button", { name: /^events/ }));
+    await user.click(await screen.findByRole("button", { name: "Развернуть или свернуть партиции events" }));
     expect(await screen.findByText("archive.events_old")).toBeInTheDocument();
     expect(screen.getByText("events_2026_10")).toBeInTheDocument();
     expect(screen.queryByText("shop.events_2026_10")).not.toBeInTheDocument();
@@ -351,7 +353,7 @@ describe("ObjectList", () => {
     vi.mocked(api.listPartitions).mockResolvedValue({ total: 5, nextOffset: 2, items: [item(9), item(10)] });
     const user = userEvent.setup();
     renderList(1);
-    await user.click(await screen.findByRole("button", { name: /^events/ }));
+    await user.click(await screen.findByRole("button", { name: "Развернуть или свернуть партиции events" }));
     expect(await screen.findByRole("button", { name: "Ещё партиции: orders.shop.events" })).toBeInTheDocument();
   });
 
@@ -360,7 +362,7 @@ describe("ObjectList", () => {
     vi.mocked(api.listPartitions).mockReturnValue(new Promise(() => {}));
     const user = userEvent.setup();
     const r = renderList(1);
-    await user.click(await screen.findByRole("button", { name: /^events/ }));
+    await user.click(await screen.findByRole("button", { name: "Развернуть или свернуть партиции events" }));
     expect(within(r.container).getByRole("status")).toHaveTextContent("Загрузка…");
     r.unmount();
 

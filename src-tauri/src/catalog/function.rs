@@ -3,9 +3,8 @@
 use serde::{Deserialize, Serialize};
 use tokio_postgres::Client;
 
-use crate::catalog::object_not_found;
 use crate::conn::errors::from_pg;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult, ErrorCode};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,9 +36,20 @@ const SQL: &str = "SELECT n.nspname::text, p.proname::text, p.prokind::text, \
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang \
   WHERE p.oid = $1";
 
+/// Функции с таким OID нет (удалена после того, как её показало дерево, или число не OID). Своё сообщение: схемы
+/// у запроса нет, и `object_not_found("", oid)` дало бы «Объект .16401 не найден». Код тот же, что у `objectNotFound`.
+fn function_not_found(oid: i64) -> AppError {
+    app_err!(
+        ErrorCode::NotFound,
+        "errors.catalog.functionNotFound",
+        "Function with oid {{oid}} was not found",
+        oid = oid
+    )
+}
+
 /// Функция по OID (имена перегружены, в дереве у функции — OID).
 pub async fn get(c: &Client, oid: i64) -> AppResult<FunctionDetails> {
-    let not_found = || object_not_found("", &oid.to_string());
+    let not_found = || function_not_found(oid);
     let Ok(pg_oid) = u32::try_from(oid) else {
         return Err(not_found());
     };
@@ -62,4 +72,21 @@ pub async fn get(c: &Client, oid: i64) -> AppResult<FunctionDetails> {
         comment: r.get(9),
         definition: r.get(10),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn function_not_found_names_the_oid_and_is_not_found_like_other_objects() {
+        let e = function_not_found(16401);
+        assert_eq!(e.key, "errors.catalog.functionNotFound");
+        assert_eq!(e.message, "Function with oid 16401 was not found");
+        assert_eq!(e.params.get("oid").map(String::as_str), Some("16401"));
+        // Тот же код, что у «объекта нет» таблицы, представления и последовательности: интерфейс различает их по коду.
+        assert_eq!(e.code, crate::catalog::object_not_found("shop", "t").code);
+        assert_eq!(e.code, ErrorCode::NotFound);
+        assert!(!e.retryable);
+    }
 }

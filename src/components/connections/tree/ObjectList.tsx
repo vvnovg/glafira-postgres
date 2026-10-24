@@ -107,12 +107,20 @@ function ObjectRow({
   const open = partitioned && openState.openOids.has(item.oid);
   const name = item.schema === schema ? item.name : `${item.schema}.${item.name}`;
   const label = item.signature !== null ? `${name}(${item.signature})` : name;
+  const toggleLabel = t("sidebar.partitionsToggle", { name: label });
   return (
     <li {...rowAttrs}>
       <div className="tree-conn tree-wrap">
-        {/* Стрелка раскрывает партиции (её имя — имя таблицы, состояние — aria-expanded), имя открывает вкладку. */}
+        {/* Стрелка раскрывает партиции (состояние — aria-expanded), имя открывает вкладку: у кнопок разные имена. */}
         {partitioned && (
-          <button type="button" className="tree-folder-toggle caret-only" aria-expanded={open} title={label} onClick={() => openState.onToggle(item.oid)}>
+          <button
+            type="button"
+            className="tree-folder-toggle caret-only"
+            aria-expanded={open}
+            aria-label={toggleLabel}
+            title={toggleLabel}
+            onClick={() => openState.onToggle(item.oid)}
+          >
             <span className="tree-caret" aria-hidden="true">
               {open ? "▾" : "▸"}
             </span>

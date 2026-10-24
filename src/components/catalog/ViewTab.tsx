@@ -36,9 +36,13 @@ function ViewBody({ d }: { d: ViewDetails }) {
         ]}
       />
       <SubTabs label={t("object.sections")} tabs={tabs} value={section} onChange={setSection}>
-        {section === "definition" && <DdlView ddl={d.definition} title={t("object.definition")} copyLabel={t("object.copyDefinition")} />}
-        {section === "columns" && <ColumnsTable columns={d.columns} />}
-        {section === "indexes" && <IndexesTable indexes={d.indexes} />}
+        {(active) => (
+          <>
+            {active === "definition" && <DdlView ddl={d.definition} title={t("object.definition")} copyLabel={t("object.copyDefinition")} />}
+            {active === "columns" && <ColumnsTable columns={d.columns} />}
+            {active === "indexes" && <IndexesTable indexes={d.indexes} />}
+          </>
+        )}
       </SubTabs>
     </>
   );
@@ -66,7 +70,7 @@ export function ViewTab({
   // Пока данных нет, вид известен по списку, из которого открыта вкладка; потом — по ответу.
   const isMat = query.data?.matview ?? matview;
   return (
-    <ObjectTab title={`${schema}.${name}`} kind={t(isMat ? "object.kinds.matview" : "object.kinds.view")} query={query}>
+    <ObjectTab connectionId={connectionId} title={`${schema}.${name}`} kind={t(isMat ? "object.kinds.matview" : "object.kinds.view")} query={query}>
       {(d) => <ViewBody d={d} />}
     </ObjectTab>
   );

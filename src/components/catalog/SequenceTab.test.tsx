@@ -1,11 +1,12 @@
 import { screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SequenceDetails } from "../../api/types";
+import { topologyView } from "../../test/fixtures";
 import { renderWithClient } from "../../test/render";
 
 vi.mock("../../api/client", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../../api/client")>();
-  return { ...orig, api: { getSequence: vi.fn() } };
+  return { ...orig, api: { getSequence: vi.fn(), getTopology: vi.fn() } };
 });
 
 import { api } from "../../api/client";
@@ -19,6 +20,7 @@ const seq: SequenceDetails = {
 beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(api.getSequence).mockResolvedValue(seq);
+  vi.mocked(api.getTopology).mockResolvedValue(topologyView());
 });
 
 describe("SequenceTab", () => {

@@ -28,6 +28,7 @@ import {
   applyTopology,
   disconnectedView,
   EVENTS_CAP,
+  refreshAfterConnect,
   useConnectionEvents,
   useTopology,
   useTopologyEvents,
@@ -127,6 +128,20 @@ describe("события наблюдения", () => {
     applyState(qc, { connectionId: "c", state: "disconnected", error: null });
     for (const k of keys) expect(qc.getQueryData(k)).toBeUndefined();
     expect(qc.getQueryData(["catalog", "other", "table", "orders", "shop", "events"])).toEqual({});
+  });
+
+  it("после подключения перечитываются запросы PostgreSQL этого подключения, остальные не трогаются", () => {
+    const qc = new QueryClient();
+    const mine = [
+      ["catalog", "c", "table", "orders", "shop", "events"],
+      ["catalog", "c", "function", "orders", 16401],
+      ["memberFacts", "c", "pg-1"],
+    ];
+    const rest = [["catalog", "other", "table", "orders", "shop", "events"], ["topology", "c"], ["connections"]];
+    for (const k of [...mine, ...rest]) qc.setQueryData(k, {});
+    refreshAfterConnect(qc, "c");
+    for (const k of mine) expect(qc.getQueryState(k)!.isInvalidated).toBe(true);
+    for (const k of rest) expect(qc.getQueryState(k)!.isInvalidated).toBe(false);
   });
 
   it("тот же узел каталога каталог не сбрасывает", () => {

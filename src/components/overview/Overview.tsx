@@ -7,7 +7,7 @@ import { i18n, currentLocale } from "../../i18n";
 import { tr } from "../../i18n/text";
 import { formatBytes, formatCount, formatTimestamp } from "../../lib/format";
 import { roleLabel } from "../../lib/topology";
-import { PG_QUERY_KEYS, ofConnection, useTopology, useTopologyEvents } from "../../lib/useConnectionEvents";
+import { refreshAfterConnect, useTopology, useTopologyEvents } from "../../lib/useConnectionEvents";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { Glyph } from "../common/Glyph";
 import { hostKeyUnknown } from "../connections/profile";
@@ -292,6 +292,8 @@ export function Overview({ connectionId, member, active = true }: { connectionId
     setTrustDismissed(null);
     try {
       qc.setQueryData(["topology", connectionId], await api.connect(connectionId));
+      // Как в дереве: запросы каталога после отключения удалены, вкладки объектов перечитываются.
+      refreshAfterConnect(qc, connectionId);
     } catch (e) {
       setError(toAppError(e));
     } finally {
@@ -315,7 +317,7 @@ export function Overview({ connectionId, member, active = true }: { connectionId
       // ошибкой в виде, а не отказом команды: предложить доверие нужно и здесь, по действию пользователя.
       if (hostKeyUnknown(v.error)) setError(v.error);
       // Подключение то же, события Disconnected нет: факты узлов и каталог после отказа во входе перечитываются сами.
-      void qc.invalidateQueries({ predicate: ofConnection(PG_QUERY_KEYS, connectionId) });
+      refreshAfterConnect(qc, connectionId);
     } catch (e) {
       setError(toAppError(e));
     } finally {

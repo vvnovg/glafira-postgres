@@ -165,7 +165,8 @@
     },
     "catalog": {
       "badPage": "Неверная страница: смещение {{offset}}, размер {{limit}}",
-      "objectNotFound": "Объект {{schema}}.{{name}} не найден (удалён или переименован?)"
+      "objectNotFound": "Объект {{schema}}.{{name}} не найден (удалён или переименован?)",
+      "functionNotFound": "Функция с oid {{oid}} не найдена"
     },
     "ssh": {
       "notFound": "Клиент OpenSSH (ssh) не найден: установите его (Windows: компонент «Клиент OpenSSH»)",
@@ -336,6 +337,7 @@
     "objectFilter": "Фильтр: {{label}} ({{where}})",
     "objectList": "Список: {{label}} ({{where}})",
     "openObject": "Открыть {{name}}",
+    "partitionsToggle": "Развернуть или свернуть партиции {{name}}",
     "objectFilterPlaceholder": "фильтр",
     "partitions_one": "{{count}} партиция",
     "partitions_few": "{{count}} партиции",
@@ -657,6 +659,7 @@
       "sequence": "Последовательность"
     },
     "sections": "Разделы",
+    "refresh": "Обновить",
     "columns": "Колонки",
     "indexes": "Индексы",
     "constraints": "Ограничения",

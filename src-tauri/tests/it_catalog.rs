@@ -390,7 +390,7 @@ async fn demo_schema_on_every_node() {
         assert_eq!((p.kind.as_str(), p.returns), ("p", None));
         assert_eq!(
             function::get(&c, 0).await.unwrap_err().key,
-            "errors.catalog.objectNotFound"
+            "errors.catalog.functionNotFound"
         );
 
         let s = sequence::get(&c, "shop", "invoice_seq").await.unwrap();

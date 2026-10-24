@@ -1,12 +1,13 @@
-import { screen, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Column, ViewDetails } from "../../api/types";
+import { topologyView } from "../../test/fixtures";
 import { renderWithClient } from "../../test/render";
 
 vi.mock("../../api/client", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../../api/client")>();
-  return { ...orig, api: { getView: vi.fn() } };
+  return { ...orig, api: { getView: vi.fn(), getTopology: vi.fn() } };
 });
 
 import { api } from "../../api/client";
@@ -31,6 +32,11 @@ const matview: ViewDetails = {
 beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(api.getView).mockResolvedValue(view);
+  vi.mocked(api.getTopology).mockResolvedValue(topologyView());
+});
+
+afterEach(() => {
+  Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
 });
 
 describe("ViewTab", () => {
@@ -59,6 +65,31 @@ describe("ViewTab", () => {
     expect(screen.getByText("8,0 KB")).toBeInTheDocument();
     await user.click(screen.getByRole("tab", { name: "Индексы" }));
     expect(within(screen.getByRole("table", { name: "Индексы" })).getByText("order_totals_idx")).toBeInTheDocument();
+  });
+
+  it("«Копировать определение» кладёт в буфер ровно текст определения", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn(() => Promise.resolve());
+    // user-event.setup() ставит свою заглушку буфера — подменять нужно после него.
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    renderWithClient(<ViewTab connectionId="c" database="orders" schema="shop" name="v_orders" matview={false} />);
+    await user.click(await screen.findByRole("button", { name: "Копировать определение" }));
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(writeText).toHaveBeenCalledWith(view.definition);
+  });
+
+  it("подвкладка «Индексы» пропала после обновления (уже не мат. представление): показано определение", async () => {
+    vi.mocked(api.getView).mockResolvedValue(matview);
+    const user = userEvent.setup();
+    renderWithClient(<ViewTab connectionId="c" database="orders" schema="shop" name="order_totals" matview />);
+    await user.click(await screen.findByRole("tab", { name: "Индексы" }));
+    expect(screen.getByRole("table", { name: "Индексы" })).toBeInTheDocument();
+    vi.mocked(api.getView).mockResolvedValue({ ...view, name: "order_totals" });
+    await user.click(screen.getByRole("button", { name: "Обновить" }));
+    await waitFor(() => expect(screen.queryByRole("tab", { name: "Индексы" })).not.toBeInTheDocument());
+    expect(screen.getByRole("tab", { name: "Определение" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText(/FROM shop\.orders/)).toBeInTheDocument();
+    expect(screen.queryByRole("table", { name: "Индексы" })).not.toBeInTheDocument();
   });
 
   it("ошибка загрузки показывается с повтором", async () => {

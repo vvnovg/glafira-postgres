@@ -60,7 +60,7 @@ describe("CatalogNodes", () => {
     expect(api.listSchemas).toHaveBeenCalledWith("c", "orders", false);
     expect(api.listObjects).toHaveBeenCalledWith("c", "orders", "shop", "tables", null, 0, 500);
 
-    await user.click(screen.getByRole("button", { name: /^events/ }));
+    await user.click(screen.getByRole("button", { name: "Развернуть или свернуть партиции events" }));
     expect(await screen.findByText("events_2026_10")).toBeInTheDocument();
   });
 

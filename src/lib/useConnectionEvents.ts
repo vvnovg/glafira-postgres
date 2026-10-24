@@ -27,6 +27,16 @@ export const PG_QUERY_KEYS = ["catalog", "memberFacts"] as const;
 export const ofConnection = (prefixes: readonly string[], id: string) => (q: { queryKey: readonly unknown[] }) =>
   prefixes.includes(q.queryKey[0] as string) && q.queryKey[1] === id;
 
+/**
+ * Подключение открыто или переоткрыто по действию пользователя (подключить, переподключить): запросы к PostgreSQL,
+ * прочитанные раньше (каталог, факты узлов, вкладки объектов), перечитываются. Одно место для дерева и обзора,
+ * чтобы пути подключения не расходились: отключение запросы удаляет, а ошибка чтения при закрытом подключении
+ * иначе осталась бы в кэше до ручного повтора.
+ */
+export function refreshAfterConnect(qc: QueryClient, id: string) {
+  void qc.invalidateQueries({ predicate: ofConnection(PG_QUERY_KEYS, id) });
+}
+
 const topologyKey = (id: string) => ["topology", id];
 const eventsKey = (id: string) => ["topologyEvents", id];
 

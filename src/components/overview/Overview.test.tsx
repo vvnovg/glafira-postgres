@@ -88,6 +88,19 @@ describe("Overview", () => {
       expect(await screen.findByText("Подключено")).toBeInTheDocument();
     });
 
+    it("подключение перечитывает запросы PostgreSQL подключения (вкладки объектов), чужие не трогает", async () => {
+      disconnected();
+      vi.mocked(api.connect).mockResolvedValue(topologyView());
+      const { client } = renderWithClient(<Overview connectionId="c" />);
+      const tableKey = ["catalog", "c", "table", "orders", "shop", "events"];
+      const otherKey = ["catalog", "other", "table", "orders", "shop", "events"];
+      client.setQueryData(tableKey, {});
+      client.setQueryData(otherKey, {});
+      expect(await screen.findByText("Подключено")).toBeInTheDocument();
+      expect(client.getQueryState(tableKey)?.isInvalidated).toBe(true);
+      expect(client.getQueryState(otherKey)?.isInvalidated).toBe(false);
+    });
+
     // Кэш топологии тёплый, как в приложении (дерево уже загрузило вид): состояние известно уже при монтировании,
     // и эффект StrictMode выполняется дважды, пока подключение ещё не закончилось.
     const renderStrictWithWarmCache = () => {

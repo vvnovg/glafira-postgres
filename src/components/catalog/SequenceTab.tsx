@@ -37,7 +37,7 @@ export function SequenceTab({ connectionId, database, schema, name }: { connecti
     queryFn: () => api.getSequence(connectionId, database, schema, name),
   });
   return (
-    <ObjectTab title={`${schema}.${name}`} kind={t("object.kinds.sequence")} query={query}>
+    <ObjectTab connectionId={connectionId} title={`${schema}.${name}`} kind={t("object.kinds.sequence")} query={query}>
       {(d) => <SequenceBody d={d} />}
     </ObjectTab>
   );

@@ -5,7 +5,7 @@ import { api, toAppError } from "../../../api/client";
 import type { AppError, ConnectionProfile, TopologyView } from "../../../api/types";
 import { tr } from "../../../i18n/text";
 import { roleLabel } from "../../../lib/topology";
-import { PG_QUERY_KEYS, disconnectedView, ofConnection, useTopology } from "../../../lib/useConnectionEvents";
+import { disconnectedView, ofConnection, refreshAfterConnect, useTopology } from "../../../lib/useConnectionEvents";
 import { useWorkspace } from "../../../state/workspace";
 import { EnvBadge } from "../../common/EnvBadge";
 import { Glyph } from "../../common/Glyph";
@@ -47,6 +47,8 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
     setTrustDismissed(null);
     try {
       setView(await api.connect(c.id));
+      // После отключения запросы каталога удалены, а открытые вкладки объектов могли получить отказ «нет подключения».
+      refreshAfterConnect(qc, c.id);
     } catch (e) {
       setError(toAppError(e));
     } finally {
@@ -73,7 +75,7 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
       if (v.error?.code === "SSH_ERROR") setError(v.error);
       // Подключение осталось тем же (журнал и узел каталога сохранены), события Disconnected не было:
       // списки каталога и факты узлов, упавшие на отказе во входе, перечитываются сами.
-      void qc.invalidateQueries({ predicate: ofConnection(PG_QUERY_KEYS, c.id) });
+      refreshAfterConnect(qc, c.id);
     } catch (e) {
       setError(toAppError(e));
     } finally {

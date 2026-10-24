@@ -213,13 +213,17 @@ function TableBody({ d }: { d: TableDetails }) {
         </p>
       )}
       <SubTabs label={t("object.sections")} tabs={tabs} value={section} onChange={setSection}>
-        {section === "columns" && <ColumnsTable columns={d.columns} />}
-        {section === "indexes" && <IndexesTable indexes={d.indexes} />}
-        {section === "constraints" && <ConstraintsPane d={d} />}
-        {section === "stats" && <StatsPane d={d} />}
-        {section === "partitioning" && <PartitioningPane d={d} />}
-        {section === "triggers" && <TriggersPane d={d} />}
-        {section === "ddl" && <DdlView ddl={d.ddl} />}
+        {(active) => (
+          <>
+            {active === "columns" && <ColumnsTable columns={d.columns} />}
+            {active === "indexes" && <IndexesTable indexes={d.indexes} />}
+            {active === "constraints" && <ConstraintsPane d={d} />}
+            {active === "stats" && <StatsPane d={d} />}
+            {active === "partitioning" && <PartitioningPane d={d} />}
+            {active === "triggers" && <TriggersPane d={d} />}
+            {active === "ddl" && <DdlView ddl={d.ddl} />}
+          </>
+        )}
       </SubTabs>
     </>
   );
@@ -234,7 +238,7 @@ export function TableTab({ connectionId, database, schema, name }: { connectionI
     queryFn: () => api.getTable(connectionId, database, schema, name),
   });
   return (
-    <ObjectTab title={`${schema}.${name}`} kind={t(`object.kinds.${kindKey(query.data)}`)} query={query}>
+    <ObjectTab connectionId={connectionId} title={`${schema}.${name}`} kind={t(`object.kinds.${kindKey(query.data)}`)} query={query}>
       {(d) => <TableBody d={d} />}
     </ObjectTab>
   );

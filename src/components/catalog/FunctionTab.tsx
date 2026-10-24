@@ -50,7 +50,7 @@ export function FunctionTab({ connectionId, database, oid, name }: { connectionI
     queryFn: () => api.getFunction(connectionId, database, oid),
   });
   return (
-    <ObjectTab title={name} kind={t(`object.kinds.${KIND_KEY[query.data?.kind ?? "f"] ?? "function"}`)} query={query}>
+    <ObjectTab connectionId={connectionId} title={name} kind={t(`object.kinds.${KIND_KEY[query.data?.kind ?? "f"] ?? "function"}`)} query={query}>
       {(d) => <FunctionBody d={d} />}
     </ObjectTab>
   );

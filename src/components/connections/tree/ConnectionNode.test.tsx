@@ -289,6 +289,34 @@ describe("ConnectionNode", () => {
     expect(await screen.findByRole("button", { name: /^Узлы/ })).toBeInTheDocument();
   });
 
+  it("подключение перечитывает запросы PostgreSQL этого подключения: отключение их удалило, вкладки объектов могли получить отказ", async () => {
+    vi.mocked(api.connect).mockResolvedValue(topologyView());
+    const user = userEvent.setup();
+    const { client } = renderNode();
+    const tableKey = ["catalog", "c", "table", "orders", "shop", "events"];
+    const otherKey = ["catalog", "other", "table", "orders", "shop", "events"];
+    client.setQueryData(tableKey, {});
+    client.setQueryData(otherKey, {});
+    await screen.findByRole("img", { name: "Не подключено" });
+    await user.click(screen.getByRole("button", { name: toggleName }));
+    await screen.findByRole("img", { name: "Подключено" });
+    expect(client.getQueryState(tableKey)?.isInvalidated).toBe(true);
+    // Подключение другого узла дерева не затронуто.
+    expect(client.getQueryState(otherKey)?.isInvalidated).toBe(false);
+  });
+
+  it("неудачное подключение запросы не перечитывает", async () => {
+    vi.mocked(api.connect).mockRejectedValue({ code: "CONNECTION_FAILED", message: "refused", retryable: true });
+    const user = userEvent.setup();
+    const { client } = renderNode();
+    const tableKey = ["catalog", "c", "table", "orders", "shop", "events"];
+    client.setQueryData(tableKey, {});
+    await screen.findByRole("img", { name: "Не подключено" });
+    await user.click(screen.getByRole("button", { name: toggleName }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("refused");
+    expect(client.getQueryState(tableKey)?.isInvalidated).toBe(false);
+  });
+
   it("меню упавшего подключения: повторить (раскрывает и подключает) и отключиться", async () => {
     vi.mocked(api.getTopology).mockResolvedValue({
       ...disconnectedView,

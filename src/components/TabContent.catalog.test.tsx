@@ -1,10 +1,11 @@
 import { screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { topologyView } from "../test/fixtures";
 import { renderWithClient } from "../test/render";
 
 vi.mock("../api/client", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../api/client")>();
-  return { ...orig, api: { getTable: vi.fn(), getView: vi.fn(), getFunction: vi.fn(), getSequence: vi.fn() } };
+  return { ...orig, api: { getTable: vi.fn(), getView: vi.fn(), getFunction: vi.fn(), getSequence: vi.fn(), getTopology: vi.fn() } };
 });
 
 import { api } from "../api/client";
@@ -18,6 +19,7 @@ beforeEach(() => {
   vi.mocked(api.getView).mockReturnValue(new Promise(() => {}));
   vi.mocked(api.getFunction).mockReturnValue(new Promise(() => {}));
   vi.mocked(api.getSequence).mockReturnValue(new Promise(() => {}));
+  vi.mocked(api.getTopology).mockResolvedValue(topologyView());
 });
 
 describe("TabContent: объекты каталога", () => {

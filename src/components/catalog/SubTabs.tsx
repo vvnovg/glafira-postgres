@@ -7,7 +7,8 @@ export interface SubTab<K extends string> {
 
 /**
  * Подвкладки внутри вкладки объекта: `tablist` с переходом стрелками, Home и End; в порядке Tab — только выбранная.
- * Панель одна, её имя — выбранная подвкладка. value, которого нет среди tabs (подвкладка исчезла после обновления), заменяется первой.
+ * Панель одна, её имя — выбранная подвкладка. value, которого нет среди tabs (подвкладка исчезла после обновления), заменяется первой;
+ * содержимое строится по этой же заменённой подвкладке — children получает её id (иначе подсвечена была бы одна, а показана другая).
  */
 export function SubTabs<K extends string>({
   label,
@@ -21,7 +22,8 @@ export function SubTabs<K extends string>({
   tabs: SubTab<K>[];
   value: K;
   onChange: (id: K) => void;
-  children: ReactNode;
+  /** Содержимое выбранной подвкладки; получает её id после замены исчезнувшей. */
+  children: (active: K) => ReactNode;
 }) {
   const base = useId();
   const active = tabs.some((t) => t.id === value) ? value : tabs[0].id;
@@ -56,7 +58,7 @@ export function SubTabs<K extends string>({
         ))}
       </div>
       <div role="tabpanel" id={`${base}-panel`} aria-labelledby={`${base}-tab-${active}`} tabIndex={0}>
-        {children}
+        {children(active)}
       </div>
     </>
   );

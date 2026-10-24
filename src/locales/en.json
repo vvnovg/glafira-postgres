@@ -163,7 +163,8 @@
     },
     "catalog": {
       "badPage": "Invalid page: offset {{offset}}, limit {{limit}}",
-      "objectNotFound": "Object {{schema}}.{{name}} was not found (dropped or renamed?)"
+      "objectNotFound": "Object {{schema}}.{{name}} was not found (dropped or renamed?)",
+      "functionNotFound": "Function with oid {{oid}} was not found"
     },
     "ssh": {
       "notFound": "OpenSSH client (ssh) was not found: install it (Windows: the “OpenSSH Client” optional feature)",
@@ -334,6 +335,7 @@
     "objectFilter": "Filter: {{label}} ({{where}})",
     "objectList": "List: {{label}} ({{where}})",
     "openObject": "Open {{name}}",
+    "partitionsToggle": "Expand or collapse partitions of {{name}}",
     "objectFilterPlaceholder": "filter",
     "partitions_one": "{{count}} partition",
     "partitions_other": "{{count}} partitions",
@@ -635,6 +637,7 @@
       "sequence": "Sequence"
     },
     "sections": "Sections",
+    "refresh": "Refresh",
     "columns": "Columns",
     "indexes": "Indexes",
     "constraints": "Constraints",

@@ -1,11 +1,13 @@
 import { screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FunctionDetails } from "../../api/types";
+import { topologyView } from "../../test/fixtures";
 import { renderWithClient } from "../../test/render";
 
 vi.mock("../../api/client", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../../api/client")>();
-  return { ...orig, api: { getFunction: vi.fn() } };
+  return { ...orig, api: { getFunction: vi.fn(), getTopology: vi.fn() } };
 });
 
 import { api } from "../../api/client";
@@ -20,6 +22,11 @@ const fn: FunctionDetails = {
 beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(api.getFunction).mockResolvedValue(fn);
+  vi.mocked(api.getTopology).mockResolvedValue(topologyView());
+});
+
+afterEach(() => {
+  Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
 });
 
 describe("FunctionTab", () => {
@@ -37,6 +44,17 @@ describe("FunctionTab", () => {
     expect(screen.getByText("Число заказов")).toBeInTheDocument();
     expect(screen.getByText(/CREATE OR REPLACE FUNCTION shop\.order_count/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Копировать определение" })).toBeInTheDocument();
+  });
+
+  it("«Копировать определение» кладёт в буфер ровно текст определения", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn(() => Promise.resolve());
+    // user-event.setup() ставит свою заглушку буфера — подменять нужно после него.
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    renderWithClient(<FunctionTab connectionId="c" database="orders" oid={16401} name="order_count" />);
+    await user.click(await screen.findByRole("button", { name: "Копировать определение" }));
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(writeText).toHaveBeenCalledWith(fn.definition);
   });
 
   it("агрегат: только сигнатура, определения нет", async () => {
