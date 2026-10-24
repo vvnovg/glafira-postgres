@@ -93,6 +93,8 @@ pub struct TopEvent {
 #[serde(rename_all = "camelCase")]
 pub struct TopQuery {
     pub key: String,
+    /// В JSON — десятичная строка: 64-битный хеш не помещается в точное число JS.
+    #[serde(with = "crate::serde_util::opt_i64_string", default)]
     pub query_id: Option<i64>,
     pub text: String,
     pub samples: u64,
@@ -515,5 +517,19 @@ mod tests {
             (&w["windowS"], &w["samplerRunning"], &w["byApplication"]),
             (&0.into(), &false.into(), &serde_json::json!([]))
         );
+    }
+
+    #[test]
+    fn top_query_id_goes_to_json_as_a_string() {
+        let q = TopQuery {
+            key: "id:-9223372036854775808".into(),
+            query_id: Some(i64::MIN),
+            ..TopQuery::default()
+        };
+        let v = serde_json::to_value(&q).unwrap();
+        assert_eq!(v["queryId"], "-9223372036854775808");
+        assert_eq!(serde_json::from_value::<TopQuery>(v).unwrap(), q);
+        let none = serde_json::to_value(TopQuery::default()).unwrap();
+        assert!(none["queryId"].is_null());
     }
 }

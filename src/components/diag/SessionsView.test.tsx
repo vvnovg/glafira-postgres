@@ -20,6 +20,8 @@ import { SessionsView } from "./SessionsView";
 describe("SessionsView", () => {
   afterEach(() => {
     win.from = 0;
+    // В jsdom scrollIntoView нет: тесты подставляют заглушку и убирают её.
+    delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
   });
 
   const rows = [
@@ -105,6 +107,32 @@ describe("SessionsView", () => {
     await user.type(filter, "нет такого");
     expect(pidsShown()).toEqual([]);
     expect(screen.getByText("Подходящих сессий нет")).toBeInTheDocument();
+    await user.clear(filter);
+    expect(pidsShown()).toEqual(["100", "200"]);
+  });
+
+  it("строки поиска строятся только при непустом фильтре и не пересчитываются при наборе текста", async () => {
+    const user = userEvent.setup();
+    // Строка 250 вне окна виртуализатора (первые 10): поле `user` читает только построитель строки поиска.
+    let reads = 0;
+    const many = Array.from({ length: 300 }, (_, i) => sessionRow({ pid: 1000 + i, query: `select ${i}` }));
+    Object.defineProperty(many[250], "user", {
+      get() {
+        reads++;
+        return "u";
+      },
+      enumerable: true,
+    });
+    renderWithClient(<SessionsView report={report(many)} preset="all" />);
+    expect(reads).toBe(0);
+    const filter = screen.getByRole("textbox", { name: "Фильтр" });
+    await user.type(filter, "z");
+    const afterFirst = reads;
+    expect(afterFirst).toBeGreaterThan(0);
+    await user.type(filter, "zz");
+    expect(reads).toBe(afterFirst);
+    await user.clear(filter);
+    expect(pidsShown()).toHaveLength(10);
   });
 
   it("группировка: всего и по состояниям, группа без значения; пресет на группы не влияет", async () => {
@@ -149,7 +177,7 @@ describe("SessionsView", () => {
   it("панель: поля сессии, пометка об обрезанном тексте и закрытие; <insufficient privilege> показывается как есть", async () => {
     const user = userEvent.setup();
     const many = [
-      sessionRow({ pid: 20, query: "select pg_sleep(100)", queryTruncated: true, user: "alice", clientAddr: "10.0.0.9", clientPort: 4242, xactAgeS: 90, queryId: 77 }),
+      sessionRow({ pid: 20, query: "select pg_sleep(100)", queryTruncated: true, user: "alice", clientAddr: "10.0.0.9", clientPort: 4242, xactAgeS: 90, queryId: "-8123456789012345678" }),
       sessionRow({ pid: 21, query: "<insufficient privilege>" }),
     ];
     renderWithClient(<SessionsView report={report(many)} preset="all" />);
@@ -158,7 +186,7 @@ describe("SessionsView", () => {
     expect(panel).toHaveTextContent("alice");
     expect(panel).toHaveTextContent("10.0.0.9:4242");
     expect(panel).toHaveTextContent("1 мин 30 с");
-    expect(panel).toHaveTextContent("77");
+    expect(panel).toHaveTextContent("-8123456789012345678"); // 64-битный хеш показан как пришёл, без округления
     expect(panel).toHaveTextContent("Текст запроса обрезан до 16 KB");
     await user.click(rowOf(21));
     expect(screen.queryByRole("region", { name: "Сессия 20" })).not.toBeInTheDocument();
@@ -181,12 +209,41 @@ describe("SessionsView", () => {
     expect(panel).toHaveTextContent("Сессии больше нет в списке");
   });
 
-  it("клавиатура: Enter на строке открывает панель", async () => {
+  it("клавиатура: Enter на строке открывает панель, фокус уходит в её заголовок, панель прокручивается в видимую область", async () => {
     const user = userEvent.setup();
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
     renderWithClient(<SessionsView report={report()} preset="all" />);
     act(() => rowOf(2).focus());
     await user.keyboard("{Enter}");
-    expect(screen.getByRole("region", { name: "Сессия 2" })).toBeInTheDocument();
+    const panel = screen.getByRole("region", { name: "Сессия 2" });
+    expect(within(panel).getByRole("heading", { name: "Сессия 2" })).toHaveFocus();
+    expect(scroll).toHaveBeenCalledTimes(1);
+    expect(scroll.mock.contexts[0]).toBe(panel);
+  });
+
+  it("клик по строке тоже переводит фокус в заголовок панели; обновление данных и смена группировки фокус не отнимают", async () => {
+    const user = userEvent.setup();
+    Element.prototype.scrollIntoView = vi.fn();
+    const a = sessionRow({ pid: 50, query: "select 1" });
+    const { rerender } = renderWithClient(<SessionsView report={report([a])} preset="all" />);
+    await user.click(rowOf(50));
+    expect(screen.getByRole("heading", { name: "Сессия 50" })).toHaveFocus();
+    // Пользователь ушёл в фильтр: новый отчёт не должен возвращать его в панель.
+    const filter = screen.getByRole("textbox", { name: "Фильтр" });
+    act(() => filter.focus());
+    rerender(<SessionsView report={report([{ ...a, query: "select 2" }])} preset="all" />);
+    expect(screen.getByRole("region", { name: "Сессия 50" })).toHaveTextContent("select 2");
+    expect(filter).toHaveFocus();
+    // Группировка прячет панель, возврат к списку возвращает её, но фокус остаётся у переключателя.
+    const groupBy = screen.getByRole("combobox", { name: "Группировать" });
+    await user.selectOptions(groupBy, "user");
+    await user.selectOptions(groupBy, "none");
+    expect(screen.getByRole("region", { name: "Сессия 50" })).toBeInTheDocument();
+    expect(groupBy).toHaveFocus();
+    // Повторный клик по той же строке — новое открытие: фокус снова в панели.
+    await user.click(rowOf(50));
+    expect(screen.getByRole("heading", { name: "Сессия 50" })).toHaveFocus();
   });
 
   it("в порядке Tab одна строка списка, между строками — стрелки; Tab-остановка следует за фокусом", async () => {

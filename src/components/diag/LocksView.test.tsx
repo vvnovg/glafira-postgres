@@ -73,6 +73,18 @@ describe("LocksView", () => {
     expect(card).not.toHaveTextContent("сессию 0");
   });
 
+  it("время ожидания DDL неизвестно: фраза без скобок, в обоих вариантах", () => {
+    const { unmount } = renderWithClient(<LocksView report={diagReport(data({ ddlQueue: [ddl({ waitS: null })] }))} />);
+    const timeless = screen.getByRole("region", { name: "DDL в очереди" });
+    expect(timeless).toHaveTextContent("ждёт сессию 1");
+    expect(timeless).not.toHaveTextContent("(");
+    unmount();
+    renderWithClient(<LocksView report={diagReport(data({ ddlQueue: [ddl({ waitsFor: null, waitS: null })] }))} />);
+    const card = screen.getByRole("region", { name: "DDL в очереди" });
+    expect(card).toHaveTextContent("ждёт prepared transaction или завершившуюся сессию");
+    expect(card).not.toHaveTextContent("(");
+  });
+
   it("отношение другой БД — «oid N в БД X» в карточке и в узле; без имени БД — «oid N»", () => {
     const other = { relation: null, relationOid: 16450, relationDatabase: "billing" };
     renderWithClient(
@@ -130,14 +142,20 @@ describe("LocksView", () => {
     expect(code.textContent!.length).toBeLessThanOrEqual(121);
   });
 
-  it("пусто: «Никто не ждёт блокировок»; цикл ожидания — группой pid и пояснением про лог", () => {
+  it("пусто: «Никто не ждёт блокировок»; цикл ожидания — группой pid; подпись про лог сервера есть всегда", () => {
+    const logNote = "Подробности взаимных блокировок есть только в логе сервера";
     const { unmount } = renderWithClient(<LocksView report={diagReport(data())} />);
     expect(screen.getByText("Никто не ждёт блокировок")).toBeInTheDocument();
     expect(screen.queryByRole("tree")).not.toBeInTheDocument();
+    expect(screen.queryByText("Сессии ждут друг друга", { exact: false })).not.toBeInTheDocument();
+    expect(screen.getByText(logNote)).toBeInTheDocument();
     unmount();
+    const withTree = renderWithClient(<LocksView report={diagReport(data({ roots: [node(s(1, "update"))] }))} />);
+    expect(screen.getByText(logNote)).toBeInTheDocument();
+    withTree.unmount();
     renderWithClient(<LocksView report={diagReport(data({ cycles: [[4, 8]] }))} />);
     expect(screen.queryByText("Никто не ждёт блокировок")).not.toBeInTheDocument();
     expect(screen.getByText("Сессии ждут друг друга: 4, 8")).toBeInTheDocument();
-    expect(screen.getByText("Подробности взаимных блокировок есть только в логе сервера")).toBeInTheDocument();
+    expect(screen.getByText(logNote)).toBeInTheDocument();
   });
 });

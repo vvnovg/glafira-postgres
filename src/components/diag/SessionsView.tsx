@@ -1,12 +1,12 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { type CSSProperties, Fragment, type KeyboardEvent, useMemo, useRef, useState } from "react";
+import { type CSSProperties, Fragment, type KeyboardEvent, type Ref, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { DiagReport, SessionRow, SessionsData } from "../../api/types";
 import { formatCount, formatDuration, formatTimestamp } from "../../lib/format";
 import { SubTabs } from "../catalog/SubTabs";
 import { CopyButton } from "../common/CopyButton";
 import { Hint } from "../common/Hint";
-import { blockersText, oneLine } from "./sessionText";
+import { blockersText, oneLine, QUERY_PREVIEW_CHARS, QUERY_TITLE_CHARS } from "./sessionText";
 
 /** Набор сессий: что показывает список (ждущие и idle in transaction — готовые отборы «кто мешает»). */
 export type SessionsPreset = "all" | "active" | "idleTx" | "waiting";
@@ -16,10 +16,6 @@ type GroupBy = "none" | "application" | "user" | "client" | "database";
 const ROW_HEIGHT = 26;
 /** Со скольких строк список виртуализируется (меньше — рисуется целиком, как список объектов дерева). */
 const VIRTUAL_FROM = 100;
-/** Сколько знаков запроса в колонке «Текст»; полный текст — в панели сессии. */
-const TEXT_CHARS = 120;
-/** Подсказка ячейки с текстом запроса не длиннее: подсказка в 16 КБ на каждую строку DOM ни к чему. */
-const TITLE_CHARS = 500;
 
 const isIdleTx = (r: SessionRow) => r.state?.startsWith("idle in transaction") ?? false;
 // blockedBy заполняется только у ждущих блокировку, но сессия могла перестать ждать между запросами — берём оба признака.
@@ -75,8 +71,8 @@ const COLS = {
     labelKey: "diag.sessions.columns.text",
     width: 240,
     flex: true,
-    cell: (r) => oneLine(r.query, TEXT_CHARS),
-    title: (r) => r.query?.slice(0, TITLE_CHARS),
+    cell: (r) => oneLine(r.query, QUERY_PREVIEW_CHARS),
+    title: (r) => r.query?.slice(0, QUERY_TITLE_CHARS),
   },
 } satisfies Record<string, Col>;
 
@@ -275,7 +271,7 @@ function SessionList({ rows, cols, selectedKey, onSelect }: { rows: SessionRow[]
 }
 
 /** Панель сессии: поля, полный текст запроса и копирование. `ended` — сессии уже нет в списке, показаны последние данные. */
-function SessionPanel({ row, ended, onClose }: { row: SessionRow; ended: boolean; onClose: () => void }) {
+function SessionPanel({ row, ended, onClose, ref }: { row: SessionRow; ended: boolean; onClose: () => void; ref: Ref<HTMLElement> }) {
   const { t } = useTranslation();
   const fields: { labelKey: string; value: string }[] = [
     { labelKey: "diag.sessions.columns.state", value: row.state ?? "" },
@@ -293,13 +289,14 @@ function SessionPanel({ row, ended, onClose }: { row: SessionRow; ended: boolean
     { labelKey: "diag.sessions.fields.stateAge", value: row.stateAgeS === null ? "" : formatDuration(row.stateAgeS) },
     { labelKey: "diag.sessions.fields.xid", value: row.backendXid ?? "" },
     { labelKey: "diag.sessions.columns.xminAge", value: row.xminAge === null ? "" : formatCount(row.xminAge) },
-    { labelKey: "diag.sessions.fields.queryId", value: row.queryId === null ? "" : String(row.queryId) },
+    { labelKey: "diag.sessions.fields.queryId", value: row.queryId ?? "" },
     { labelKey: "diag.sessions.columns.locksHeld", value: formatCount(row.locksHeld) },
   ].filter((f) => f.value !== "");
   return (
-    <section role="region" aria-label={t("diag.sessions.panel", { pid: row.pid })} className="panel sess-panel">
+    <section ref={ref} role="region" aria-label={t("diag.sessions.panel", { pid: row.pid })} className="panel sess-panel">
       <div className="toolbar">
-        <h3>{t("diag.sessions.panel", { pid: row.pid })}</h3>
+        {/* tabIndex -1: заголовок принимает фокус программно, когда пользователь открыл панель, но не попадает в порядок Tab. */}
+        <h3 tabIndex={-1}>{t("diag.sessions.panel", { pid: row.pid })}</h3>
         <button type="button" onClick={onClose}>
           {t("common.close")}
         </button>
@@ -341,12 +338,29 @@ function SessionsBody({ data, preset: initial }: { data: SessionsData; preset: S
   const [hideGlafira, setHideGlafira] = useState(true);
   // Сессия, открытая в панели: последний снимок её строки (обновляется с каждым отчётом, пока сессия есть в списке).
   const [opened, setOpened] = useState<SessionRow | null>(null);
+  // Счётчик открытий панели пользователем (клик, Enter): по нему фокус уходит в панель. Обновление данных и возврат панели после
+  // переключения группировки счётчик не меняют, поэтому фокус не отнимают.
+  const [openCount, setOpenCount] = useState(0);
+  const panelRef = useRef<HTMLElement>(null);
+  const select = (r: SessionRow) => {
+    setOpened(r);
+    setOpenCount((n) => n + 1);
+  };
+  useEffect(() => {
+    if (openCount === 0) return;
+    const panel = panelRef.current;
+    // Панель открывается под списком: заголовок получает фокус (читалка объявит сессию), а панель показывается целиком.
+    panel?.querySelector<HTMLElement>("h3")?.focus({ preventScroll: true });
+    panel?.scrollIntoView?.({ block: "nearest" });
+  }, [openCount]);
 
-  const haystacks = useMemo(() => new Map(data.rows.map((r) => [rowKey(r), haystack(r)])), [data.rows]);
   const needle = filter.trim().toLowerCase();
+  const filtering = needle !== "";
+  // Строки поиска строятся, только пока фильтр задан (тысяча сессий × текст запроса до 16 КБ), и переживают набор текста фильтра.
+  const haystacks = useMemo(() => (filtering ? new Map(data.rows.map((r) => [rowKey(r), haystack(r)])) : null), [data.rows, filtering]);
   // Скрытие сессий Glafira и фильтр действуют и на список, и на группы; набор — только на список (счётчики групп — по состояниям).
   const base = useMemo(
-    () => data.rows.filter((r) => !(hideGlafira && r.glafira) && (needle === "" || (haystacks.get(rowKey(r)) ?? "").includes(needle))),
+    () => data.rows.filter((r) => !(hideGlafira && r.glafira) && (haystacks === null || (haystacks.get(rowKey(r)) ?? "").includes(needle))),
     [data.rows, hideGlafira, needle, haystacks],
   );
   const current = PRESETS.find((p) => p.id === preset) ?? PRESETS[0];
@@ -390,10 +404,10 @@ function SessionsBody({ data, preset: initial }: { data: SessionsData; preset: S
             <GroupTable rows={base} by={groupBy} />
           ) : (
             <>
-              <SessionList rows={rows} cols={cols} selectedKey={openedKey} onSelect={setOpened} />
+              <SessionList rows={rows} cols={cols} selectedKey={openedKey} onSelect={select} />
               {rows.length === 0 && <p className="muted">{t("diag.sessions.none")}</p>}
               <p className="muted">{t("sidebar.shown", { shown: formatCount(rows.length), total: formatCount(data.rows.length) })}</p>
-              {opened && <SessionPanel row={opened} ended={fresh === undefined} onClose={() => setOpened(null)} />}
+              {opened && <SessionPanel ref={panelRef} row={opened} ended={fresh === undefined} onClose={() => setOpened(null)} />}
             </>
           )}
         </div>

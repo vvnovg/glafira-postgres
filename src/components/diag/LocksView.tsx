@@ -3,12 +3,10 @@ import { useTranslation } from "react-i18next";
 import type { DdlQueueItem, DiagReport, LockNode, LockSession, LocksData, WaitingLock } from "../../api/types";
 import { i18n } from "../../i18n";
 import { formatDuration } from "../../lib/format";
-import { blockersText, oneLine } from "./sessionText";
+import { blockersText, oneLine, QUERY_PREVIEW_CHARS, QUERY_TITLE_CHARS } from "./sessionText";
 
-/** Знаков запроса в дереве и карточке; полный текст — в подсказке. */
-const TREE_QUERY_CHARS = 120;
+/** Знаков запроса в карточке DDL (в дереве — `QUERY_PREVIEW_CHARS`); полный текст — в подсказке. */
 const CARD_QUERY_CHARS = 200;
-const TITLE_CHARS = 500;
 
 /** Отношение блокировки: имя (БД соединения), «oid N в БД X» (другая БД), «oid N» (БД неизвестна) или `null`. */
 function relationText(l: { relation: string | null; relationOid: number | null; relationDatabase: string | null }): string | null {
@@ -31,15 +29,17 @@ function SessionMeta({ s }: { s: LockSession }) {
 }
 
 function QueryText({ s, max }: { s: LockSession; max: number }) {
-  return s.query ? <code className="lock-query" title={s.query.slice(0, TITLE_CHARS)}>{oneLine(s.query, max)}</code> : null;
+  return s.query ? <code className="lock-query" title={s.query.slice(0, QUERY_TITLE_CHARS)}>{oneLine(s.query, max)}</code> : null;
 }
 
 function DdlCard({ item }: { item: DdlQueueItem }) {
   const { t } = useTranslation();
-  // Время — в скобках: «ждёт сессию 1 40 с» читалось бы как два числа подряд.
-  const waitS = item.waitS === null ? "" : `(${formatDuration(item.waitS)})`;
+  // Фраза целиком — ключ словаря, с ожиданием и без него (скобки вокруг времени — в словаре): код ничего не склеивает.
   // waitsFor пуст, когда блокирующий не виден: подготовленная транзакция или сессия, завершившаяся между запросами.
-  const waits = item.waitsFor === null ? t("diag.locks.waitsForHidden", { waitS }) : t("diag.locks.waitsFor", { pid: item.waitsFor, waitS });
+  const waitS = item.waitS === null ? null : formatDuration(item.waitS);
+  let waits: string;
+  if (item.waitsFor === null) waits = waitS === null ? t("diag.locks.waitsForHidden") : t("diag.locks.waitsForHiddenTimed", { waitS });
+  else waits = waitS === null ? t("diag.locks.waitsFor", { pid: item.waitsFor }) : t("diag.locks.waitsForTimed", { pid: item.waitsFor, waitS });
   return (
     <li className="lock-card">
       <div className="lock-line">
@@ -49,7 +49,7 @@ function DdlCard({ item }: { item: DdlQueueItem }) {
       <QueryText s={item.session} max={CARD_QUERY_CHARS} />
       <div className="lock-line">
         <span>{requestText({ ...item, locktype: "relation" })}</span>
-        <span>{waits.trim()}</span>
+        <span>{waits}</span>
         <span>{t("diag.locks.queued", { count: item.queued })}</span>
       </div>
     </li>
@@ -99,7 +99,7 @@ function TreeNode({ node, base, collapsed, toggle }: { node: LockNode; base: str
         {node.victims > 0 && <span className="lock-victims">{t("diag.locks.victims", { count: node.victims })}</span>}
       </div>
       <div className="lock-detail">
-        <QueryText s={s} max={TREE_QUERY_CHARS} />
+        <QueryText s={s} max={QUERY_PREVIEW_CHARS} />
         {lock && (
           <div className="lock-line">
             <span>{requestText(lock)}</span>
@@ -163,10 +163,11 @@ function LocksBody({ data }: { data: LocksData }) {
               <li key={c.join(",")}>{t("diag.locks.cycle", { pids: c.join(", ") })}</li>
             ))}
           </ul>
-          <p className="muted">{t("diag.locks.logNote")}</p>
         </section>
       )}
       {empty && <p className="muted">{t("diag.locks.none")}</p>}
+      {/* Подпись о границе инструмента — всегда: взаимные блокировки, уже разрешённые сервером, видны только в его логе. */}
+      <p className="muted">{t("diag.locks.logNote")}</p>
     </div>
   );
 }

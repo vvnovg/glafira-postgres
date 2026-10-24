@@ -26,7 +26,8 @@ pub struct SessionRow {
     pub wait_event: Option<String>,
     pub backend_xid: Option<String>,
     pub xmin_age: Option<i64>,
-    /// `query_id` — PostgreSQL 14+.
+    /// `query_id` — PostgreSQL 14+. В JSON — десятичная строка: 64-битный хеш не помещается в точное число JS.
+    #[serde(with = "crate::serde_util::opt_i64_string", default)]
     pub query_id: Option<i64>,
     pub query: Option<String>,
     /// Текст запроса обрезан по пределу списка.
@@ -322,5 +323,17 @@ mod tests {
                 .iter()
                 .all(|x| x.id != "noIdleTimeout")
         );
+    }
+
+    #[test]
+    fn query_id_goes_to_json_as_a_string() {
+        // Хеш выше 2^53: числом JS округлил бы его.
+        let mut a = row(1, "active");
+        a.query_id = Some(i64::MAX);
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v["queryId"], "9223372036854775807");
+        assert_eq!(serde_json::from_value::<SessionRow>(v).unwrap(), a);
+        let none = serde_json::to_value(row(2, "idle")).unwrap();
+        assert!(none["queryId"].is_null());
     }
 }

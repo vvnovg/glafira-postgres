@@ -130,8 +130,14 @@ describe("PulseView", () => {
     const buttons = within(row).getAllByRole("button");
     expect(buttons).toHaveLength(PULSE_COLUMNS.length);
     for (const [i, col] of PULSE_COLUMNS.entries()) {
+      // Вкладка инструмента одна на подключение: без сброса повторный клик по тому же инструменту ничего не менял бы в списке,
+      // и проверка прошла бы по вкладке от прошлого клика.
+      useWorkspace.setState({ tabs: [], activeId: null });
       await user.click(buttons[i]);
-      expect(useWorkspace.getState().tabs.find((t) => t.kind === "diag" && t.tool === col.tool)).toMatchObject({ kind: "diag", connectionId: "c", member: "pg-7" });
+      const { tabs, activeId } = useWorkspace.getState();
+      expect(tabs, col.key).toHaveLength(1);
+      expect(tabs[0], col.key).toMatchObject({ kind: "diag", tool: col.tool, connectionId: "c", member: "pg-7" });
+      expect(activeId, col.key).toBe(tabs[0].id);
     }
     expect(PULSE_COLUMNS.map((c) => [c.key, c.tool])).toEqual([
       ["connections", "sessions"],

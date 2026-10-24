@@ -597,8 +597,8 @@ export interface SessionRow {
   waitEvent: string | null;
   backendXid: string | null;
   xminAge: number | null;
-  /** PostgreSQL 14+. */
-  queryId: number | null;
+  /** PostgreSQL 14+. Десятичная строка: 64-битный хеш не помещается в точное число JS. */
+  queryId: string | null;
   query: string | null;
   /** Текст обрезан по пределу списка (16 384 символа). */
   queryTruncated: boolean;
@@ -691,7 +691,8 @@ export interface TopEvent {
 export interface TopQuery {
   /** `id:<query_id>` или `text:<хэш>`. */
   key: string;
-  queryId: number | null;
+  /** Десятичная строка: 64-битный хеш не помещается в точное число JS. */
+  queryId: string | null;
   text: string;
   samples: number;
   share: number;
