@@ -43,15 +43,17 @@ export function useDiagnostic(
     refetchInterval: (query) => diagRefetchInterval(opts.active, opts.intervalS, query.state.error),
   });
   const wasActive = useRef(opts.active);
-  const { dataUpdatedAt, refetch } = q;
+  const { dataUpdatedAt, error, refetch } = q;
   const { active, intervalS, live } = opts;
   useEffect(() => {
     const shown = active && !wasActive.current;
     wasActive.current = active;
-    // Пауза и закрытое подключение отчёт не обновляют; без данных (`dataUpdatedAt` = 0) читать нечего — это дело первого запроса.
-    if (!shown || !live || intervalS === null || dataUpdatedAt === 0) return;
+    // Пауза, закрытое подключение и отказ во входе отчёт не обновляют: повтор входа блокирует учётную запись.
+    // Без данных (`dataUpdatedAt` = 0) читать нечего — это дело первого запроса.
+    const ms = diagRefetchInterval(true, intervalS, error);
+    if (!shown || !live || dataUpdatedAt === 0 || ms === false) return;
     // Идущий запрос не отменяется: он и принесёт свежие данные.
-    if (Date.now() - dataUpdatedAt > intervalS * 1000) void refetch({ cancelRefetch: false });
-  }, [active, intervalS, live, dataUpdatedAt, refetch]);
+    if (Date.now() - dataUpdatedAt > ms) void refetch({ cancelRefetch: false });
+  }, [active, intervalS, live, dataUpdatedAt, error, refetch]);
   return q;
 }

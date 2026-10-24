@@ -141,4 +141,21 @@ describe("useDiagnostic: опрос по таймеру", () => {
     await tick(20_000);
     expect(api.runDiagnostic).toHaveBeenCalledTimes(1);
   });
+
+  it("после отказа во входе показ вкладки не повторяет вход, даже если данные устарели", async () => {
+    const h = setup({ active: true, intervalS: 5 });
+    await tick(0);
+    expect(api.runDiagnostic).toHaveBeenCalledTimes(1);
+    // Следующий опрос получает отказ во входе; отчёт первого опроса остаётся в кэше.
+    vi.mocked(api.runDiagnostic).mockRejectedValue({ code: "AUTH_FAILED", message: "x", retryable: false });
+    await tick(5000);
+    expect(api.runDiagnostic).toHaveBeenCalledTimes(2);
+    expect(h.client.getQueryState(["diag", "c", "sessions", "pg-2", 0])?.error).toMatchObject({ code: "AUTH_FAILED" });
+    expect(h.client.getQueryData(["diag", "c", "sessions", "pg-2", 0])).toEqual(report);
+    h.rerender({ active: false, intervalS: 5 });
+    await tick(20_000);
+    h.rerender({ active: true, intervalS: 5 });
+    await tick(0);
+    expect(api.runDiagnostic).toHaveBeenCalledTimes(2);
+  });
 });
