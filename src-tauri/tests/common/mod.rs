@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -7,7 +8,7 @@ use std::time::{Duration, Instant};
 use glafira_pg_lib::conn::pool::PoolRegistry;
 use glafira_pg_lib::conn::profile::{
     ConnectionKind, ConnectionProfile, Environment, HostOverride, HostPort, PatroniSettings,
-    PgSettings, PgTls, SslMode, TargetServerType,
+    PgSettings, PgTls, SshAuth, SshSettings, SslMode, TargetServerType,
 };
 use glafira_pg_lib::net::ssh::tunnel::{TunnelConfig, TunnelRegistry};
 use glafira_pg_lib::secrets::{MemoryStore, PG_PASSWORD, SecretStore, secret_key};
@@ -65,6 +66,38 @@ pub fn no_tunnels(pools: Arc<PoolRegistry>) -> Arc<TunnelRegistry> {
         pools,
         Arc::new(MemoryStore::default()),
     )
+}
+
+/// Адрес bastion (`GPG_IT_BASTION=localhost:2222`) и каталог ключей (`GPG_IT_SSH_KEYS`, абсолютный путь); без
+/// любой из переменных тест пропускается.
+pub fn bastion_settings(auth: SshAuth) -> Option<SshSettings> {
+    let (host, port) = host_port(&env("GPG_IT_BASTION")?);
+    let keys = ssh_keys_dir()?;
+    Some(SshSettings {
+        target: host,
+        port: Some(port),
+        user: Some("tester".into()),
+        auth,
+        key_path: match auth {
+            SshAuth::Key => Some(keys.join("tester_ed25519").to_string_lossy().into_owned()),
+            _ => None,
+        },
+    })
+}
+
+pub fn ssh_keys_dir() -> Option<PathBuf> {
+    env("GPG_IT_SSH_KEYS").map(PathBuf::from)
+}
+
+/// Реестр туннелей для тестов с настоящим OpenSSH: свой known_hosts во временном каталоге (файл разработчика не
+/// трогается), секреты для askpass — в файле 0600 (keychain на CI недоступен).
+pub fn tunnel_registry_for_tests(dir: &Path, pools: Arc<PoolRegistry>) -> Arc<TunnelRegistry> {
+    let mut cfg = TunnelConfig::new(dir.join("data"), dir.join("logs"));
+    cfg.known_hosts = Some(dir.join("known_hosts"));
+    cfg.stage_secrets_in_file = true;
+    // Askpass умеет только бинарь приложения; cargo собирает его для интеграционных тестов и даёт путь.
+    cfg.askpass_bin = Some(PathBuf::from(env!("CARGO_BIN_EXE_glafira-pg")));
+    TunnelRegistry::new(cfg, pools, Arc::new(MemoryStore::default()))
 }
 
 pub fn secrets_with_password(id: &str) -> Arc<MemoryStore> {

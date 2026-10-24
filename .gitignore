@@ -17,5 +17,8 @@ docs/licensing-review-2026-10-19.md
 # Экспорты подключений (без паролей, но с адресами реальных кластеров)
 *.glafira-postgres-connections.json
 
+# Тестовые приватные ключи bastion (генерирует dev/ssh/gen-keys.sh)
+dev/ssh/keys/
+
 # Журнал и брифы субагентной разработки
 .superpowers/

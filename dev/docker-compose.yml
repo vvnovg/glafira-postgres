@@ -99,3 +99,14 @@ services:
     volumes:
       - ./sql/init.sql:/docker-entrypoint-initdb.d/20-init.sql:ro
     ports: ["127.0.0.1:5460:5432"]
+
+  # SSH-бастион для проверки туннеля: имена узлов (pg-single, patroni1…) разрешаются во внутренней сети compose.
+  # Ключи tester генерирует dev/ssh/gen-keys.sh (до `up --build`), в репозитории их нет.
+  bastion:
+    build:
+      context: .
+      dockerfile: ssh/Dockerfile
+    image: glafira-pg-dev/bastion
+    container_name: gp-bastion
+    hostname: bastion
+    ports: ["127.0.0.1:2222:22"]

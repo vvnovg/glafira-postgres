@@ -42,6 +42,7 @@ https://github.com/vvnovg/glafira-postgres-releases/releases
 ## Запуск
 ```bash
 pnpm install
+dev/ssh/gen-keys.sh          # тестовые ключи для bastion (один раз; в репозиторий не попадают)
 docker compose -f dev/docker-compose.yml up -d --build
 scripts/wait-stand.sh
 pnpm tauri dev
@@ -53,6 +54,7 @@ pnpm tauri dev
 | Кластер Patroni `demo` (PG 17, etcd) | PG `localhost:5441–5443`, REST API `localhost:8011–8013` |
 | Primary и реплика без Patroni (PG 16) | `localhost:5451`, `localhost:5452` |
 | Одиночный сервер без `pg_stat_statements` (PG 15) | `localhost:5460` |
+| SSH-бастион `bastion` (OpenSSH, пользователь `tester`) | `localhost:2222` |
 
 Порты стенда опубликованы только на `127.0.0.1` (учётные данные известные), поэтому `localhost` в адресах стенда выше работает, а с другой машины стенд недоступен.
 
@@ -60,6 +62,11 @@ pnpm tauri dev
 REST API Patroni `patroni` / `patroni-secret`. Демо-база `orders`, схема `shop`.
 Участники Patroni отдают внутренние адреса `patroniN`: в профиле кластера задайте подмену адресов
 (`patroni1 → localhost:5441`, API `http://localhost:8011` и т. д.).
+
+`bastion` проверяет SSH-туннель: он входит в сеть compose и разрешает имена узлов (`pg-single`, `pg-primary`, `pg-replica`,
+`patroni1`…`patroni3`). Вход — пароль `tester-secret` или ключи из `dev/ssh/keys/`, которые создаёт `dev/ssh/gen-keys.sh`
+(`tester_ed25519` без пассфразы, `tester_ed25519_pass` с пассфразой `test-passphrase`); `gen-keys.sh` нужно выполнить до
+`docker compose up --build`. Подробности — `dev/ssh/README.md`.
 
 ## Тесты
 ```bash
@@ -71,9 +78,11 @@ cargo deny --manifest-path src-tauri/Cargo.toml --config deny.toml check license
 cargo deny --manifest-path crates/pg-advisor/Cargo.toml --config deny.toml check licenses
 GPG_IT_SINGLE=localhost:5460 GPG_IT_PRIMARY=localhost:5451 GPG_IT_REPLICA=localhost:5452 \
 GPG_IT_PATRONI=http://localhost:8011,http://localhost:8012,http://localhost:8013 GPG_IT_DOCKER=1 \
+GPG_IT_BASTION=localhost:2222 GPG_IT_SSH_KEYS=$PWD/dev/ssh/keys \
   cargo test --manifest-path src-tauri/Cargo.toml --tests -- --test-threads=1   # интеграционные (нужен стенд)
 ```
-Без переменной `GPG_IT_*` интеграционный тест пропускается. `GPG_IT_DOCKER=1` разрешает тестам останавливать контейнеры,
+Без переменной `GPG_IT_*` интеграционный тест пропускается (`it_ssh` — без `GPG_IT_BASTION` или `GPG_IT_SSH_KEYS`; он запускает
+настоящий OpenSSH 8.4+ из `PATH`). `GPG_IT_DOCKER=1` разрешает тестам останавливать контейнеры,
 делать switchover и promote; после них стенд возвращается в исходное состояние.
 
 ## Релиз

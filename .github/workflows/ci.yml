@@ -62,6 +62,8 @@ jobs:
           cargo deny --version 2>/dev/null | grep -q ' 0\.20\.2$' || cargo install cargo-deny --locked --version 0.20.2 --force
           cargo deny --manifest-path src-tauri/Cargo.toml --config deny.toml check licenses
           cargo deny --manifest-path crates/pg-advisor/Cargo.toml --config deny.toml check licenses
+      - name: Ключи bastion
+        run: dev/ssh/gen-keys.sh
       - name: Стенд
         run: |
           docker compose -f dev/docker-compose.yml up -d --build
@@ -73,6 +75,8 @@ jobs:
           GPG_IT_PRIMARY: localhost:5451
           GPG_IT_REPLICA: localhost:5452
           GPG_IT_PATRONI: http://localhost:8011,http://localhost:8012,http://localhost:8013
+          GPG_IT_BASTION: localhost:2222
+          GPG_IT_SSH_KEYS: ${{ github.workspace }}/dev/ssh/keys
           GPG_IT_DOCKER: "1"
       - name: Логи стенда при сбое
         if: failure()

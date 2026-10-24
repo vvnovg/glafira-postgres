@@ -55,7 +55,7 @@
   а `.app` и `.dmg` в `src-tauri/target/release/bundle/` годны для смоука.
 
 ## Смоук установщиков
-Стенд: `docker compose -f dev/docker-compose.yml up -d` и `scripts/wait-stand.sh` (README → «Стенд»).
+Стенд: `dev/ssh/gen-keys.sh`, `docker compose -f dev/docker-compose.yml up -d` и `scripts/wait-stand.sh` (README → «Стенд»).
 - [ ] macOS (`.dmg` и `.pkg`): установка; из `.dmg` запуск без предупреждений Gatekeeper (сборка подписана и нотаризована),
       `.pkg` без отдельной нотаризации может предупредить; подключение к серверу `localhost:5460` (`glafira_diag` / `glafira-secret`)
       и к кластеру Patroni (`http://localhost:8011`), «О программе» — версия.
