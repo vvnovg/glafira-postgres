@@ -61,6 +61,19 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> AppResult<()> {
     })
 }
 
+/// Небольшой служебный файл только для владельца (0600 на unix, в том числе если файл уже был с другими
+/// правами): реестр процессов ssh, отчёт askpass. Без атомарной замены и fsync — читатели терпят пустой или
+/// неполный файл. Каталог должен существовать.
+pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut f = create_private(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        f.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    f.write_all(bytes)
+}
+
 /// fsync каталога фиксирует rename на диске (POSIX). На Windows каталог так не открыть — пропускаем.
 fn sync_dir(dir: &Path) {
     #[cfg(unix)]
@@ -179,6 +192,30 @@ mod tests {
         atomic_write(&p, b"new").unwrap();
         let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "заменённый файл тоже 0600");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_files_are_owner_only_even_if_they_existed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("tunnels.json");
+        write_private(&p, b"first").unwrap();
+        assert_eq!(
+            std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_private(&p, b"2").unwrap();
+        assert_eq!(
+            std::fs::read(&p).unwrap(),
+            b"2",
+            "файл перезаписан, а не дописан"
+        );
+        assert_eq!(
+            std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]

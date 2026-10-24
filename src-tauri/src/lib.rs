@@ -7,6 +7,7 @@ pub mod diagnostics;
 pub mod error;
 pub mod logging;
 pub mod migrate;
+pub mod net;
 pub mod policy;
 pub mod product;
 pub mod readiness;

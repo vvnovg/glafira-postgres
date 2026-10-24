@@ -12,7 +12,7 @@ because they are compiled from source by the Rust `-sys` crates and are invisibl
 | OpenSSL 3 | Apache-2.0 | https://www.openssl.org/ | openssl-src, feature vendored (openssl, postgres-openssl) |
 | AWS-LC | ISC, Apache-2.0, MIT, BSD-3-Clause (see the license expression of aws-lc-sys) | https://github.com/aws/aws-lc | aws-lc-sys (reqwest → rustls → aws-lc-rs) |
 
-## Rust crates (571)
+## Rust crates (573)
 
 | Crate | Version | License | Repository |
 |---|---|---|---|
@@ -117,6 +117,7 @@ because they are compiled from source by the Rust `-sys` crates and are invisibl
 | dtoa-short | 0.3.5 | MPL-2.0 | https://github.com/upsuper/dtoa-short |
 | dunce | 1.0.5 | CC0-1.0 OR MIT-0 OR Apache-2.0 | https://gitlab.com/kornelski/dunce |
 | dyn-clone | 1.0.20 | MIT OR Apache-2.0 | https://github.com/dtolnay/dyn-clone |
+| either | 1.19.0 | MIT OR Apache-2.0 | https://github.com/rayon-rs/either |
 | embed-resource | 3.0.12 | MIT | https://github.com/nabijaczleweli/rust-embed-resource |
 | embed_plist | 1.2.2 | MIT OR Apache-2.0 | https://github.com/nvzqz/embed-plist-rs |
 | endi | 1.1.1 | MIT | https://github.com/zeenix/endi |
@@ -445,6 +446,7 @@ because they are compiled from source by the Rust `-sys` crates and are invisibl
 | tokio-openssl | 0.6.5 | MIT/Apache-2.0 | https://github.com/tokio-rs/tokio-openssl |
 | tokio-postgres | 0.7.18 | MIT OR Apache-2.0 | https://github.com/rust-postgres/rust-postgres |
 | tokio-rustls | 0.26.6 | MIT OR Apache-2.0 | https://github.com/rustls/tokio-rustls |
+| tokio-socks | 0.5.3 | MIT | https://github.com/sticnarf/tokio-socks |
 | tokio-util | 0.7.20 | MIT | https://github.com/tokio-rs/tokio |
 | toml | 0.8.2 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | toml | 1.1.8+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |

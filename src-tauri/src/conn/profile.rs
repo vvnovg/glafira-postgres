@@ -521,7 +521,7 @@ fn ssh_argument_ok(s: &str) -> bool {
     !s.is_empty() && !s.starts_with('-') && !s.chars().any(char::is_whitespace)
 }
 
-fn validate_ssh(ssh: Option<&SshSettings>) -> AppResult<()> {
+pub(crate) fn validate_ssh(ssh: Option<&SshSettings>) -> AppResult<()> {
     let Some(s) = ssh else { return Ok(()) };
     if !ssh_argument_ok(&s.target) {
         return Err(invalid(ltext!(

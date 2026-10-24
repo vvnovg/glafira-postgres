@@ -27,7 +27,9 @@ thiserror = "2"
 uuid = { version = "1", features = ["v4"] }
 time = { version = "0.3", features = ["formatting"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "macros", "sync", "io-util"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "macros", "sync", "io-util", "process"] }
+# SOCKS5 к узлу через порт туннеля `ssh -D` (имя узла разрешает бастион).
+tokio-socks = "0.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry", "fmt"] }
 plist = "1"
@@ -41,7 +43,7 @@ openssl = { version = "0.10", features = ["vendored"] }
 openssl-sys = "0.9"
 rustls-native-certs = "0.8"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "socks"] }
 futures-util = "0.3"
 socket2 = { version = "0.6", features = ["all"] }
 pg-advisor = { path = "../crates/pg-advisor" }

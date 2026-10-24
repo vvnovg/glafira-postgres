@@ -163,6 +163,16 @@
     },
     "catalog": {
       "badPage": "Invalid page: offset {{offset}}, limit {{limit}}"
+    },
+    "ssh": {
+      "notFound": "OpenSSH client (ssh) was not found: install it (Windows: the “OpenSSH Client” optional feature)",
+      "tooOld": "OpenSSH 8.4 or newer is needed for password and passphrase prompts; use an agent or a key without a passphrase",
+      "hostKeyUnknown": "The host key of {{host}} is not known yet ({{fingerprint}})",
+      "hostKeyChanged": "The host key of {{target}} has changed: check ~/.ssh/known_hosts yourself",
+      "authFailed": "SSH login to {{target}} was refused: check the user, the key or the password",
+      "forwardFailed": "The bastion {{target}} could not reach the node (the forward failed)",
+      "exited": "The ssh process to {{target}} exited",
+      "socks": "The bastion could not connect to {{host}}:{{port}}"
     }
   },
   "connections": {
