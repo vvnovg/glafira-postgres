@@ -1,13 +1,14 @@
 import { describe, expect, it } from "vitest";
-import type { ParsedConnection } from "../../api/types";
-import type { ConnectionProfile, HostPort } from "../../api/types";
+import type { AppError, ConnectionProfile, HostPort, ParsedConnection } from "../../api/types";
 import {
   applyParsed,
   copyProfile,
   emptyKindMemo,
   emptyPatroni,
+  emptySsh,
   formatDatabases,
   formatFromPath,
+  hostKeyUnknown,
   hostsFromPatroni,
   type KindMemo,
   newProfile,
@@ -243,5 +244,59 @@ describe("portProblem", () => {
     expect(portProblem(p(null))).toBeNull();
     expect(portProblem(p(6432))).toBeNull();
     expect(portProblem(p(70000))).not.toBeNull();
+  });
+});
+
+describe("SSH в модели формы", () => {
+  it("пустые настройки SSH — вход через агент, порт и пользователь из ~/.ssh/config", () => {
+    expect(emptySsh()).toEqual({ target: "", port: null, user: null, auth: "agent", keyPath: null });
+  });
+
+  const unknown = (patch: Partial<AppError> = {}, params: Record<string, string> = {}): AppError => ({
+    code: "SSH_ERROR",
+    key: "errors.ssh.hostKeyUnknown",
+    message: "x",
+    retryable: false,
+    params: { kind: "hostKeyUnknown", target: "bastion", host: "bastion (10.0.0.5)", fingerprint: "SHA256:abc", ...params },
+    ...patch,
+  });
+
+  it("ошибка неизвестного ключа хоста распознаётся по коду и виду", () => {
+    expect(hostKeyUnknown(unknown())).toEqual({ target: "bastion", host: "bastion (10.0.0.5)", fingerprint: "SHA256:abc" });
+    expect(hostKeyUnknown({ ...unknown(), params: { kind: "authFailed" } })).toBeNull();
+    expect(hostKeyUnknown({ ...unknown(), code: "CONNECTION_FAILED" })).toBeNull();
+    expect(hostKeyUnknown(null)).toBeNull();
+    expect(hostKeyUnknown(undefined)).toBeNull();
+  });
+
+  it("смена ключа хоста доверием из интерфейса не лечится: диалога нет", () => {
+    expect(hostKeyUnknown(unknown({ key: "errors.ssh.hostKeyChanged" }, { kind: "hostKeyChanged" }))).toBeNull();
+  });
+
+  it("без отпечатка (пустой или отсутствует) доверять нечему: это обычная ошибка", () => {
+    expect(hostKeyUnknown(unknown({}, { fingerprint: "" }))).toBeNull();
+    expect(hostKeyUnknown(unknown({}, { fingerprint: "   " }))).toBeNull();
+    const { fingerprint: _drop, ...noFingerprint } = unknown().params!;
+    expect(hostKeyUnknown(unknown({ params: noFingerprint }))).toBeNull();
+    expect(hostKeyUnknown(unknown({ params: undefined }))).toBeNull();
+  });
+
+  it("без цели доверять некому; хост по умолчанию — сама цель", () => {
+    expect(hostKeyUnknown(unknown({}, { target: "" }))).toBeNull();
+    const { host: _drop, ...noHost } = unknown().params!;
+    expect(hostKeyUnknown(unknown({ params: noHost }))).toEqual({ target: "bastion", host: "bastion", fingerprint: "SHA256:abc" });
+  });
+
+  it("порт SSH проверяется вместе с портами узлов", () => {
+    const p: ConnectionProfile = { ...newProfile(), ssh: { ...emptySsh(), target: "b", port: 70000 } };
+    expect(portProblem(p)?.key).toBe("errors.connections.portInvalid");
+    expect(portProblem({ ...p, ssh: { ...p.ssh!, port: null } })).toBeNull();
+    expect(portProblem({ ...p, ssh: { ...p.ssh!, port: 2222 } })).toBeNull();
+    expect(portProblem({ ...p, ssh: null })).toBeNull();
+  });
+
+  it("порт SSH проверяется и у Patroni, где порты узлов не вводятся", () => {
+    const patroni: ConnectionProfile = { ...newProfile(), kind: "patroni", hosts: [], patroni: emptyPatroni(), ssh: { ...emptySsh(), target: "b", port: 0 } };
+    expect(portProblem(patroni)?.key).toBe("errors.connections.portInvalid");
   });
 });

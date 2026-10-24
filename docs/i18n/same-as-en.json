@@ -1,6 +1,7 @@
 {
   "ru": [
     "connections.form.scoped",
+    "connections.form.ssh.section",
     "connections.form.targets.primary",
     "overview.dcsSeen",
     "overview.head",

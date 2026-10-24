@@ -1,4 +1,4 @@
-import type { AppError, CertFormat, ConnectionKind, ConnectionProfile, HostPort, ParsedConnection, PatroniSettings } from "../../api/types";
+import type { AppError, CertFormat, ConnectionKind, ConnectionProfile, HostPort, ParsedConnection, PatroniSettings, SshSettings } from "../../api/types";
 
 export function newProfile(): ConnectionProfile {
   return {
@@ -32,6 +32,24 @@ export function copyProfile(source: ConnectionProfile, name: string): Connection
 
 export function emptyPatroni(): PatroniSettings {
   return { urls: ["http://localhost:8008"], username: null, tls: null, hostOverrides: [] };
+}
+
+/** Настройки туннеля при включении флажка: вход через агент, порт и пользователь — из ~/.ssh/config. */
+export function emptySsh(): SshSettings {
+  return { target: "", port: null, user: null, auth: "agent", keyPath: null };
+}
+
+/**
+ * Ошибка «ключ хоста ssh ещё не известен» (`SSH_ERROR` с `params.kind = hostKeyUnknown`) — данные для диалога доверия.
+ * null, если доверять нечему: другой вид ошибки (в том числе `hostKeyChanged` — его лечат правкой known_hosts, а не
+ * кнопкой), нет отпечатка или цели. Такая ошибка показывается как обычная, без предложения «доверять».
+ */
+export function hostKeyUnknown(e: AppError | null | undefined): { target: string; host: string; fingerprint: string } | null {
+  if (!e || e.code !== "SSH_ERROR" || e.params?.kind !== "hostKeyUnknown") return null;
+  const target = e.params.target ?? "";
+  const fingerprint = e.params.fingerprint ?? "";
+  if (!target.trim() || !fingerprint.trim()) return null;
+  return { target, host: e.params.host || target, fingerprint };
 }
 
 /** Хост для URL: пробелы обрезаются, IPv6 берётся в скобки (уже заключённый в скобки не трогаем). */
@@ -167,10 +185,13 @@ export function isValidPort(port: number): boolean {
 
 /**
  * Порты формы, которые нельзя отправить в Rust: узлы сервера и списка, подмены адресов Patroni (пустая подмена порта —
- * «не менять», это null). Иначе вместо понятной ошибки пришёл бы сбой разбора аргументов команды.
+ * «не менять», это null), порт SSH (пустой — «как в ~/.ssh/config», тоже null). Иначе вместо понятной ошибки пришёл бы
+ * сбой разбора аргументов команды.
  */
 export function portProblem(p: ConnectionProfile): AppError | null {
-  const ports = p.kind === "patroni" ? (p.patroni?.hostOverrides ?? []).flatMap((o) => (o.port === null ? [] : [o.port])) : p.hosts.map((h) => h.port);
+  const nodePorts = p.kind === "patroni" ? (p.patroni?.hostOverrides ?? []).flatMap((o) => (o.port === null ? [] : [o.port])) : p.hosts.map((h) => h.port);
+  // Порт SSH пуст — «как в ~/.ssh/config» (null): проверяется только заданный.
+  const ports = p.ssh?.port == null ? nodePorts : [...nodePorts, p.ssh.port];
   if (ports.every(isValidPort)) return null;
   return { code: "INVALID_INPUT", key: "errors.connections.portInvalid", message: "Port must be from 1 to 65535", retryable: false };
 }

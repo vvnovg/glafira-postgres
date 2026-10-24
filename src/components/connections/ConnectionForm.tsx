@@ -8,8 +8,10 @@ import { ErrorBanner } from "../common/ErrorBanner";
 import { Hint } from "../common/Hint";
 import { NodesSection, type PatroniSecrets } from "./NodesSection";
 import { PgSection, type PgSecrets } from "./PgSection";
-import { applyParsed, emptyKindMemo, emptySecret, type KindMemo, portProblem, secretValue, switchKind, visibleProfile } from "./profile";
+import { applyParsed, emptyKindMemo, emptySecret, hostKeyUnknown, type KindMemo, portProblem, secretValue, switchKind, visibleProfile } from "./profile";
+import { SshSection, type SshSecrets } from "./SshSection";
 import { TestPanel } from "./TestPanel";
+import { TrustHostKeyDialog } from "./TrustHostKeyDialog";
 import { folderPaths } from "./tree/folderTree";
 
 const ENVIRONMENTS: Environment[] = ["local", "dev", "test", "stage", "prod"];
@@ -26,11 +28,14 @@ export function ConnectionForm({ initial, tabId, copyOf }: { initial: Connection
   const [kindMemo, setKindMemo] = useState<KindMemo>(emptyKindMemo);
   const [pgSecrets, setPgSecrets] = useState<PgSecrets>({ password: emptySecret, keyPassword: emptySecret });
   const [apiSecrets, setApiSecrets] = useState<PatroniSecrets>({ password: emptySecret, keyPassword: emptySecret });
+  const [sshSecrets, setSshSecrets] = useState<SshSecrets>({ password: emptySecret, passphrase: emptySecret });
   const [connstr, setConnstr] = useState("");
   const [ignored, setIgnored] = useState<string[]>([]);
   const [events, setEvents] = useState<TestEvent[]>([]);
   const [report, setReport] = useState<TestReport | null>(null);
   const [error, setError] = useState<AppError | null>(null);
+  // Ошибка ключа хоста, от диалога доверия по которой пользователь отказался: пока проверка не дала новую ошибку, он не открывается.
+  const [trustDismissed, setTrustDismissed] = useState<AppError | null>(null);
   // busy — разбор строки, сохранение, удаление; testing — проверка (долгая, не должна блокировать остальное).
   const [busy, setBusy] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -66,7 +71,16 @@ export function ConnectionForm({ initial, tabId, copyOf }: { initial: Connection
     pgKeyPassword: secretValue(pgSecrets.keyPassword),
     patroniPassword: secretValue(apiSecrets.password),
     patroniKeyPassword: secretValue(apiSecrets.keyPassword),
+    // Секрет, который выбранному способу входа не нужен, Rust при сохранении удаляет, а проверка его не читает.
+    sshPassword: secretValue(sshSecrets.password),
+    sshPassphrase: secretValue(sshSecrets.passphrase),
   });
+
+  // Неизвестный ключ хоста приходит либо ошибкой проверки, либо упавшим шагом SSH: при ошибке туннеля Rust отвечает
+  // отчётом «не удалось», а причину кладёт в событие шага. Диалога нет, пока идёт проверка, и после «Отмены» — до новой ошибки.
+  const sshStep = [...events].reverse().find((e) => e.step === "ssh");
+  const trustCandidate = hostKeyUnknown(error) ? error : sshStep?.status === "failed" && hostKeyUnknown(sshStep.error) ? sshStep.error : null;
+  const trustError = !testing && trustCandidate !== null && trustCandidate !== trustDismissed ? trustCandidate : null;
 
   async function run(fn: () => Promise<void>) {
     setBusy(true);
@@ -106,6 +120,7 @@ export function ConnectionForm({ initial, tabId, copyOf }: { initial: Connection
     testingRef.current = true;
     setTesting(true);
     setError(null);
+    setTrustDismissed(null);
     setEvents([]);
     setReport(null);
     try {
@@ -259,6 +274,7 @@ export function ConnectionForm({ initial, tabId, copyOf }: { initial: Connection
         <NodesSection idPrefix={uid} profile={profile} onChange={setProfile} onKind={changeKind} secrets={apiSecrets} onSecrets={setApiSecrets} saved={saved} />
         <h3 className="full">PostgreSQL</h3>
         <PgSection idPrefix={uid} profile={profile} onChange={setProfile} secrets={pgSecrets} onSecrets={setPgSecrets} saved={saved} />
+        <SshSection idPrefix={uid} profile={profile} onChange={setProfile} secrets={sshSecrets} onSecrets={setSshSecrets} saved={saved} />
       </div>
 
       <div className="toolbar">
@@ -289,6 +305,7 @@ export function ConnectionForm({ initial, tabId, copyOf }: { initial: Connection
 
       {error && <ErrorBanner error={error} />}
       {(events.length > 0 || report) && <TestPanel events={events} report={report} />}
+      {trustError && <TrustHostKeyDialog error={trustError} onTrusted={() => void onTest()} onCancel={() => setTrustDismissed(trustError)} />}
     </div>
   );
 }

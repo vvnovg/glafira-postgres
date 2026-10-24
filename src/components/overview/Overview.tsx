@@ -10,7 +10,9 @@ import { roleLabel } from "../../lib/topology";
 import { PG_QUERY_KEYS, ofConnection, useTopology, useTopologyEvents } from "../../lib/useConnectionEvents";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { Glyph } from "../common/Glyph";
+import { hostKeyUnknown } from "../connections/profile";
 import { warningText } from "../connections/TestPanel";
+import { TrustHostKeyDialog } from "../connections/TrustHostKeyDialog";
 
 /** Как часто обновляются быстрые факты узлов (спец. P1 §9): топология опрашивается раз в 10 с. */
 const FACTS_REFRESH_MS = 10_000;
@@ -280,11 +282,14 @@ export function Overview({ connectionId, member, active = true }: { connectionId
   const journal = events.data ?? [];
   const journalKeys = eventKeys(journal);
   const [error, setError] = useState<AppError | null>(null);
+  // Ошибка ключа хоста, от диалога доверия по которой пользователь отказался: баннер остаётся, диалог — нет.
+  const [trustDismissed, setTrustDismissed] = useState<AppError | null>(null);
   const [busy, setBusy] = useState(false);
 
   const connect = async () => {
     setBusy(true);
     setError(null);
+    setTrustDismissed(null);
     try {
       qc.setQueryData(["topology", connectionId], await api.connect(connectionId));
     } catch (e) {
@@ -302,8 +307,13 @@ export function Overview({ connectionId, member, active = true }: { connectionId
   const reopen = async () => {
     setBusy(true);
     setError(null);
+    setTrustDismissed(null);
     try {
-      qc.setQueryData(["topology", connectionId], await api.reconnect(connectionId));
+      const v = await api.reconnect(connectionId);
+      qc.setQueryData(["topology", connectionId], v);
+      // Туннель, который не поднялся из-за неизвестного ключа хоста, оставляет подключение открытым (degraded) с этой
+      // ошибкой в виде, а не отказом команды: предложить доверие нужно и здесь, по действию пользователя.
+      if (hostKeyUnknown(v.error)) setError(v.error);
       // Подключение то же, события Disconnected нет: факты узлов и каталог после отказа во входе перечитываются сами.
       void qc.invalidateQueries({ predicate: ofConnection(PG_QUERY_KEYS, connectionId) });
     } catch (e) {
@@ -337,6 +347,17 @@ export function Overview({ connectionId, member, active = true }: { connectionId
   const v = view.data;
   const topo = v.topology;
   const live = v.state === "connected" || v.state === "degraded";
+  /**
+   * Повтор после доверия ключу хоста: сам Rust ничего не повторяет (туннель на стоянке ждёт «Переподключить»).
+   * Открытое подключение переподключается на месте, закрытое или упавшее — подключается заново.
+   */
+  const retryAfterTrust = () => {
+    setError(null);
+    void (live ? reopen() : connect());
+  };
+  // Диалог доверия — только для ошибки, которой можно доверять, по собственному действию (не по фоновому событию)
+  // и на видимой вкладке: скрытая остаётся смонтированной и не должна открывать окно поверх чужой.
+  const trustError = active && hostKeyUnknown(error) && error !== trustDismissed ? error : null;
   const shownError = error ?? v.error;
   // У одиночного сервера один узел и «лидера» нет: в шапке его роль (как значок в дереве). У остальных видов лидер
   // показывается всегда; без него — «—», чтобы отсутствие лидера было видно, а не пропадала сама строка.
@@ -375,6 +396,7 @@ export function Overview({ connectionId, member, active = true }: { connectionId
       </div>
       {view.error && <ErrorBanner error={view.error} onRetry={() => void view.refetch()} />}
       {shownError && <ErrorBanner error={shownError} />}
+      {trustError && <TrustHostKeyDialog error={trustError} onTrusted={retryAfterTrust} onCancel={() => setTrustDismissed(trustError)} />}
       {topo && topo.warnings.length > 0 && (
         <div className="confirm" role="alert">
           {topo.warnings.map((w, i) => (

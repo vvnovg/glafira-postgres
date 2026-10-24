@@ -1,7 +1,7 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ConnectionProfile } from "../../../api/types";
+import type { AppError, ConnectionProfile } from "../../../api/types";
 import { member, topology, topologyView } from "../../../test/fixtures";
 import { renderWithClient } from "../../../test/render";
 import { newProfile } from "../profile";
@@ -15,6 +15,7 @@ vi.mock("../../../api/client", async (importOriginal) => {
       connect: vi.fn(),
       disconnect: vi.fn(),
       reconnect: vi.fn(),
+      trustSshHostKey: vi.fn(),
       setCatalogMember: vi.fn(),
       getUiSettings: vi.fn(() => Promise.resolve({ showSystemObjects: false })),
       listDatabases: vi.fn(() => Promise.resolve([])),
@@ -431,6 +432,100 @@ describe("ConnectionNode", () => {
       await openMenuAndPick(user, "Каталог — с узла pg-1");
       await waitFor(() => expect(api.setCatalogMember).toHaveBeenCalledTimes(2));
       await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+    });
+  });
+
+  describe("доверие ключу хоста ssh", () => {
+    const hostKeyError = (patch: Partial<AppError> = {}, params: Record<string, string> = {}): AppError => ({
+      code: "SSH_ERROR",
+      key: "errors.ssh.hostKeyUnknown",
+      message: "unknown host key",
+      retryable: false,
+      params: { kind: "hostKeyUnknown", target: "bastion", host: "bastion", fingerprint: "SHA256:abc", ...params },
+      ...patch,
+    });
+
+    it("неизвестный ключ хоста при подключении из дерева: диалог, доверие, повтор", async () => {
+      const hostKey = { code: "SSH_ERROR", key: "errors.ssh.hostKeyUnknown", message: "unknown host key", retryable: false, params: { kind: "hostKeyUnknown", target: "bastion", host: "bastion", fingerprint: "SHA256:abc" } };
+      vi.mocked(api.connect).mockRejectedValueOnce(hostKey).mockResolvedValueOnce(topologyView());
+      vi.mocked(api.trustSshHostKey).mockResolvedValue(undefined);
+      const user = userEvent.setup();
+      renderNode();
+      await screen.findByRole("img", { name: "Не подключено" });
+      await user.click(screen.getByRole("button", { name: toggleName }));
+      const dialog = await screen.findByRole("dialog", { name: "Неизвестный ключ хоста" });
+      await user.click(within(dialog).getByRole("button", { name: "Доверять и подключиться" }));
+      expect(api.trustSshHostKey).toHaveBeenCalledWith("bastion", "SHA256:abc");
+      expect(await screen.findByRole("img", { name: "Подключено" })).toBeInTheDocument();
+      expect(api.connect).toHaveBeenCalledTimes(2);
+      expect(api.reconnect).not.toHaveBeenCalled();
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    it("открытое, но ограниченное подключение: после доверия — «Переподключить», а не «Подключиться»", async () => {
+      // Туннель на стоянке с hostKeyUnknown сам не поднимется: после доверия переподключение запускает интерфейс.
+      const failing = topologyView({ state: "degraded", error: hostKeyError() });
+      vi.mocked(api.getTopology).mockResolvedValue(failing);
+      vi.mocked(api.reconnect).mockResolvedValueOnce(failing).mockResolvedValueOnce(topologyView());
+      vi.mocked(api.trustSshHostKey).mockResolvedValue(undefined);
+      const user = userEvent.setup();
+      renderNode();
+      await screen.findByRole("img", { name: "Часть узлов недоступна" });
+      // Диалог не всплывает сам по событию из фона: только после действия пользователя.
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Действия с подключением billing" }));
+      await user.click(screen.getByRole("menuitem", { name: "Переподключить" }));
+      const dialog = await screen.findByRole("dialog", { name: "Неизвестный ключ хоста" });
+      await user.click(within(dialog).getByRole("button", { name: "Доверять и подключиться" }));
+      expect(api.trustSshHostKey).toHaveBeenCalledWith("bastion", "SHA256:abc");
+      expect(await screen.findByRole("img", { name: "Подключено" })).toBeInTheDocument();
+      expect(api.reconnect).toHaveBeenCalledTimes(2);
+      expect(api.connect).not.toHaveBeenCalled();
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    it("«Отмена»: ничего не доверяется, диалог закрыт, причина остаётся под узлом", async () => {
+      vi.mocked(api.connect).mockRejectedValueOnce(hostKeyError());
+      const user = userEvent.setup();
+      renderNode();
+      await screen.findByRole("img", { name: "Не подключено" });
+      await user.click(screen.getByRole("button", { name: toggleName }));
+      const dialog = await screen.findByRole("dialog", { name: "Неизвестный ключ хоста" });
+      await user.click(within(dialog).getByRole("button", { name: "Отмена" }));
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(api.trustSshHostKey).not.toHaveBeenCalled();
+      expect(api.connect).toHaveBeenCalledTimes(1);
+    });
+
+    it("отказ команды доверия показывается в диалоге, подключение не повторяется", async () => {
+      vi.mocked(api.connect).mockRejectedValueOnce(hostKeyError());
+      vi.mocked(api.trustSshHostKey).mockRejectedValue({ code: "INVALID_INPUT", message: "Fingerprint is empty", retryable: false });
+      const user = userEvent.setup();
+      renderNode();
+      await screen.findByRole("img", { name: "Не подключено" });
+      await user.click(screen.getByRole("button", { name: toggleName }));
+      const dialog = await screen.findByRole("dialog", { name: "Неизвестный ключ хоста" });
+      await user.click(within(dialog).getByRole("button", { name: "Доверять и подключиться" }));
+      expect(await within(dialog).findByText("Fingerprint is empty")).toBeInTheDocument();
+      expect(api.connect).toHaveBeenCalledTimes(1);
+    });
+
+    it("смена ключа хоста и ошибка без отпечатка — обычным текстом под узлом, без диалога", async () => {
+      vi.mocked(api.connect)
+        .mockRejectedValueOnce(hostKeyError({ key: "errors.ssh.hostKeyChanged", message: "The host key of bastion has changed" }, { kind: "hostKeyChanged" }))
+        .mockRejectedValueOnce(hostKeyError({}, { fingerprint: "" }));
+      const user = userEvent.setup();
+      renderNode();
+      await screen.findByRole("img", { name: "Не подключено" });
+      await user.click(screen.getByRole("button", { name: toggleName }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("known_hosts");
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+      await user.click(screen.getByRole("button", { name: toggleName })); // свернуть
+      await user.click(screen.getByRole("button", { name: toggleName })); // развернуть — вторая попытка
+      await waitFor(() => expect(api.connect).toHaveBeenCalledTimes(2));
+      expect(await screen.findByRole("alert")).toBeInTheDocument();
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     });
   });
 

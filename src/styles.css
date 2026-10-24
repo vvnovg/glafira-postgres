@@ -74,6 +74,9 @@ tr.clickable:hover, .row.clickable:hover { background: var(--bg-alt); }
 .modal { display: flex; flex-direction: column; gap: 10px; width: min(640px, 100%); max-height: calc(100vh - 32px); overflow: auto; padding: 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); box-shadow: 0 8px 24px rgb(0 0 0 / 25%); }
 .modal h3 { margin: 0; overflow-wrap: anywhere; }
 .modal .form { grid-template-columns: auto minmax(200px, 1fr); }
+.host-key { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; margin: 0; }
+.host-key dt { color: var(--muted); }
+.host-key dd { margin: 0; overflow-wrap: anywhere; }
 .import-preview p { margin: 0 0 6px; }
 .import-group ul, .import-warnings { margin: 4px 0; padding-left: 20px; }
 .import-warnings li::marker { color: var(--warn); }

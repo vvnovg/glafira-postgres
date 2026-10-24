@@ -5,7 +5,7 @@ import type { AppError, ConnectionFolder, ConnectionProfile, SecretsSet, TestRep
 import { useWorkspace } from "../../state/workspace";
 import { topologyView } from "../../test/fixtures";
 import { renderWithClient } from "../../test/render";
-import { emptyPatroni, newProfile } from "./profile";
+import { emptyPatroni, emptySsh, newProfile } from "./profile";
 
 vi.mock("../../api/client", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../../api/client")>();
@@ -19,6 +19,7 @@ vi.mock("../../api/client", async (importOriginal) => {
       testConnection: vi.fn(),
       moveItems: vi.fn(),
       connectionSecrets: vi.fn(),
+      trustSshHostKey: vi.fn(),
     },
   };
 });
@@ -113,7 +114,7 @@ describe("ConnectionForm", () => {
     expect(await screen.findByText("primary, PostgreSQL 17.2")).toBeInTheDocument();
     expect(screen.getByText('GRANT pg_monitor TO "glafira_plain";')).toBeInTheDocument();
     const [, secrets] = vi.mocked(api.testConnection).mock.calls[0];
-    expect(secrets).toEqual({ pgPassword: "s3cret", pgKeyPassword: null, patroniPassword: null, patroniKeyPassword: null });
+    expect(secrets).toEqual({ pgPassword: "s3cret", pgKeyPassword: null, patroniPassword: null, patroniKeyPassword: null, sshPassword: null, sshPassphrase: null });
   });
 
   it("существующее подключение: сохранённый пароль можно оставить или удалить", async () => {
@@ -587,7 +588,7 @@ describe("ConnectionForm", () => {
     await user.click(screen.getByRole("button", { name: "Сохранить" }));
     const [profile, secrets] = vi.mocked(api.saveConnection).mock.calls[0];
     expect(profile.kind).toBe("patroni");
-    expect(secrets).toEqual({ pgPassword: "pg-pw", pgKeyPassword: null, patroniPassword: "api-pw", patroniKeyPassword: "api-key-pw" });
+    expect(secrets).toEqual({ pgPassword: "pg-pw", pgKeyPassword: null, patroniPassword: "api-pw", patroniKeyPassword: "api-key-pw", sshPassword: null, sshPassphrase: null });
     // Секретов нет в профиле.
     expect(JSON.stringify(profile)).not.toMatch(/api-pw|api-key-pw|pg-pw/);
   });
@@ -643,7 +644,7 @@ describe("ConnectionForm", () => {
     expect(save).toBeEnabled();
     await user.click(save);
     await waitFor(() => expect(api.saveConnection).toHaveBeenCalled());
-    expect(vi.mocked(api.saveConnection).mock.calls[0][1]).toEqual({ pgPassword: null, pgKeyPassword: null, patroniPassword: null, patroniKeyPassword: null });
+    expect(vi.mocked(api.saveConnection).mock.calls[0][1]).toEqual({ pgPassword: null, pgKeyPassword: null, patroniPassword: null, patroniKeyPassword: null, sshPassword: null, sshPassphrase: null });
   });
 
   it("после сохранения ответ о сохранённых секретах запрашивается заново", async () => {
@@ -735,6 +736,204 @@ describe("ConnectionForm", () => {
       await user.selectOptions(screen.getByLabelText("Окружение"), "prod");
       expect(ro).not.toBeChecked();
       expect(ro).toBeEnabled();
+    });
+  });
+});
+
+describe("ConnectionForm: SSH-туннель", () => {
+  const hostKey = (patch: Partial<AppError> = {}, params: Record<string, string> = {}): AppError => ({
+    code: "SSH_ERROR",
+    key: "errors.ssh.hostKeyUnknown",
+    message: "unknown host key",
+    retryable: false,
+    params: { kind: "hostKeyUnknown", target: "bastion", host: "bastion (10.0.0.5)", fingerprint: "SHA256:abc", ...params },
+    ...patch,
+  });
+  const withSsh = (patch: Partial<ConnectionProfile["ssh"] & object> = {}): ConnectionProfile => ({
+    ...newProfile(),
+    name: "n",
+    ssh: { ...emptySsh(), target: "bastion", ...patch },
+  });
+
+  it("раздел SSH: включение добавляет цель и способ входа, пароль уходит как sshPassword", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.saveConnection).mockImplementation(async (p) => ({ ...p, id: "c9" }));
+    renderWithClient(<ConnectionForm initial={newProfile()} tabId="t" />);
+    await user.type(screen.getByLabelText("Имя"), "via-bastion");
+    expect(screen.queryByLabelText("Цель SSH")).not.toBeInTheDocument();
+    await user.click(screen.getByLabelText("Через SSH-туннель"));
+    await user.type(screen.getByLabelText("Цель SSH"), "bastion");
+    await user.selectOptions(screen.getByLabelText("Вход на бастион"), "password");
+    await user.type(screen.getByLabelText("Пароль SSH"), "s3cret");
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(api.saveConnection).toHaveBeenCalled());
+    const [profile, secrets] = vi.mocked(api.saveConnection).mock.calls[0];
+    expect(profile.ssh).toEqual({ target: "bastion", port: null, user: null, auth: "password", keyPath: null });
+    expect(secrets.sshPassword).toBe("s3cret");
+    expect(secrets.sshPassphrase).toBeNull();
+  });
+
+  it("способ «ключ» показывает путь к ключу и пассфразу; выключение SSH убирает раздел и шлёт ssh: null", async () => {
+    const user = userEvent.setup();
+    const initial = { ...newProfile(), ssh: { target: "b", port: 2222, user: "tester", auth: "key" as const, keyPath: "/k/id" } };
+    vi.mocked(api.saveConnection).mockImplementation(async (p) => ({ ...p, id: "c9" }));
+    renderWithClient(<ConnectionForm initial={initial} tabId="t" />);
+    expect(screen.getByLabelText("Файл ключа")).toHaveValue("/k/id");
+    expect(screen.getByLabelText("Пассфраза ключа")).toBeInTheDocument();
+    await user.click(screen.getByLabelText("Через SSH-туннель"));
+    expect(screen.queryByLabelText("Цель SSH")).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText("Имя"), "x");
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(api.saveConnection).toHaveBeenCalled());
+    expect(vi.mocked(api.saveConnection).mock.calls[0][0].ssh).toBeNull();
+  });
+
+  it("поля порта и пользователя подсказывают «как в ~/.ssh/config»; пустые уходят как null, заданные — как есть", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.saveConnection).mockImplementation(async (p) => ({ ...p, id: "c9" }));
+    renderWithClient(<ConnectionForm initial={withSsh()} tabId="t" />);
+    expect(screen.getByLabelText("Порт SSH")).toHaveAttribute("placeholder", "как в ~/.ssh/config");
+    expect(screen.getByLabelText("Пользователь SSH")).toHaveAttribute("placeholder", "как в ~/.ssh/config");
+    await user.type(screen.getByLabelText("Порт SSH"), "2222");
+    await user.type(screen.getByLabelText("Пользователь SSH"), "tester");
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(api.saveConnection).toHaveBeenCalled());
+    expect(vi.mocked(api.saveConnection).mock.calls[0][0].ssh).toEqual({ target: "bastion", port: 2222, user: "tester", auth: "agent", keyPath: null });
+  });
+
+  it("порт SSH вне диапазона не уходит в Rust: ни проверка, ни сохранение не стартуют, поле помечено", async () => {
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionForm initial={withSsh({ port: 70000 })} tabId="t" />);
+    expect(screen.getByLabelText("Порт SSH")).toHaveAttribute("aria-invalid", "true");
+    await user.click(screen.getByRole("button", { name: "Проверить" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Порт — от 1 до 65535");
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    expect(api.testConnection).not.toHaveBeenCalled();
+    expect(api.saveConnection).not.toHaveBeenCalled();
+  });
+
+  it("сохранённые пассфраза и пароль SSH: оставить, удалить; у каждого свой флажок", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.connectionSecrets).mockResolvedValue({ ...NO_SECRETS, sshPassphrase: true });
+    vi.mocked(api.saveConnection).mockImplementation(async (p) => ({ ...p, id: "c1" }));
+    renderWithClient(<ConnectionForm initial={existing({ ssh: { ...emptySsh(), target: "b", auth: "key", keyPath: "/k/id" } })} tabId="t" />);
+    await waitFor(() => expect(screen.getByLabelText("Пассфраза ключа")).toHaveAttribute("placeholder", "оставить сохранённый"));
+    await user.click(screen.getByLabelText("Удалить сохранённый: Пассфраза ключа"));
+    expect(screen.getByLabelText("Пассфраза ключа")).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(api.saveConnection).toHaveBeenCalled());
+    const [, secrets] = vi.mocked(api.saveConnection).mock.calls[0];
+    expect(secrets.sshPassphrase).toBe("");
+    expect(secrets.sshPassword).toBeNull();
+  });
+
+  it("проверка отправляет и профиль с SSH, и новый секрет SSH из формы", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.testConnection).mockResolvedValue(EMPTY_REPORT);
+    renderWithClient(<ConnectionForm initial={withSsh({ auth: "password" })} tabId="t" />);
+    await user.type(screen.getByLabelText("Пароль SSH"), "s3cret");
+    await user.click(screen.getByRole("button", { name: "Проверить" }));
+    await waitFor(() => expect(api.testConnection).toHaveBeenCalled());
+    const [profile, secrets] = vi.mocked(api.testConnection).mock.calls[0];
+    expect(profile.ssh).toMatchObject({ target: "bastion", auth: "password" });
+    expect(secrets.sshPassword).toBe("s3cret");
+  });
+
+  it("шаг SSH в панели проверки: поднятый туннель называет версию OpenSSH", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.testConnection).mockImplementation(async (_p, _s, onEvent) => {
+      onEvent({ step: "ssh", member: null, status: "running", message: null, error: null });
+      onEvent({ step: "ssh", member: null, status: "ok", message: { key: "test.sshOk", params: { version: "9.6" }, text: "OpenSSH 9.6, tunnel is up" }, error: null });
+      return EMPTY_REPORT;
+    });
+    renderWithClient(<ConnectionForm initial={withSsh()} tabId="t" />);
+    await user.click(screen.getByRole("button", { name: "Проверить" }));
+    expect(await screen.findByText("OpenSSH 9.6, туннель поднят")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  describe("доверие ключу хоста", () => {
+    it("проверка с неизвестным ключом хоста предлагает доверять и повторяет проверку", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.testConnection).mockRejectedValueOnce(hostKey()).mockResolvedValueOnce(EMPTY_REPORT);
+      vi.mocked(api.trustSshHostKey).mockResolvedValue(undefined);
+      renderWithClient(<ConnectionForm initial={{ ...newProfile(), name: "n", ssh: { ...emptySsh(), target: "bastion" } }} tabId="t" />);
+      await user.click(screen.getByRole("button", { name: "Проверить" }));
+      const dialog = await screen.findByRole("dialog", { name: "Неизвестный ключ хоста" });
+      expect(dialog).toHaveTextContent("bastion (10.0.0.5)");
+      expect(dialog).toHaveTextContent("SHA256:abc");
+      await user.click(within(dialog).getByRole("button", { name: "Доверять и подключиться" }));
+      expect(api.trustSshHostKey).toHaveBeenCalledWith("bastion", "SHA256:abc");
+      await waitFor(() => expect(api.testConnection).toHaveBeenCalledTimes(2));
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    it("Rust отвечает отчётом, а ключ хоста — в упавшем шаге SSH: диалог открывается и из события", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.testConnection)
+        .mockImplementationOnce(async (_p, _s, onEvent) => {
+          onEvent({ step: "ssh", member: null, status: "running", message: null, error: null });
+          onEvent({ step: "ssh", member: null, status: "failed", message: null, error: hostKey() });
+          return { ok: false, topology: null, readiness: [] };
+        })
+        .mockImplementationOnce(async (_p, _s, onEvent) => {
+          onEvent({ step: "ssh", member: null, status: "ok", message: { key: "test.sshOk", params: { version: "9.6" }, text: "OpenSSH 9.6, tunnel is up" }, error: null });
+          return EMPTY_REPORT;
+        });
+      vi.mocked(api.trustSshHostKey).mockResolvedValue(undefined);
+      renderWithClient(<ConnectionForm initial={withSsh()} tabId="t" />);
+      await user.click(screen.getByRole("button", { name: "Проверить" }));
+      const dialog = await screen.findByRole("dialog", { name: "Неизвестный ключ хоста" });
+      await user.click(within(dialog).getByRole("button", { name: "Доверять и подключиться" }));
+      await waitFor(() => expect(api.testConnection).toHaveBeenCalledTimes(2));
+      expect(await screen.findByText("OpenSSH 9.6, туннель поднят")).toBeInTheDocument();
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    it("«Отмена» закрывает диалог, ничего не доверяет и оставляет ошибку на виду; новая проверка снова спрашивает", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.testConnection).mockRejectedValue(hostKey());
+      renderWithClient(<ConnectionForm initial={withSsh()} tabId="t" />);
+      await user.click(screen.getByRole("button", { name: "Проверить" }));
+      const dialog = await screen.findByRole("dialog", { name: "Неизвестный ключ хоста" });
+      await user.click(within(dialog).getByRole("button", { name: "Отмена" }));
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(api.trustSshHostKey).not.toHaveBeenCalled();
+      expect(screen.getByRole("alert")).toHaveTextContent("Ключ хоста bastion (10.0.0.5) ещё не известен");
+      await user.click(screen.getByRole("button", { name: "Проверить" }));
+      expect(await screen.findByRole("dialog", { name: "Неизвестный ключ хоста" })).toBeInTheDocument();
+    });
+
+    it("отказ команды доверия показывается в диалоге, проверка не повторяется", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.testConnection).mockRejectedValue(hostKey());
+      vi.mocked(api.trustSshHostKey).mockRejectedValue(appError("INVALID_INPUT", "Fingerprint is empty", "errors.ssh.fingerprintEmpty"));
+      renderWithClient(<ConnectionForm initial={withSsh()} tabId="t" />);
+      await user.click(screen.getByRole("button", { name: "Проверить" }));
+      const dialog = await screen.findByRole("dialog", { name: "Неизвестный ключ хоста" });
+      await user.click(within(dialog).getByRole("button", { name: "Доверять и подключиться" }));
+      expect(await within(dialog).findByText("Fingerprint is empty")).toBeInTheDocument();
+      expect(api.testConnection).toHaveBeenCalledTimes(1);
+      // Диалог остался: кнопки снова доступны.
+      expect(within(dialog).getByRole("button", { name: "Доверять и подключиться" })).toBeEnabled();
+    });
+
+    it("смена ключа хоста доверием не лечится: диалога нет, ошибка — обычным текстом", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.testConnection).mockRejectedValue(hostKey({ key: "errors.ssh.hostKeyChanged", message: "The host key of bastion has changed" }, { kind: "hostKeyChanged" }));
+      renderWithClient(<ConnectionForm initial={withSsh()} tabId="t" />);
+      await user.click(screen.getByRole("button", { name: "Проверить" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("known_hosts");
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    it("без отпечатка доверять нечему: диалога нет, ошибка — обычным текстом", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.testConnection).mockRejectedValue(hostKey({}, { fingerprint: "" }));
+      renderWithClient(<ConnectionForm initial={withSsh()} tabId="t" />);
+      await user.click(screen.getByRole("button", { name: "Проверить" }));
+      expect(await screen.findByRole("alert")).toBeInTheDocument();
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     });
   });
 });

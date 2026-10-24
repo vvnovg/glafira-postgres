@@ -42,6 +42,34 @@ describe("TestPanel", () => {
     expect(items[2]).toHaveTextContent("Аутентификация не прошла");
   });
 
+  it("шаг SSH идёт первым: версия OpenSSH, ошибка туннеля, «не используется» при прямом подключении", () => {
+    const { unmount } = render(
+      <TestPanel events={[ev({ step: "ssh", status: "ok", message: { key: "test.sshOk", params: { version: "9.6" }, text: "OpenSSH 9.6, tunnel is up" } })]} report={null} />,
+    );
+    expect(screen.getByRole("listitem")).toHaveTextContent("SSH: OpenSSH 9.6, туннель поднят");
+    unmount();
+
+    const noVersion = render(<TestPanel events={[ev({ step: "ssh", status: "ok", message: { key: "test.sshOkNoVersion", params: {}, text: "Tunnel is up" } })]} report={null} />);
+    expect(screen.getByRole("listitem")).toHaveTextContent("SSH: Туннель поднят");
+    noVersion.unmount();
+
+    const failed = render(
+      <TestPanel
+        events={[
+          ev({ step: "ssh", status: "running" }),
+          ev({ step: "ssh", status: "failed", error: { code: "SSH_ERROR", key: "errors.ssh.authFailed", message: "SSH login refused", retryable: false, params: { kind: "authFailed", target: "bastion" } } }),
+        ]}
+        report={null}
+      />,
+    );
+    expect(screen.getByRole("img", { name: "Ошибка" })).toBeInTheDocument();
+    expect(screen.getByRole("listitem")).toHaveTextContent("SSH: Вход по SSH на bastion отклонён");
+    failed.unmount();
+
+    render(<TestPanel events={[ev({ step: "ssh", status: "skipped", message: { key: "test.sshNotUsed", params: {}, text: "Not used: direct connection" } })]} report={null} />);
+    expect(screen.getByRole("listitem")).toHaveTextContent("SSH: Не используется: прямое подключение");
+  });
+
   it("шаги с числом узлов склоняются: 1 узел, 5 узлов; участников 3, лидер назван", () => {
     const one = ev({ step: "discovery", status: "ok", message: { key: "test.discoveryOk", params: { count: "1" }, text: "1 nodes found" } });
     const five = ev({ step: "discovery", status: "ok", message: { key: "test.discoveryOk", params: { count: "5" }, text: "5 nodes found" } });

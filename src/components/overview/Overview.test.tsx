@@ -3,7 +3,7 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { TopologyEvent } from "../../api/types";
+import type { AppError, TopologyEvent } from "../../api/types";
 import { renderWithClient } from "../../test/render";
 import { member, topology, topologyView } from "../../test/fixtures";
 import { newProfile } from "../connections/profile";
@@ -19,6 +19,7 @@ vi.mock("../../api/client", async (importOriginal) => {
       getMemberFacts: vi.fn(() => Promise.resolve({ startedAtMs: Date.now() - 3_600_000, connections: 12, maxConnections: 100, databases: 3 })),
       connect: vi.fn(),
       reconnect: vi.fn(),
+      trustSshHostKey: vi.fn(),
     },
   };
 });
@@ -178,6 +179,96 @@ describe("Overview", () => {
       expect(api.getMemberFacts).not.toHaveBeenCalled();
       await user.click(screen.getByRole("button", { name: "Подключиться" }));
       expect(api.connect).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe("доверие ключу хоста ssh", () => {
+    const hostKey = (patch: Partial<AppError> = {}, params: Record<string, string> = {}): AppError => ({
+      code: "SSH_ERROR",
+      key: "errors.ssh.hostKeyUnknown",
+      message: "unknown host key",
+      retryable: false,
+      params: { kind: "hostKeyUnknown", target: "bastion", host: "bastion (10.0.0.5)", fingerprint: "SHA256:abc", ...params },
+      ...patch,
+    });
+    const disconnected = () =>
+      vi.mocked(api.getTopology).mockResolvedValue(topologyView({ state: "disconnected", topology: null, catalogMember: null }));
+
+    it("автоподключение с неизвестным ключом хоста: диалог, доверие, повторное подключение", async () => {
+      disconnected();
+      vi.mocked(api.connect).mockRejectedValueOnce(hostKey()).mockResolvedValueOnce(topologyView());
+      vi.mocked(api.trustSshHostKey).mockResolvedValue(undefined);
+      const user = userEvent.setup();
+      renderWithClient(<Overview connectionId="c" />);
+      const dialog = await screen.findByRole("dialog", { name: "Неизвестный ключ хоста" });
+      expect(dialog).toHaveTextContent("bastion (10.0.0.5)");
+      expect(dialog).toHaveTextContent("SHA256:abc");
+      await user.click(within(dialog).getByRole("button", { name: "Доверять и подключиться" }));
+      expect(api.trustSshHostKey).toHaveBeenCalledWith("bastion", "SHA256:abc");
+      expect(await screen.findByText("Подключено")).toBeInTheDocument();
+      expect(api.connect).toHaveBeenCalledTimes(2);
+      expect(api.reconnect).not.toHaveBeenCalled();
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    it("ограниченное подключение: «Переподключить» возвращает ошибку туннеля в виде, после доверия — снова «Переподключить»", async () => {
+      const failing = topologyView({ state: "degraded", error: hostKey() });
+      vi.mocked(api.getTopology).mockResolvedValue(failing);
+      vi.mocked(api.reconnect).mockResolvedValueOnce(failing).mockResolvedValueOnce(topologyView());
+      vi.mocked(api.trustSshHostKey).mockResolvedValue(undefined);
+      const user = userEvent.setup();
+      renderWithClient(<Overview connectionId="c" />);
+      await screen.findByText("Часть узлов недоступна");
+      // Фоновая ошибка в виде — обычный баннер: диалог открывается только после действия пользователя.
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Переподключить" }));
+      const dialog = await screen.findByRole("dialog", { name: "Неизвестный ключ хоста" });
+      await user.click(within(dialog).getByRole("button", { name: "Доверять и подключиться" }));
+      expect(await screen.findByText("Подключено")).toBeInTheDocument();
+      expect(api.reconnect).toHaveBeenCalledTimes(2);
+      expect(api.connect).not.toHaveBeenCalled();
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    it("«Отмена»: ничего не доверяется, ошибка остаётся баннером, кнопка «Подключиться» повторяет попытку и снова спрашивает", async () => {
+      disconnected();
+      vi.mocked(api.connect).mockRejectedValue(hostKey());
+      const user = userEvent.setup();
+      renderWithClient(<Overview connectionId="c" />);
+      const dialog = await screen.findByRole("dialog", { name: "Неизвестный ключ хоста" });
+      await user.click(within(dialog).getByRole("button", { name: "Отмена" }));
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(api.trustSshHostKey).not.toHaveBeenCalled();
+      expect(screen.getByText(/Ключ хоста bastion \(10.0.0.5\) ещё не известен/)).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Подключиться" }));
+      expect(await screen.findByRole("dialog", { name: "Неизвестный ключ хоста" })).toBeInTheDocument();
+      expect(api.connect).toHaveBeenCalledTimes(2);
+    });
+
+    it("смена ключа хоста и ошибка без отпечатка — баннером, без диалога", async () => {
+      disconnected();
+      vi.mocked(api.connect)
+        .mockRejectedValueOnce(hostKey({ key: "errors.ssh.hostKeyChanged", message: "The host key of bastion has changed" }, { kind: "hostKeyChanged" }))
+        .mockRejectedValueOnce(hostKey({}, { fingerprint: "" }));
+      const user = userEvent.setup();
+      renderWithClient(<Overview connectionId="c" />);
+      expect(await screen.findByText(/known_hosts/)).toBeInTheDocument();
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Подключиться" }));
+      await waitFor(() => expect(api.connect).toHaveBeenCalledTimes(2));
+      expect(await screen.findByRole("alert")).toBeInTheDocument();
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    it("скрытая вкладка диалог не открывает; он появляется, когда вкладку открыли", async () => {
+      disconnected();
+      vi.mocked(api.connect).mockRejectedValueOnce(hostKey());
+      const { rerender } = renderWithClient(<Overview connectionId="c" active={false} />);
+      await waitFor(() => expect(api.connect).toHaveBeenCalledTimes(1));
+      await screen.findByText(/Ключ хоста bastion/);
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      rerender(<Overview connectionId="c" active />);
+      expect(await screen.findByRole("dialog", { name: "Неизвестный ключ хоста" })).toBeInTheDocument();
     });
   });
 

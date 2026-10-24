@@ -9,6 +9,8 @@ import { PG_QUERY_KEYS, disconnectedView, ofConnection, useTopology } from "../.
 import { useWorkspace } from "../../../state/workspace";
 import { EnvBadge } from "../../common/EnvBadge";
 import { Glyph } from "../../common/Glyph";
+import { hostKeyUnknown } from "../profile";
+import { TrustHostKeyDialog } from "../TrustHostKeyDialog";
 import { CatalogNodes } from "./CatalogNodes";
 import { FolderMenu, type FolderMenuItem } from "./FolderMenu";
 
@@ -25,6 +27,8 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
   const [busy, setBusy] = useState(false);
   const [reopening, setReopening] = useState(false);
   const [error, setError] = useState<AppError | null>(null);
+  // Ошибка ключа хоста, от диалога доверия по которой пользователь отказался: текст ошибки остаётся, диалог — нет.
+  const [trustDismissed, setTrustDismissed] = useState<AppError | null>(null);
   const { data: view = disconnectedView } = useTopology(c.id);
   const live = view.state === "connected" || view.state === "degraded";
 
@@ -40,6 +44,7 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
     if (busy) return;
     setBusy(true);
     setError(null);
+    setTrustDismissed(null);
     try {
       setView(await api.connect(c.id));
     } catch (e) {
@@ -58,8 +63,13 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
     if (reopening) return;
     setReopening(true);
     setError(null);
+    setTrustDismissed(null);
     try {
-      setView(await api.reconnect(c.id));
+      const v = await api.reconnect(c.id);
+      setView(v);
+      // Туннель, который не поднялся из-за неизвестного ключа хоста, оставляет подключение открытым (degraded) с этой
+      // ошибкой в виде, а не отказом команды: предложить доверие нужно и здесь, по действию пользователя.
+      if (hostKeyUnknown(v.error)) setError(v.error);
       // Подключение осталось тем же (журнал и узел каталога сохранены), события Disconnected не было:
       // списки каталога и факты узлов, упавшие на отказе во входе, перечитываются сами.
       void qc.invalidateQueries({ predicate: ofConnection(PG_QUERY_KEYS, c.id) });
@@ -68,6 +78,15 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
     } finally {
       setReopening(false);
     }
+  };
+
+  /**
+   * Повтор после доверия ключу хоста: сам Rust ничего не повторяет (туннель на стоянке ждёт «Переподключить»).
+   * Открытое подключение переподключается на месте, закрытое или упавшее — подключается заново.
+   */
+  const retryAfterTrust = () => {
+    setError(null);
+    void (live ? reconnect() : connect());
   };
 
   /** Смена узла, с которого читается каталог: новый вид в кэш, каталог — перечитать заново. */
@@ -150,6 +169,8 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
   const shownError = error ?? (view.state === "failed" ? view.error : null);
   // У одиночного сервера группы «Узлы» нет, и роль (primary или standby) показывается в заголовке (спека P1 §8).
   const serverRole = c.kind === "server" ? view.topology?.members[0]?.role : undefined;
+  // Диалог доверия — только для ошибки, которой можно доверять, и по собственному действию (не по фоновому событию).
+  const trustError = hostKeyUnknown(error) && error !== trustDismissed ? error : null;
 
   return (
     <li>
@@ -181,6 +202,7 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
           {menuOpen && <FolderMenu label={t("sidebar.connectionMenu", { name: c.name })} items={menu} onClose={() => setMenuOpen(false)} />}
         </span>
       </div>
+      {trustError && <TrustHostKeyDialog error={trustError} onTrusted={retryAfterTrust} onCancel={() => setTrustDismissed(trustError)} />}
       {expanded && (
         <>
           {(view.state === "connecting" || busy) && (

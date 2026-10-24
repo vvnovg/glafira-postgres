@@ -246,6 +246,23 @@
       "timeout": "Connection timeout, s",
       "databases": "Only databases",
       "databasesPlaceholder": "all",
+      "ssh": {
+        "section": "SSH",
+        "enabled": "Through an SSH tunnel",
+        "target": "SSH target",
+        "port": "SSH port",
+        "user": "SSH user",
+        "fromConfig": "as in ~/.ssh/config",
+        "auth": "Bastion login",
+        "auths": {
+          "agent": "SSH agent",
+          "key": "Key file",
+          "password": "Password"
+        },
+        "keyPath": "Key file",
+        "passphrase": "Key passphrase",
+        "password": "SSH password"
+      },
       "pick": "Browse…",
       "pickAria": "Choose a file: {{label}}",
       "scoped": "{{label}} ({{scope}})",
@@ -255,6 +272,13 @@
       "deleteConfirm": "Delete connection “{{name}}”?",
       "deleteYes": "Delete"
     }
+  },
+  "hostKey": {
+    "title": "Unknown host key",
+    "explain": "The bastion presented a key that is not in known_hosts yet. Compare the fingerprint with the one your administrator gave you.",
+    "host": "Host",
+    "fingerprint": "Fingerprint",
+    "trust": "Trust and connect"
   },
   "sidebar": {
     "settings": "Settings",
@@ -604,7 +628,8 @@
       "sslMode": "prefer — TLS if possible, no certificate check even with a CA file; require — TLS only, a CA file adds a certificate check; verify-ca — check the certificate; verify-full — also the host name.",
       "pgpass": "If no password is set, ~/.pgpass is used, as in psql.",
       "environment": "Marks the connection with a color. prod connections ask you to type the connection name before any change.",
-      "readOnly": "Blocks everything that changes data or the cluster. Recommended for prod."
+      "readOnly": "Blocks everything that changes data or the cluster. Recommended for prod.",
+      "sshTarget": "A host or an alias from ~/.ssh/config: ProxyJump, the agent and hardware keys are honored. Port and user come from the config when left empty."
     },
     "import": {
       "target": "Where new folders and connections go. Existing ones stay where they are.",
