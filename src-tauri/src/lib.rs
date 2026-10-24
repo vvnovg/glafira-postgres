@@ -25,6 +25,13 @@ use tauri::Manager;
 use crate::secrets::KeyringStore;
 use crate::state::AppState;
 
+/// Режим askpass для ssh (спец. P1 §5.1): тот же бинарь, запущенный с `GLAFIRA_ASKPASS`, отвечает на запрос
+/// ssh и завершается. Возвращает код выхода процесса.
+pub fn askpass_main() -> i32 {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    crate::net::askpass::run(&args)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Один провайдер TLS на процесс: плагин updater при первой проверке ставит `ring`, а reqwest
