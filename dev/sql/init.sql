@@ -37,6 +37,9 @@ CREATE VIEW shop.active_orders AS SELECT * FROM shop.orders WHERE status <> 'don
 CREATE MATERIALIZED VIEW shop.order_totals AS
   SELECT customer_id, sum(total) AS total FROM shop.orders GROUP BY customer_id;
 CREATE SEQUENCE shop.invoice_seq AS integer;
+-- Вкладка последовательности показывает last_value только роли с правом SELECT/USAGE на неё (иначе
+-- pg_sequences отдаёт NULL): демо-стенд выдаёт право роли диагностики, интеграционные тесты проверяют обе ветки.
+GRANT SELECT ON ALL SEQUENCES IN SCHEMA shop TO glafira_diag;
 CREATE FUNCTION shop.order_count(c bigint) RETURNS bigint LANGUAGE sql STABLE
   AS $$ SELECT count(*) FROM shop.orders WHERE customer_id = c $$;
 CREATE PROCEDURE shop.close_order(o bigint) LANGUAGE sql

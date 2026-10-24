@@ -1,9 +1,12 @@
 //! Каталог демо-схемы на узлах стенда: PG 15 (`GPG_IT_SINGLE`), 16 (`GPG_IT_PRIMARY`), 17 (Patroni).
+//! Вкладки объектов (таблица, представление, функция, последовательность) — на тех же узлах.
 
 mod common;
 
 use glafira_pg_lib::catalog::objects::ObjectKind;
-use glafira_pg_lib::catalog::{databases, extensions, objects, roles, schemas};
+use glafira_pg_lib::catalog::{
+    databases, extensions, function, objects, roles, schemas, sequence, table, view,
+};
 use glafira_pg_lib::conn::pg::ConnectSpec;
 use glafira_pg_lib::conn::profile::SslMode;
 use glafira_pg_lib::secrets::{MemoryStore, PG_PASSWORD, SecretStore, secret_key};
@@ -250,5 +253,212 @@ async fn demo_schema_on_every_node() {
                 .iter()
                 .any(|r| r.name == "pg_monitor")
         );
+
+        let tbl = table::get(&c, "shop", "orders").await.unwrap();
+        assert_eq!(
+            tbl.columns
+                .iter()
+                .map(|x| x.name.as_str())
+                .collect::<Vec<_>>(),
+            ["id", "customer_id", "total", "total_with_tax", "status"]
+        );
+        let total = &tbl.columns[2];
+        assert_eq!(
+            (total.data_type.as_str(), total.not_null),
+            ("numeric(12,2)", true)
+        );
+        assert_eq!(tbl.columns[3].generated.as_deref(), Some("s"));
+        assert_eq!(
+            tbl.columns[0].default_expr.as_deref(),
+            Some("nextval('shop.orders_id_seq'::regclass)")
+        );
+        // Цель статистики по умолчанию — NULL на любой версии (до 17 в каталоге -1).
+        assert!(
+            tbl.columns.iter().all(|x| x.stat_target.is_none()),
+            "{addr}"
+        );
+        assert!(
+            tbl.indexes
+                .iter()
+                .any(|i| i.name == "orders_pkey" && i.primary && i.valid)
+        );
+        assert!(
+            tbl.indexes
+                .iter()
+                .any(|i| i.name == "orders_customer_idx" && !i.unique)
+        );
+        assert!(
+            tbl.constraints
+                .iter()
+                .any(|k| k.kind == "f" && k.definition.contains("REFERENCES shop.customers(id)"))
+        );
+        assert!(
+            tbl.constraints
+                .iter()
+                .any(|k| k.kind == "c" && k.definition.contains("total >= 0"))
+        );
+        assert!(tbl.stats.total_bytes > 0 && tbl.stats.n_live_tup.is_some());
+        assert_eq!(tbl.partitioning.key, None);
+        assert_eq!(tbl.owner, "postgres");
+
+        let customers = table::get(&c, "shop", "customers").await.unwrap();
+        assert_eq!(customers.comment.as_deref(), Some("Покупатели"));
+        assert_eq!(customers.columns[0].identity.as_deref(), Some("a"));
+        assert_eq!(
+            customers
+                .triggers
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>(),
+            ["customers_touch"]
+        );
+        assert!(customers.incoming_fks.iter().any(|f| f.table == "orders"));
+
+        let events = table::get(&c, "shop", "events").await.unwrap();
+        assert_eq!(events.relkind, "p");
+        assert_eq!(
+            events.partitioning.key.as_deref(),
+            Some("RANGE (happened_at)")
+        );
+        assert_eq!(
+            events.partitioning.partitions,
+            ["shop.events_2026_09", "shop.events_2026_10"]
+        );
+        let part = table::get(&c, "shop", "events_2026_09").await.unwrap();
+        assert_eq!(part.partitioning.parent.as_deref(), Some("shop.events"));
+        assert!(
+            part.partitioning
+                .bound
+                .as_deref()
+                .unwrap()
+                .starts_with("FOR VALUES FROM")
+        );
+        // Размер партиционированной таблицы — сумма по дереву партиций (у самого родителя хранения нет).
+        let part10 = table::get(&c, "shop", "events_2026_10").await.unwrap();
+        assert_eq!(
+            (events.stats.total_bytes, events.stats.toast_bytes),
+            (
+                part.stats.total_bytes + part10.stats.total_bytes,
+                part.stats.toast_bytes + part10.stats.toast_bytes
+            ),
+            "{addr}"
+        );
+        assert!(
+            events.stats.seq_scan.is_some(),
+            "{addr}: {:?}",
+            events.stats
+        );
+
+        let v = view::get(&c, "shop", "active_orders").await.unwrap();
+        assert!(!v.matview && v.definition.contains("status <> 'done'"));
+        assert_eq!((v.populated, v.size_bytes), (None, None));
+        let mv = view::get(&c, "shop", "order_totals").await.unwrap();
+        assert_eq!((mv.matview, mv.populated), (true, Some(true)));
+        assert!(mv.size_bytes.unwrap() > 0);
+        assert_eq!(
+            view::get(&c, "shop", "orders").await.unwrap_err().key,
+            "errors.catalog.objectNotFound",
+            "таблица — не представление"
+        );
+
+        let f_oid = funcs
+            .items
+            .iter()
+            .find(|f| f.name == "order_count")
+            .unwrap()
+            .oid;
+        let f = function::get(&c, f_oid).await.unwrap();
+        assert_eq!(
+            (f.kind.as_str(), f.language.as_str(), f.volatility.as_str()),
+            ("f", "sql", "s")
+        );
+        assert!(
+            f.definition
+                .as_deref()
+                .unwrap()
+                .contains("CREATE OR REPLACE FUNCTION shop.order_count")
+        );
+        assert_eq!(f.returns.as_deref(), Some("bigint"));
+        let p_oid = funcs
+            .items
+            .iter()
+            .find(|f| f.name == "close_order")
+            .unwrap()
+            .oid;
+        let p = function::get(&c, p_oid).await.unwrap();
+        assert_eq!((p.kind.as_str(), p.returns), ("p", None));
+        assert_eq!(
+            function::get(&c, 0).await.unwrap_err().key,
+            "errors.catalog.objectNotFound"
+        );
+
+        let s = sequence::get(&c, "shop", "invoice_seq").await.unwrap();
+        assert_eq!(
+            (s.data_type.as_str(), s.increment, s.cycle),
+            ("integer", 1, false)
+        );
+        assert_eq!(s.last_value, None, "последовательность не использовалась");
+        let owned = sequence::get(&c, "shop", "orders_id_seq").await.unwrap();
+        assert_eq!(owned.owned_by.as_deref(), Some("shop.orders.id"));
+        // `last_value` виден только с правом SELECT или USAGE на последовательность (так устроен
+        // `pg_sequences`); без права — NULL, а не ошибка. Свежий стенд выдаёт право в `init.sql`.
+        let readable: bool = c
+            .query_one(
+                "SELECT has_sequence_privilege(c.oid, 'SELECT,USAGE') FROM pg_class c \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE n.nspname = 'shop' AND c.relname = 'orders_id_seq'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if readable {
+            assert!(
+                owned.last_value.is_some_and(|v| v >= 1000),
+                "{addr}: {owned:?}"
+            );
+            assert!(owned.percent_used.is_some_and(|p| p > 0.0), "{addr}");
+        } else {
+            assert_eq!(
+                (owned.last_value, owned.percent_used),
+                (None, None),
+                "{addr}"
+            );
+        }
+        assert_eq!(
+            sequence::get(&c, "shop", "orders").await.unwrap_err().key,
+            "errors.catalog.objectNotFound",
+            "таблица — не последовательность"
+        );
+
+        let e = table::get(&c, "shop", "missing").await.unwrap_err();
+        assert_eq!(e.key, "errors.catalog.objectNotFound");
+        assert_eq!(
+            table::get(&c, "shop", "active_orders")
+                .await
+                .unwrap_err()
+                .key,
+            "errors.catalog.objectNotFound",
+            "представление — не таблица"
+        );
+    }
+}
+
+/// Вкладка обычной таблицы не оставляет блокировок отношений: размеры (`pg_relation_size` и т. п.) снимают
+/// свою блокировку сразу, разбор выражений и определений идёт по каталогу. Партиционированная таблица (сумма
+/// по `pg_partition_tree`, отступление 7 плана) держит блокировки партиций до конца своего запроса, а
+/// `pg_get_viewdef` у представления — блокировки самого представления и его таблиц (`AcquireRewriteLocks`):
+/// каждый запрос вкладки идёт отдельной транзакцией, и они снимаются, как только запрос ответил.
+#[tokio::test]
+async fn table_details_keep_no_locks_on_plain_tables() {
+    for addr in addrs() {
+        let c = client(&addr, "orders").await;
+        c.batch_execute("BEGIN READ ONLY").await.unwrap();
+        table::get(&c, "shop", "orders").await.unwrap();
+        table::get(&c, "shop", "customers").await.unwrap();
+        table::get(&c, "shop", "events_2026_09").await.unwrap();
+        let locks = held_locks(&c).await;
+        c.batch_execute("ROLLBACK").await.unwrap();
+        assert!(locks.is_empty(), "{addr}: блокировки отношений: {locks:?}");
     }
 }

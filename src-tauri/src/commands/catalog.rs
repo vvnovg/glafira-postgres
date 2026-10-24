@@ -1,5 +1,6 @@
-//! Каталог для дерева: базы, схемы, объекты, партиции, расширения, роли (спец. P1 §8).
-//! Запросы идут на узле каталога открытого подключения.
+//! Каталог для дерева: базы, схемы, объекты, партиции, расширения, роли (спец. P1 §8), и вкладки объектов:
+//! таблица, представление, функция, последовательность (§9). Запросы идут на узле каталога открытого
+//! подключения.
 
 use std::future::Future;
 use std::time::Duration;
@@ -11,10 +12,16 @@ use tokio_postgres::Client;
 
 use crate::catalog::databases::DatabaseInfo;
 use crate::catalog::extensions::ExtensionInfo;
+use crate::catalog::function::FunctionDetails;
 use crate::catalog::objects::{ObjectKind, ObjectPage};
 use crate::catalog::roles::RoleInfo;
 use crate::catalog::schemas::SchemaInfo;
-use crate::catalog::{databases, extensions, objects, roles, schemas};
+use crate::catalog::sequence::SequenceDetails;
+use crate::catalog::table::TableDetails;
+use crate::catalog::view::ViewDetails;
+use crate::catalog::{
+    databases, extensions, function, objects, roles, schemas, sequence, table, view,
+};
 use crate::conn::pool::PooledClient;
 use crate::conn::profile::ConnectionProfile;
 use crate::error::{AppError, AppResult, ErrorCode};
@@ -176,6 +183,65 @@ pub async fn list_roles(
 ) -> AppResult<Vec<RoleInfo>> {
     on_catalog_node(&state, &id, None, move |c| {
         Box::pin(roles::list(c, include_system))
+    })
+    .await
+}
+
+/// Вкладка таблицы (обычной, партиционированной, внешней).
+#[tauri::command]
+pub async fn get_table(
+    state: State<'_, AppState>,
+    id: String,
+    db: String,
+    schema: String,
+    name: String,
+) -> AppResult<TableDetails> {
+    on_catalog_node(&state, &id, Some(&db), move |c| {
+        Box::pin(async move { table::get(c, &schema, &name).await })
+    })
+    .await
+}
+
+/// Вкладка представления или материализованного представления.
+#[tauri::command]
+pub async fn get_view(
+    state: State<'_, AppState>,
+    id: String,
+    db: String,
+    schema: String,
+    name: String,
+) -> AppResult<ViewDetails> {
+    on_catalog_node(&state, &id, Some(&db), move |c| {
+        Box::pin(async move { view::get(c, &schema, &name).await })
+    })
+    .await
+}
+
+/// Вкладка функции или процедуры (по OID: имена перегружены).
+#[tauri::command]
+pub async fn get_function(
+    state: State<'_, AppState>,
+    id: String,
+    db: String,
+    oid: i64,
+) -> AppResult<FunctionDetails> {
+    on_catalog_node(&state, &id, Some(&db), move |c| {
+        Box::pin(function::get(c, oid))
+    })
+    .await
+}
+
+/// Вкладка последовательности.
+#[tauri::command]
+pub async fn get_sequence(
+    state: State<'_, AppState>,
+    id: String,
+    db: String,
+    schema: String,
+    name: String,
+) -> AppResult<SequenceDetails> {
+    on_catalog_node(&state, &id, Some(&db), move |c| {
+        Box::pin(async move { sequence::get(c, &schema, &name).await })
     })
     .await
 }

@@ -1,12 +1,20 @@
-//! Запросы каталога для дерева (спец. P1 §8). Все — на узле каталога, текст рассчитан на PostgreSQL 13+.
+//! Запросы каталога для дерева (спец. P1 §8) и вкладок объектов (§9). Все — на узле каталога, текст
+//! рассчитан на PostgreSQL 13+; столбцы новых версий выбираются по [`server_version_num`].
 
 pub mod databases;
 pub mod extensions;
+pub mod function;
 pub mod objects;
 pub mod roles;
 pub mod schemas;
+pub mod sequence;
+pub mod table;
+pub mod view;
 
-use crate::error::{AppResult, ErrorCode};
+use tokio_postgres::Client;
+
+use crate::conn::errors::from_pg;
+use crate::error::{AppError, AppResult, ErrorCode};
 
 pub const MAX_PAGE: i64 = 1000;
 
@@ -28,6 +36,41 @@ pub fn like_pattern(filter: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|f| !f.is_empty())
         .map(|f| format!("%{}%", escape_like(f)))
+}
+
+/// Версия сервера для выбора текста запроса (`last_idx_scan` — 16+ и т. п.).
+pub async fn server_version_num(c: &Client) -> AppResult<i32> {
+    let r = c
+        .query_one("SELECT current_setting('server_version_num')::int", &[])
+        .await
+        .map_err(|e| from_pg(&e))?;
+    Ok(r.get(0))
+}
+
+/// Объекта нет (удалён или переименован после того, как его показало дерево).
+pub(crate) fn object_not_found(schema: &str, name: &str) -> AppError {
+    app_err!(
+        ErrorCode::NotFound,
+        "errors.catalog.objectNotFound",
+        "Object {{schema}}.{{name}} was not found (dropped or renamed?)",
+        schema = schema,
+        name = name
+    )
+}
+
+/// OID отношения по схеме и имени; нет — `objectNotFound`. Только каталог: приведение `'s.n'::regclass`
+/// потребовало бы права USAGE на схему, а у роли диагностики его обычно нет.
+pub async fn relation_oid(c: &Client, schema: &str, name: &str) -> AppResult<i64> {
+    let row = c
+        .query_opt(
+            "SELECT c.oid::bigint FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relname = $2",
+            &[&schema, &name],
+        )
+        .await
+        .map_err(|e| from_pg(&e))?;
+    row.map(|r| r.get(0))
+        .ok_or_else(|| object_not_found(schema, name))
 }
 
 pub(crate) fn check_page(offset: i64, limit: i64) -> AppResult<()> {
@@ -53,6 +96,12 @@ mod tests {
         assert_eq!(like_pattern(Some(" ord ")).as_deref(), Some("%ord%"));
         assert_eq!(like_pattern(Some("  ")), None);
         assert_eq!(like_pattern(None), None);
+    }
+
+    #[test]
+    fn index_query_mentions_last_idx_scan_only_on_16_plus() {
+        assert!(table::index_sql(160000).contains("last_idx_scan"));
+        assert!(!table::index_sql(150004).contains("last_idx_scan"));
     }
 
     #[test]

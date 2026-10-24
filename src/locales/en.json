@@ -162,7 +162,8 @@
       "unknownMember": "Node {{member}} is not part of the connection"
     },
     "catalog": {
-      "badPage": "Invalid page: offset {{offset}}, limit {{limit}}"
+      "badPage": "Invalid page: offset {{offset}}, limit {{limit}}",
+      "objectNotFound": "Object {{schema}}.{{name}} was not found (dropped or renamed?)"
     },
     "ssh": {
       "notFound": "OpenSSH client (ssh) was not found: install it (Windows: the “OpenSSH Client” optional feature)",

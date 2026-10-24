@@ -164,7 +164,8 @@
       "unknownMember": "Узла {{member}} нет в подключении"
     },
     "catalog": {
-      "badPage": "Неверная страница: смещение {{offset}}, размер {{limit}}"
+      "badPage": "Неверная страница: смещение {{offset}}, размер {{limit}}",
+      "objectNotFound": "Объект {{schema}}.{{name}} не найден (удалён или переименован?)"
     },
     "ssh": {
       "notFound": "Клиент OpenSSH (ssh) не найден: установите его (Windows: компонент «Клиент OpenSSH»)",
