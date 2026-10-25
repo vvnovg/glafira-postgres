@@ -24,7 +24,7 @@ const appError = (patch: Partial<AppError>): AppError => ({ code: "INVALID_INPUT
 
 /** Диалог для слота `it_dead_slot` на узле pg-1. */
 const dialog = (profile = dev, onClose: () => void = () => {}, member = "pg-1") => (
-  <DropSlotDialog connectionId="c" profile={profile} member={member} slot="it_dead_slot" onClose={onClose} />
+  <DropSlotDialog connectionId="c" profile={profile} member={member} slot="it_dead_slot" scope="tab" onClose={onClose} />
 );
 
 describe("DropSlotDialog", () => {
@@ -69,6 +69,24 @@ describe("DropSlotDialog", () => {
     expect(facts).toHaveTextContent("logical · pgoutput");
     expect(facts).toHaveTextContent("lab");
     expect(facts).not.toHaveTextContent("Неактивен с");
+  });
+
+  it("слот стал активным, пока открывался диалог: предупреждение и только «Закрыть», подтверждения и удаления нет", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    vi.mocked(api.previewDropSlot).mockResolvedValue(preview({ active: true, activePid: 4242, patroni: "member" }));
+    renderWithClient(dialog(dev, onClose));
+    expect(await screen.findByRole("status")).toHaveTextContent("Слот активен — удалить можно только неактивный слот");
+    // Факты видны: состояние названо с pid процесса, который слот держит.
+    expect(document.querySelector("dl.kv")).toHaveTextContent("активен, pid 4242");
+    expect(screen.queryByRole("group")).toBeNull();
+    expect(screen.queryByLabelText("Подтверждение: имя слота")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Удалить слот" })).toBeNull();
+    // Предупреждение Patroni относится к удалению, которого здесь нет.
+    expect(screen.queryByText(/Patroni/)).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Закрыть" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(api.dropSlot).not.toHaveBeenCalled();
   });
 
   it("слот участника Patroni: предупреждение, кнопка доступна", async () => {
@@ -265,8 +283,15 @@ describe("DropSlotDialog", () => {
       await user.type(await screen.findByLabelText("Подтверждение: имя слота"), "it_dead_slot");
       await user.click(screen.getByRole("button", { name: "Удалить слот" }));
       await waitFor(() => expect(api.dropSlot).toHaveBeenCalled());
+      // После щелчка кнопка неактивна и фокус уходит с неё на body, откуда нажатие до секции не доходит. Поэтому фокус
+      // ставится на саму секцию: без защиты `!run.isPending` в обработчике секции Escape закрыл бы диалог посреди команды.
+      const section = screen.getByRole("region", { name: "Удаление слота" });
+      section.focus();
+      expect(section).toHaveFocus();
       await user.keyboard("{Escape}");
       expect(onClose).not.toHaveBeenCalled();
+      // «Отмена» тоже ждёт конца команды.
+      expect(screen.getByRole("button", { name: "Отмена" })).toBeDisabled();
     });
 
     it("у секции и группы подтверждения разные имена; после закрытия фокус возвращается на кнопку, открывшую диалог", async () => {

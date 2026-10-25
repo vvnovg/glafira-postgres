@@ -998,6 +998,19 @@ async fn slots_sql_runs_on_every_version() {
             .unwrap_or_else(|e| panic!("{addr}: {e:?}"));
         // glafira_diag — не суперпользователь и без REPLICATION (пункт чек-листа «Удаление слотов репликации»).
         assert!(!d.can_drop_slots, "{addr}");
+        // Суперпользователь стенда слоты удалять может. Роль с REPLICATION не создаётся: ради второй половины условия
+        // запроса не стоит оставлять на стенде роли и объекты.
+        let su = common::connect_as(
+            &addr,
+            "postgres",
+            common::SUPERUSER,
+            common::SUPERUSER_PASSWORD,
+        )
+        .await;
+        let (d, _) = diag::slots::collect(&su, Caps::new(h.version_num))
+            .await
+            .unwrap_or_else(|e| panic!("{addr} (суперпользователь): {e:?}"));
+        assert!(d.can_drop_slots, "{addr}");
     }
 }
 

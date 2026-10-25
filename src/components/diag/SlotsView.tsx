@@ -36,19 +36,25 @@ function SlotFlags({ s }: { s: Slot }) {
   );
 }
 
-/** Куда ведёт кнопка удаления: нет `onDrop` — подключение только для чтения (или узла нет), столбца действий нет совсем. */
+/**
+ * Куда ведёт кнопка удаления: нет `onDrop` — подключение только для чтения (или узла нет), столбца действий нет совсем.
+ * `busy` — на этой вкладке слот уже удаляется: кнопки ждут, результат удаления не должен потеряться.
+ */
 interface DropControl {
   canDrop: boolean;
+  busy: boolean;
   onDrop: (slot: string) => void;
 }
 
 /** Кнопка удаления слота; неактивной она остаётся с названной причиной. Активный слот сервер не удалит, а права роль не исправит сама. */
 function DropButton({ s, drop }: { s: Slot; drop: DropControl }) {
   const { t } = useTranslation();
-  // Причин может быть две; называется первая: «слот активен» не лечится выдачей прав.
-  const reason = s.active ? t("actions.slots.active") : drop.canDrop ? undefined : t("actions.slots.needReplication");
+  // Причин может быть несколько; называется первая — самая устойчивая: «слот активен» и «нет права» не проходят сами,
+  // а «идёт удаление» кончится через секунды (потому называется последней, только у кнопки, которая иначе была бы доступна).
+  const reason = s.active ? t("actions.slots.active") : !drop.canDrop ? t("actions.slots.needReplication") : drop.busy ? t("actions.slots.dropping") : undefined;
+  // Видимый текст одинаков у всех строк, поэтому имя для вспомогательных технологий называет и слот.
   return (
-    <button type="button" disabled={reason !== undefined} title={reason} onClick={() => drop.onDrop(s.name)}>
+    <button type="button" disabled={reason !== undefined} title={reason} aria-label={t("actions.slots.dropNamed", { slot: s.name })} onClick={() => drop.onDrop(s.name)}>
       {t("actions.slots.drop")}
     </button>
   );
@@ -156,7 +162,7 @@ function SubscriptionsTable({ subscriptions, labelId }: { subscriptions: Subscri
   );
 }
 
-function SlotsBody({ data, onDropSlot }: { data: SlotsData; onDropSlot?: (slot: string) => void }) {
+function SlotsBody({ data, onDropSlot, dropBusy }: { data: SlotsData; onDropSlot?: (slot: string) => void; dropBusy: boolean }) {
   const { t } = useTranslation();
   const slotsId = useId();
   const subsId = useId();
@@ -165,7 +171,7 @@ function SlotsBody({ data, onDropSlot }: { data: SlotsData; onDropSlot?: (slot: 
     <div className="diag-view">
       <section>
         <h3 id={slotsId}>{t("diag.slots.table")}</h3>
-        {data.slots.length === 0 ? <p className="muted">{t("diag.slots.none")}</p> : <SlotsTable slots={data.slots} labelId={slotsId} drop={onDropSlot && { canDrop: data.canDropSlots, onDrop: onDropSlot }} />}
+        {data.slots.length === 0 ? <p className="muted">{t("diag.slots.none")}</p> : <SlotsTable slots={data.slots} labelId={slotsId} drop={onDropSlot && { canDrop: data.canDropSlots, busy: dropBusy, onDrop: onDropSlot }} />}
         {keep !== null && (
           // Мегабайты из настройки; -1 — слоты могут удерживать WAL без предела.
           <p className="muted">{t("diag.slots.keepSize", { value: keep < 0 ? t("diag.slots.unlimited") : bytesText(keep * 1024 * 1024) })}</p>
@@ -186,8 +192,18 @@ function SlotsBody({ data, onDropSlot }: { data: SlotsData; onDropSlot?: (slot: 
  * Слоты репликации и подписки (спец. P2 §5.7): сколько WAL держит каждый слот и в каком он состоянии, отметка слотов
  * Patroni (участник или постоянный), `max_slot_wal_keep_size`; ниже — подписки логической репликации.
  * `onDropSlot` — удаление слота (спец. P2 §8.4): нет его — подключение только для чтения, кнопок нет.
+ * `dropBusy` — слот на этой вкладке уже удаляется: кнопки неактивны с названной причиной.
  */
-export function SlotsView({ report, onDropSlot }: { connectionId: string; report: DiagReport; onDropSlot?: (slot: string) => void }) {
+export function SlotsView({
+  report,
+  onDropSlot,
+  dropBusy = false,
+}: {
+  connectionId: string;
+  report: DiagReport;
+  onDropSlot?: (slot: string) => void;
+  dropBusy?: boolean;
+}) {
   if (report.data.kind !== "slots") return null;
-  return <SlotsBody data={report.data} onDropSlot={onDropSlot} />;
+  return <SlotsBody data={report.data} onDropSlot={onDropSlot} dropBusy={dropBusy} />;
 }

@@ -1,5 +1,5 @@
 import { useIsMutating, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../api/client";
 import type { AppError, DiagReport, DiagTool, SessionActionLink } from "../../api/types";
@@ -43,7 +43,7 @@ type OpenDrop = { id: number; member: string; slot: string };
  * Тело инструмента: вид данных выбирается по `report.data.kind`.
  * `tool` отличает вкладку `idleTx` от `sessions`: данные у них одни, а набор сессий разный.
  * `onSessionAction` — отмена и завершение сессий, `onDropSlot` — удаление слота (нет — подключение только для чтения,
- * профиль не загружен или у отчёта нет узла).
+ * профиль не загружен или у отчёта нет узла), `dropBusy` — слот на этой вкладке удаляется (кнопки слотов ждут).
  */
 function ToolBody({
   tool,
@@ -51,12 +51,14 @@ function ToolBody({
   connectionId,
   onSessionAction,
   onDropSlot,
+  dropBusy,
 }: {
   tool: DiagTool;
   report: DiagReport;
   connectionId: string;
   onSessionAction?: (choice: SessionActionChoice) => void;
   onDropSlot?: (slot: string) => void;
+  dropBusy: boolean;
 }) {
   switch (report.data.kind) {
     case "pulse":
@@ -70,7 +72,7 @@ function ToolBody({
     case "replication":
       return <ReplicationView connectionId={connectionId} report={report} />;
     case "slots":
-      return <SlotsView connectionId={connectionId} report={report} onDropSlot={onDropSlot} />;
+      return <SlotsView connectionId={connectionId} report={report} onDropSlot={onDropSlot} dropBusy={dropBusy} />;
     case "failover":
       return <FailoverView connectionId={connectionId} report={report} />;
     case "health":
@@ -104,8 +106,10 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
   const [action, setAction] = useState<OpenAction | null>(null);
   const actionSeq = useRef(0);
   const [dropSlot, setDropSlot] = useState<OpenDrop | null>(null);
-  // Пока слот удаляется, кнопки слотов другой диалог не открывают: результат удаления не должен потеряться.
-  const dropping = useIsMutating({ mutationKey: ["dropSlot", connectionId] }) > 0;
+  // Пока слот удаляется в диалоге ЭТОЙ вкладки, другой диалог её не вытесняет, а кнопки слотов неактивны: результат
+  // удаления не должен потеряться. Удаление на другой вкладке подключения вкладку не касается — ключ мутации с областью.
+  const dropScope = useId();
+  const dropping = useIsMutating({ mutationKey: ["dropSlot", connectionId, dropScope] }) > 0;
 
   const cluster = isClusterTool(tool);
   const state = view.data?.state;
@@ -126,12 +130,17 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
     }
   }, [live]);
   // `node` — узел действия; параметр назван не `member`, чтобы не затенять проп вкладки.
-  // Диалог действия один на вкладку: новый вытесняет открытый (диалог сессий — удаление слота и наоборот).
+  // Диалог действия один на вкладку: новый вытесняет открытый (диалог сессий — удаление слота и наоборот), но не тот,
+  // чья команда выполняется (`dropping`): иначе результат удаления пропал бы. Сессионные кнопки на вкладке «Слоты»
+  // сейчас не появляются (инструмент вкладки неизменен, находки слотов действий не несут), так что защита в
+  // `startAction` — страховка на случай, если такие находки появятся.
   const startAction = (node: string, choice: SessionActionChoice) => {
+    if (dropping) return;
     setDropSlot(null);
     setAction({ ...choice, member: node, id: ++actionSeq.current });
   };
   const startDrop = (node: string, name: string) => {
+    // Кнопки слотов при `dropping` неактивны; проверка нужна и для повторного нажатия до перерисовки.
     if (dropping) return;
     setAction(null);
     setDropSlot({ id: ++actionSeq.current, member: node, slot: name });
@@ -241,7 +250,7 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
         />
       )}
       {dropSlot && actor && (
-        <DropSlotDialog key={dropSlot.id} connectionId={connectionId} profile={actor} member={dropSlot.member} slot={dropSlot.slot} onClose={() => setDropSlot(null)} />
+        <DropSlotDialog key={dropSlot.id} connectionId={connectionId} profile={actor} member={dropSlot.member} slot={dropSlot.slot} scope={dropScope} onClose={() => setDropSlot(null)} />
       )}
       {report ? (
         <div className={placeholder ? "diag-body diag-pending" : "diag-body"} aria-busy={placeholder}>
@@ -276,6 +285,7 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
             connectionId={connectionId}
             onSessionAction={actor && reportNode !== null ? (choice) => startAction(reportNode, choice) : undefined}
             onDropSlot={actor && reportNode !== null ? (name) => startDrop(reportNode, name) : undefined}
+            dropBusy={dropping}
           />
         </div>
       ) : (

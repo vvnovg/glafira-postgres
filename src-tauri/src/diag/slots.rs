@@ -81,7 +81,7 @@ const KEEP_SIZE_SQL: &str = "SELECT setting::bigint, (extract(epoch FROM now()) 
 
 /// Может ли роль подключения удалять слоты (`pg_drop_replication_slot` требует суперпользователя или `REPLICATION`).
 /// `current_user`, а не `session_user`: права проверяются по нему.
-pub const CAN_DROP_SQL: &str =
+const CAN_DROP_SQL: &str =
     "SELECT rolsuper OR rolreplication FROM pg_roles WHERE rolname = current_user";
 
 /// Ключ счётчика ошибок подписок (сумма применения и синхронизации) в снимке.
@@ -285,7 +285,6 @@ mod tests {
     fn can_drop_slots_is_read_for_the_current_role() {
         // Суперпользователь или REPLICATION; роль — `current_user`, как в проверке прав самого сервера.
         assert!(CAN_DROP_SQL.contains("rolsuper OR rolreplication"));
-        assert!(CAN_DROP_SQL.contains("rolreplication"));
         assert!(CAN_DROP_SQL.contains("rolname = current_user"));
         // Старые сохранённые отчёты поля не знают: «нельзя».
         let d: SlotsData = serde_json::from_str(r#"{"slots":[],"subscriptions":[],"maxSlotWalKeepSizeMb":null,"subscriptionErrorsGrowth":null}"#).unwrap();

@@ -118,10 +118,10 @@ describe("SlotsView", () => {
       const user = userEvent.setup();
       const onDropSlot = vi.fn();
       renderWithClient(<SlotsView connectionId="c" report={diagReport(slotsData({ slots, canDropSlots: true }))} onDropSlot={onDropSlot} />);
-      const dead = within(screen.getByRole("row", { name: /dead/ })).getByRole("button", { name: "Удалить…" });
+      const dead = within(screen.getByRole("row", { name: /dead/ })).getByRole("button", { name: "Удалить слот dead…" });
       expect(dead).toBeEnabled();
       expect(dead).not.toHaveAttribute("title");
-      const busy = within(screen.getByRole("row", { name: /busy/ })).getByRole("button", { name: "Удалить…" });
+      const busy = within(screen.getByRole("row", { name: /busy/ })).getByRole("button", { name: "Удалить слот busy…" });
       expect(busy).toBeDisabled();
       expect(busy).toHaveAttribute("title", "Слот активен");
       await user.click(dead);
@@ -129,13 +129,41 @@ describe("SlotsView", () => {
       expect(onDropSlot).toHaveBeenCalledWith("dead");
     });
 
+    it("видимый текст кнопки у всех строк «Удалить…», а имя для диктора называет слот: кнопки различимы", () => {
+      renderWithClient(<SlotsView connectionId="c" report={diagReport(slotsData({ slots, canDropSlots: true }))} onDropSlot={vi.fn()} />);
+      const buttons = screen.getAllByRole("button");
+      expect(buttons.map((b) => b.textContent)).toEqual(["Удалить…", "Удалить…"]);
+      expect(buttons.map((b) => b.getAttribute("aria-label"))).toEqual(["Удалить слот dead…", "Удалить слот busy…"]);
+      // Подсказка причины остаётся описанием кнопки, а не заменяет имя.
+      expect(screen.getByRole("button", { name: "Удалить слот busy…" })).toHaveAccessibleDescription("Слот активен");
+    });
+
     it("роль без REPLICATION: кнопки неактивны, подсказка называет пункт чек-листа; у активного слота подсказка про активность", () => {
       renderWithClient(<SlotsView connectionId="c" report={diagReport(slotsData({ slots, canDropSlots: false }))} onDropSlot={vi.fn()} />);
-      const dead = within(screen.getByRole("row", { name: /dead/ })).getByRole("button", { name: "Удалить…" });
+      const dead = within(screen.getByRole("row", { name: /dead/ })).getByRole("button", { name: "Удалить слот dead…" });
       expect(dead).toBeDisabled();
       expect(dead).toHaveAttribute("title", "Нужен атрибут REPLICATION — пункт чек-листа «Удаление слотов репликации»");
       // Причин две — называется та, которую роль не исправит: слот активен.
-      expect(within(screen.getByRole("row", { name: /busy/ })).getByRole("button", { name: "Удалить…" })).toHaveAttribute("title", "Слот активен");
+      expect(within(screen.getByRole("row", { name: /busy/ })).getByRole("button", { name: "Удалить слот busy…" })).toHaveAttribute("title", "Слот активен");
+    });
+
+    it("слот уже удаляется (dropBusy): кнопки неактивны с причиной «Идёт удаление слота»; активный и без права называют свою, более устойчивую причину", async () => {
+      const user = userEvent.setup();
+      const onDropSlot = vi.fn();
+      const { rerender } = renderWithClient(<SlotsView connectionId="c" report={diagReport(slotsData({ slots, canDropSlots: true }))} onDropSlot={onDropSlot} dropBusy />);
+      const dead = screen.getByRole("button", { name: "Удалить слот dead…" });
+      expect(dead).toBeDisabled();
+      expect(dead).toHaveAttribute("title", "Идёт удаление слота");
+      // Активный слот: причина «слот активен» не пропадает вместе с удалением, поэтому называется она.
+      expect(screen.getByRole("button", { name: "Удалить слот busy…" })).toHaveAttribute("title", "Слот активен");
+      await user.click(dead);
+      expect(onDropSlot).not.toHaveBeenCalled();
+      // Нет права: «нужен REPLICATION» тоже устойчивее.
+      rerender(<SlotsView connectionId="c" report={diagReport(slotsData({ slots, canDropSlots: false }))} onDropSlot={onDropSlot} dropBusy />);
+      expect(screen.getByRole("button", { name: "Удалить слот dead…" })).toHaveAttribute("title", "Нужен атрибут REPLICATION — пункт чек-листа «Удаление слотов репликации»");
+      // Удаление закончилось — кнопка снова доступна.
+      rerender(<SlotsView connectionId="c" report={diagReport(slotsData({ slots, canDropSlots: true }))} onDropSlot={onDropSlot} dropBusy={false} />);
+      expect(screen.getByRole("button", { name: "Удалить слот dead…" })).toBeEnabled();
     });
 
     it("без onDropSlot (подключение только для чтения) кнопок и столбца действий нет", () => {

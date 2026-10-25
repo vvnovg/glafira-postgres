@@ -1388,11 +1388,14 @@
     },
     "slots": {
       "drop": "Drop…",
+      "dropNamed": "Drop slot {{slot}}…",
       "dropTitle": "Drop slot {{slot}}?",
       "confirm": "Drop slot",
       "nameLabel": "slot name",
       "done": "Slot dropped",
       "active": "The slot is active",
+      "activeNoDrop": "The slot is active: only an inactive slot can be dropped",
+      "dropping": "A slot is being dropped",
       "needReplication": "Needs the REPLICATION attribute: see the readiness item “Dropping replication slots”",
       "patroniMember": "Patroni will recreate the slot while the member is in the cluster: remove the member",
       "patroniPermanent": "Remove the slot from /config (patronictl edit-config), or Patroni will recreate it"

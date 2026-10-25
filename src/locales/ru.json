@@ -1416,11 +1416,14 @@
     },
     "slots": {
       "drop": "Удалить…",
+      "dropNamed": "Удалить слот {{slot}}…",
       "dropTitle": "Удалить слот {{slot}}?",
       "confirm": "Удалить слот",
       "nameLabel": "имя слота",
       "done": "Слот удалён",
       "active": "Слот активен",
+      "activeNoDrop": "Слот активен — удалить можно только неактивный слот",
+      "dropping": "Идёт удаление слота",
       "needReplication": "Нужен атрибут REPLICATION — пункт чек-листа «Удаление слотов репликации»",
       "patroniMember": "Patroni пересоздаст слот, пока участник есть в кластере; удалите участника",
       "patroniPermanent": "Уберите слот из /config (patronictl edit-config), иначе Patroni его пересоздаст"

@@ -473,13 +473,13 @@ describe("DiagTab", () => {
       vi.mocked(api.dropSlot).mockResolvedValue({ journalWritten: true });
       const user = userEvent.setup();
       const { client } = renderWithClient(<DiagTab connectionId="c" tool="slots" member={null} active tabId="diag:c:slots" />);
-      await user.click(within(await screen.findByRole("row", { name: /dead/ })).getByRole("button", { name: "Удалить…" }));
+      await user.click(within(await screen.findByRole("row", { name: /dead/ })).getByRole("button", { name: "Удалить слот dead…" }));
       expect(await screen.findByRole("group", { name: "Удалить слот dead?" })).toBeInTheDocument();
       expect(api.previewDropSlot).toHaveBeenCalledWith("c", { member: "pg-1", slot: "dead" });
       await user.click(screen.getByRole("button", { name: "Отмена" }));
       expect(screen.queryByRole("group", { name: "Удалить слот dead?" })).toBeNull();
       // Повторное открытие того же слота читает его заново.
-      await user.click(within(screen.getByRole("row", { name: /dead/ })).getByRole("button", { name: "Удалить…" }));
+      await user.click(within(screen.getByRole("row", { name: /dead/ })).getByRole("button", { name: "Удалить слот dead…" }));
       await user.type(await screen.findByLabelText("Подтверждение: имя слота"), "dead");
       expect(api.previewDropSlot).toHaveBeenCalledTimes(2);
       const spy = vi.spyOn(client, "invalidateQueries");
@@ -496,7 +496,7 @@ describe("DiagTab", () => {
       vi.mocked(api.previewDropSlot).mockImplementation(async (_id, req) => dropPreview(req.slot));
       const user = userEvent.setup();
       renderWithClient(<DiagTab connectionId="c" tool="slots" member={null} active tabId="diag:c:slots" />);
-      const open = async () => user.click(within(await screen.findByRole("row", { name: /dead/ })).getByRole("button", { name: "Удалить…" }));
+      const open = async () => user.click(within(await screen.findByRole("row", { name: /dead/ })).getByRole("button", { name: "Удалить слот dead…" }));
       await open();
       await user.type(await screen.findByLabelText("Подтверждение: имя слота"), "dead");
       await open();
@@ -512,7 +512,7 @@ describe("DiagTab", () => {
       vi.mocked(api.previewDropSlot).mockResolvedValue({ member: "pg-1", slot: slot({ name: "dead", active: false }) });
       const user = userEvent.setup();
       renderWithClient(<DiagTab connectionId="c" tool="slots" member={null} active tabId="diag:c:slots" />);
-      await user.click(within(await screen.findByRole("row", { name: /dead/ })).getByRole("button", { name: "Удалить…" }));
+      await user.click(within(await screen.findByRole("row", { name: /dead/ })).getByRole("button", { name: "Удалить слот dead…" }));
       await screen.findByRole("group", { name: "Удалить слот dead?" });
       await user.click(screen.getByRole("button", { name: "Обновить" }));
       await screen.findByText("Узел сменился: pg-1 → pg-2");
@@ -520,28 +520,96 @@ describe("DiagTab", () => {
       expect(api.previewDropSlot).toHaveBeenCalledWith("c", { member: "pg-1", slot: "dead" });
     });
 
-    it("пока слот удаляется, кнопка другого слота диалог не подменяет", async () => {
+    it("пока слот удаляется, кнопки слотов этой вкладки неактивны с причиной и диалог не подменяют; после удаления снова доступны", async () => {
       vi.mocked(api.runDiagnostic).mockResolvedValue(slotsReport());
       vi.mocked(api.previewDropSlot).mockImplementation(async (_id, req) => dropPreview(req.slot));
-      vi.mocked(api.dropSlot).mockReturnValue(new Promise(() => {}));
+      let finish: () => void = () => {};
+      vi.mocked(api.dropSlot).mockReturnValue(new Promise((resolve) => (finish = () => resolve({ journalWritten: true }))));
       const user = userEvent.setup();
       renderWithClient(<DiagTab connectionId="c" tool="slots" member={null} active tabId="diag:c:slots" />);
-      const dropOf = async (name: string) => within(await screen.findByRole("row", { name: new RegExp(name) })).getByRole("button", { name: "Удалить…" });
+      const dropOf = async (name: string) => within(await screen.findByRole("row", { name: new RegExp(name) })).getByRole("button", { name: `Удалить слот ${name}…` });
       await user.click(await dropOf("dead"));
+      expect(await dropOf("other")).toBeEnabled();
       await user.type(await screen.findByLabelText("Подтверждение: имя слота"), "dead");
       await user.click(screen.getByRole("button", { name: "Удалить слот" }));
       await waitFor(() => expect(api.dropSlot).toHaveBeenCalled());
-      await user.click(await dropOf("other"));
+      // Кнопки не молчат: неактивны и называют причину (и у удаляемого слота, и у другого).
+      const other = await dropOf("other");
+      await waitFor(() => expect(other).toBeDisabled());
+      expect(other).toHaveAttribute("title", "Идёт удаление слота");
+      expect(await dropOf("dead")).toHaveAttribute("title", "Идёт удаление слота");
+      await user.click(other);
       expect(screen.getByRole("group", { name: "Удалить слот dead?" })).toBeInTheDocument();
       expect(screen.queryByRole("group", { name: "Удалить слот other?" })).toBeNull();
       expect(api.previewDropSlot).toHaveBeenCalledTimes(1);
+      // Удаление закончилось: результат на месте, кнопки снова доступны.
+      await act(async () => finish());
+      expect(await screen.findByText("Слот удалён")).toBeInTheDocument();
+      await waitFor(() => expect(other).toBeEnabled());
+      expect(other).not.toHaveAttribute("title");
+    });
+
+    it("удаление на одной вкладке подключения не блокирует другую вкладку того же подключения", async () => {
+      vi.mocked(api.runDiagnostic).mockImplementation(async (_id, req) => slotsReport({ member: req.member ?? "pg-1" }));
+      vi.mocked(api.previewDropSlot).mockImplementation(async (_id, req) => dropPreview(req.slot));
+      vi.mocked(api.dropSlot).mockReturnValue(new Promise(() => {}));
+      const user = userEvent.setup();
+      renderWithClient(
+        <>
+          <DiagTab connectionId="c" tool="slots" member="pg-1" active tabId="a" />
+          <DiagTab connectionId="c" tool="slots" member="pg-2" active tabId="b" />
+        </>,
+      );
+      await waitFor(() => expect(screen.getAllByRole("table", { name: "Слоты репликации" })).toHaveLength(2));
+      const [a, b] = screen.getAllByRole("table", { name: "Слоты репликации" });
+      const dropOf = (table: HTMLElement, name: string) => within(table).getByRole("button", { name: `Удалить слот ${name}…` });
+      await user.click(dropOf(a, "dead"));
+      await user.type(await screen.findByLabelText("Подтверждение: имя слота"), "dead");
+      await user.click(screen.getByRole("button", { name: "Удалить слот" }));
+      await waitFor(() => expect(api.dropSlot).toHaveBeenCalledWith("c", { member: "pg-1", slot: "dead" }, expect.anything()));
+      await waitFor(() => expect(dropOf(a, "other")).toBeDisabled());
+      // Вкладка B своего удаления не ведёт: кнопки доступны и открывают диалог на своём узле, диалог A остаётся.
+      expect(dropOf(b, "dead")).toBeEnabled();
+      expect(dropOf(b, "other")).not.toHaveAttribute("title");
+      await user.click(dropOf(b, "other"));
+      expect(await screen.findByRole("group", { name: "Удалить слот other?" })).toBeInTheDocument();
+      expect(api.previewDropSlot).toHaveBeenLastCalledWith("c", { member: "pg-2", slot: "other" });
+      expect(screen.getByRole("group", { name: "Удалить слот dead?" })).toBeInTheDocument();
+    });
+
+    it("пока слот удаляется, действие над сессиями (кнопка находки) диалог слота не вытесняет", async () => {
+      // Слоты и сессии на одной вкладке не встречаются (инструмент вкладки неизменен, находки слотов действий не несут),
+      // поэтому ссылка-действие подложена в находки отчёта слотов: проверяется сама защита `startAction`.
+      const finding: Finding = {
+        id: "idleInTransaction",
+        severity: "critical",
+        member: "pg-1",
+        target: null,
+        params: { maxS: 2000, count: 1 },
+        links: [{ kind: "action", action: { type: "terminateIdleInTransaction", olderThanS: 300 }, member: "pg-1" }],
+      };
+      vi.mocked(api.runDiagnostic).mockResolvedValue(slotsReport({ findings: [finding] }));
+      vi.mocked(api.previewDropSlot).mockImplementation(async (_id, req) => dropPreview(req.slot));
+      vi.mocked(api.previewSessionAction).mockResolvedValue({ member: "pg-1", rows: [] });
+      vi.mocked(api.dropSlot).mockReturnValue(new Promise(() => {}));
+      const user = userEvent.setup();
+      renderWithClient(<DiagTab connectionId="c" tool="slots" member={null} active tabId="diag:c:slots" />);
+      const toIdle = await screen.findByRole("button", { name: "Завершить idle in transaction старше 5 мин" });
+      await user.click(within(screen.getByRole("row", { name: /dead/ })).getByRole("button", { name: "Удалить слот dead…" }));
+      await user.type(await screen.findByLabelText("Подтверждение: имя слота"), "dead");
+      await user.click(screen.getByRole("button", { name: "Удалить слот" }));
+      await waitFor(() => expect(api.dropSlot).toHaveBeenCalled());
+      await user.click(toIdle);
+      expect(screen.getByRole("group", { name: "Удалить слот dead?" })).toBeInTheDocument();
+      expect(screen.queryByRole("region", { name: "Завершение сессий" })).toBeNull();
+      expect(api.previewSessionAction).not.toHaveBeenCalled();
     });
 
     it("без права REPLICATION кнопка неактивна и диалог не открывается", async () => {
       vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport(slotsData({ slots: [slot({ name: "dead", active: false })], canDropSlots: false })));
       const user = userEvent.setup();
       renderWithClient(<DiagTab connectionId="c" tool="slots" member={null} active tabId="diag:c:slots" />);
-      const button = within(await screen.findByRole("row", { name: /dead/ })).getByRole("button", { name: "Удалить…" });
+      const button = within(await screen.findByRole("row", { name: /dead/ })).getByRole("button", { name: "Удалить слот dead…" });
       expect(button).toBeDisabled();
       await user.click(button);
       expect(api.previewDropSlot).not.toHaveBeenCalled();
@@ -553,13 +621,13 @@ describe("DiagTab", () => {
       const first = renderWithClient(<DiagTab connectionId="c" tool="slots" member={null} active tabId="diag:c:slots" />);
       await screen.findByRole("row", { name: /dead/ });
       await waitFor(() => expect(api.listConnections).toHaveBeenCalled());
-      expect(screen.queryByRole("button", { name: "Удалить…" })).toBeNull();
+      expect(screen.queryByRole("button", { name: /^Удалить слот / })).toBeNull();
       first.unmount();
 
       vi.mocked(api.listConnections).mockReturnValue(new Promise(() => {}));
       const second = renderWithClient(<DiagTab connectionId="c" tool="slots" member={null} active tabId="diag:c:slots" />);
       await screen.findByRole("row", { name: /dead/ });
-      expect(screen.queryByRole("button", { name: "Удалить…" })).toBeNull();
+      expect(screen.queryByRole("button", { name: /^Удалить слот / })).toBeNull();
       second.unmount();
 
       vi.mocked(api.listConnections).mockResolvedValue([connection({ id: "c", kind: "patroni" })]);
@@ -567,7 +635,7 @@ describe("DiagTab", () => {
       renderWithClient(<DiagTab connectionId="c" tool="slots" member={null} active tabId="diag:c:slots" />);
       await screen.findByRole("row", { name: /dead/ });
       await waitFor(() => expect(api.listConnections).toHaveBeenCalledTimes(3));
-      expect(screen.queryByRole("button", { name: "Удалить…" })).toBeNull();
+      expect(screen.queryByRole("button", { name: /^Удалить слот / })).toBeNull();
     });
   });
 });
