@@ -6,7 +6,7 @@ The header is the same in every tab:
 
 - [[ui:diag.header.node]] — which node to read. The default is [[ui:diag.header.followLeaderPending]]: the node that accepts writes — the Patroni leader (the leader of a standby cluster in that case), the available primary of a host list, or the only server. When the leader changes, the tab moves to the new one and says “Node changed: old → new”. A node chosen from the list stays pinned to the tab. Tools that poll all members themselves ([[ui:diag.tools.pulse]], [[ui:diag.tools.failover]], [[ui:diag.tools.health]]) and a single server have no node selector.
 - [[ui:diag.header.interval]] — how often to refresh the data: 2, 5, 10 or 30 seconds, or [[ui:diag.header.pause]]. The default is 5 seconds; the Patroni tools are polled every 10 seconds, like the topology. The choice is not kept between launches.
-- [[ui:diag.header.refresh]] reads the data right away; next to it is the time of the last answer from the server. If a refresh fails, the previous data stays on screen, marked [[ui:diag.header.stale]], with an error message.
+- [[ui:diag.header.refresh]] reads the data right away; next to it is the time when the app received the last report. If a refresh fails, the previous data stays on screen, marked [[ui:diag.header.stale]], with an error message.
 
 A tab polls the server only while it is visible: a hidden tab sends nothing, and when you return to it, data that went stale is read at once. After a login is rejected, polling stops: repeated attempts with a wrong password can lock the account. If the connection is closed, the tab says [[ui:diag.closed]] and offers [[ui:diag.connect]].
 
@@ -14,7 +14,7 @@ For the full picture the role needs `pg_monitor` (it includes `pg_read_all_stats
 
 ## Pulse {#pulse}
 
-[[ui:diag.tools.pulse]] is one table for the whole cluster: a row per node, a column per indicator. All available nodes are polled in parallel, one query per node. An unavailable node stays a row with the reason ([[ui:diag.pulse.unreachable]]).
+[[ui:diag.tools.pulse]] is one table for the whole cluster: a row per node, a column per indicator. All available nodes are polled in parallel: for each one, a query for the indicators and a separate query for the size of `pg_wal` (`pg_ls_waldir()`). An unavailable node stays a row with the reason ([[ui:diag.pulse.unreachable]]).
 
 Indicators:
 
@@ -38,14 +38,14 @@ The rates (TPS, cache hit, WAL per second) are the difference between two consec
 
 - Presets: [[ui:diag.sessions.presets.all]], [[ui:diag.sessions.presets.active]], [[ui:diag.sessions.presets.idleTx]] and [[ui:diag.sessions.presets.waiting]] (waiting for a lock). Active and waiting sessions are sorted by query age, idle in transaction by idle time.
 - The filter is a case-insensitive substring of pid, role, application, client, database and query text.
-- [[ui:diag.sessions.groupBy]] — application, role, client or database: instead of the list you get a table with session counts per state. Groups always include all sessions, regardless of the selected preset.
+- [[ui:diag.sessions.groupBy]] — application, role, client or database: instead of the list you get a table with session counts per state. The preset does not affect the groups, but the filter and [[ui:diag.sessions.hideGlafira]] do.
 - [[ui:diag.sessions.hideGlafira]] is on by default: the app's own sessions (`application_name = glafira-pg`) are shown neither in the list nor in the groups.
 - The [[ui:diag.sessions.columns.blockedBy]] column holds the pids of the blocking sessions; it is filled only for sessions waiting for a lock.
 - Clicking a row opens the session panel: backend type, start time, age of the transaction, query and state, transaction ID, xmin age, query ID (PostgreSQL 14 and later), the number of locks held, the full query text and the [[ui:diag.sessions.copyQuery]] button. The text is limited to 16 KB, and a cut is marked. When the session ends, the panel stays with the last data and a note.
 
 The query texts of other sessions are visible to a role with `pg_read_all_stats`. Without it the text is `<insufficient privilege>`, and the “Texts of sessions are hidden” finding suggests granting `pg_monitor` to the role.
 
-A session in the `idle in transaction` state opened a transaction and does nothing. It holds the locks it has acquired (the [[ui:diag.sessions.columns.locksHeld]] column) and the xmin horizon (the [[ui:diag.sessions.columns.xminAge]] column): autovacuum cannot remove dead rows newer than its snapshot, and tables bloat. Usually the application is at fault — it did not run `COMMIT` or `ROLLBACK`; grouping by application and role helps to find it. Server-side protection is `idle_in_transaction_session_timeout`: set it for the application role rather than for the whole server. The “Idle in transaction” preset shows the current value of the setting. If it is 0 and a session has been idle for more than 5 minutes, a finding suggests a ready command, `ALTER ROLE … SET idle_in_transaction_session_timeout = '10min';`, with the [[ui:diag.findings.copy]] button; the app does not run this command.
+A session in the `idle in transaction` state opened a transaction and does nothing. It holds the locks it has acquired (the [[ui:diag.sessions.columns.locksHeld]] column) and the xmin horizon (the [[ui:diag.sessions.columns.xminAge]] column): autovacuum cannot remove dead rows newer than its snapshot, and tables bloat. Usually the application is at fault — it did not run `COMMIT` or `ROLLBACK`; grouping by application and role helps to find it. Server-side protection is `idle_in_transaction_session_timeout`: set it for the application role rather than for the whole server. The “Idle in transaction” preset shows the current value of the setting. If it is 0 and a session has been idle for 5 minutes or more, a finding suggests a ready command, `ALTER ROLE … SET idle_in_transaction_session_timeout = '10min';`, with the [[ui:diag.findings.copy]] button; the app does not run this command.
 
 ## Wait profile {#waits}
 
