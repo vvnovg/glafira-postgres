@@ -70,6 +70,14 @@ Glafira, PostgreSQL, Patroni, WAL, LSN, DCS, REST API, DNS, TCP, TLS, SSL, mTLS,
 | environment | окружение | Значения (local, dev, test, stage, prod) не переводятся |
 | prod connection | prod-подключение | `prod` — только как значение окружения |
 | keychain / secret store | хранилище секретов | Полностью — «системное хранилище секретов» (как в `errors.secrets.keychain`); названия Keychain, Credential Manager, Secret Service — латиницей |
+| xmin horizon | горизонт xmin | Самая старая транзакция, снимок которой ещё нужен; `xmin` не переводится. Кто держит горизонт — «держатель» |
+| idle in transaction | idle in transaction | Состояние сессии, не переводится и не склоняется: «сессия в состоянии idle in transaction» |
+| wait event | событие ожидания | `wait_event`; тип `wait_event_type` — «класс ожидания» (Lock, IO, CPU* и другие названия классов не переводятся) |
+| root blocker | корневой блокирующий | Сессия, которая держит других и сама ничего не ждёт; ждущие за ней — «жертвы» |
+| queued DDL | DDL в очереди | DDL, который ждёт блокировку отношения и сам задерживает других |
+| retained WAL | удерживаемый WAL | Сколько WAL не даёт удалить слот; в узком столбце — «Удерживает WAL» |
+| failover readiness | готовность к failover | Вердикт по каждому кандидату: готов ли принять роль лидера |
+| health matrix | матрица health | Коды ответов адресов проверки здоровья Patroni; `health` не переводится |
 
 ## Термины приложения
 
@@ -86,6 +94,8 @@ Glafira, PostgreSQL, Patroni, WAL, LSN, DCS, REST API, DNS, TCP, TLS, SSL, mTLS,
 | organization policy | политика организации | Пометка «задан вашей организацией» там, где значение закреплено политикой |
 | system default (…) | как в системе (…) | |
 | hint (значок «?») | подсказка | |
+| wait profile | профиль ожиданий | Инструмент диагностики: на что тратят время активные сессии |
+| finding | находка | Результат правила диагностики: строгость, заголовок, «что сделать» |
 
 ## Частые слова интерфейса
 

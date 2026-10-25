@@ -163,6 +163,45 @@ describe("Layout tabs", () => {
     expect(within(screen.getByRole("tablist")).getByRole("tab", { name: "Справка" })).toBeInTheDocument();
   });
 
+  it("F1 на вкладке инструмента диагностики открывает его раздел главы «Диагностика»", () => {
+    useWorkspace.setState({
+      tabs: [
+        { kind: "diag", connectionId: "c1", tool: "locks", id: "diag:c1:locks" },
+        { kind: "diag", connectionId: "c1", tool: "idleTx", id: "diag:c1:idleTx" },
+      ],
+      activeId: "diag:c1:locks",
+    });
+    renderWithClient(<Layout />);
+    const press = () =>
+      act(() => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "F1", bubbles: true, cancelable: true }));
+      });
+    press();
+    expect(useWorkspace.getState().tabs.find((t) => t.id === "help")).toMatchObject({ kind: "help", chapter: "diagnostics", anchor: "locks" });
+    // «Idle in transaction» описан в «Сессиях».
+    act(() => useWorkspace.getState().activate("diag:c1:idleTx"));
+    press();
+    expect(useWorkspace.getState().tabs.find((t) => t.id === "help")).toMatchObject({ chapter: "diagnostics", anchor: "sessions" });
+    // На самой справке F1 только возвращает её на экран: открытая глава не сбрасывается.
+    act(() => useWorkspace.getState().activate("diag:c1:locks"));
+    act(() => useWorkspace.getState().activate("help"));
+    press();
+    expect(useWorkspace.getState().activeId).toBe("help");
+    expect(useWorkspace.getState().tabs.find((t) => t.id === "help")).toMatchObject({ chapter: "diagnostics", anchor: "sessions" });
+  });
+
+  it("F1: глава, заданная экраном, главнее таблицы, и якорь не передаётся", () => {
+    useWorkspace.setState({ tabs: [{ kind: "diag", connectionId: "c1", tool: "locks", id: "diag:c1:locks" }], activeId: "diag:c1:locks" });
+    useHelpContext.setState({ byTab: { "diag:c1:locks": "updates" } });
+    renderWithClient(<Layout />);
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "F1", bubbles: true, cancelable: true }));
+    });
+    const help = useWorkspace.getState().tabs.find((t) => t.id === "help");
+    expect(help).toMatchObject({ kind: "help", chapter: "updates" });
+    expect(help && "anchor" in help ? help.anchor : undefined).toBeUndefined();
+  });
+
   it("opens the guide from the sidebar", () => {
     renderWithClient(<Layout />);
     fireEvent.click(screen.getByRole("button", { name: "Справка" }));

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { helpChapterFor } from "./helpChapterFor";
+import { helpAnchorFor, helpChapterFor } from "./helpChapterFor";
 
 describe("helpChapterFor", () => {
   it("для null, настроек и обзора — «Начало работы»", () => {
@@ -24,5 +24,13 @@ describe("helpChapterFor", () => {
 
   it("для «О программе» — «Обновления и диагностика»", () => {
     expect(helpChapterFor({ kind: "about" })).toBe("updates");
+  });
+
+  it("вкладка инструмента — глава «Диагностика» с якорем инструмента", () => {
+    expect(helpChapterFor({ kind: "diag", connectionId: "c", tool: "locks" })).toBe("diagnostics");
+    expect(helpAnchorFor({ kind: "diag", connectionId: "c", tool: "locks" })).toBe("locks");
+    expect(helpAnchorFor({ kind: "diag", connectionId: "c", tool: "idleTx" })).toBe("sessions");
+    expect(helpAnchorFor({ kind: "overview", connectionId: "c" })).toBeUndefined();
+    expect(helpAnchorFor(null)).toBeUndefined();
   });
 });

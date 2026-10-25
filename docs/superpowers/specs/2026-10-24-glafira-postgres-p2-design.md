@@ -51,8 +51,8 @@ P2 превращает навигатор P1 в инструмент дежур
 | Откуда | Что | Изменения в P2 |
 |---|---|---|
 | P1 `topology/model.rs` | `Topology`, `Member` | `Topology.scheduledSwitchover`, `Member.scheduledRestart` (§5.10); `same_except_time` учитывает новые поля |
-| P1 `topology/patroni.rs` | `PatroniHttp`, `ReqwestHttp`, разбор `/cluster` | `get_status(url)` (матрица health), `get_config()`; P2b — `send_json(method, url, body)` |
-| P1 `topology/runtime.rs` | `Runtimes`, `TopologyView`, `target(id, member)` | Подписчики закрытия подключения (§3.4); `boost(id, interval, until)` — ускоренный опрос для наблюдения (§8.6) |
+| P1 `topology/patroni.rs` | `PatroniHttp`, `ReqwestHttp`, разбор `/cluster` | `get_status(url)` (матрица health), `fetch_config(http, bases)` — `GET /config` по `get_json` с обходом адресов (§5.8); P2b — `send_json(method, url, body)` |
+| P1 `topology/runtime.rs` | `Runtimes`, `TopologyView`, `target(id, member)` | `diag_target(id, member, cluster)` и `topology::observe::leader_member` — узел инструмента (§3.2); подписчики закрытия подключения (§3.4); `LiveSource::http_for` публичен (клиент HTTP подключения для Patroni-инструментов); `boost(id, interval, until)` — ускоренный опрос для наблюдения (§8.6) |
 | P1 `conn/pool.rs` | `PoolPurpose`, `PoolRegistry` | `PoolPurpose::Sampler` (одно соединение на узел) |
 | P1 `conn/pg.rs` | `ConnectSpec`, `SESSION_OPTIONS` | P2b: `ACTION_SESSION_OPTIONS` — без `default_transaction_read_only` (§8.2) |
 | P1 `commands/catalog.rs` | `on_catalog_node_within`, предел `catalog_limit` | Те же пределы и закрытие соединения при таймауте для запросов диагностики |
@@ -106,8 +106,12 @@ DiagRequest { tool: pulse | sessions | waits | locks | horizon | replication | s
               windowS: Option<u32> }       // только waits: 300 | 900 | 3600, по умолчанию 900
 ```
 
-1. `Runtimes::target(id, member)` разрешает узел так же, как для каталога: `null` — лидер Patroni, primary списка узлов
-   (узел по умолчанию, спец. P1 §6.3) или единственный сервер. Подключение не открыто — `errors.topology.notConnected`.
+1. `Runtimes::diag_target(id, member, cluster)` разрешает узел: инструмент кластера узла не берёт; названный `member` —
+   этот участник; `null` — «за лидером» (`topology::observe::leader_member`): лидер Patroni (у standby-кластера — лидер
+   этого кластера), **доступный primary** списка узлов (не узел по умолчанию каталога: при `targetServerType` он может быть
+   репликой, а «за лидером» означает узел, принимающий запись) или единственный сервер; только доступный узел, иначе
+   `errors.topology.noNode`. Подключение не открыто — `errors.topology.notConnected`. Узел вкладки хранится только в её
+   спецификации (`TabSpec.member`, §7.2).
 2. Узловые инструменты берут соединение из пула `Catalog` узла (БД `pg.database`: все используемые представления
    кластерные). Сессия уже read-only с `statement_timeout = 5 с` и `lock_timeout = 1 с` (спец. P1 §7). Получение
    соединения и запросы укладываются в `catalog_limit` (таймаут подключения + 10 с); таймаут и обрыв закрывают соединение.
@@ -119,7 +123,7 @@ DiagReport {
   tool, member: Option<String>, followsLeader: bool, observedAtMs, serverVersionNum: Option<i32>, inRecovery: Option<bool>,
   data: { kind: "<tool>", … },                  // свой тип у каждого инструмента (§5)
   findings: [Finding],                           // §4
-  unavailable: [{ part: String, reason: LocalizedText }]   // что не показано и почему
+  unavailable: [{ part: String, member: Option<String>, reason: LocalizedText }]   // что не показано и почему
 }
 ```
 
@@ -153,13 +157,17 @@ DiagReport {
 |---|---|---|
 | `Catalog` (каталог и все вкладки, включая диагностику) | до 3 | Как в P1 |
 | `Probe` (опрос топологии) | 1 | Как в P1 |
-| `Sampler` (новое) | 1 | Пока к сэмплеру узла подключена вкладка; закрывается через 5 мин простоя, как остальные пулы |
+| `Sampler` (новое) | 1 | Пока к сэмплеру узла подключена вкладка; закрывается через 5 мин простоя, как остальные пулы. Соединение — `AppState::client_with(id, member, database, PoolPurpose::Sampler)`; `AppState::client` — то же для `Catalog` |
 | Действие (P2b, вне пулов) | 1 | На время одного действия или пакета (§8.2) |
 
 `Runtimes` сообщает подписчикам о закрытии и переоткрытии подключения (`disconnect`, удаление, переоткрытие с другими
 настройками, исчезновение участника): сэмплеры подключения останавливаются, их буферы и прошлые счётчики (§3.6) удаляются,
 сессии наблюдения прерываются. Каждое такое состояние привязано к номеру открытия подключения (`Entry::generation`): ответ,
 пришедший после переоткрытия, к новому открытию не применяется.
+
+`AppState` хранит `live: Arc<LiveSource>` — тот же экземпляр источника топологии, что у `Runtimes`: инструменты Patroni берут
+клиента HTTP подключения (`LiveSource::http_for`), а не строят второго. Логика длительных сессий вынесена из команд:
+`sampler::start(st, id, member, sink)` (§9), команда Tauri только оборачивает `Channel` в `SamplerSink`.
 
 ### 3.5 Длительные сессии
 
@@ -171,8 +179,10 @@ DiagReport {
 ### 3.6 Обновление, скорости и рост
 
 - Вкладка опрашивает `run_diagnostic`, только пока видна: по умолчанию раз в 5 с (`health` и `failover` — раз в 10 с),
-  в шапке — выбор 2 / 5 / 10 / 30 с или «Пауза» и кнопка «Обновить». Выбор не сохраняется между запусками.
-- После `AUTH_FAILED` опрос останавливается (как у фактов узлов, спец. P1 §9): повтор с неверным паролем блокирует учётную запись.
+  в шапке — выбор 2 / 5 / 10 / 30 с или «Пауза» и кнопка «Обновить». Выбор не сохраняется между запусками. Вкладка, снова
+  ставшая видимой, сразу перечитывает данные, устаревшие больше чем на интервал (если не «Пауза» и не отказ во входе).
+- После `AUTH_FAILED` опрос останавливается (как у фактов узлов, спец. P1 §9) и при показе вкладки не возобновляется:
+  повтор с неверным паролем блокирует учётную запись.
 - Скорости пульса и рост счётчиков (конфликты recovery, ошибки подписок) — разница двух соседних вызовов: `diag/memory.rs`
   хранит прошлые счётчики на ключ (подключение, номер открытия, узел, инструмент) вместе с серверным временем снимка,
   `pg_postmaster_start_time()` и `stats_reset`. Первый вызов, перезапуск сервера или сброс статистики — скорости `null`
@@ -199,6 +209,12 @@ Finding {
   не переводятся и приложением не выполняются.
 - Пороги — константы `pg_advisor::findings::thresholds`; строгость от окружения подключения не зависит (P2).
 - Одно правило может срабатывать в нескольких инструментах (например, `longTransaction` — в пульсе и в сессиях): id общий.
+- **Одна находка на правило и узел** у правил по множеству объектов (`idleInTransaction`, `longQuery`, `longTransaction`,
+  `slotRetainsWal`, `replicaLag`, `replicaNotStreaming` …): `target` — худший объект, `params.count` — сколько объектов
+  достигли порога предупреждения, `params.maxS` / `maxBytes` — худшее значение. Иначе сотня висящих сессий дала бы сотню
+  одинаковых находок. Исключения, где важен сам объект: `rootBlocker` и `ddlQueue` — по находке на корень и на элемент очереди.
+- Тексты: заголовок `healthPrimary` нейтральный («адрес лидера отвечает 200 у N участников»), потому что 200 считается
+  и на `/primary`, и на `/standby-leader`; «что сделать» у `replicaOutOfPool` называет причины, в том числе тег `noloadbalance`.
 - Порядок в отчёте: строгость (critical → info), затем `member`, затем `id`.
 
 | id | Инструменты | warning | critical |
@@ -209,9 +225,9 @@ Finding {
 | `longTransaction` | sessions, pulse | транзакция ≥ 1 ч | ≥ 6 ч |
 | `xidAge` | pulse | `max(age(datfrozenxid))` ≥ 50 % от 2³¹ | ≥ 75 % |
 | `lockWait` | pulse, locks | ожидание блокировки ≥ 30 с | ≥ 5 мин |
-| `walDirSize` | pulse | `pg_wal` > 2 × `max_wal_size` | > 4 × |
+| `walDirSize` | pulse | `pg_wal` ≥ 2 × `max_wal_size` | ≥ 4 × |
 | `deadlocks` | pulse | рост `deadlocks` за интервал | — |
-| `lockShare` | waits | доля `Lock` в окне ≥ 20 % | ≥ 50 % |
+| `lockShare` | waits | доля `Lock` в окне ≥ 20 % (при ≥ 30 сэмплах в окне) | ≥ 50 % |
 | `rootBlocker` | locks | у корня жертва ждёт ≥ 10 с | ≥ 60 с или ≥ 10 жертв |
 | `ddlQueue` | locks | — | есть DDL в очереди |
 | `xminHorizon` | horizon | держатель старше 10 млн xid или 1 ч | 100 млн xid или 6 ч |
@@ -229,7 +245,7 @@ Finding {
 | `clusterPaused` | failover | pause включена | — |
 | `syncModeWithoutSync` | failover | — | `synchronous_mode` включён, sync / quorum реплики нет |
 | `patroniTiming` | failover | `ttl < loop_wait + 2 × retry_timeout` | — |
-| `healthPrimary` | health | — | `/primary` = 200 не ровно у одного участника |
+| `healthPrimary` | health | — | `/primary` или `/standby-leader` = 200 не ровно у одного из ответивших участников |
 | `healthUnhealthy` | health | — | `/health` ≠ 200 у доступного API |
 | `replicaOutOfPool` | health | реплика без `/replica` = 200 (вне пула чтения балансировщика) | — |
 
@@ -252,7 +268,7 @@ Info: `cacheHitLow` (cache hit за интервал < 90 % при ≥ 1000 пр
 | `member`, `role`, `reachable`, `error` | Топология; ошибка запроса |
 | `connections { used, available, byState { active, idle, idleInTransaction, other } }` | `pg_stat_activity` (`backend_type = 'client backend'`); `available = max_connections − superuser_reserved_connections − reserved_connections (16+)` |
 | `rates { tps, commitsPerS, rollbacksPerS, cacheHitPct, tempFilesPerS, tempBytesPerS, deadlocks, walBytesPerS }` | Дельты сумм `pg_stat_database` и LSN (`pg_current_wal_lsn()`, на реплике `pg_last_wal_receive_lsn()`), §3.6 |
-| `longestTransactionS`, `longestQueryS`, `longestIdleInTransactionS` | `now() − xact_start` / `query_start` (активные) / `state_change` (idle in transaction), client backend |
+| `longestTransactionS`, `longestQueryS`, `longestIdleInTransactionS` | `now() − xact_start` / `query_start` (активные) / `state_change` (idle in transaction), client backend, без собственной сессии сбора (`pid <> pg_backend_pid()`: её запрос всегда активен) |
 | `lockWaiting`, `longestLockWaitS` | `wait_event_type = 'Lock'`; время — `waitstart` (14+) или `state_change` |
 | `maxXidAge`, `xidAgePct` | `max(age(datfrozenxid))` из `pg_database`, доля от 2³¹ |
 | `walDirBytes`, `maxWalSize` | `sum(size) FROM pg_ls_waldir()` (`pg_monitor`; без права — `unavailable`), `max_wal_size` |
@@ -266,7 +282,8 @@ Info: `cacheHitLow` (cache hit за интервал < 90 % при ≥ 1000 пр
 
 `SessionRow`: `pid`, `leaderPid`, `backendType`, `database`, `user`, `application`, `clientAddr`, `clientPort`,
 `backendStartUs` (микросекунды эпохи — ключ защиты от переиспользования PID, §8.3), `xactAgeS`, `queryAgeS`, `stateAgeS`,
-`state`, `waitEventType`, `waitEvent`, `backendXid`, `xminAge`, `queryId` (14+), `query` (до `track_activity_query_size`),
+`state`, `waitEventType`, `waitEvent`, `backendXid`, `xminAge`, `queryId` (14+; в JSON — десятичная строка, в TS `string | null`: 64-битный хеш не помещается в точное число JS),
+`query` (не длиннее 16 384 символов: `left(query, 16384)`, флаг `queryTruncated` — текст обрезан: при `track_activity_query_size` 1 МБ и тысяче сессий ответ иначе весил бы гигабайт),
 `blockedBy: [pid]` (только у ждущих блокировку: `CASE WHEN wait_event_type = 'Lock' THEN pg_blocking_pids(pid) END`),
 `locksHeld` (одним проходом `pg_locks WHERE granted GROUP BY pid`), `glafira: bool` (`application_name = 'glafira-pg'`).
 
@@ -284,7 +301,7 @@ Info: `cacheHitLow` (cache hit за интервал < 90 % при ≥ 1000 пр
 накопленного), `buckets: [{ startMs, sampledS, aas: { cpu, lock, lwlock, io, ipc, client, timeout, bufferPin, extension, activity, other } }]`
 (среднее число активных сессий = сэмплы в интервале / секунды, когда сэмплер работал), `gaps: [{ fromMs, toMs }]`,
 `topEvents: [{ class, event, samples, share }]`, `topQueries: [{ key, queryId?, text, samples, share, topEvent }]`
-(ключ — `query_id`, если он есть и не 0, иначе хэш текста; на PG 13 — всегда хэш), `byApplication`, `byUser`, `byDatabase`,
+(ключ — `query_id`, если он есть и не 0, иначе хэш текста; на PG 13 — всегда хэш; `queryId` в JSON — десятичная строка, как у сессий), `byApplication`, `byUser`, `byDatabase`,
 `byClient: [{ name, samples, share }]` (по 10 строк). Класс `cpu` — активная сессия без wait event (`CPU*`: на процессоре
 или в неинструментированном ожидании, подпись это объясняет). Параллельные воркеры учитываются за запросом лидера (`leader_pid`).
 Агрегация — `pg_advisor::ash::profile(samples, window, bucket)`.
@@ -301,10 +318,18 @@ Info: `cacheHitLow` (cache hit за интервал < 90 % при ≥ 1000 пр
 
 **DDL в очереди:** ждущая сессия, которая запросила блокировку отношения в режиме `AccessExclusiveLock`,
 `ShareRowExclusiveLock` или `ShareLock` и сама блокирует хотя бы одну сессию. Данные: `ddlQueue: [{ session, waitsFor: pid,
-waitS, queued: число сессий за ней, relation }]`. Находка `ddlQueue` рекомендует отменить DDL (быстро снимает очередь) или
-блокирующий запрос и задавать `lock_timeout` в миграциях. Подпись инструмента: детали deadlock есть только в логе сервера.
+waitS, queued: число сессий за ней, relation, relationOid, relationDatabase, mode }]`: `relation` — имя отношения только для БД
+соединения, для отношения другой БД вместо него `relationOid` и `relationDatabase` (интерфейс собирает «oid N в БД X»);
+находка `ddlQueue` несёт `relation` либо `relationOid` и `relationDatabase`. Находка рекомендует отменить DDL (быстро
+снимает очередь) или блокирующий запрос и задавать `lock_timeout` в миграциях. Постоянная подпись вида: детали deadlock
+есть только в логе сервера.
 
-Данные: `roots: [LockNode { session, lock?, waitS?, waitApprox: bool, victims, children: [LockNode] }]`, `cycles: [[pid]]`, `ddlQueue`.
+Данные: `roots: [LockNode { session, lock?, alsoBlockedBy: [pid], victims, children: [LockNode] }]`, где `lock` —
+запрошенная блокировка `{ locktype, mode, relation, relationOid, relationDatabase, waitS, approx }` (на PG 13 `approx` — время
+оценено по `state_change`), `cycles: [[pid]]`, `ddlQueue`. Ожидающий, чьих блокирующих нет в строках (pid 0 — подготовленная
+транзакция, либо сессия уже завершилась), — корень своего поддерева: `lock` у него заполнен, `alsoBlockedBy` перечисляет
+неразрешённые pid (0 — prepared transaction). `rootBlocker` для такого корня не выдаётся (завершать нечего, очередь учтена
+в `lockWait`); `lockWait.count` — все ожидающие сессии леса.
 
 ### 5.5 Горизонт xmin (`horizon`, узел)
 
@@ -312,15 +337,22 @@ waitS, queued: число сессий за ней, relation }]`. Находка
 
 | Вид | Источник | Длительность |
 |---|---|---|
-| `session` | `pg_stat_activity.backend_xmin`, `backend_xid` (client backend и прочие) | `now() − xact_start` |
+| `session` | `pg_stat_activity.backend_xmin`, `backend_xid` (client backend и прочие), кроме собственной сессии, отправителей WAL, autovacuum и ленивого `VACUUM` (ручного — по строке в `pg_stat_progress_vacuum`; `VACUUM FULL` — обычная транзакция и учитывается): его xmin горизонт других процессов не держит | `now() − xact_start` |
 | `preparedXact` | `pg_prepared_xacts`: `transaction`, `gid`, `owner`, `database` | `now() − prepared` |
-| `slot` | `pg_replication_slots.xmin`, `catalog_xmin` | `inactive_since` (17+), иначе нет |
+| `slot` | `pg_replication_slots.xmin`, `catalog_xmin`; слот связывается с `pg_stat_replication` по `active_pid` (`application`, `clientAddr`, `member`) | `inactive_since` (17+), иначе нет |
 | `standbyFeedback` | `pg_stat_replication.backend_xmin` (на primary и каскадной реплике) | — |
 
-Реплика `standbyFeedback` сопоставляется с участником топологии: у Patroni `application_name` = имя участника, у списка узлов —
-правила спец. P1 §6.3 (`client_addr` или `application_name`); ссылка находки открывает горизонт на этом участнике. У
+Реплика с физическим слотом передаёт обратную связь через `pg_replication_slots.xmin` (держатель — `slot`); активный физический
+слот с сопоставленным участником ссылается на него, как `standbyFeedback`: ссылка находки открывает горизонт на этом
+участнике. **Сопоставление отправителя WAL с участником** (здесь и в §5.6): `application_name` равен имени участника или его
+хосту; DNS не используется (опрос топологии разрешает имена, диагностика — нет); не сопоставилось — `member` пусто и ссылки нет. У
 `preparedXact` в `params.command` — `ROLLBACK PREPARED '<gid>'` (строковая константа по правилам `quote_literal`). Данные:
 `holders: [{ kind, name, member?, xminAge, durationS?, details }]`, `hotStandbyFeedback` (значение настройки на узле).
+
+**Права** (§5.5–5.6). Сведения чужих сессий (`backend_xmin`, `backend_xid`, состояние приёмника WAL и отправителей, их LSN) видит роль с
+`pg_read_all_stats` (входит в `pg_monitor`); проверка — `pg_has_role(current_user, 'pg_read_all_stats', 'USAGE')` (`USAGE`: членство
+без наследования права не открывает). Без права горизонт добавляет в `unavailable` часть `otherSessionsXmin` с причиной «права»
+(`diag.unavailable.privilege`): пустые поля нельзя читать как «горизонт свободен».
 
 ### 5.6 Реплики (`replication`, узел)
 
@@ -336,18 +368,27 @@ waitS, queued: число сессий за ней, relation }]`. Находка
 `tablespace`, `lock`, `snapshot`, `bufferpin`, `deadlock`, `activeLogicalslot` 16+) и их рост (§3.6), `hotStandbyFeedback`,
 `maxStandbyStreamingDelay`.
 
+**Без `pg_read_all_stats`** (проверка — как в §5.5) данные получают `detailsHidden = true`: пустые поля отправителей и приёмника
+не значат, что репликация сломана, поэтому по отправителям не выдаются `walReceiverDown`, `replicaNotStreaming`,
+`syncStandbyMissing`, `replicaReplyStale` и `replicaLag`; в `unavailable` — часть `replicationDetails` с причиной «права»
+(`diag.unavailable.privilege`); вид скрывает таблицу отправителей, оставляя их число, и показывает подпись о правах.
+
 ### 5.7 Слоты репликации и подписки (`slots`, узел)
 
-`pg_replication_slots`: `name`, `type`, `plugin`, `database`, `temporary`, `active`, `activePid`, `xminAge`, `catalogXminAge`,
+`pg_replication_slots`: `name`, `slotType` (в JSON не `type`), `plugin`, `database`, `temporary`, `active`, `activePid`, `xminAge`, `catalogXminAge`,
 `restartLsn`, `confirmedFlushLsn`, `walStatus`, `safeWalSize`, `retainedBytes` (текущий LSN − `restart_lsn`; на реплике
 от `pg_last_wal_replay_lsn()`), `twoPhase` (14+), `conflicting` (16+), `inactiveSince`, `invalidationReason`, `failover`,
 `synced` (17+). Настройка `max_slot_wal_keep_size`.
 
-**Слоты Patroni** (только подключение `patroni`): слот участника — имя, полученное из имени участника, как это делает Patroni
-(нижний регистр, символы вне `[a-z0-9_]` заменяются на `_`, обрезка до 63 байт); постоянный слот — ключ `slots` в `/config`.
-Отметка `patroni: member | permanent | null`. `/config` недоступен — отметки нет, причина в `unavailable`.
+Синхронизированные слоты (`synced`, PostgreSQL 17+, на реплике) неактивны по устройству и не дают `slotRetainsWal`.
 
-**Подписки:** `pg_stat_subscription` (`name`, `pid`, `receivedLsn`, `lastMsgAgeS`, `latestEndAgeS`) и
+**Слоты Patroni** (только подключение `patroni`): слот участника — имя, полученное из имени участника по точному правилу Patroni
+(`slot_name_from_member_name`): нижний регистр, `-` и `.` → `_`, прочие символы вне `[a-z0-9_]` → `u` и код символа из четырёх
+цифр, обрезка до 63 символов; постоянный слот — ключ `slots` в `/config`. Отметка `patroni: member | permanent | null`.
+`/config` недоступен — отмечены только слоты участников, причина в `unavailable` (текст — `diag.unavailable.patroniConfig`), сама
+ошибка пишется в лог.
+
+**Подписки:** `pg_stat_subscription` (`name`, `pid`, `receivedLsn`, `lastMsgAgeS`, `latestEndAgeS`; на PG 16+ только строки основного процесса, `leader_pid IS NULL`, без параллельных воркеров применения) и
 `pg_stat_subscription_stats` (15+: `applyErrorCount`, `syncErrorCount`, их рост).
 
 ### 5.8 Patroni: готовность к failover (`failover`, кластер, только `patroni`)
@@ -355,7 +396,9 @@ waitS, queued: число сессий за ней, relation }]`. Находка
 Входы: топология (роль, состояние, доступность, лаг, теги `nofailover`, `failover_priority` (Patroni 4), `nosync`,
 `pending_restart`) и `GET /config` (`maximum_lag_on_failover`, `synchronous_mode` — `true` / `false` / `"quorum"`,
 `synchronous_mode_strict`, `synchronous_node_count`, `ttl`, `loop_wait`, `retry_timeout`), `paused`. `/config` читается одним
-запросом на отчёт тем же клиентом подключения (`get_config`), отдельного кэша нет.
+запросом на отчёт (`fetch_config`) клиентом HTTP подключения (`LiveSource::http_for`), отдельного кэша нет; обход адресов API —
+как у `/cluster`, общий срок тот же, что у `discover` (`DISCOVER_TIMEOUT`). Ключ, которого в `/config` нет, берётся по умолчанию
+Patroni (`maximum_lag_on_failover` — 1 МиБ); не прочитался весь `/config` — ошибка отчёта.
 
 `pg_advisor::failover::evaluate` выдаёт по каждому участнику, кроме лидера, вердикт `ready` и причины: `unreachable`,
 `notStreaming` (состояние не `streaming` / `running`), `lagTooHigh`, `lagUnknown`, `noFailoverTag`, `zeroPriority`,
@@ -365,7 +408,7 @@ waitS, queued: число сессий за ней, relation }]`. Находка
 
 ### 5.9 Patroni: матрица health (`health`, кластер, только `patroni`)
 
-Для каждого участника с `apiUrl` параллельно — HTTP-коды `GET /primary`, `/standby-leader`, `/replica`, `/read-only`, `/sync`,
+Лидером считается участник, ответивший 200 на `/primary` **или** на `/standby-leader` (лидер standby-кластера). Для каждого участника с `apiUrl` параллельно — HTTP-коды `GET /primary`, `/standby-leader`, `/replica`, `/read-only`, `/sync`,
 `/async`, `/health` (`PatroniHttp::get_status`, срок 5 с на запрос, без авторизации — эти адреса её не требуют). Данные:
 `endpoints: [String]`, `members: [{ member, apiUrl, cells: [{ endpoint, status: Option<u16>, error: Option<AppError> }] }]`.
 Подпись объясняет: это то, что видит балансировщик (например, HAProxy с `option httpchk GET /primary`); параметры вида
@@ -387,23 +430,31 @@ waitS, queued: число сессий за ней, relation }]`. Находка
 
 - **Запрос** раз в секунду на соединении пула `Sampler` узла:
   ```sql
-  SELECT pid, leader_pid, backend_type, datname, usename, application_name, client_addr, wait_event_type, wait_event,
-         <query_id | NULL::bigint>, query, (extract(epoch FROM clock_timestamp()) * 1000)::bigint
-  FROM pg_stat_activity
-  WHERE state = 'active' AND pid <> pg_backend_pid()
-    AND backend_type IN ('client backend', 'autovacuum worker', 'parallel worker')
+  SELECT a.pid, a.leader_pid, a.backend_type, a.datname, a.usename, a.application_name, host(a.client_addr),
+         a.wait_event_type, a.wait_event, <a.query_id | NULL::bigint>, left(a.query, 16384)
+  FROM pg_stat_activity a
+  WHERE a.state = 'active' AND a.pid <> pg_backend_pid()
+    AND a.backend_type IN ('client backend', 'autovacuum worker', 'parallel worker')
   ```
   Фоновые процессы с постоянным ожиданием-циклом (walsender, checkpointer и т. п.) не сэмплируются: они искажали бы профиль.
-- **Буфер** на узел: последние 60 мин, не больше 500 000 строк сэмплов (порядка 50 МБ); старое вытесняется. Строки (роль,
-  приложение, БД, клиент, wait event, текст запроса) хранятся один раз и адресуются индексом; текст — по хэшу.
+  **Время сэмпла — часы приложения** (момент ответа на запрос): тики, промежутки и окно
+  отчёта считаются одними часами, и пустой сэмпл (нет активных сессий) тоже получает время. Номер версии сервера сэмплер узнаёт
+  первым запросом на своём соединении и запоминает.
+- **Буфер** на узел: последние 60 мин, не больше 500 000 строк сэмплов (порядка 40 МБ); старое вытесняется, при пределе строк —
+  тиками целиком (не обрывками тиков, иначе окно показало бы секунды работы сэмплера без их сэмплов). Строки (роль,
+  приложение, БД, клиент, wait event, текст запроса) хранятся один раз в словаре и адресуются индексом.
 - **Жизнь.** Сэмплер узла создаётся первой подпиской `start_sampler(id, member, channel)` и останавливается, когда отписалась
   последняя (`stop_session`, закрытый канал). Буфер живёт до закрытия подключения или исчезновения участника (§3.4); повторная
-  подписка продолжает его, промежуток записывается в `gaps`. Подписка держится, пока вкладка открыта, в том числе скрытая
-  (история не прерывается при переключении вкладок); отчёт `run_diagnostic` опрашивается только видимой вкладкой (§3.6).
-  Вкладка в режиме «за лидером» при смене лидера отписывается от сэмплера старого узла и подписывается на новый.
+  подписка продолжает его, промежуток записывается в `gaps`; узел, оставшийся без подписчиков после отменённого запуска, забывается.
+  Подписка с номером открытия подключения старше номера узла отклоняется (вкладке — `stopped`). Подписка держится, пока вкладка
+  открыта, в том числе скрытая (история не прерывается при переключении вкладок); отчёт `run_diagnostic` опрашивается только
+  видимой вкладкой (§3.6). Вкладка в режиме «за лидером» при смене лидера отписывается от сэмплера старого узла и подписывается
+  на новый. Перезагрузка вебвью (`on_page_load`, начало загрузки) останавливает все длительные сессии; фронтенд подписывается
+  заново при монтировании и игнорирует события после `stopped`.
 - **Нагрузка и сбои.** Тик, на котором прошлый запрос ещё не вернулся, пропускается (запросы не накладываются); пропуск
-  больше 2 с — промежуток. Ошибка запроса — паузы 1, 2, 5, 10, 30 с и событие ошибки; `AUTH_FAILED` — сэмплер
-  останавливается. Запрос идёт через туннель подключения, как остальные.
+  больше 2 с — промежуток. Получение соединения укладывается в `catalog_limit` (как у каталога), сам запрос — в 5 с
+  (`on_catalog_node_split`); таймаут и обрыв закрывают соединение. Ошибка запроса — паузы 1, 2, 5, 10, 30 с и событие
+  ошибки; `AUTH_FAILED` — сэмплер останавливается. Запрос идёт через туннель подключения, как остальные.
 - **Канал** `SamplerEvent`: `tick { atMs, active, waiting }` (раз в секунду — индикатор «живой» во вкладке), `gap { fromMs, toMs }`,
   `error { error }`, `stopped`.
 
@@ -428,12 +479,16 @@ type DiagTool = "pulse" | "sessions" | "idleTx" | "waits" | "locks" | "horizon" 
 
 - `idleTx` — та же вкладка сессий с пресетом «Idle in transaction»; в Rust это инструмент `sessions`.
 - Id вкладки — `diag:<подключение>:<tool>` (одна вкладка инструмента на подключение); открытие с другим `member` (например,
-  из клетки пульса) обновляет её, как вкладку справки. Журнал — `actions:<подключение>`.
+  из клетки пульса) обновляет её, как вкладку справки. Узел вкладки хранится только в её спецификации (`TabSpec.member`): выбор
+  узла в шапке тоже переоткрывает вкладку через `useWorkspace.open` — один источник правды, и повторное открытие из ссылки
+  находки или клетки пульса с любым узлом всегда действует. Журнал — `actions:<подключение>`.
 - **Шапка** (общая): название; селектор узла — «За лидером (pg-1)» и участники с ролями (у `server` и у инструментов кластера
-  селектора нет); интервал обновления; «Обновить»; время последнего ответа.
+  селектора нет); интервал обновления; у профиля ожиданий — окно 5 / 15 / 60 мин (по умолчанию 15); «Обновить»; время
+  последнего ответа.
 - **Состояния:** обновление не удалось — остаются прошлые данные, баннер ошибки и пометка «устарело»; в режиме «за лидером»
   узел сменился — строка «Узел сменился: pg-1 → pg-2»; подключение закрыто — «Подключение закрыто» и «Подключиться», опрос
-  стоит; инструмент Patroni у подключения без Patroni не предлагается.
+  стоит; вкладка, снова ставшая видимой, перечитывает устаревшие данные, но не после отказа во входе (§3.6); инструмент
+  Patroni у подключения без Patroni не предлагается.
 - Ключ запросов `["diag", connectionId, …]` добавляется в `PG_QUERY_KEYS`: отключение удаляет данные, переподключение перечитывает.
 
 ### 7.3 Находки
@@ -448,19 +503,21 @@ type DiagTool = "pulse" | "sessions" | "idleTx" | "waits" | "locks" | "horizon" 
 - **Сессии** — виртуализированная таблица (`@tanstack/react-virtual`), панель строки с полным текстом запроса и
   «Копировать», пресеты, фильтр, группировка.
 - **Профиль ожиданий** — свой SVG без новых библиотек: столбцы с накоплением по классам ожиданий (цвета — по правилам
-  навыка dataviz при реализации), легенда, подсказка у столбца, промежутки штриховкой; табличная альтернатива для экранного
-  диктора; ниже — топ ожиданий, запросов и группировок; индикатор «сэмплер работает» по событиям `tick`.
+  навыка dataviz при реализации), легенда, подсказка у столбца, промежутки штриховкой; легенда и столбцы табличной
+  альтернативы для экранного диктора содержат только классы, встреченные в окне; окно (5 / 15 / 60 мин) выбирается в шапке;
+  ниже — топ ожиданий, запросов и группировок; индикатор «сэмплер работает» по событиям `tick`.
 - **Блокировки** — дерево с раскрытием уровней; сверху — карточки «DDL в очереди».
 - **Горизонт, реплики, слоты, готовность к failover** — таблицы; у реплик на реплике — карточка приёмника.
 - **Матрица health** — сетка «участники × адреса» с кодом и цветом.
-- Длительности, байты и числа — функции `src/lib/format.ts`; все строки — через словари.
+- Длительности, байты и числа — функции `src/lib/format.ts`; длительность — старшая единица и соседняя («2 ч 5 мин»); все строки — через словари.
 
 ### 7.5 Справка и i18n
 
 - Глава руководства `diagnostics` (`docs/guide/{en,ru}/diagnostics.md`, в `GUIDE_CHAPTERS` и `scripts/i18n-check.mjs`):
   `{#pulse}`, `{#sessions}`, `{#waits}`, `{#locks}`, `{#horizon}`, `{#replication}`, `{#slots}`, `{#failover}`, `{#health}`,
-  `{#findings}`; P2b — `{#actions}`, `{#patroni-actions}`, `{#journal}`. F1 на вкладке инструмента открывает его якорь
-  (`helpChapterFor`).
+  `{#findings}`; P2b — `{#actions}`, `{#patroni-actions}`, `{#journal}`. F1 на вкладке инструмента открывает главу `diagnostics`
+  с якорем инструмента: `helpChapterFor` даёт главу, `helpAnchorFor` — якорь (`idleTx` → `sessions`); глава, заданная экраном
+  через `useHelpChapter`, главнее, и тогда якорь не передаётся; на самой справке F1 только возвращает её на экран.
 - Ключи: `diag.tools.*`, `diag.*` (шапка, колонки), `findings.<id>.title|fix`, `actions.*` (P2b), ошибки — `errors.diag.*`,
   `errors.actions.*`. Все строки — en и ru; новые термины (горизонт xmin, wait event, idle in transaction, профиль ожиданий,
   корневой блокирующий) — в `docs/i18n/glossary.md`.
@@ -622,7 +679,9 @@ retainedBytes, walStatus }`; у Patroni — `patroni { method, path, body, statu
 `PatroniAction` — `switchover { candidate?, scheduledAt? }` | `cancelSwitchover` | `failover { candidate }` |
 `restart { member, onlyPending, scheduledAt? }` | `cancelRestart { member }` | `pause { paused }`.
 Новых событий Tauri нет: данные длительных сессий идут через их каналы, изменения топологии — через `topology://changed`.
-Все команды возвращают `Result<T, AppError>`; JSON — camelCase.
+Все команды возвращают `Result<T, AppError>`; JSON — camelCase. `start_sampler` — тонкая обёртка над
+`sampler::start(st, id, member, sink) -> SessionId`: `sink` (`SamplerSink`) оборачивает `Channel`, поэтому сэмплер проверяется
+интеграционным тестом без окна приложения.
 
 ---
 
@@ -630,7 +689,7 @@ retainedBytes, walStatus }`; у Patroni — `patroni { method, path, body, statu
 
 | code | Причина | Поведение UI |
 |---|---|---|
-| `RECOVERY_CONFLICT` (новый, P2a) | Запрос на узле в recovery отменён: SQLSTATE 40001 или 40P01 с текстом «conflict with recovery» | «Запрос на реплике отменён конфликтом recovery», `retryable` — следующий опрос повторит |
+| `RECOVERY_CONFLICT` (новый, P2a) | Запрос на узле в recovery отменён: SQLSTATE 40001 или 40P01 **и** (английский текст «conflict with recovery» **или** файл сервера `postgres.c`): сообщения сервера локализуются `lc_messages` | «Запрос на реплике отменён конфликтом recovery», `retryable` — следующий опрос повторит |
 | `READ_ONLY` (P2b) | Действие на read-only подключении | Кнопок нет; команда всё равно отказывает |
 | `CONFIRMATION_REQUIRED` (P2b) | Нет или неверно имя подключения, объекта, число сессий | Диалог подтверждения |
 | `NOT_AUTHORIZED` (42501) | Нет права на сигнал или слот | `errors.actions.signalDenied` (нужна `pg_signal_backend`), `errors.actions.replicationRequired` |
@@ -671,7 +730,7 @@ docs/guide/{en,ru}/diagnostics.md
 | Что | Зачем |
 |---|---|
 | Роль `glafira_app` (`app-secret`, без `pg_monitor`, права на схему `shop` в БД `orders`) | Нагрузка в тестах: `pg_signal_backend` не завершает сессии суперпользователя. В `dev/sql/init.sql` — для новых стендов; для поднятого — идемпотентная подготовка `common::ensure_fixtures()` от `postgres` в начале интеграционных тестов |
-| Сервис `pg-lab` (`gp-pg-lab`, `postgres:16` — образ уже есть локально, `127.0.0.1:5470`): `wal_level=logical`, `max_prepared_transactions=10`, `max_replication_slots=10`, `pg_stat_statements` в `shared_preload_libraries`, `init.sql` | Логические слоты, подписки, prepared transactions — на остальных узлах они невозможны без рестарта. Init-скрипт `dev/lab/30-logical.sh`: в `orders` — публикация `lab_pub` и слот `lab_sub_slot` (`pgoutput`); БД `lab_sub` с копией `shop.customers` и подпиской `lab_sub` на себя через unix-сокет (`create_slot = false`, `copy_data = false`) |
+| Сервис `pg-lab` (`gp-pg-lab`, `127.0.0.1:5470`): образ собирается из `dev/lab/Dockerfile` (`FROM postgres:16`, `sql/init.sql` и `lab/30-logical.sh` копируются в образ; bind-монтирования нет — контейнер не зависит от пути рабочей копии, правка init-скриптов требует пересборки `pg-lab`); `wal_level=logical`, `max_prepared_transactions=10`, `max_replication_slots=10`, `pg_stat_statements` в `shared_preload_libraries` | Логические слоты, подписки, prepared transactions — на остальных узлах они невозможны без рестарта. Init-скрипт `dev/lab/30-logical.sh`: в `orders` — публикация `lab_pub` и слот `lab_sub_slot` (`pgoutput`); БД `lab_sub` с копией `shop.customers` и подпиской `lab_sub` на себя через unix-сокет (`create_slot = false`, `copy_data = false`) |
 | `scripts/wait-stand.sh` | Ждёт и `gp-pg-lab` |
 
 ### 12.2 Автотесты
@@ -687,12 +746,15 @@ docs/guide/{en,ru}/diagnostics.md
   §8.1; параметры и критерии SQL действий; классификация итогов; тела и адреса запросов Patroni и обход при отказе на
   поддельном HTTP; предусловия (failover при здоровом лидере, расписание в прошлом); `watch::progress` на последовательностях
   топологий; журнал — ротация, права 0600, обрезка текста, отсутствие учётных данных, `list_actions` с битой строкой.
+- **Служебные помощники** интеграционных тестов `common::superuser()` и `common::app()` открывают сессию без
+  `default_transaction_read_only` (`SESSION_OPTIONS` P1 иначе запретили бы запись сценариев).
 - **Интеграционные** (`GPG_IT_*`; без переменной тест пропускается; `GPG_IT_LAB=localhost:5470` — новый; сценарии с
   остановкой узлов и переключениями — под `GPG_IT_DOCKER=1`, failover — ещё и под `GPG_IT_FAILOVER=1`; каждый сценарий
   возвращает стенд в исходное состояние при любом выходе):
-  - **Блокировки** (`pg-single`, `glafira_app`): транзакция держит строку `shop.orders`; вторая сессия ждёт её; третья в
-    транзакции выполняет `ALTER TABLE shop.orders ADD COLUMN it_tmp int` и встаёт в очередь (потом откат) → корень, DDL в
-    очереди, жертвы, `ddlQueue` critical.
+  - **Блокировки** (`pg-single`): держатель и жертва — `glafira_app`, DDL выполняет `postgres` (у `glafira_app` нет владения
+    таблицей). Порядок: держатель делает `UPDATE` строки `shop.orders` и держит транзакцию; затем в транзакции выполняется
+    `ALTER TABLE shop.orders ADD COLUMN it_tmp int` и встаёт в очередь (потом откат); затем `SELECT` жертвы — классическая очередь
+    за миграцией → корень, DDL в очереди, жертвы, `ddlQueue` critical.
   - **Idle in transaction:** `BEGIN; SELECT 1` и простой → строка и `idleInTransaction` при пороге теста.
   - **Сэмплер:** `pg_sleep` и ожидание блокировки → `Timeout:PgSleep` и `Lock:transactionid` в профиле; после отписки новых
     запросов сэмплера нет.
