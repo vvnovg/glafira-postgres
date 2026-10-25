@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { i18n } from "../i18n";
-import { formatBytes, formatCount, formatDuration, formatInt64, formatPercent, formatTimestamp } from "./format";
+import { formatAas, formatBytes, formatCount, formatDuration, formatInt64, formatPercent, formatTimestamp } from "./format";
 
 describe("format", () => {
   it("timestamp в UTC с миллисекундами", () => {
@@ -62,6 +62,15 @@ describe("format", () => {
     expect(formatPercent(0)).toBe("0 %");
     expect(formatPercent(100)).toBe("100 %");
     expect(formatPercent(null)).toBe("—");
+  });
+
+  it("AAS: целое без дробной части, один знак, у малых значений два", () => {
+    expect(formatAas(0)).toBe("0");
+    expect(formatAas(1)).toBe("1");
+    expect(formatAas(1.4)).toBe("1,4");
+    expect(formatAas(12.34)).toBe("12,3");
+    expect(formatAas(0.04)).toBe("0,04");
+    expect(formatAas(0.1)).toBe("0,1");
   });
 
   it("int64: границы bigint не округляются вверх до 2^63", () => {

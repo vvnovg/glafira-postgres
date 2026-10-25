@@ -2,7 +2,7 @@ import { useTranslation } from "react-i18next";
 import type { ConnectionKind, DiagTool, Member } from "../../api/types";
 import { formatTimestamp } from "../../lib/format";
 import { roleLabel } from "../../lib/topology";
-import { DIAG_INTERVALS_S } from "../../lib/useDiagnostic";
+import { DIAG_INTERVALS_S, WAITS_WINDOWS_S } from "../../lib/useDiagnostic";
 
 /** Значение пункта «За лидером» в выборе узла и пункта «Пауза» в выборе интервала. */
 const FOLLOW = "";
@@ -19,6 +19,9 @@ export interface DiagControls {
   onSelect: (member: string | null) => void;
   intervalS: number | null;
   onInterval: (seconds: number | null) => void;
+  /** Окно профиля ожиданий, секунды; `null` — у инструмента окна нет (выбор не показывается). */
+  windowS: number | null;
+  onWindow: (seconds: number) => void;
   onRefresh: () => void;
   /** Время ответа последнего отчёта (мс эпохи). */
   observedAtMs: number | null;
@@ -27,8 +30,8 @@ export interface DiagControls {
 }
 
 /**
- * Общая шапка вкладки инструмента (спец. P2 §7.2): название, выбор узла, интервал обновления, «Обновить», время
- * последнего ответа. Без `controls` (подключение закрыто) — только название.
+ * Общая шапка вкладки инструмента (спец. P2 §7.2): название, выбор узла, интервал обновления, окно (у профиля
+ * ожиданий), «Обновить», время последнего ответа. Без `controls` (подключение закрыто) — только название.
  */
 export function DiagHeader({ tool, controls }: { tool: DiagTool; controls?: DiagControls }) {
   const { t } = useTranslation();
@@ -66,6 +69,18 @@ export function DiagHeader({ tool, controls }: { tool: DiagTool; controls?: Diag
               <option value={PAUSE}>{t("diag.header.pause")}</option>
             </select>
           </label>
+          {c.windowS !== null && (
+            <label className="inline">
+              <span>{t("diag.waits.window")}</span>
+              <select aria-label={t("diag.waits.window")} value={String(c.windowS)} onChange={(e) => c.onWindow(Number(e.target.value))}>
+                {WAITS_WINDOWS_S.map((s) => (
+                  <option key={s} value={String(s)}>
+                    {t("diag.duration.m", { n: s / 60 })}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           <button type="button" onClick={c.onRefresh}>
             {t("diag.header.refresh")}
           </button>

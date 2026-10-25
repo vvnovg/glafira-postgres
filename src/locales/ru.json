@@ -1086,6 +1086,51 @@
       "noApi": "нет адреса REST API",
       "none": "Участников нет",
       "note": "Так видит кластер балансировщик, например HAProxy с option httpchk GET /primary; параметры вида /replica?lag= не проверяются."
+    },
+    "waits": {
+      "window": "Окно",
+      "live": "Сэмплер: активных {{active}}, ждут блокировку {{waiting}}",
+      "notRunning": "Сэмплер не работает: история не пополняется",
+      "truncated": "История короче окна: сэмплер работает с {{time}}",
+      "noSamples": "За выбранное окно сэмплов нет",
+      "chartLabel": "Среднее число активных сессий по классам ожиданий",
+      "tableLabel": "Профиль ожиданий по интервалам",
+      "legendLabel": "Классы ожиданий",
+      "tooltip": "{{time}} — в среднем активных сессий: {{total}}",
+      "tooltipEmpty": "{{time}} — нет данных",
+      "noData": "нет данных",
+      "cpuNote": "CPU* — активная сессия без события ожидания: на процессоре или в ожидании без инструментирования",
+      "topEvents": "Топ ожиданий",
+      "topQueries": "Топ запросов",
+      "byApplication": "По приложениям",
+      "byUser": "По ролям",
+      "byDatabase": "По базам данных",
+      "byClient": "По клиентам",
+      "columns": {
+        "interval": "Интервал",
+        "total": "Всего",
+        "class": "Класс",
+        "event": "Событие",
+        "share": "Доля",
+        "samples": "Сэмплы",
+        "query": "Запрос",
+        "queryId": "query_id",
+        "topEvent": "Главное ожидание",
+        "name": "Имя"
+      },
+      "classes": {
+        "cpu": "CPU*",
+        "lock": "Lock",
+        "lwlock": "LWLock",
+        "io": "IO",
+        "ipc": "IPC",
+        "client": "Client",
+        "timeout": "Timeout",
+        "bufferPin": "BufferPin",
+        "extension": "Extension",
+        "activity": "Activity",
+        "other": "Прочие"
+      }
     }
   },
   "findings": {

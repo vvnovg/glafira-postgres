@@ -6,6 +6,12 @@ import type { DiagTool, RustTool } from "../api/types";
 /** Интервалы обновления в выборе шапки, секунды; «Пауза» — отдельный пункт (`null`). */
 export const DIAG_INTERVALS_S = [2, 5, 10, 30] as const;
 
+/** Окна профиля ожиданий в выборе шапки, секунды (5, 15 и 60 минут — те же, что понимает Rust). */
+export const WAITS_WINDOWS_S = [300, 900, 3600] as const;
+
+/** Окно профиля ожиданий по умолчанию — 15 минут. */
+export const DEFAULT_WAITS_WINDOW_S = 900;
+
 /** Вкладка `idleTx` читает тот же инструмент Rust, что и `sessions`. */
 export const rustTool = (tool: DiagTool): RustTool => (tool === "idleTx" ? "sessions" : tool);
 

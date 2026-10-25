@@ -41,6 +41,14 @@ export function formatPercent(n: number | null): string {
   return `${n.toLocaleString(currentLocale(), { maximumFractionDigits: 1 })} %`;
 }
 
+/**
+ * Среднее число активных сессий (AAS): до одного знака после запятой («1,4», целое — «1»), а при значении меньше 0,1 —
+ * до двух («0,04»), чтобы малая, но не нулевая нагрузка не превращалась в «0».
+ */
+export function formatAas(n: number): string {
+  return n.toLocaleString(currentLocale(), { maximumFractionDigits: n < 0.1 ? 2 : 1 });
+}
+
 /** Предел i64 (9223372036854775807) как BigInt; сам литерал не годится — в `number` он округляется до 2^63. */
 const I64_MAX = BigInt("9223372036854775807");
 

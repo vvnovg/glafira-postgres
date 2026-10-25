@@ -1064,6 +1064,51 @@
       "noApi": "no REST API address",
       "none": "There are no members",
       "note": "This is how a load balancer sees the cluster, for example HAProxy with option httpchk GET /primary; parameters like /replica?lag= are not checked."
+    },
+    "waits": {
+      "window": "Window",
+      "live": "Sampler: {{active}} active, {{waiting}} waiting for a lock",
+      "notRunning": "Sampler is not running: history is not being updated",
+      "truncated": "History is shorter than the window: the sampler has been running since {{time}}",
+      "noSamples": "No samples in the selected window",
+      "chartLabel": "Average active sessions by wait class",
+      "tableLabel": "Wait profile by interval",
+      "legendLabel": "Wait classes",
+      "tooltip": "{{time}} — {{total}} active on average",
+      "tooltipEmpty": "{{time}} — no data",
+      "noData": "no data",
+      "cpuNote": "CPU* — an active session with no wait event: on CPU or waiting without instrumentation",
+      "topEvents": "Top waits",
+      "topQueries": "Top queries",
+      "byApplication": "By application",
+      "byUser": "By role",
+      "byDatabase": "By database",
+      "byClient": "By client",
+      "columns": {
+        "interval": "Interval",
+        "total": "Total",
+        "class": "Class",
+        "event": "Event",
+        "share": "Share",
+        "samples": "Samples",
+        "query": "Query",
+        "queryId": "query_id",
+        "topEvent": "Main wait",
+        "name": "Name"
+      },
+      "classes": {
+        "cpu": "CPU*",
+        "lock": "Lock",
+        "lwlock": "LWLock",
+        "io": "IO",
+        "ipc": "IPC",
+        "client": "Client",
+        "timeout": "Timeout",
+        "bufferPin": "BufferPin",
+        "extension": "Extension",
+        "activity": "Activity",
+        "other": "Other"
+      }
     }
   },
   "findings": {

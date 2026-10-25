@@ -1,4 +1,4 @@
-import type { ConnectionProfile, DiagData, DiagReport, Holder, Member, PulseFacts, PulseRates, ReplicationData, SessionRow, Sender, Slot, Subscription, Topology, TopologyView } from "../api/types";
+import type { ConnectionProfile, DiagData, DiagReport, Holder, Member, PulseFacts, PulseRates, ReplicationData, SessionRow, Sender, Slot, Subscription, Topology, TopologyView, WaitsData } from "../api/types";
 
 export function member(name: string, patch: Partial<Member> = {}): Member {
   return {
@@ -249,6 +249,27 @@ export function subscription(patch: Partial<Subscription> = {}): Subscription {
     latestEndAgeS: null,
     applyErrorCount: null,
     syncErrorCount: null,
+    ...patch,
+  };
+}
+
+/** Данные профиля ожиданий вместе с `kind` (годятся и для `diagReport`, и для `WaitsChart`): сэмплер работает, истории нет — нули и пустые списки; `patch` меняет нужные поля. */
+export function waitsData(patch: Partial<WaitsData> = {}): { kind: "waits" } & WaitsData {
+  return {
+    kind: "waits",
+    windowS: 900,
+    bucketS: 10,
+    samplerRunning: true,
+    truncated: false,
+    totalSamples: 0,
+    buckets: [],
+    gaps: [],
+    topEvents: [],
+    topQueries: [],
+    byApplication: [],
+    byUser: [],
+    byDatabase: [],
+    byClient: [],
     ...patch,
   };
 }

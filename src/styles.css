@@ -11,6 +11,23 @@
   --warn: #f59e0b;
   /* Подкраска «готов» и кода 200 в видах диагностики: только фон клетки, слово или код остаётся текстом. */
   --ok: #16a34a;
+  /* Классы ожиданий в профиле ожиданий (задача 13). Восемь оттенков — документированная категориальная палитра навыка dataviz
+     в её порядке (cpu, lock, lwlock, io, ipc, client, timeout, bufferPin): соседние классы столбца различимы при протанопии и
+     дейтеранопии (ΔE OKLab ≥ 8,4) и при обычном зрении (≥ 19), проверено validate_palette.js на фоне темы. Lock — оранжевый,
+     самый заметный тёплый. Три редких класса (extension, activity, other) — нейтральные серые: девятого оттенка палитра не даёт.
+     Контраст с фоном ниже 3:1 у aqua, yellow, magenta и светло-серого extension (светлая тема): образцы дублируются легендой, подсказкой
+     и таблицей для экранного диктора. */
+  --wait-cpu: #2a78d6;
+  --wait-lock: #eb6834;
+  --wait-lwlock: #1baf7a;
+  --wait-io: #eda100;
+  --wait-ipc: #e87ba4;
+  --wait-client: #008300;
+  --wait-timeout: #6250d6;
+  --wait-bufferPin: #e34948;
+  --wait-extension: #b1b5bd;
+  --wait-activity: #5a5f68;
+  --wait-other: #8a8f98;
   /* Флажки, переключатели, списки и полосы прокрутки рисуются системой в цветах текущей темы. */
   color-scheme: light dark;
   accent-color: var(--accent);
@@ -28,6 +45,17 @@
     --border: #33373d;
     /* #f87171: 6.1:1 на фоне темы и 5.3:1 на плашке предупреждений (#dc2626 давал 3.5:1 и 3.1:1). */
     --danger-text: #f87171;
+    --wait-cpu: #3987e5;
+    --wait-lock: #d95926;
+    --wait-lwlock: #199e70;
+    --wait-io: #c98500;
+    --wait-ipc: #d55181;
+    --wait-client: #008300;
+    --wait-timeout: #9085e9;
+    --wait-bufferPin: #e66767;
+    --wait-extension: #b4bac4;
+    --wait-activity: #626872;
+    --wait-other: #929ba6;
   }
 }
 * { box-sizing: border-box; }
@@ -219,7 +247,6 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 /* Отчёт прошлого узла на время загрузки нового. */
 .diag-pending { opacity: 0.6; }
 .diag-unavailable p { margin: 0 0 2px; }
-.diag-raw { max-height: 60vh; overflow: auto; padding: 8px; background: var(--bg-alt); border: 1px solid var(--border); border-radius: 4px; word-break: normal; overflow-wrap: anywhere; }
 .findings { border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; }
 .findings-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .findings-head h3 { margin: 0; font-size: 13px; }
@@ -313,3 +340,36 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .health-table td { white-space: nowrap; font-variant-numeric: tabular-nums; }
 /* Баннер запланированного switchover в шапке обзора: абзац в строке с переносом, без полей абзаца. */
 .toolbar-note { margin: 0; }
+
+/* Профиль ожиданий: график со столбцами по классам, легенда, топы и разрезы. Цвета классов — переменные --wait-<класс>. */
+.waits-view { gap: 12px; }
+.waits-status { display: flex; flex-direction: column; gap: 4px; }
+.waits-status p { margin: 0; }
+.waits-live { font-variant-numeric: tabular-nums; }
+.waits-chart { position: relative; min-width: 0; }
+.waits-plot { width: 100%; min-width: 0; }
+.waits-plot svg { display: block; max-width: 100%; overflow: visible; }
+.waits-axis { stroke: var(--border); stroke-width: 1; }
+.waits-grid { stroke: var(--border); stroke-width: 1; opacity: 0.6; }
+.waits-ytick, .waits-xtick { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.waits-hatch { stroke: var(--muted); stroke-width: 1.5; opacity: 0.55; }
+.waits-hit { fill: transparent; }
+.waits-col:hover .waits-hit { fill: color-mix(in srgb, var(--fg) 8%, transparent); }
+.waits-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 6px 0 0; padding: 0; list-style: none; }
+.waits-legend li { display: inline-flex; align-items: center; gap: 6px; }
+.waits-swatch { flex: none; width: 10px; height: 10px; border-radius: 2px; }
+.waits-swatch[data-class="cpu"] { background: var(--wait-cpu); }
+.waits-swatch[data-class="lock"] { background: var(--wait-lock); }
+.waits-swatch[data-class="lwlock"] { background: var(--wait-lwlock); }
+.waits-swatch[data-class="io"] { background: var(--wait-io); }
+.waits-swatch[data-class="ipc"] { background: var(--wait-ipc); }
+.waits-swatch[data-class="client"] { background: var(--wait-client); }
+.waits-swatch[data-class="timeout"] { background: var(--wait-timeout); }
+.waits-swatch[data-class="bufferPin"] { background: var(--wait-bufferPin); }
+.waits-swatch[data-class="extension"] { background: var(--wait-extension); }
+.waits-swatch[data-class="activity"] { background: var(--wait-activity); }
+.waits-swatch[data-class="other"] { background: var(--wait-other); }
+.waits-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.waits-groups section { min-width: 0; }
+/* Текст запроса в топе — не длиннее двух строк; целиком он в подсказке. */
+.waits-query { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; max-width: 70ch; overflow: hidden; white-space: normal; overflow-wrap: anywhere; }

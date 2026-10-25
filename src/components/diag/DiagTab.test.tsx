@@ -1,14 +1,14 @@
-import { act, screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DiagTool } from "../../api/types";
 import { useWorkspace } from "../../state/workspace";
-import { connection, diagReport, holder, member, pulseFacts, pulseRates, replication, sender, slot, topology, topologyView } from "../../test/fixtures";
+import { connection, diagReport, holder, member, pulseFacts, pulseRates, replication, sender, slot, topology, topologyView, waitsData } from "../../test/fixtures";
 import { renderWithClient } from "../../test/render";
 
 vi.mock("../../api/client", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../../api/client")>();
-  return { ...orig, api: { runDiagnostic: vi.fn(), getTopology: vi.fn(), listConnections: vi.fn(), connect: vi.fn() } };
+  return { ...orig, api: { runDiagnostic: vi.fn(), getTopology: vi.fn(), listConnections: vi.fn(), connect: vi.fn(), startSampler: vi.fn(), stopSession: vi.fn() } };
 });
 
 import { api } from "../../api/client";
@@ -200,27 +200,45 @@ describe("DiagTab", () => {
     expect(api.runDiagnostic).toHaveBeenCalledTimes(1);
   });
 
-  it("JSON тела не пересчитывается, пока данные отчёта те же", async () => {
-    const stringify = vi.spyOn(JSON, "stringify");
-    try {
-      // Инструмент без собственного вида (здесь профиль ожиданий, до задачи 13): его тело — JSON отчёта.
-      const waits = { kind: "waits" as const, windowS: 900, bucketS: 30, samplerRunning: false, truncated: false, totalSamples: 0, buckets: [], gaps: [], topEvents: [], topQueries: [], byApplication: [], byUser: [], byDatabase: [], byClient: [] };
-      vi.mocked(api.runDiagnostic).mockImplementation(async () => diagReport(waits, { observedAtMs: Date.now() }));
-      const user = userEvent.setup();
-      renderWithClient(<DiagTab connectionId="c" tool="waits" member={null} active tabId="diag:c:waits" />);
-      await screen.findByText("Проблем не найдено");
-      const raw = () => stringify.mock.calls.filter((c) => c[2] === 2).length;
-      expect(raw()).toBe(1);
-      for (let n = 2; n <= 3; n++) {
-        await user.click(screen.getByRole("button", { name: "Обновить" }));
-        await waitFor(() => expect(api.runDiagnostic).toHaveBeenCalledTimes(n));
-      }
-      // Время ответа меняется при каждом опросе, данные инструмента — нет: тело остаётся прежним.
-      expect(screen.getByText(/Обновлено/)).toBeInTheDocument();
-      expect(raw()).toBe(1);
-    } finally {
-      stringify.mockRestore();
-    }
+  it("профиль ожиданий: окно по умолчанию 15 минут, выбор окна перечитывает отчёт с ним и не трогает подписку на сэмплер", async () => {
+    vi.mocked(api.runDiagnostic).mockImplementation(async (_id, req) => diagReport(waitsData({ windowS: req.windowS ?? 0, totalSamples: 1, topEvents: [{ class: "io", event: "DataFileRead", samples: 1, share: 1 }] }), { member: "pg-1" }));
+    vi.mocked(api.startSampler).mockResolvedValue("s-1");
+    vi.mocked(api.stopSession).mockResolvedValue(true);
+    const user = userEvent.setup();
+    renderWithClient(<DiagTab connectionId="c" tool="waits" member={null} active tabId="diag:c:waits" />);
+    expect(await screen.findByRole("table", { name: "Топ ожиданий" })).toBeInTheDocument();
+    expect(api.runDiagnostic).toHaveBeenCalledWith("c", { tool: "waits", member: null, windowS: 900 });
+    const window = screen.getByRole("combobox", { name: "Окно" });
+    expect(within(window).getAllByRole("option").map((o) => o.textContent)).toEqual(["5 мин", "15 мин", "60 мин"]);
+    expect(window).toHaveDisplayValue("15 мин");
+    await waitFor(() => expect(api.startSampler).toHaveBeenCalledWith("c", "pg-1", expect.any(Function)));
+    await user.selectOptions(window, "60 мин");
+    await waitFor(() => expect(api.runDiagnostic).toHaveBeenLastCalledWith("c", { tool: "waits", member: null, windowS: 3600 }));
+    await user.selectOptions(window, "5 мин");
+    await waitFor(() => expect(api.runDiagnostic).toHaveBeenLastCalledWith("c", { tool: "waits", member: null, windowS: 300 }));
+    // Смена окна — тот же узел: сэмплер не переподписывается.
+    expect(api.startSampler).toHaveBeenCalledTimes(1);
+    expect(api.stopSession).not.toHaveBeenCalled();
+  });
+
+  it("выбор окна есть только у профиля ожиданий", async () => {
+    vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport({ kind: "locks", roots: [], cycles: [], ddlQueue: [] }));
+    renderWithClient(<DiagTab connectionId="c" tool="locks" member={null} active tabId="diag:c:locks" />);
+    await screen.findByText("Проблем не найдено");
+    expect(screen.queryByRole("combobox", { name: "Окно" })).toBeNull();
+    expect(api.runDiagnostic).toHaveBeenCalledWith("c", { tool: "locks", member: null });
+  });
+
+  it("сэмплер держится, пока вкладка смонтирована, и скрытая вкладка его не снимает; закрытие вкладки — снимает", async () => {
+    vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport(waitsData(), { member: "pg-1" }));
+    vi.mocked(api.startSampler).mockResolvedValue("s-1");
+    vi.mocked(api.stopSession).mockResolvedValue(true);
+    const { rerender, unmount } = renderWithClient(<DiagTab connectionId="c" tool="waits" member={null} active tabId="diag:c:waits" />);
+    await waitFor(() => expect(api.startSampler).toHaveBeenCalledTimes(1));
+    rerender(<DiagTab connectionId="c" tool="waits" member={null} active={false} tabId="diag:c:waits" />);
+    expect(api.stopSession).not.toHaveBeenCalled();
+    unmount();
+    await waitFor(() => expect(api.stopSession).toHaveBeenCalledWith("s-1"));
   });
 
   it("тела инструментов задач 12: горизонт, реплики, слоты, готовность к failover и матрица health — свои виды, а не JSON", async () => {
@@ -236,7 +254,6 @@ describe("DiagTab", () => {
       vi.mocked(api.runDiagnostic).mockResolvedValue(reports[tool]);
       const { unmount } = renderWithClient(<DiagTab connectionId="c" tool={tool} member={null} active tabId={`diag:c:${tool}`} />);
       expect(await screen.findByRole("table", { name: tables[tool] })).toBeInTheDocument();
-      expect(document.querySelector(".diag-raw")).toBeNull();
       unmount();
     }
   });

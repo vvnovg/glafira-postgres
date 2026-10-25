@@ -1,10 +1,10 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../api/client";
-import type { AppError, DiagData, DiagReport, DiagTool } from "../../api/types";
+import type { AppError, DiagReport, DiagTool } from "../../api/types";
 import { tr } from "../../i18n/text";
-import { defaultIntervalS, isClusterTool, useDiagnostic } from "../../lib/useDiagnostic";
+import { DEFAULT_WAITS_WINDOW_S, defaultIntervalS, isClusterTool, useDiagnostic } from "../../lib/useDiagnostic";
 import { refreshAfterConnect, useTopology } from "../../lib/useConnectionEvents";
 import { useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
@@ -18,18 +18,10 @@ import { PulseView } from "./PulseView";
 import { ReplicationView } from "./ReplicationView";
 import { SessionsView } from "./SessionsView";
 import { SlotsView } from "./SlotsView";
-
-/** Окно профиля ожиданий, секунды: по умолчанию 15 минут (выбор окна — в шапке инструмента «Профиль ожиданий»). */
-const DEFAULT_WAITS_WINDOW_S = 900;
-
-/** JSON данных отчёта (до вида задачи 13); строится заново только при изменении данных, а не при каждой отрисовке. */
-function RawData({ data }: { data: DiagData }) {
-  const json = useMemo(() => JSON.stringify(data, null, 2), [data]);
-  return <pre className="diag-raw">{json}</pre>;
-}
+import { WaitsView } from "./WaitsView";
 
 /**
- * Тело инструмента. Виды данных подставляют свои компоненты по `report.data.kind` (задача 13 — профиль ожиданий); до него — JSON отчёта.
+ * Тело инструмента: вид данных выбирается по `report.data.kind`.
  * `tool` отличает вкладку `idleTx` от `sessions`: данные у них одни, а набор сессий разный.
  */
 function ToolBody({ tool, report, connectionId }: { tool: DiagTool; report: DiagReport; connectionId: string }) {
@@ -51,7 +43,7 @@ function ToolBody({ tool, report, connectionId }: { tool: DiagTool; report: Diag
     case "health":
       return <HealthView connectionId={connectionId} report={report} />;
     case "waits":
-      return <RawData data={report.data} />;
+      return <WaitsView connectionId={connectionId} report={report} />;
   }
 }
 
@@ -66,6 +58,8 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
   const qc = useQueryClient();
   const view = useTopology(connectionId);
   const [intervalS, setIntervalS] = useState<number | null>(defaultIntervalS(tool));
+  // Окно профиля ожиданий (выбор — в шапке); у остальных инструментов не используется.
+  const [windowS, setWindowS] = useState(DEFAULT_WAITS_WINDOW_S);
   const [connectError, setConnectError] = useState<AppError | null>(null);
   const [busy, setBusy] = useState(false);
   // Лидер, на котором прошлый отчёт «за лидером» был получен; смена объявляется строкой, пока пользователь не выберет узел сам.
@@ -79,7 +73,7 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
   const q = useDiagnostic(connectionId, tool, cluster ? null : member, {
     active,
     intervalS,
-    windowS: tool === "waits" ? DEFAULT_WAITS_WINDOW_S : undefined,
+    windowS: tool === "waits" ? windowS : undefined,
     live,
   });
   const report = q.data;
@@ -159,6 +153,8 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
           onSelect: pick,
           intervalS,
           onInterval: setIntervalS,
+          windowS: tool === "waits" ? windowS : null,
+          onWindow: setWindowS,
           onRefresh: () => void q.refetch(),
           observedAtMs: report?.observedAtMs ?? null,
           stale: q.isError && report !== undefined,
