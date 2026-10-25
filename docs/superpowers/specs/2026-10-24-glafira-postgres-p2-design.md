@@ -274,7 +274,7 @@ Info: `cacheHitLow` (cache hit за интервал < 90 % при ≥ 1000 пр
 | `connections { used, available, byState { active, idle, idleInTransaction, other } }` | `pg_stat_activity` (`backend_type = 'client backend'`); `available = max_connections − superuser_reserved_connections − reserved_connections (16+)` |
 | `rates { tps, commitsPerS, rollbacksPerS, cacheHitPct, tempFilesPerS, tempBytesPerS, deadlocks, walBytesPerS }` | Дельты сумм `pg_stat_database` и LSN (`pg_current_wal_lsn()`, на реплике `pg_last_wal_receive_lsn()`), §3.6 |
 | `longestTransactionS`, `longestQueryS`, `longestIdleInTransactionS` | `now() − xact_start` / `query_start` (активные) / `state_change` (idle in transaction), client backend, без собственной сессии сбора (`pid <> pg_backend_pid()`: её запрос всегда активен) |
-| `lockWaiting`, `longestLockWaitS` | `wait_event_type = 'Lock'`; время — `waitstart` (14+) или `state_change` |
+| `lockWaiting`, `longestLockWaitS` | оба — только client backend: `wait_event_type = 'Lock'`; время — `pg_locks.waitstart` строк этих сессий (14+) или `state_change`; ожидания служебных процессов (autovacuum и др.) — в «Блокировках» |
 | `maxXidAge`, `xidAgePct` | `max(age(datfrozenxid))` из `pg_database`, доля от 2³¹ |
 | `walDirBytes`, `maxWalSize` | `sum(size) FROM pg_ls_waldir()` (`pg_monitor`; без права — `unavailable`), `max_wal_size` |
 | `lagBytes`, `replayDelayMs` | Из топологии (запроса нет) |

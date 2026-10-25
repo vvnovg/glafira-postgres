@@ -23,7 +23,7 @@ Indicators:
 - [[ui:diag.pulse.columns.cache]] — the share of block reads served from the cache between two refreshes.
 - [[ui:diag.pulse.columns.wal]] — the WAL write rate (receive rate on a replica).
 - [[ui:diag.pulse.columns.xact]], [[ui:diag.pulse.columns.query]] and [[ui:diag.pulse.columns.idle]] — the longest transaction, active query and idle-in-transaction time among client sessions. The server computes durations from its own `now()`, the clock of your computer is not used, and the collecting session itself is not counted.
-- [[ui:diag.pulse.columns.locks]] — how many sessions wait for a lock and how long the oldest has waited.
+- [[ui:diag.pulse.columns.locks]] — how many client sessions wait for a lock and how long the oldest of them has waited. Background processes such as autovacuum are not counted here: their waits are shown in [[ui:diag.tools.locks]].
 - [[ui:diag.pulse.columns.xid]] — the largest `datfrozenxid` age across databases and its share of the wraparound limit (2³¹).
 - [[ui:diag.pulse.columns.walDir]] — the size of the `pg_wal` directory; hover to see `max_wal_size`.
 - [[ui:diag.pulse.columns.lag]] — replica lag in bytes and in time. It comes from the topology; there is no separate query to the replica.

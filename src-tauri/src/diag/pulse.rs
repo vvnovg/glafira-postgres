@@ -44,9 +44,11 @@ pub struct PulseData {
 /// 19 позиция WAL, 20 запуск postmaster, 21 `now()`, 22 `max_wal_size`.
 pub fn pulse_sql(caps: Caps) -> String {
     // `reserved_connections` появился в 16; `pg_locks.waitstart` — в 14, раньше ожидание считается по `state_change`.
+    // И число ждущих, и самое долгое ожидание — только по клиентским сессиям (`a`): иначе autovacuum или фоновый
+    // процесс давали бы «0 ждут» с долгим ожиданием в одной клетке. Ожидания служебных процессов видны в «Блокировках».
     let reserved = caps.col(V16, "current_setting('reserved_connections')::int", "int");
     let lock_wait = if caps.at_least(V14) {
-        "(SELECT max(extract(epoch FROM now() - l.waitstart)) FROM pg_locks l WHERE NOT l.granted)"
+        "(SELECT max(extract(epoch FROM now() - l.waitstart)) FROM pg_locks l JOIN a ON a.pid = l.pid WHERE NOT l.granted)"
     } else {
         "(SELECT max(extract(epoch FROM now() - state_change)) FROM a WHERE wait_event_type = 'Lock')"
     };
@@ -239,6 +241,18 @@ mod tests {
                 && new.contains("current_setting('reserved_connections')")
         );
         assert!(old.contains("NULL::int"));
+    }
+
+    #[test]
+    fn lock_wait_count_and_longest_wait_are_both_over_client_sessions() {
+        // На 14+ самое долгое ожидание — по `pg_locks`, но только строки клиентских сессий (`a`), как и число ждущих.
+        let new = pulse_sql(Caps::new(170000));
+        assert!(new.contains("FROM pg_locks l JOIN a ON a.pid = l.pid WHERE NOT l.granted"));
+        assert!(new.contains("(SELECT count(*) FROM a WHERE wait_event_type = 'Lock')"));
+        // На 13 оба числа и так берутся из `a`.
+        let old = pulse_sql(Caps::new(130000));
+        assert!(old.contains("FROM a WHERE wait_event_type = 'Lock')::bigint"));
+        assert!(!old.contains("pg_locks"));
     }
 
     #[test]
