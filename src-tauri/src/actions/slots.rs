@@ -10,7 +10,7 @@ use crate::actions::Confirmation;
 use crate::actions::journal::{self, ActionRecord, RecordConnection, SlotRecord};
 use crate::conn::profile::{ConnectionKind, Environment};
 use crate::diag::caps::Caps;
-use crate::error::{AppResult, ErrorCode};
+use crate::error::{AppError, AppResult, ErrorCode};
 use crate::guard::{ensure_mutation_allowed, ensure_name_confirmed};
 use crate::state::AppState;
 
@@ -91,6 +91,34 @@ pub async fn preview(st: &AppState, id: &str, req: &SlotDropRequest) -> AppResul
     })
 }
 
+/// Как действие понимает отказ сервера на `DROP_SQL`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DropFailure {
+    /// 55006 (`object_in_use`): слот стал активным между фильтром `NOT active` и самим удалением. Ничего не
+    /// произошло, как и при пустом ответе: журнал не пишется.
+    ActiveOrGone,
+    /// 42501: у роли нет атрибута `REPLICATION` и она не суперпользователь.
+    NotAuthorized,
+    Other,
+}
+
+fn classify_drop_error(code: Option<&SqlState>) -> DropFailure {
+    match code {
+        Some(c) if *c == SqlState::OBJECT_IN_USE => DropFailure::ActiveOrGone,
+        Some(c) if *c == SqlState::INSUFFICIENT_PRIVILEGE => DropFailure::NotAuthorized,
+        _ => DropFailure::Other,
+    }
+}
+
+/// Слот не удалён, потому что стал активным или исчез: пустой ответ и 55006 дают одну и ту же ошибку.
+fn active_or_gone() -> AppError {
+    app_err!(
+        ErrorCode::InvalidInput,
+        "errors.actions.slotActiveOrGone",
+        "The slot became active or is gone"
+    )
+}
+
 /// Удаляет неактивный слот. Подтверждение — имя слота всегда, имя подключения — на prod.
 pub async fn drop(
     st: &AppState,
@@ -112,36 +140,33 @@ pub async fn drop(
     let c = crate::actions::conn::open(st, id, &req.member, database).await?;
     let result = c.client.query(DROP_SQL, &[&req.slot]).await;
     let (outcome, code, ret) = match result {
-        Ok(rows) if rows.is_empty() => {
-            // Ничего не произошло: журнал не пишется.
-            return Err(app_err!(
-                ErrorCode::InvalidInput,
-                "errors.actions.slotActiveOrGone",
-                "The slot became active or is gone"
-            ));
-        }
+        // Ничего не произошло: журнал не пишется.
+        Ok(rows) if rows.is_empty() => return Err(active_or_gone()),
         Ok(_) => (journal::Outcome::Ok, None, Ok(())),
-        Err(e) if e.code() == Some(&SqlState::INSUFFICIENT_PRIVILEGE) => {
-            let err = app_err!(
-                ErrorCode::NotAuthorized,
-                "errors.actions.replicationRequired",
-                "Dropping a slot needs the REPLICATION attribute or superuser"
-            )
-            .with_details(crate::conn::errors::chain(&e));
-            (
-                journal::Outcome::Error,
-                Some(journal::code_name(err.code)),
-                Err(err),
-            )
-        }
-        Err(e) => {
-            let err = crate::conn::errors::from_pg(&e);
-            (
-                journal::Outcome::Error,
-                Some(journal::code_name(err.code)),
-                Err(err),
-            )
-        }
+        Err(e) => match classify_drop_error(e.code()) {
+            DropFailure::ActiveOrGone => return Err(active_or_gone()),
+            DropFailure::NotAuthorized => {
+                let err = app_err!(
+                    ErrorCode::NotAuthorized,
+                    "errors.actions.replicationRequired",
+                    "Dropping a slot needs the REPLICATION attribute or superuser"
+                )
+                .with_details(crate::conn::errors::chain(&e));
+                (
+                    journal::Outcome::Error,
+                    Some(journal::code_name(err.code)),
+                    Err(err),
+                )
+            }
+            DropFailure::Other => {
+                let err = crate::conn::errors::from_pg(&e);
+                (
+                    journal::Outcome::Error,
+                    Some(journal::code_name(err.code)),
+                    Err(err),
+                )
+            }
+        },
     };
     let record = ActionRecord {
         ts: journal::now_ms(),
@@ -187,5 +212,30 @@ mod tests {
             (r.name.as_str(), r.slot_type.as_str(), r.retained_bytes),
             ("it_dead_slot", "physical", Some(4096))
         );
+    }
+
+    #[test]
+    fn busy_slot_error_is_the_same_as_an_empty_answer() {
+        // 55006: слот стал активным между фильтром `NOT active` и самим удалением — ничего не произошло.
+        assert_eq!(
+            classify_drop_error(Some(&SqlState::OBJECT_IN_USE)),
+            DropFailure::ActiveOrGone
+        );
+        assert_eq!(SqlState::OBJECT_IN_USE.code(), "55006");
+        assert_eq!(
+            classify_drop_error(Some(&SqlState::INSUFFICIENT_PRIVILEGE)),
+            DropFailure::NotAuthorized
+        );
+        for other in [
+            Some(&SqlState::SYNTAX_ERROR),
+            Some(&SqlState::QUERY_CANCELED),
+            None,
+        ] {
+            assert_eq!(classify_drop_error(other), DropFailure::Other, "{other:?}");
+        }
+        let e = active_or_gone();
+        assert_eq!(e.code, ErrorCode::InvalidInput);
+        assert_eq!(e.key, "errors.actions.slotActiveOrGone");
+        assert_eq!(e.message, "The slot became active or is gone");
     }
 }
