@@ -1,15 +1,15 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { DiagTool } from "../../api/types";
+import type { DiagTool, Finding } from "../../api/types";
 import { formatTime, formatTimestamp } from "../../lib/format";
 import { useWorkspace } from "../../state/workspace";
-import { connection, diagReport, holder, member, pulseFacts, pulseRates, replication, sender, slot, topology, topologyView, waitsData } from "../../test/fixtures";
+import { connection, diagReport, holder, member, pulseFacts, pulseRates, replication, sender, sessionRow, slot, topology, topologyView, waitsData } from "../../test/fixtures";
 import { renderWithClient } from "../../test/render";
 
 vi.mock("../../api/client", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../../api/client")>();
-  return { ...orig, api: { runDiagnostic: vi.fn(), getTopology: vi.fn(), listConnections: vi.fn(), connect: vi.fn(), startSampler: vi.fn(), stopSession: vi.fn() } };
+  return { ...orig, api: { runDiagnostic: vi.fn(), getTopology: vi.fn(), listConnections: vi.fn(), connect: vi.fn(), startSampler: vi.fn(), stopSession: vi.fn(), previewSessionAction: vi.fn(), executeSessionAction: vi.fn() } };
 });
 
 import { api } from "../../api/client";
@@ -285,5 +285,127 @@ describe("DiagTab", () => {
     await user.selectOptions(interval, "Пауза");
     expect(interval).toHaveDisplayValue("Пауза");
     expect(screen.getByText("Проблем не найдено")).toBeInTheDocument();
+  });
+
+  describe("действия над сессиями", () => {
+    const settings = { idleInTransactionSessionTimeoutMs: null, trackActivityQuerySize: null };
+    const sessionsReport = (findings: Finding[] = []) =>
+      diagReport({ kind: "sessions", rows: [sessionRow({ pid: 5, state: "idle in transaction", stateAgeS: 900, backendStartUs: 50 })], settings }, { findings });
+    const previewRow = (pid: number, backendStartUs: number) => ({
+      session: { pid, backendStartUs, user: "app", database: "orders", application: "api", client: null, state: "idle in transaction", backendType: "client backend", xactAgeS: 900, stateAgeS: 900, query: "update t" },
+      allowed: true,
+      reason: null,
+    });
+
+    it("кнопка в панели сессии открывает диалог на узле отчёта; закрытие убирает его", async () => {
+      vi.mocked(api.runDiagnostic).mockResolvedValue(sessionsReport());
+      vi.mocked(api.previewSessionAction).mockResolvedValue({ member: "pg-1", rows: [previewRow(5, 50)] });
+      const user = userEvent.setup();
+      renderWithClient(<DiagTab connectionId="c" tool="sessions" member={null} active tabId="diag:c:sessions" />);
+      await user.click(await screen.findByRole("row", { name: /5/ }));
+      await user.click(screen.getByRole("button", { name: "Завершить сессию…" }));
+      expect(await screen.findByRole("table", { name: "Сессии для завершения" })).toBeInTheDocument();
+      expect(api.previewSessionAction).toHaveBeenCalledWith("c", { member: "pg-1", kind: "terminate", target: { kind: "selected", sessions: [{ pid: 5, backendStartUs: 50 }] } });
+      await user.click(screen.getByRole("button", { name: "Отмена" }));
+      expect(screen.queryByRole("table", { name: "Сессии для завершения" })).toBeNull();
+    });
+
+    it("порог в наборе idle in transaction открывает диалог с критерием; после выполнения отчёт и журнал перечитываются", async () => {
+      vi.mocked(api.runDiagnostic).mockResolvedValue(sessionsReport());
+      vi.mocked(api.previewSessionAction).mockResolvedValue({ member: "pg-1", rows: [previewRow(5, 50)] });
+      vi.mocked(api.executeSessionAction).mockResolvedValue({ member: "pg-1", results: [{ pid: 5, backendStartUs: 50, result: "terminated" }], outcome: "ok", journalWritten: true });
+      const user = userEvent.setup();
+      const { client } = renderWithClient(<DiagTab connectionId="c" tool="idleTx" member={null} active tabId="diag:c:idleTx" />);
+      const input = await screen.findByRole("spinbutton", { name: "Старше, мин" });
+      await user.clear(input);
+      await user.type(input, "10");
+      await user.click(screen.getByRole("button", { name: "Завершить idle in transaction старше 10 мин…" }));
+      expect(await screen.findByText("Сессии в состоянии idle in transaction дольше 10 мин")).toBeInTheDocument();
+      expect(api.previewSessionAction).toHaveBeenCalledWith("c", { member: "pg-1", kind: "terminate", target: { kind: "idleInTransaction", olderThanS: 600 } });
+      const spy = vi.spyOn(client, "invalidateQueries");
+      const before = vi.mocked(api.runDiagnostic).mock.calls.length;
+      await user.click(screen.getByRole("button", { name: "Завершить сессию" }));
+      expect(await screen.findByRole("table", { name: "Результат" })).toBeInTheDocument();
+      expect(spy).toHaveBeenCalledWith({ queryKey: ["actions", "c"] });
+      await waitFor(() => expect(vi.mocked(api.runDiagnostic).mock.calls.length).toBeGreaterThan(before));
+    });
+
+    it("блокировки: кнопка у корня открывает диалог rootBlocker", async () => {
+      const lockSession = { pid: 1, backendStartUs: 10, user: "app", application: "api", database: "orders", state: "active", query: "update", xactAgeS: 100, queryAgeS: 10 };
+      vi.mocked(api.runDiagnostic).mockResolvedValue(
+        diagReport({ kind: "locks", roots: [{ session: lockSession, lock: null, alsoBlockedBy: [], victims: 1, children: [] }], cycles: [], ddlQueue: [] }),
+      );
+      vi.mocked(api.previewSessionAction).mockResolvedValue({ member: "pg-1", rows: [previewRow(1, 10)] });
+      const user = userEvent.setup();
+      renderWithClient(<DiagTab connectionId="c" tool="locks" member={null} active tabId="diag:c:locks" />);
+      await user.click(await screen.findByRole("button", { name: "Завершить корневой блокирующий…" }));
+      expect(await screen.findByRole("table", { name: "Сессии для завершения" })).toBeInTheDocument();
+      expect(api.previewSessionAction).toHaveBeenCalledWith("c", { member: "pg-1", kind: "terminate", target: { kind: "rootBlocker", pid: 1, backendStartUs: 10 } });
+    });
+
+    it("кнопка находки открывает диалог; узел берётся из ссылки находки", async () => {
+      const finding: Finding = {
+        id: "idleInTransaction",
+        severity: "critical",
+        member: "pg-2",
+        target: null,
+        params: { maxS: 2000, count: 1 },
+        links: [{ kind: "action", action: { type: "terminateIdleInTransaction", olderThanS: 300 }, member: "pg-2" }],
+      };
+      vi.mocked(api.runDiagnostic).mockResolvedValue(sessionsReport([finding]));
+      vi.mocked(api.previewSessionAction).mockResolvedValue({ member: "pg-2", rows: [previewRow(5, 50)] });
+      const user = userEvent.setup();
+      renderWithClient(<DiagTab connectionId="c" tool="sessions" member={null} active tabId="diag:c:sessions" />);
+      await user.click(await screen.findByRole("button", { name: "Завершить idle in transaction старше 5 мин" }));
+      expect(await screen.findByRole("table", { name: "Сессии для завершения" })).toBeInTheDocument();
+      expect(api.previewSessionAction).toHaveBeenCalledWith("c", { member: "pg-2", kind: "terminate", target: { kind: "idleInTransaction", olderThanS: 300 } });
+    });
+
+    it("кнопка находки «корневой блокирующий» — одна сессия по паре из ссылки", async () => {
+      const finding: Finding = {
+        id: "rootBlocker",
+        severity: "warning",
+        member: "pg-1",
+        target: { kind: "session", pid: 7, backendStartUs: 70 },
+        params: { count: 1, maxS: 20 },
+        links: [{ kind: "action", action: { type: "terminateRootBlocker", pid: 7, backendStartUs: 70 }, member: null }],
+      };
+      vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport({ kind: "locks", roots: [], cycles: [], ddlQueue: [] }, { findings: [finding] }));
+      vi.mocked(api.previewSessionAction).mockResolvedValue({ member: "pg-1", rows: [previewRow(7, 70)] });
+      const user = userEvent.setup();
+      renderWithClient(<DiagTab connectionId="c" tool="locks" member={null} active tabId="diag:c:locks" />);
+      // Ссылка без узла — узел отчёта.
+      await user.click(await screen.findByRole("button", { name: "Завершить сессию 7" }));
+      await screen.findByRole("table", { name: "Сессии для завершения" });
+      expect(api.previewSessionAction).toHaveBeenCalledWith("c", { member: "pg-1", kind: "terminate", target: { kind: "rootBlocker", pid: 7, backendStartUs: 70 } });
+    });
+
+    it("подключение только для чтения: ни кнопок сессий, ни порога, ни кнопок находок", async () => {
+      vi.mocked(api.listConnections).mockResolvedValue([connection({ id: "c", kind: "patroni", readOnly: true })]);
+      const finding: Finding = {
+        id: "idleInTransaction",
+        severity: "critical",
+        member: "pg-1",
+        target: null,
+        params: { maxS: 2000, count: 1 },
+        links: [{ kind: "action", action: { type: "terminateIdleInTransaction", olderThanS: 300 }, member: "pg-1" }],
+      };
+      vi.mocked(api.runDiagnostic).mockResolvedValue(sessionsReport([finding]));
+      const user = userEvent.setup();
+      renderWithClient(<DiagTab connectionId="c" tool="idleTx" member={null} active tabId="diag:c:idleTx" />);
+      await user.click(await screen.findByRole("row", { name: /5/ }));
+      expect(screen.getByRole("region", { name: "Сессия 5" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /Завершить|Отменить запрос/ })).toBeNull();
+      expect(screen.queryByRole("spinbutton")).toBeNull();
+    });
+
+    it("профиль подключения ещё не загружен: действий нет", async () => {
+      vi.mocked(api.listConnections).mockReturnValue(new Promise(() => {}));
+      vi.mocked(api.runDiagnostic).mockResolvedValue(sessionsReport());
+      const user = userEvent.setup();
+      renderWithClient(<DiagTab connectionId="c" tool="idleTx" member={null} active tabId="diag:c:idleTx" />);
+      await user.click(await screen.findByRole("row", { name: /5/ }));
+      expect(screen.queryByRole("button", { name: /Завершить|Отменить запрос/ })).toBeNull();
+    });
   });
 });

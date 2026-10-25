@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import type { DdlQueueItem, DiagReport, LockNode, LockSession, LocksData, WaitingLock } from "../../api/types";
 import { i18n } from "../../i18n";
 import { formatDuration } from "../../lib/format";
+import type { SessionActionChoice } from "../actions/SessionActionDialog";
 import { blockersText, oneLine, QUERY_PREVIEW_CHARS, QUERY_TITLE_CHARS } from "./sessionText";
 
 /** Знаков запроса в карточке DDL (в дереве — `QUERY_PREVIEW_CHARS`); полный текст — в подсказке. */
@@ -70,13 +71,30 @@ function WaitText({ lock }: { lock: WaitingLock }) {
   );
 }
 
-/** Узел дерева: сессия, её запрос, что она ждёт, сколько сессий за ней; потомки вложены и сворачиваются. */
-function TreeNode({ node, base, collapsed, toggle }: { node: LockNode; base: string; collapsed: ReadonlySet<number>; toggle: (pid: number) => void }) {
+/**
+ * Узел дерева: сессия, её запрос, что она ждёт, сколько сессий за ней; потомки вложены и сворачиваются.
+ * `onSessionAction` — только у корней: корень, который сам ничего не ждёт, можно завершить (с известным временем
+ * старта — иначе PID мог достаться другой сессии).
+ */
+function TreeNode({
+  node,
+  base,
+  collapsed,
+  toggle,
+  onSessionAction,
+}: {
+  node: LockNode;
+  base: string;
+  collapsed: ReadonlySet<number>;
+  toggle: (pid: number) => void;
+  onSessionAction?: (choice: SessionActionChoice) => void;
+}) {
   const { t } = useTranslation();
   const { session: s, lock } = node;
   const hasChildren = node.children.length > 0;
   const expanded = !collapsed.has(s.pid);
   const labelId = `${base}-${s.pid}`;
+  const startUs = s.backendStartUs;
   return (
     // Имя узла — только его заголовок: иначе имя treeitem вобрало бы тексты всех вложенных узлов.
     <li role="treeitem" aria-labelledby={labelId} aria-expanded={hasChildren ? expanded : undefined} className="lock-node">
@@ -97,6 +115,11 @@ function TreeNode({ node, base, collapsed, toggle }: { node: LockNode; base: str
         <SessionMeta s={s} />
         {s.xactAgeS !== null && <span className="muted">{t("diag.locks.xactAge", { duration: formatDuration(s.xactAgeS) })}</span>}
         {node.victims > 0 && <span className="lock-victims">{t("diag.locks.victims", { count: node.victims })}</span>}
+        {onSessionAction && lock === null && startUs !== null && (
+          <button type="button" onClick={() => onSessionAction({ kind: "terminate", target: { kind: "rootBlocker", pid: s.pid, backendStartUs: startUs } })}>
+            {t("actions.buttons.terminateRoot")}
+          </button>
+        )}
       </div>
       <div className="lock-detail">
         <QueryText s={s} max={QUERY_PREVIEW_CHARS} />
@@ -119,7 +142,7 @@ function TreeNode({ node, base, collapsed, toggle }: { node: LockNode; base: str
   );
 }
 
-function LocksBody({ data }: { data: LocksData }) {
+function LocksBody({ data, onSessionAction }: { data: LocksData; onSessionAction?: (choice: SessionActionChoice) => void }) {
   const { t } = useTranslation();
   const base = useId();
   const ddlId = `${base}-ddl`;
@@ -150,7 +173,7 @@ function LocksBody({ data }: { data: LocksData }) {
           <h3 id={treeId}>{t("diag.locks.tree")}</h3>
           <ul role="tree" aria-labelledby={treeId} className="plain-list lock-tree">
             {data.roots.map((r) => (
-              <TreeNode key={r.session.pid} node={r} base={base} collapsed={collapsed} toggle={toggle} />
+              <TreeNode key={r.session.pid} node={r} base={base} collapsed={collapsed} toggle={toggle} onSessionAction={onSessionAction} />
             ))}
           </ul>
         </section>
@@ -174,9 +197,10 @@ function LocksBody({ data }: { data: LocksData }) {
 
 /**
  * Блокировки (спец. P2 §7.4): DDL в очереди карточками сверху (самая частая причина «всё встало»), под ними — дерево
- * блокировок от корней-блокирующих с числом жертв, затем циклы ожидания.
+ * блокировок от корней-блокирующих с числом жертв, затем циклы ожидания. `onSessionAction` — завершение корня дерева;
+ * без него кнопок нет (подключение только для чтения).
  */
-export function LocksView({ report }: { report: DiagReport }) {
+export function LocksView({ report, onSessionAction }: { report: DiagReport; onSessionAction?: (choice: SessionActionChoice) => void }) {
   if (report.data.kind !== "locks") return null;
-  return <LocksBody data={report.data} />;
+  return <LocksBody data={report.data} onSessionAction={onSessionAction} />;
 }

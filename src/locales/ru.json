@@ -1371,6 +1371,58 @@
       "ok": "выполнено",
       "partial": "частично",
       "error": "ошибка"
+    },
+    "journalNotWritten": "Журнал не записан",
+    "sessions": {
+      "cancelTitle": "Отменить запрос?",
+      "terminateTitle": "Завершить сессии?",
+      "cancelOne": "Отменить запрос",
+      "cancel_one": "Отменить {{count}} запрос",
+      "cancel_few": "Отменить {{count}} запроса",
+      "cancel_many": "Отменить {{count}} запросов",
+      "cancel_other": "Отменить {{count}} запроса",
+      "terminateOne": "Завершить сессию",
+      "terminate_one": "Завершить {{count}} сессию",
+      "terminate_few": "Завершить {{count}} сессии",
+      "terminate_many": "Завершить {{count}} сессий",
+      "terminate_other": "Завершить {{count}} сессии",
+      "tableCancel": "Запросы для отмены",
+      "tableTerminate": "Сессии для завершения",
+      "criterionIdle": "Сессии в состоянии idle in transaction дольше {{duration}}",
+      "node": "Узел: {{member}}",
+      "nothing": "Ни одну сессию нельзя отменить или завершить",
+      "countLabel": "число сессий",
+      "glafiraNote": "Соединение Glafira",
+      "resultTable": "Результат",
+      "columns": {
+        "note": "Примечание",
+        "result": "Результат"
+      },
+      "reason": {
+        "superuserSession": "Сессия суперпользователя: нужна роль суперпользователя",
+        "otherRole": "Чужая роль: нужна роль pg_signal_backend",
+        "notClientBackend": "Не клиентская сессия",
+        "ownConnection": "Соединение самого приложения"
+      },
+      "result": {
+        "terminated": "Завершена",
+        "signalSent": "Сигнал отправлен",
+        "gone": "Сессии уже нет",
+        "noLongerMatches": "Уже не подходит под условие",
+        "notAllowed": "Нет прав",
+        "failed": "Ошибка"
+      }
+    },
+    "buttons": {
+      "cancel": "Отменить запрос…",
+      "terminate": "Завершить сессию…",
+      "terminateIdle": "Завершить idle in transaction старше {{min}} мин…",
+      "idleOlderThan": "Старше, мин",
+      "terminateRoot": "Завершить корневой блокирующий…"
+    },
+    "findings": {
+      "terminateIdle": "Завершить idle in transaction старше {{min}} мин",
+      "terminateRoot": "Завершить сессию {{pid}}"
     }
   },
   "hints": {

@@ -2,10 +2,12 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../api/client";
-import type { AppError, DiagReport, DiagTool } from "../../api/types";
+import type { AppError, DiagReport, DiagTool, SessionActionLink } from "../../api/types";
+import { canAct, useConnectionProfile } from "../../lib/useConnectionProfile";
 import { DEFAULT_WAITS_WINDOW_S, defaultIntervalS, isClusterTool, useDiagnostic } from "../../lib/useDiagnostic";
 import { refreshAfterConnect, useTopology } from "../../lib/useConnectionEvents";
 import { useWorkspace } from "../../state/workspace";
+import { type SessionActionChoice, SessionActionDialog } from "../actions/SessionActionDialog";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { DiagHeader } from "./DiagHeader";
 import { FailoverView } from "./FailoverView";
@@ -20,18 +22,39 @@ import { SlotsView } from "./SlotsView";
 import { unavailableText } from "./unavailable";
 import { WaitsView } from "./WaitsView";
 
+/** Действие по кнопке находки: «idle in transaction старше порога» — пакет, «корневой блокирующий» — одна сессия. */
+function linkAction(a: SessionActionLink): SessionActionChoice {
+  return a.type === "terminateIdleInTransaction"
+    ? { kind: "terminate", target: { kind: "idleInTransaction", olderThanS: a.olderThanS } }
+    : { kind: "terminate", target: { kind: "rootBlocker", pid: a.pid, backendStartUs: a.backendStartUs } };
+}
+
+/** Открытое действие: выбор и узел, на котором оно выполняется (узел фиксируется при открытии и не уходит вслед за отчётом). */
+type OpenAction = SessionActionChoice & { member: string };
+
 /**
  * Тело инструмента: вид данных выбирается по `report.data.kind`.
  * `tool` отличает вкладку `idleTx` от `sessions`: данные у них одни, а набор сессий разный.
+ * `onSessionAction` — отмена и завершение сессий (нет — подключение только для чтения или профиль не загружен).
  */
-function ToolBody({ tool, report, connectionId }: { tool: DiagTool; report: DiagReport; connectionId: string }) {
+function ToolBody({
+  tool,
+  report,
+  connectionId,
+  onSessionAction,
+}: {
+  tool: DiagTool;
+  report: DiagReport;
+  connectionId: string;
+  onSessionAction?: (choice: SessionActionChoice) => void;
+}) {
   switch (report.data.kind) {
     case "pulse":
       return <PulseView connectionId={connectionId} report={report} />;
     case "sessions":
-      return <SessionsView key={tool} report={report} preset={tool === "idleTx" ? "idleTx" : "all"} />;
+      return <SessionsView key={tool} report={report} preset={tool === "idleTx" ? "idleTx" : "all"} onSessionAction={onSessionAction} />;
     case "locks":
-      return <LocksView report={report} />;
+      return <LocksView report={report} onSessionAction={onSessionAction} />;
     case "horizon":
       return <HorizonView connectionId={connectionId} report={report} />;
     case "replication":
@@ -65,6 +88,10 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
   // Лидер, на котором прошлый отчёт «за лидером» был получен; смена объявляется строкой, пока пользователь не выберет узел сам.
   const lastLeader = useRef<string | null>(null);
   const [moved, setMoved] = useState<{ from: string; to: string } | null>(null);
+  // Действия над сессиями: профиль нужен диалогу (окружение, имя для подтверждения) и условию показа кнопок.
+  const profile = useConnectionProfile(connectionId);
+  const actor = profile !== undefined && canAct(profile) ? profile : undefined;
+  const [action, setAction] = useState<OpenAction | null>(null);
 
   const cluster = isClusterTool(tool);
   const state = view.data?.state;
@@ -77,6 +104,13 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
     live,
   });
   const report = q.data;
+  // Подключение закрыто: подтверждение не ждёт переоткрытия (после него предпросмотр был бы устаревшим).
+  useEffect(() => {
+    if (!live) setAction(null);
+  }, [live]);
+  const startAction = (member: string | null, choice: SessionActionChoice) => {
+    if (member !== null) setAction({ ...choice, member });
+  };
 
   // Выбор узла в шапке — то же открытие вкладки, что и из ссылки находки: спека (и узел вместе с ней) обновляется.
   const pick = (m: string | null) => useWorkspace.getState().open({ kind: "diag", connectionId, tool, member: m });
@@ -168,9 +202,27 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
         </p>
       )}
       {q.error && <ErrorBanner error={q.error} />}
+      {action && actor && (
+        <SessionActionDialog
+          key={JSON.stringify(action)}
+          connectionId={connectionId}
+          profile={actor}
+          member={action.member}
+          kind={action.kind}
+          target={action.target}
+          onClose={() => setAction(null)}
+        />
+      )}
       {report ? (
         <div className={placeholder ? "diag-body diag-pending" : "diag-body"} aria-busy={placeholder}>
-          <FindingsPanel connectionId={connectionId} findings={report.findings} showMember={cluster} tool={tool} member={report.member} />
+          <FindingsPanel
+            connectionId={connectionId}
+            findings={report.findings}
+            showMember={cluster}
+            tool={tool}
+            member={report.member}
+            onAction={actor ? (l) => startAction(l.member ?? report.member, linkAction(l.action)) : undefined}
+          />
           {report.unavailable.length > 0 && (
             <div className="diag-unavailable">
               {report.unavailable.map((u, i) => (
@@ -180,7 +232,7 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
               ))}
             </div>
           )}
-          <ToolBody tool={tool} report={report} connectionId={connectionId} />
+          <ToolBody tool={tool} report={report} connectionId={connectionId} onSessionAction={actor ? (choice) => startAction(report.member, choice) : undefined} />
         </div>
       ) : (
         !q.error && <p className="empty">{t("common.loading")}</p>

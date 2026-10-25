@@ -3,6 +3,7 @@ import { type CSSProperties, Fragment, type KeyboardEvent, type Ref, useEffect, 
 import { useTranslation } from "react-i18next";
 import type { DiagReport, SessionRow, SessionsData } from "../../api/types";
 import { formatCount, formatDuration, formatTimestamp } from "../../lib/format";
+import type { SessionActionChoice } from "../actions/SessionActionDialog";
 import { SubTabs } from "../catalog/SubTabs";
 import { CopyButton } from "../common/CopyButton";
 import { Hint } from "../common/Hint";
@@ -272,9 +273,29 @@ function SessionList({ rows, cols, selectedKey, onSelect }: { rows: SessionRow[]
   );
 }
 
-/** Панель сессии: поля, полный текст запроса и копирование. `ended` — сессии уже нет в списке, показаны последние данные. */
-function SessionPanel({ row, ended, onClose, ref }: { row: SessionRow; ended: boolean; onClose: () => void; ref: Ref<HTMLElement> }) {
+/**
+ * Панель сессии: поля, полный текст запроса и копирование. `ended` — сессии уже нет в списке, показаны последние данные.
+ * Кнопки отмены и завершения (`onSessionAction`) — у клиентской сессии с известным временем старта: пара (pid, время старта)
+ * однозначна, а служебные процессы сервера сигналом не трогаем.
+ */
+function SessionPanel({
+  row,
+  ended,
+  onClose,
+  onSessionAction,
+  ref,
+}: {
+  row: SessionRow;
+  ended: boolean;
+  onClose: () => void;
+  onSessionAction?: (choice: SessionActionChoice) => void;
+  ref: Ref<HTMLElement>;
+}) {
   const { t } = useTranslation();
+  const startUs = row.backendStartUs;
+  const signal = (kind: SessionActionChoice["kind"]) => {
+    if (startUs !== null) onSessionAction?.({ kind, target: { kind: "selected", sessions: [{ pid: row.pid, backendStartUs: startUs }] } });
+  };
   const fields: { labelKey: string; value: string }[] = [
     { labelKey: "diag.sessions.columns.state", value: row.state ?? "" },
     { labelKey: "diag.sessions.columns.wait", value: waitText(row) },
@@ -299,6 +320,16 @@ function SessionPanel({ row, ended, onClose, ref }: { row: SessionRow; ended: bo
       <div className="toolbar">
         {/* tabIndex -1: заголовок принимает фокус программно, когда пользователь открыл панель, но не попадает в порядок Tab. */}
         <h3 tabIndex={-1}>{t("diag.sessions.panel", { pid: row.pid })}</h3>
+        {onSessionAction && startUs !== null && row.backendType === "client backend" && (
+          <>
+            <button type="button" disabled={ended} onClick={() => signal("cancel")}>
+              {t("actions.buttons.cancel")}
+            </button>
+            <button type="button" disabled={ended} onClick={() => signal("terminate")}>
+              {t("actions.buttons.terminate")}
+            </button>
+          </>
+        )}
         <button type="button" onClick={onClose}>
           {t("common.close")}
         </button>
@@ -332,7 +363,36 @@ function timeoutText(ms: number | null): string {
   return ms % 1000 === 0 ? formatDuration(ms / 1000) : `${formatCount(ms)} ms`;
 }
 
-function SessionsBody({ data, preset: initial }: { data: SessionsData; preset: SessionsPreset }) {
+/** Порог в минутах: целое не меньше 1 (меньше минуты — шум обновления отчёта, а не простой); иначе `null`. */
+function parseMinutes(text: string): number | null {
+  const n = Number(text.trim());
+  // Порог уходит в Rust секундами: число должно остаться точным целым и после умножения на 60.
+  return Number.isInteger(n) && n >= 1 && Number.isSafeInteger(n * 60) ? n : null;
+}
+
+/** «Завершить idle in transaction старше N мин…»: пакет по критерию, диалог предпросмотра покажет, кого это затронет. */
+function IdleTerminate({ onSessionAction }: { onSessionAction: (choice: SessionActionChoice) => void }) {
+  const { t } = useTranslation();
+  const [text, setText] = useState("5");
+  const min = parseMinutes(text);
+  return (
+    <div className="toolbar">
+      <label className="inline">
+        <span>{t("actions.buttons.idleOlderThan")}</span>
+        <input type="number" min={1} step={1} value={text} aria-invalid={min === null} onChange={(e) => setText(e.target.value)} />
+      </label>
+      <button
+        type="button"
+        disabled={min === null}
+        onClick={() => min !== null && onSessionAction({ kind: "terminate", target: { kind: "idleInTransaction", olderThanS: min * 60 } })}
+      >
+        {t("actions.buttons.terminateIdle", { min: min ?? "N" })}
+      </button>
+    </div>
+  );
+}
+
+function SessionsBody({ data, preset: initial, onSessionAction }: { data: SessionsData; preset: SessionsPreset; onSessionAction?: (choice: SessionActionChoice) => void }) {
   const { t } = useTranslation();
   const [preset, setPreset] = useState<SessionsPreset>(initial);
   const [filter, setFilter] = useState("");
@@ -402,6 +462,7 @@ function SessionsBody({ data, preset: initial }: { data: SessionsData; preset: S
               <Hint k="hints.diag.idleTimeout" label={t("diag.sessions.timeoutName")} />
             </p>
           )}
+          {preset === "idleTx" && onSessionAction && <IdleTerminate onSessionAction={onSessionAction} />}
           {grouped ? (
             <GroupTable rows={base} by={groupBy} />
           ) : (
@@ -409,7 +470,7 @@ function SessionsBody({ data, preset: initial }: { data: SessionsData; preset: S
               <SessionList rows={rows} cols={cols} selectedKey={openedKey} onSelect={select} />
               {rows.length === 0 && <p className="muted">{t("diag.sessions.none")}</p>}
               <p className="muted">{t("sidebar.shown", { shown: formatCount(rows.length), total: formatCount(data.rows.length) })}</p>
-              {opened && <SessionPanel ref={panelRef} row={opened} ended={fresh === undefined} onClose={() => setOpened(null)} />}
+              {opened && <SessionPanel ref={panelRef} row={opened} ended={fresh === undefined} onClose={() => setOpened(null)} onSessionAction={onSessionAction} />}
             </>
           )}
         </div>
@@ -421,9 +482,10 @@ function SessionsBody({ data, preset: initial }: { data: SessionsData; preset: S
 /**
  * Сессии и idle in transaction (спец. P2 §7.4): наборы (все, активные, idle in transaction, ждущие), фильтр, группировка,
  * скрытие сессий самой Glafira, виртуализированный список и панель выбранной сессии. `preset` — набор при открытии:
- * у вкладки «Idle in transaction» это одноимённый набор.
+ * у вкладки «Idle in transaction» это одноимённый набор. `onSessionAction` — отмена и завершение сессий (панель сессии,
+ * порог в наборе idle in transaction); без него кнопок нет (подключение только для чтения).
  */
-export function SessionsView({ report, preset }: { report: DiagReport; preset: SessionsPreset }) {
+export function SessionsView({ report, preset, onSessionAction }: { report: DiagReport; preset: SessionsPreset; onSessionAction?: (choice: SessionActionChoice) => void }) {
   if (report.data.kind !== "sessions") return null;
-  return <SessionsBody data={report.data} preset={preset} />;
+  return <SessionsBody data={report.data} preset={preset} onSessionAction={onSessionAction} />;
 }

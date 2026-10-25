@@ -19,7 +19,7 @@ describe("FindingsPanel", () => {
     expect(screen.getByRole("button", { name: "Открыть «Idle in transaction»" })).toBeInTheDocument();
   });
 
-  it("ссылка-действие кнопки не рисует (до задачи 11) и не мешает ссылке на инструмент", () => {
+  it("без onAction ссылка-действие кнопки не рисует и не мешает ссылке на инструмент", () => {
     const only: Finding = { id: "idleInTransaction", severity: "critical", member: "pg-1", target: null, params: { maxS: 2000, count: 1 }, links: [{ kind: "action", action: { type: "terminateIdleInTransaction", olderThanS: 300 }, member: "pg-1" }] };
     const both: Finding = { id: "rootBlocker", severity: "warning", member: "pg-1", target: { kind: "session", pid: 7, backendStartUs: 1 }, params: { count: 1, maxS: 20 }, links: [{ kind: "openTool", tool: "sessions", member: "pg-1" }, { kind: "action", action: { type: "terminateRootBlocker", pid: 7, backendStartUs: 1 }, member: "pg-1" }] };
     const { rerender } = renderWithClient(<FindingsPanel connectionId="c" findings={[only]} tool="idleTx" member="pg-1" />);
@@ -30,6 +30,25 @@ describe("FindingsPanel", () => {
     rerender(<FindingsPanel connectionId="c" findings={[both]} />);
     const buttons = within(screen.getByRole("listitem")).getAllByRole("button");
     expect(buttons.map((b) => b.textContent)).toEqual(["Открыть «Сессии»"]);
+  });
+
+  it("с onAction ссылки-действия — кнопки; клик отдаёт ссылку; переход «в себя» по-прежнему скрыт", async () => {
+    const user = userEvent.setup();
+    const onAction = vi.fn();
+    const idleLink = { kind: "action" as const, action: { type: "terminateIdleInTransaction" as const, olderThanS: 300 }, member: "pg-1" };
+    const rootLink = { kind: "action" as const, action: { type: "terminateRootBlocker" as const, pid: 7, backendStartUs: 1 }, member: "pg-1" };
+    const idle: Finding = { id: "idleInTransaction", severity: "critical", member: "pg-1", target: null, params: { maxS: 2000, count: 1 }, links: [{ kind: "openTool", tool: "idleTx", member: "pg-1" }, idleLink] };
+    const root: Finding = { id: "rootBlocker", severity: "warning", member: "pg-1", target: { kind: "session", pid: 7, backendStartUs: 1 }, params: { count: 1, maxS: 20 }, links: [{ kind: "openTool", tool: "sessions", member: "pg-1" }, rootLink] };
+    renderWithClient(<FindingsPanel connectionId="c" findings={[idle, root]} tool="idleTx" member="pg-1" onAction={onAction} />);
+    const [first, second] = screen.getAllByRole("listitem");
+    // На вкладке idleTx переход в idleTx скрыт, кнопка действия есть.
+    expect(within(first).queryByRole("button", { name: /Открыть/ })).toBeNull();
+    await user.click(within(first).getByRole("button", { name: "Завершить idle in transaction старше 5 мин" }));
+    expect(onAction).toHaveBeenLastCalledWith(idleLink);
+    expect(within(second).getByRole("button", { name: "Открыть «Сессии»" })).toBeInTheDocument();
+    await user.click(within(second).getByRole("button", { name: "Завершить сессию 7" }));
+    expect(onAction).toHaveBeenLastCalledWith(rootLink);
+    expect(onAction).toHaveBeenCalledTimes(2);
   });
 
   it("находки по строгости с текстом, «что сделать», командой и переходом в инструмент", async () => {

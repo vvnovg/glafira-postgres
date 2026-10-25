@@ -1347,6 +1347,54 @@
       "ok": "done",
       "partial": "partly",
       "error": "error"
+    },
+    "journalNotWritten": "The journal was not written",
+    "sessions": {
+      "cancelTitle": "Cancel the query?",
+      "terminateTitle": "Terminate sessions?",
+      "cancelOne": "Cancel the query",
+      "cancel_one": "Cancel {{count}} query",
+      "cancel_other": "Cancel {{count}} queries",
+      "terminateOne": "Terminate the session",
+      "terminate_one": "Terminate {{count}} session",
+      "terminate_other": "Terminate {{count}} sessions",
+      "tableCancel": "Queries to cancel",
+      "tableTerminate": "Sessions to terminate",
+      "criterionIdle": "Sessions idle in a transaction for longer than {{duration}}",
+      "node": "Node: {{member}}",
+      "nothing": "No session can be signalled",
+      "countLabel": "number of sessions",
+      "glafiraNote": "Glafira connection",
+      "resultTable": "Result",
+      "columns": {
+        "note": "Note",
+        "result": "Result"
+      },
+      "reason": {
+        "superuserSession": "Superuser session: needs the superuser role",
+        "otherRole": "Another role: needs pg_signal_backend",
+        "notClientBackend": "Not a client session",
+        "ownConnection": "The app's own connection"
+      },
+      "result": {
+        "terminated": "Terminated",
+        "signalSent": "Signal sent",
+        "gone": "Already gone",
+        "noLongerMatches": "No longer matches",
+        "notAllowed": "Not allowed",
+        "failed": "Failed"
+      }
+    },
+    "buttons": {
+      "cancel": "Cancel query…",
+      "terminate": "Terminate session…",
+      "terminateIdle": "Terminate idle in transaction older than {{min}} min…",
+      "idleOlderThan": "Older than, min",
+      "terminateRoot": "Terminate the root blocker…"
+    },
+    "findings": {
+      "terminateIdle": "Terminate idle in transaction older than {{min}} min",
+      "terminateRoot": "Terminate session {{pid}}"
     }
   },
   "hints": {

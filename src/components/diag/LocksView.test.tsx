@@ -1,6 +1,6 @@
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { DdlQueueItem, LockNode, LockSession, LocksData, WaitingLock } from "../../api/types";
 import { diagReport } from "../../test/fixtures";
 import { renderWithClient } from "../../test/render";
@@ -157,5 +157,37 @@ describe("LocksView", () => {
     expect(screen.queryByText("Никто не ждёт блокировок")).not.toBeInTheDocument();
     expect(screen.getByText("Сессии ждут друг друга: 4, 8")).toBeInTheDocument();
     expect(screen.getByText(logNote)).toBeInTheDocument();
+  });
+
+  describe("завершение корневого блокирующего", () => {
+    const tree = () => node(s(1, "update"), { victims: 2, children: [node(s(2, "alter"), { lock: lock("AccessExclusiveLock", 40), victims: 1, children: [node(s(3, "select"), { lock: lock("AccessShareLock", 30) })] })] });
+    const button = { name: "Завершить корневой блокирующий…" };
+
+    it("кнопка только у корня без ожидания: клик передаёт сессию корня", async () => {
+      const user = userEvent.setup();
+      const onSessionAction = vi.fn();
+      renderWithClient(<LocksView report={diagReport(data({ roots: [tree()] }))} onSessionAction={onSessionAction} />);
+      // Потомки ждут сами — кнопки у них нет: корень один, кнопка одна.
+      expect(screen.getAllByRole("button", button)).toHaveLength(1);
+      await user.click(within(screen.getByRole("treeitem", { name: /сессия 1$/i })).getByRole("button", button));
+      expect(onSessionAction).toHaveBeenCalledWith({ kind: "terminate", target: { kind: "rootBlocker", pid: 1, backendStartUs: 1 } });
+    });
+
+    it("кнопка у каждого из нескольких корней", () => {
+      renderWithClient(<LocksView report={diagReport(data({ roots: [tree(), node(s(9, "lock table"), { victims: 1, children: [node(s(10, "x"), { lock: lock("AccessShareLock", 5) })] })] }))} onSessionAction={() => {}} />);
+      expect(screen.getAllByRole("button", button)).toHaveLength(2);
+    });
+
+    it("без onSessionAction кнопки нет (подключение только для чтения)", () => {
+      renderWithClient(<LocksView report={diagReport(data({ roots: [tree()] }))} />);
+      expect(screen.queryByRole("button", button)).toBeNull();
+    });
+
+    it("ждущему корню (есть lock) и корню без времени старта кнопка не нужна", () => {
+      const waiting = node(s(5, "update"), { lock: lock("RowExclusiveLock", 7), victims: 1, children: [node(s(6, "x"), { lock: lock("AccessShareLock", 1) })] });
+      const unknownStart = node({ ...s(7, "update"), backendStartUs: null }, { victims: 1, children: [node(s(8, "x"), { lock: lock("AccessShareLock", 1) })] });
+      renderWithClient(<LocksView report={diagReport(data({ roots: [waiting, unknownStart] }))} onSessionAction={() => {}} />);
+      expect(screen.queryByRole("button", button)).toBeNull();
+    });
   });
 });

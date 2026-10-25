@@ -281,4 +281,105 @@ describe("SessionsView", () => {
     expect(text.textContent).toHaveLength(121); // 120 символов и «…»
     expect(text.textContent).toMatch(/^select x+…$/);
   });
+
+  describe("действия над сессиями", () => {
+    const cancel = { name: "Отменить запрос…" };
+    const terminate = { name: "Завершить сессию…" };
+    const idleButton = (min: number | string) => ({ name: `Завершить idle in transaction старше ${min} мин…` });
+
+    it("панель клиентской сессии: отмена и завершение передают пару (pid, время старта)", async () => {
+      const user = userEvent.setup();
+      const onSessionAction = vi.fn();
+      renderWithClient(<SessionsView report={report()} preset="all" onSessionAction={onSessionAction} />);
+      await user.click(rowOf(2));
+      const panel = screen.getByRole("region", { name: "Сессия 2" });
+      const start = rows[1].backendStartUs!;
+      await user.click(within(panel).getByRole("button", cancel));
+      expect(onSessionAction).toHaveBeenLastCalledWith({ kind: "cancel", target: { kind: "selected", sessions: [{ pid: 2, backendStartUs: start }] } });
+      await user.click(within(panel).getByRole("button", terminate));
+      expect(onSessionAction).toHaveBeenLastCalledWith({ kind: "terminate", target: { kind: "selected", sessions: [{ pid: 2, backendStartUs: start }] } });
+    });
+
+    it("без onSessionAction (подключение только для чтения) кнопок нет ни в панели, ни в наборе idle in transaction", async () => {
+      const user = userEvent.setup();
+      renderWithClient(<SessionsView report={report()} preset="idleTx" />);
+      await user.click(rowOf(2));
+      expect(screen.queryByRole("button", cancel)).toBeNull();
+      expect(screen.queryByRole("button", terminate)).toBeNull();
+      expect(screen.queryByRole("button", { name: /Завершить idle in transaction/ })).toBeNull();
+      expect(screen.queryByRole("spinbutton")).toBeNull();
+    });
+
+    it("не клиентская сессия и сессия без времени старта: кнопок нет (адрес пары неполон или это служебный процесс)", async () => {
+      const user = userEvent.setup();
+      const other = [
+        sessionRow({ pid: 61, backendType: "autovacuum worker" }),
+        sessionRow({ pid: 62, backendStartUs: null }),
+        sessionRow({ pid: 63, backendType: null }),
+      ];
+      renderWithClient(<SessionsView report={report(other)} preset="all" onSessionAction={() => {}} />);
+      for (const pid of [61, 62, 63]) {
+        await user.click(rowOf(pid));
+        expect(screen.getByRole("region", { name: `Сессия ${pid}` })).toBeInTheDocument();
+        expect(screen.queryByRole("button", cancel)).toBeNull();
+        expect(screen.queryByRole("button", terminate)).toBeNull();
+      }
+    });
+
+    it("сессии уже нет в списке: кнопки в панели недоступны", async () => {
+      const user = userEvent.setup();
+      const a = sessionRow({ pid: 30, state: "active" });
+      const { rerender } = renderWithClient(<SessionsView report={report([a])} preset="all" onSessionAction={() => {}} />);
+      await user.click(rowOf(30));
+      expect(screen.getByRole("button", terminate)).toBeEnabled();
+      rerender(<SessionsView report={report([])} preset="all" onSessionAction={() => {}} />);
+      expect(screen.getByRole("button", cancel)).toBeDisabled();
+      expect(screen.getByRole("button", terminate)).toBeDisabled();
+    });
+
+    it("набор idle in transaction: порог по умолчанию 5 мин, клик передаёт критерий в секундах", async () => {
+      const user = userEvent.setup();
+      const onSessionAction = vi.fn();
+      renderWithClient(<SessionsView report={report()} preset="idleTx" onSessionAction={onSessionAction} />);
+      const input = screen.getByRole("spinbutton", { name: "Старше, мин" });
+      expect(input).toHaveValue(5);
+      await user.click(screen.getByRole("button", idleButton(5)));
+      expect(onSessionAction).toHaveBeenLastCalledWith({ kind: "terminate", target: { kind: "idleInTransaction", olderThanS: 300 } });
+      await user.clear(input);
+      await user.type(input, "30");
+      await user.click(screen.getByRole("button", idleButton(30)));
+      expect(onSessionAction).toHaveBeenLastCalledWith({ kind: "terminate", target: { kind: "idleInTransaction", olderThanS: 1800 } });
+      expect(onSessionAction).toHaveBeenCalledTimes(2);
+    });
+
+    it("порог: минимум 1 минута, целое число; неверное значение диалог не открывает", async () => {
+      const user = userEvent.setup();
+      const onSessionAction = vi.fn();
+      renderWithClient(<SessionsView report={report()} preset="idleTx" onSessionAction={onSessionAction} />);
+      const input = screen.getByRole("spinbutton", { name: "Старше, мин" });
+      const button = () => screen.getByRole("button", { name: /Завершить idle in transaction старше/ });
+      for (const bad of ["", "0", "-3", "1.5", "99999999999999999999"]) {
+        await user.clear(input);
+        if (bad !== "") await user.type(input, bad);
+        expect(button(), `«${bad}»`).toBeDisabled();
+        expect(input, `«${bad}»`).toBeInvalid();
+      }
+      await user.clear(input);
+      await user.type(input, "1");
+      expect(input).toBeValid();
+      await user.click(screen.getByRole("button", idleButton(1)));
+      expect(onSessionAction).toHaveBeenCalledTimes(1);
+      expect(onSessionAction).toHaveBeenLastCalledWith({ kind: "terminate", target: { kind: "idleInTransaction", olderThanS: 60 } });
+    });
+
+    it("управление порогом только в наборе idle in transaction, в том числе после переключения набора", async () => {
+      const user = userEvent.setup();
+      renderWithClient(<SessionsView report={report()} preset="all" onSessionAction={() => {}} />);
+      expect(screen.queryByRole("spinbutton")).toBeNull();
+      await user.click(screen.getByRole("tab", { name: "Idle in transaction" }));
+      expect(screen.getByRole("spinbutton", { name: "Старше, мин" })).toBeInTheDocument();
+      await user.click(screen.getByRole("tab", { name: "Активные" }));
+      expect(screen.queryByRole("spinbutton")).toBeNull();
+    });
+  });
 });
