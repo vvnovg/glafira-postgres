@@ -580,8 +580,11 @@ type DiagTool = "pulse" | "sessions" | "idleTx" | "waits" | "locks" | "horizon" 
 Подтверждение — `ConfirmDialog` внутри страницы: имя объекта (`objectName`) вводится всегда, когда оно задано (слот, кандидат
 failover, число сессий пакета на prod), имя подключения — на prod; необязательное `disabled` не даёт подтвердить, пока не
 заполнена форма над ним (время расписания). Диалог действия один на вкладку (`DiagTab` — сессии и слоты, `Overview` — Patroni):
-новое открытие вытесняет прежнее, но не то, чья команда ещё выполняется (`useIsMutating` с областью вкладки); кнопки слотов и
-Patroni на это время неактивны. Узел диалога фиксируется при открытии. Предпросмотр читается один раз на открытие (`staleTime: Infinity`, новый
+новое открытие вытесняет прежнее. Защита от вытеснения диалога, чья команда ещё выполняется, есть у удаления слота
+(`DiagTab`) и у действий Patroni (`Overview`): `useIsMutating` с областью вкладки, пока команда идёт, другой диалог не
+открывается, а кнопки слотов или обзора неактивны. У действий над сессиями защиты нет: новое действие над сессиями (или
+удаление слота) вытесняет их диалог и во время выполнения; команда при этом завершается, запись в журнале пишется,
+отчёты и журнал перечитываются по её успеху, но итог в диалоге пользователь уже не увидит. Узел диалога фиксируется при открытии. Предпросмотр читается один раз на открытие (`staleTime: Infinity`, новый
 экземпляр диалога — новый предпросмотр) и не обновляется под рукой у пользователя. Escape закрывает диалог, пока команда не
 выполняется; закрытие подключения закрывает диалоги. После выполнения диалог перечитывает отчёты
 (`["diag", id]` или `["topology", id]`) и журнал (`["actions", id]`).
@@ -677,7 +680,7 @@ Patroni на это время неактивны. Узел диалога фи�
 и секрет `patroniPassword`); без логина кнопки неактивны, а команда отказывает `errors.patroni.authRequired`
 (`PATRONI_ERROR`; предпросмотр сообщает `canSend`). Правило P1 о неотправке пароля на `http://`-адрес при https-профиле
 действует и здесь. Порядок в `execute`: guard → ввод имени кандидата failover → тип подключения → логин → предусловия на
-свежей топологии → запрос → журнал.
+топологии последнего опроса (`diag_target(…).topology`, не старше интервала опроса: 10 с, при наблюдении 2 с) → запрос → журнал.
 
 | Действие | Запрос | Предусловие (`actions::patroni::check`) |
 |---|---|---|
@@ -718,11 +721,14 @@ Patroni отвечает после выполнения. Срок переда�
 как есть.
 
 - `preview_patroni_action(id, action)` → `{ leader, leaderState, leaderReachable, paused, candidates, leaderClientSessions, member,
-  scheduledSwitchover, canSend }`. Для switchover и failover: `candidates` — вердикты готовности (§5.8; `/config` не прочитался —
+  scheduledSwitchover, canSend }`. Предпросмотр берёт топологию последнего опроса (как и предусловия `execute`, см. выше); заново
+  читаются только `/config` и число сессий лидера. Для switchover и failover: `candidates` — вердикты готовности (§5.8; `/config` не прочитался —
   пределы Patroni по умолчанию; неготовые — с причиной, у switchover есть вариант «Patroni выберет сам») и
-  `leaderClientSessions` — клиентские сессии лидера, которые оборвутся, без своей и без `glafira-pg` (`null`, если лидер
-  недоступен или запрос не удался: недоступный узел предпросмотр не ждёт); окно предупреждает «запись недоступна несколько
-  секунд» (только для «сейчас») и «старый лидер станет репликой». Для restart и его отмены `member` — роль, состояние,
+  `leaderClientSessions` — клиентские сессии лидера, которые оборвутся, без своей и без `glafira-pg`, но с собственным
+  соединением Patroni (оно клиентское: `backend_type = 'client backend'`); `null`, если лидер недоступен или запрос не
+  удался (недоступный узел предпросмотр не ждёт). Предупреждения окна — как построено, не правило проекта: число сессий и
+  «запись недоступна несколько секунд» — у failover и switchover «сейчас» (число — когда лидер есть), «старый лидер станет
+  репликой» — когда лидер есть, у switchover по расписанию это единственное предупреждение. Для restart и его отмены `member` — роль, состояние,
   `pendingRestart`, `scheduledRestart` (restart лидера — предупреждение: запись недоступна до конца перезапуска; флажок «только
   если нужен перезапуск» включён, когда `pendingRestart`). Предусловия в предпросмотре не проверяются, но интерфейс повторяет
   главные (`running_leader`: доступен и `running`): failover при работающем лидере и switchover без него показывают
@@ -845,7 +851,8 @@ backendStartUs }]`. `WatchEvent` и `PatroniActionResult` — §8.6, `ActionReco
 | `CONFIRMATION_REQUIRED` (P2b) | Нет или неверно имя подключения (`errors.guard.prodConfirm`), имя объекта или число сессий (`errors.guard.typeToConfirm`) | Диалог подтверждения |
 | `NOT_AUTHORIZED` (42501) | Нет атрибута `REPLICATION` для слота: `errors.actions.replicationRequired`. Сигнал сессии без права — не ошибка команды, а итог сессии `notAllowed` (в журнале `code` — `NOT_AUTHORIZED`) | Подсказка у кнопки (§8.7), строка итога |
 | `AUTH_FAILED` | Patroni отклонил учётные данные (401, 403) | `errors.patroni.unauthorized` или `credentialsWithheld` — те же ключи, что у чтения |
-| `PATRONI_ERROR` | Отказ Patroni и сбои запроса | `errors.patroni.actionRejected` (`params.status`, 500 символов ответа в `details`), `authRequired`, `noUrls`; неизвестный исход — `timeout`, `connectionLost`, `statusUnknown` (§8.5); `unreachable`, `tls` — запрос не дошёл |
+| `PATRONI_ERROR` | Отказ Patroni и сбои запроса | `errors.patroni.actionRejected` (`params.status`, 500 символов ответа в `details`), `authRequired`, `noUrls`; неизвестный исход — `timeout`, `connectionLost`, `statusUnknown` (§8.5); `unreachable` — запрос не дошёл |
+| `TLS_ERROR` | Ошибка сертификата при запросе к API Patroni: `errors.patroni.tls` (запрос не дошёл, пробуется следующий адрес) | Тот же ключ, что у чтения |
 | `INVALID_INPUT` | Нарушено предусловие или неверный ввод | `errors.actions.leaderHealthy`, `noLeader`, `badCandidate`, `badSchedule`, `pastSchedule`, `nothingScheduled`, `pauseUnchanged`, `patroniOnly`, `badThreshold`, `noSessions`, `badTarget`, `batchTooLarge`, `slotActiveOrGone`; `errors.patroni.badUrl` |
 | `NOT_FOUND` | Слота нет на узле | `errors.actions.slotNotFound` |
 | `TIMEOUT` | Пакет не уложился в 60 с | Итог сессии `failed` с `errors.actions.batchTimeout` |
