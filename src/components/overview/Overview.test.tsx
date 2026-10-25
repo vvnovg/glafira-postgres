@@ -20,6 +20,9 @@ vi.mock("../../api/client", async (importOriginal) => {
       connect: vi.fn(),
       reconnect: vi.fn(),
       trustSshHostKey: vi.fn(),
+      previewPatroniAction: vi.fn(),
+      executePatroniAction: vi.fn(),
+      stopSession: vi.fn(),
     },
   };
 });
@@ -303,7 +306,8 @@ describe("Overview", () => {
     expect(screen.getByText("scope: demo")).toBeInTheDocument();
     expect(screen.getByText("Leader: pg-1")).toBeInTheDocument();
     expect(screen.getByText("Подключено")).toBeInTheDocument();
-    expect(screen.queryByText("Пауза")).not.toBeInTheDocument();
+    // Пометка паузы в шапке — `span`; кнопка «Пауза» (действие Patroni) — другой элемент.
+    expect(screen.queryByText("Пауза", { selector: "span" })).not.toBeInTheDocument();
   });
 
   it("подписи следуют за языком интерфейса", async () => {
@@ -666,7 +670,7 @@ describe("Overview: столбцы по виду подключения", () => 
     renderWithClient(<Overview connectionId="c" />);
     await screen.findByRole("columnheader", { name: "Узел" });
     expect(headers()).toEqual([
-      "Узел", "Роль", "Состояние", "Адрес", "Таймлайн", "Лаг", "Задержка replay", "Источник WAL", "Теги", "Версии", "Работает", "Соединения", "БД",
+      "Узел", "Роль", "Состояние", "Адрес", "Таймлайн", "Лаг", "Задержка replay", "Источник WAL", "Теги", "Версии", "Работает", "Соединения", "БД", "Действия",
     ]);
   });
 });
@@ -897,6 +901,209 @@ describe("Overview: опрос фактов и устаревшие данные
     await tick(10_000);
     expect(screen.getByText("13 / 100")).not.toHaveClass("stale");
     expect(screen.queryByRole("img", { name: /последние известные данные/ })).not.toBeInTheDocument();
+  });
+});
+
+describe("Overview: действия Patroni", () => {
+  const withLogin = { ...newProfile(), id: "c", name: "billing", kind: "patroni" as const, patroni: { urls: ["http://pg-1:8008"], username: "admin", tls: null, hostOverrides: [] } };
+  const scheduled = {
+    scheduledSwitchover: { at: "2030-12-01T10:30:00+03:00", from: "pg-1", to: "pg-2" },
+    members: [member("pg-1", { role: "primary", state: "running", lagBytes: null }), member("pg-2", { role: "replica", pendingRestart: true, scheduledRestart: { at: "2030-12-01T03:00:00+03:00", postgresVersion: null } })],
+  };
+  const answer = {
+    leader: "pg-1",
+    leaderState: "running",
+    leaderReachable: true,
+    paused: false,
+    candidates: [],
+    leaderClientSessions: 3,
+    member: null,
+    scheduledSwitchover: null,
+    canSend: true,
+  };
+  const names = (re: RegExp) => screen.queryAllByRole("button").filter((b) => re.test(b.getAttribute("aria-label") ?? b.textContent ?? ""));
+  const ACTIONS = /Switchover|Failover|Restart|Отменить|Пауза|Снять паузу/;
+
+  beforeEach(() => {
+    vi.mocked(api.listConnections).mockResolvedValue([withLogin]);
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView());
+    vi.mocked(api.previewPatroniAction).mockResolvedValue(answer);
+    vi.mocked(api.executePatroniAction).mockResolvedValue({ response: "ok", watch: null, journalWritten: true, outcomeUnknown: false, error: null });
+    vi.mocked(api.stopSession).mockResolvedValue(true);
+  });
+
+  it("в панели — Switchover…, Failover…, Пауза; у каждого участника — Restart…; отмен нет, пока ничего не запланировано", async () => {
+    renderWithClient(<Overview connectionId="c" />);
+    for (const name of ["Switchover…", "Failover…", "Пауза", "Restart pg-1…", "Restart pg-2…"]) {
+      expect(await screen.findByRole("button", { name })).toBeEnabled();
+    }
+    expect(screen.getByRole("columnheader", { name: "Действия" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Отменить/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Снять паузу" })).toBeNull();
+    // Видимый текст кнопки строки — «Restart…», имя с узлом — для скринридера.
+    expect(within(screen.getByRole("row", { name: /^pg-2 / })).getByRole("button")).toHaveTextContent("Restart…");
+  });
+
+  it("кластер на паузе — «Снять паузу» вместо «Пауза»", async () => {
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView({ topology: topology({ paused: true }) }));
+    renderWithClient(<Overview connectionId="c" />);
+    expect(await screen.findByRole("button", { name: "Снять паузу" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Пауза" })).toBeNull();
+    // Пометка паузы в шапке остаётся.
+    expect(screen.getByText("Пауза", { selector: "span" })).toBeInTheDocument();
+  });
+
+  it("запланированный switchover — «Отменить…» у баннера; запланированный restart — «Отменить restart…» у участника", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView({ topology: topology(scheduled) }));
+    renderWithClient(<Overview connectionId="c" />);
+    const banner = (await screen.findByText(/Запланирован switchover pg-1 → pg-2/)).closest("p")!;
+    await user.click(within(banner).getByRole("button", { name: "Отменить…" }));
+    expect(api.previewPatroniAction).toHaveBeenCalledWith("c", { kind: "cancelSwitchover" });
+    expect(await screen.findByRole("region", { name: "Отмена switchover" })).toBeInTheDocument();
+    expect(within(screen.getByRole("row", { name: /^pg-1 / })).queryByRole("button", { name: /Отменить restart/ })).toBeNull();
+    await user.click(within(screen.getByRole("row", { name: /^pg-2 / })).getByRole("button", { name: "Отменить restart pg-2…" }));
+    expect(api.previewPatroniAction).toHaveBeenLastCalledWith("c", { kind: "cancelRestart", member: "pg-2" });
+    // Новый диалог заменил прежний, идущего действия нет.
+    expect(await screen.findByRole("region", { name: "Отмена restart" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Отмена switchover" })).toBeNull();
+  });
+
+  it("подключение только для чтения — ни одной кнопки действий и столбца", async () => {
+    vi.mocked(api.listConnections).mockResolvedValue([{ ...withLogin, readOnly: true }]);
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView({ topology: topology(scheduled) }));
+    renderWithClient(<Overview connectionId="c" />);
+    await screen.findByText(/Запланирован switchover pg-1 → pg-2/);
+    expect(names(ACTIONS)).toHaveLength(0);
+    expect(screen.queryByRole("columnheader", { name: "Действия" })).toBeNull();
+  });
+
+  it("профиль ещё не загружен — кнопок нет", async () => {
+    vi.mocked(api.listConnections).mockReturnValue(new Promise(() => {}));
+    renderWithClient(<Overview connectionId="c" />);
+    await screen.findByText("Leader: pg-1");
+    expect(names(ACTIONS)).toHaveLength(0);
+  });
+
+  it("не Patroni (список узлов, одиночный сервер) — ни одной кнопки", async () => {
+    vi.mocked(api.listConnections).mockResolvedValue([{ ...withLogin, kind: "hostList" }]);
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView({ topology: topology({ kind: "hostList", scope: null, paused: null }) }));
+    renderWithClient(<Overview connectionId="c" />);
+    await screen.findByText("Primary: pg-1");
+    expect(names(ACTIONS)).toHaveLength(0);
+    expect(screen.queryByRole("columnheader", { name: "Действия" })).toBeNull();
+  });
+
+  it("без логина API Patroni кнопки неактивны с подсказкой, что указать", async () => {
+    vi.mocked(api.listConnections).mockResolvedValue([{ ...withLogin, patroni: { urls: ["http://pg-1:8008"], username: null, tls: null, hostOverrides: [] } }]);
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView({ topology: topology(scheduled) }));
+    renderWithClient(<Overview connectionId="c" />);
+    await screen.findByText(/Запланирован switchover pg-1 → pg-2/);
+    const buttons = names(ACTIONS);
+    expect(buttons.length).toBeGreaterThanOrEqual(6);
+    for (const b of buttons) {
+      expect(b).toBeDisabled();
+      expect(b).toHaveAttribute("title", "Укажите в подключении логин API Patroni, чтобы выполнять действия");
+    }
+  });
+
+  it("недоступному участнику Restart недоступен с причиной, отмена его расписания — доступна", async () => {
+    vi.mocked(api.getTopology).mockResolvedValue(
+      topologyView({
+        state: "degraded",
+        topology: topology({
+          members: [member("pg-1", { role: "primary", state: "running" }), member("pg-2", { reachable: false, role: "unknown", scheduledRestart: { at: "2030-12-01T03:00:00+03:00", postgresVersion: null } })],
+        }),
+      }),
+    );
+    renderWithClient(<Overview connectionId="c" />);
+    const restart = await screen.findByRole("button", { name: "Restart pg-2…" });
+    expect(restart).toBeDisabled();
+    expect(restart).toHaveAttribute("title", "Узел pg-2 недоступен");
+    expect(screen.getByRole("button", { name: "Restart pg-1…" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Отменить restart pg-2…" })).toBeEnabled();
+  });
+
+  it("подключение закрыто (последний известный вид): действия недоступны", async () => {
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView({ state: "failed", error: { code: "CONNECTION_FAILED", message: "gone", retryable: true } }));
+    renderWithClient(<Overview connectionId="c" />);
+    await screen.findByText("Не удалось подключиться");
+    const buttons = names(ACTIONS);
+    expect(buttons.length).toBeGreaterThanOrEqual(5);
+    for (const b of buttons) expect(b).toBeDisabled();
+  });
+
+  it("кнопки открывают диалог с нужным действием: Switchover, Failover, Пауза, Restart (onlyPending — по отметке участника)", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView({ topology: topology(scheduled) }));
+    renderWithClient(<Overview connectionId="c" />);
+    await user.click(await screen.findByRole("button", { name: "Switchover…" }));
+    expect(api.previewPatroniAction).toHaveBeenLastCalledWith("c", { kind: "switchover", candidate: null, scheduledAt: null });
+    expect(await screen.findByRole("region", { name: "Switchover" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Failover…" }));
+    expect(api.previewPatroniAction).toHaveBeenLastCalledWith("c", { kind: "failover", candidate: "" });
+    await user.click(screen.getByRole("button", { name: "Пауза" }));
+    expect(api.previewPatroniAction).toHaveBeenLastCalledWith("c", { kind: "pause", paused: true });
+    await user.click(screen.getByRole("button", { name: "Restart pg-2…" }));
+    expect(api.previewPatroniAction).toHaveBeenLastCalledWith("c", { kind: "restart", member: "pg-2", onlyPending: true, scheduledAt: null });
+    await user.click(screen.getByRole("button", { name: "Restart pg-1…" }));
+    expect(api.previewPatroniAction).toHaveBeenLastCalledWith("c", { kind: "restart", member: "pg-1", onlyPending: false, scheduledAt: null });
+    expect(api.previewPatroniAction).toHaveBeenCalledTimes(5);
+  });
+
+  it("на паузе «Снять паузу» открывает действие pause с paused: false", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView({ topology: topology({ paused: true }) }));
+    renderWithClient(<Overview connectionId="c" />);
+    await user.click(await screen.findByRole("button", { name: "Снять паузу" }));
+    expect(api.previewPatroniAction).toHaveBeenCalledWith("c", { kind: "pause", paused: false });
+  });
+
+  it("диалог стоит над таблицей участников; закрытие возвращает фокус на кнопку", async () => {
+    const user = userEvent.setup();
+    renderWithClient(<Overview connectionId="c" />);
+    const opener = await screen.findByRole("button", { name: "Switchover…" });
+    await user.click(opener);
+    const dialog = await screen.findByRole("region", { name: "Switchover" });
+    const table = screen.getByRole("region", { name: "Таблица узлов" });
+    expect(dialog.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await user.click(await within(dialog).findByRole("button", { name: "Отмена" }));
+    expect(screen.queryByRole("region", { name: "Switchover" })).toBeNull();
+    expect(opener).toHaveFocus();
+  });
+
+  it("повторное открытие того же действия читает предпросмотр заново", async () => {
+    const user = userEvent.setup();
+    renderWithClient(<Overview connectionId="c" />);
+    const opener = await screen.findByRole("button", { name: "Switchover…" });
+    await user.click(opener);
+    await screen.findByRole("region", { name: "Switchover" });
+    await user.click(opener);
+    await waitFor(() => expect(api.previewPatroniAction).toHaveBeenCalledTimes(2));
+  });
+
+  it("пока действие выполняется, другое окно не открывается и кнопки неактивны", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.executePatroniAction).mockReturnValue(new Promise(() => {}));
+    renderWithClient(<Overview connectionId="c" />);
+    await user.click(await screen.findByRole("button", { name: "Switchover…" }));
+    await user.click(await screen.findByRole("button", { name: "Выполнить" }));
+    await waitFor(() => expect(api.executePatroniAction).toHaveBeenCalled());
+    for (const b of names(ACTIONS)) expect(b).toBeDisabled();
+    expect(screen.getByRole("region", { name: "Switchover" })).toBeInTheDocument();
+    expect(api.previewPatroniAction).toHaveBeenCalledTimes(1);
+  });
+
+  it("закрытие вкладки с идущим наблюдением останавливает его", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.executePatroniAction).mockResolvedValue({ response: "", watch: "w-1", journalWritten: true, outcomeUnknown: false, error: null });
+    const { unmount } = renderWithClient(<Overview connectionId="c" />);
+    await user.click(await screen.findByRole("button", { name: "Пауза" }));
+    await user.click(await screen.findByRole("button", { name: "Выполнить" }));
+    await screen.findByRole("region", { name: "Ход действия" });
+    expect(api.stopSession).not.toHaveBeenCalled();
+    unmount();
+    await waitFor(() => expect(api.stopSession).toHaveBeenCalledWith("w-1"));
   });
 });
 

@@ -661,7 +661,8 @@
       "versions": "Versions",
       "uptime": "Uptime",
       "connections": "Connections",
-      "databases": "Databases"
+      "databases": "Databases",
+      "actions": "Actions"
     },
     "event": {
       "leaderChanged": "Leader changed: {{from}} → {{to}}",
@@ -1411,6 +1412,62 @@
     "findings": {
       "terminateIdle": "Terminate idle in transaction older than {{duration}}",
       "terminateRoot": "Terminate session {{pid}}"
+    },
+    "patroni": {
+      "switchover": "Switchover…",
+      "failover": "Failover…",
+      "pause": "Pause",
+      "resume": "Resume",
+      "restart": "Restart…",
+      "restartNamed": "Restart {{member}}…",
+      "cancel": "Cancel…",
+      "cancelRestart": "Cancel restart…",
+      "cancelRestartNamed": "Cancel restart on {{member}}…",
+      "candidate": "Candidate",
+      "candidateAuto": "Let Patroni choose",
+      "candidateLabel": "candidate name",
+      "candidateLag": "lag {{lag}}",
+      "noReadyCandidate": "No replica is ready to become the leader",
+      "when": "When",
+      "now": "Now",
+      "scheduled": "Scheduled",
+      "scheduleAt": "Date and time",
+      "scheduleInvalid": "Set a date and time to schedule the action",
+      "onlyPending": "Only if a restart is pending",
+      "leader": "Leader: {{name}}",
+      "leaderUnreachable": "The leader is not answering the poll: the action may fail or take longer",
+      "sessions": "Client sessions on the leader that will break: {{count}}",
+      "sessionsUnknown": "Client sessions on the leader that will break: could not be read",
+      "writeDown": "Writes will be unavailable for a few seconds",
+      "oldLeader": "The old leader will become a replica",
+      "leaderRestart": "Restarting the leader: writes are unavailable until it is back",
+      "pauseNote": "Patroni stops managing the cluster: no failover and no restarts until resumed",
+      "resumeNote": "Patroni will manage the cluster again",
+      "authRequired": "Set the Patroni API login in the connection to run actions",
+      "run": "Run",
+      "title": "Patroni: {{action}}",
+      "response": "Patroni answered: {{text}}",
+      "accepted": "Patroni accepted the request",
+      "outcomeUnknown": "Patroni did not answer: whether the action ran will show in the progress below",
+      "outcomeUnknownNoWatch": "Patroni did not answer: check the overview to see whether the action ran"
+    },
+    "watch": {
+      "title": "Progress",
+      "step": {
+        "accepted": "Accepted",
+        "leaderStepped": "The old leader stepped down",
+        "newLeaderRunning": "The new leader is running",
+        "timelineIncreased": "The timeline increased",
+        "replicasStreaming": "Replicas are streaming",
+        "restarted": "Restarted",
+        "memberRunning": "The node is running",
+        "pendingCleared": "Pending restart cleared",
+        "pauseApplied": "The cluster state changed",
+        "done": "Done"
+      },
+      "reached": "reached",
+      "timedOut": "The watch timed out: check the overview",
+      "failed": "The action failed"
     }
   },
   "hints": {

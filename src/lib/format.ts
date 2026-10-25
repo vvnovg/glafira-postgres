@@ -12,6 +12,15 @@ export function formatTimestamp(ms: number | null, utc = false): string {
   return `${y}-${pad(mo)}-${pad(da)} ${pad(h)}:${pad(mi)}:${pad(s)}.${pad(milli, 3)}`;
 }
 
+/**
+ * Время запланированного действия Patroni (`at` — ISO 8601 со смещением, как пришло из `/cluster`): в часовом поясе
+ * компьютера, тем же форматом, что и остальные метки. Строка, которую не разобрать, показывается как есть.
+ */
+export function formatScheduled(at: string): string {
+  const ms = Date.parse(at);
+  return Number.isNaN(ms) ? at : formatTimestamp(ms);
+}
+
 /** Время дня «ЧЧ:ММ:СС» по местным часам: в «Обновлено» шапки дата и миллисекунды — шум (полное время — в подсказке). */
 export function formatTime(ms: number): string {
   const d = new Date(ms);

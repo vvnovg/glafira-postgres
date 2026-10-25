@@ -1,13 +1,15 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useIsMutating, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../api/client";
-import type { AppError, ConnectionKind, Member, Topology, TopologyEvent } from "../../api/types";
+import type { AppError, ConnectionKind, Member, PatroniAction, Topology, TopologyEvent } from "../../api/types";
 import { i18n, currentLocale } from "../../i18n";
 import { tr } from "../../i18n/text";
-import { formatBytes, formatCount, formatTimestamp } from "../../lib/format";
+import { formatBytes, formatCount, formatScheduled, formatTimestamp } from "../../lib/format";
 import { roleLabel } from "../../lib/topology";
+import { canAct, useConnectionProfile } from "../../lib/useConnectionProfile";
 import { refreshAfterConnect, useTopology, useTopologyEvents } from "../../lib/useConnectionEvents";
+import { PatroniActionDialog } from "../actions/PatroniActionDialog";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { Glyph } from "../common/Glyph";
 import { hostKeyUnknown } from "../connections/profile";
@@ -53,15 +55,6 @@ function duration(ms: number): string {
 function replayDelay(ms: number): string {
   const s = (ms / 1000).toLocaleString(currentLocale(), { minimumFractionDigits: 1, maximumFractionDigits: 1 });
   return `${s} s`;
-}
-
-/**
- * Время запланированного действия Patroni (`at` — ISO 8601 со смещением, как пришло из `/cluster`): в часовом поясе
- * компьютера, тем же форматом, что и остальные метки. Строка, которую не разобрать, показывается как есть.
- */
-function scheduledAt(at: string): string {
-  const ms = Date.parse(at);
-  return Number.isNaN(ms) ? at : formatTimestamp(ms);
 }
 
 /** Теги Patroni: включённые флаги — именем, остальные значения (replicatefrom, failover_priority) — `имя: значение`; выключенные не показываются. */
@@ -163,18 +156,28 @@ function FactsCells({ connectionId, m, live, active }: { connectionId: string; m
 /** wrap — ячейка с длинным списком (теги) переносится по словам, остальные не ломаются. */
 type Column = { id: string; header: string; wrap?: boolean; cell: (m: Member) => ReactNode };
 
+/** Действия Patroni над участником (столбец «Действия»): открыть диалог, недоступны ли кнопки и почему (подсказка). */
+interface RowActions {
+  open: (a: PatroniAction) => void;
+  disabled: boolean;
+  title: string | undefined;
+}
+
 function MembersTable({
   connectionId,
   topo,
   live,
   active,
   selected,
+  actions,
 }: {
   connectionId: string;
   topo: Topology;
   live: boolean;
   active: boolean;
   selected?: string;
+  /** Есть только у кластера Patroni и подключения не для чтения. */
+  actions?: RowActions;
 }) {
   const { t } = useTranslation();
   const patroni = topo.kind === "patroni";
@@ -224,7 +227,7 @@ function MembersTable({
                 <>
                   {tags.join(", ")}
                   {m.pendingRestart && <div className="warn">{t("overview.pendingRestart")}</div>}
-                  {m.scheduledRestart && <div className="warn">{t("overview.scheduledRestart", { at: scheduledAt(m.scheduledRestart.at) })}</div>}
+                  {m.scheduledRestart && <div className="warn">{t("overview.scheduledRestart", { at: formatScheduled(m.scheduledRestart.at) })}</div>}
                 </>
               );
             },
@@ -258,6 +261,7 @@ function MembersTable({
             <th scope="col">{t("overview.col.uptime")}</th>
             <th scope="col">{t("overview.col.connections")}</th>
             <th scope="col">{t("overview.col.databases")}</th>
+            {actions && <th scope="col">{t("overview.col.actions")}</th>}
           </tr>
         </thead>
         <tbody>
@@ -271,6 +275,31 @@ function MembersTable({
                   </td>
                 ))}
                 <FactsCells connectionId={connectionId} m={m} live={live} active={active} />
+                {actions && (
+                  <td>
+                    {/* Видимый текст — «Restart…», а имя для скринридера называет узел: в столбце их столько, сколько узлов. */}
+                    <button
+                      type="button"
+                      disabled={actions.disabled || !m.reachable}
+                      title={actions.title ?? (m.reachable ? undefined : t("errors.actions.nodeUnavailable", { member: m.name }))}
+                      aria-label={t("actions.patroni.restartNamed", { member: m.name })}
+                      onClick={() => actions.open({ kind: "restart", member: m.name, onlyPending: m.pendingRestart, scheduledAt: null })}
+                    >
+                      {t("actions.patroni.restart")}
+                    </button>
+                    {m.scheduledRestart && (
+                      <button
+                        type="button"
+                        disabled={actions.disabled}
+                        title={actions.title}
+                        aria-label={t("actions.patroni.cancelRestartNamed", { member: m.name })}
+                        onClick={() => actions.open({ kind: "cancelRestart", member: m.name })}
+                      >
+                        {t("actions.patroni.cancelRestart")}
+                      </button>
+                    )}
+                  </td>
+                )}
               </tr>
             );
           })}
@@ -285,8 +314,19 @@ export function Overview({ connectionId, member, active = true }: { connectionId
   const { t } = useTranslation();
   const qc = useQueryClient();
   const journalId = useId();
-  const conns = useQuery({ queryKey: ["connections"], queryFn: api.listConnections });
-  const conn = conns.data?.find((c) => c.id === connectionId);
+  const conn = useConnectionProfile(connectionId);
+  // Действия Patroni: профиль нужен диалогу (окружение, имя для подтверждения) и условию показа кнопок.
+  const actor = conn !== undefined && canAct(conn) ? conn : undefined;
+  const [patroniAction, setPatroniAction] = useState<{ id: number; action: PatroniAction } | null>(null);
+  const patroniSeq = useRef(0);
+  // Пока действие выполняется, другой диалог его не вытесняет (результат не должен потеряться), а кнопки неактивны.
+  // Область ключа мутации — своя у каждой вкладки: действие другой вкладки этой же не мешает.
+  const patroniScope = useId();
+  const acting = useIsMutating({ mutationKey: ["patroniAction", connectionId, patroniScope] }) > 0;
+  const openPatroni = (action: PatroniAction) => {
+    if (acting) return;
+    setPatroniAction({ id: ++patroniSeq.current, action });
+  };
   const view = useTopology(connectionId);
   const events = useTopologyEvents(connectionId);
   const journal = events.data ?? [];
@@ -376,6 +416,13 @@ export function Overview({ connectionId, member, active = true }: { connectionId
   const isServer = topo?.kind === "server";
   const head = topo && !isServer ? leaders(topo.members) : [];
   const serverRole = isServer ? topo.members[0]?.role : undefined;
+  // Кнопки действий: только у кластера Patroni и подключения не для чтения. Без логина API Patroni они неактивны с
+  // подсказкой, что указать; при закрытом подключении действовать не на чем (и предпросмотр не прочитается).
+  const patroniActions = topo?.kind === "patroni" && actor !== undefined;
+  const noLogin = !conn?.patroni?.username;
+  const actionTitle = noLogin ? t("actions.patroni.authRequired") : undefined;
+  const actionsOff = !live || acting || noLogin;
+  const rowActions: RowActions | undefined = patroniActions ? { open: openPatroni, disabled: actionsOff, title: actionTitle } : undefined;
 
   return (
     <div className="page">
@@ -387,10 +434,18 @@ export function Overview({ connectionId, member, active = true }: { connectionId
         {topo?.scheduledSwitchover && (
           <p className="warn toolbar-note">
             {t("overview.scheduledSwitchover", {
-              at: scheduledAt(topo.scheduledSwitchover.at),
+              at: formatScheduled(topo.scheduledSwitchover.at),
               from: topo.scheduledSwitchover.from ?? "—",
               to: topo.scheduledSwitchover.to ?? "—",
             })}
+            {patroniActions && (
+              <>
+                {" "}
+                <button type="button" disabled={actionsOff} title={actionTitle} onClick={() => openPatroni({ kind: "cancelSwitchover" })}>
+                  {t("actions.patroni.cancel")}
+                </button>
+              </>
+            )}
           </p>
         )}
         {topo && !isServer && (
@@ -414,6 +469,19 @@ export function Overview({ connectionId, member, active = true }: { connectionId
             {t("sidebar.reopen")}
           </button>
         )}
+        {patroniActions && (
+          <>
+            <button type="button" disabled={actionsOff} title={actionTitle} onClick={() => openPatroni({ kind: "switchover", candidate: null, scheduledAt: null })}>
+              {t("actions.patroni.switchover")}
+            </button>
+            <button type="button" disabled={actionsOff} title={actionTitle} onClick={() => openPatroni({ kind: "failover", candidate: "" })}>
+              {t("actions.patroni.failover")}
+            </button>
+            <button type="button" disabled={actionsOff} title={actionTitle} onClick={() => openPatroni({ kind: "pause", paused: topo.paused !== true })}>
+              {t(topo.paused === true ? "actions.patroni.resume" : "actions.patroni.pause")}
+            </button>
+          </>
+        )}
       </div>
       {view.error && <ErrorBanner error={view.error} onRetry={() => void view.refetch()} />}
       {shownError && <ErrorBanner error={shownError} />}
@@ -428,7 +496,10 @@ export function Overview({ connectionId, member, active = true }: { connectionId
           ))}
         </div>
       )}
-      {topo && <MembersTable connectionId={connectionId} topo={topo} live={live} active={active} selected={member} />}
+      {patroniAction && actor && patroniActions && (
+        <PatroniActionDialog key={patroniAction.id} connectionId={connectionId} profile={actor} action={patroniAction.action} scope={patroniScope} onClose={() => setPatroniAction(null)} />
+      )}
+      {topo && <MembersTable connectionId={connectionId} topo={topo} live={live} active={active} selected={member} actions={rowActions} />}
       {topo && (
         <section aria-labelledby={journalId}>
           <h3 id={journalId}>{t("overview.journal")}</h3>

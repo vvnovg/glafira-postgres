@@ -105,6 +105,22 @@ describe("ConfirmDialog", () => {
     expect(onConfirm).not.toHaveBeenCalled();
   });
 
+  it("disabled: подтверждение недоступно (кнопка и Enter), а отмена и поля работают", async () => {
+    const user = userEvent.setup();
+    const onConfirm = vi.fn();
+    const onCancel = vi.fn();
+    render(<ConfirmDialog connection={prod} title="t" confirmLabel="Да" disabled onConfirm={onConfirm} onCancel={onCancel} />);
+    const name = screen.getByLabelText("Имя подключения");
+    await user.type(name, "prod-1");
+    // Имя верное, но форма над подтверждением не заполнена: кнопка неактивна, Enter не подтверждает.
+    expect(screen.getByRole("button", { name: "Да" })).toBeDisabled();
+    await user.keyboard("{Enter}");
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Отмена" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Отмена" }));
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
   it("needsConfirmation", () => {
     expect(needsConfirmation(dev)).toBe(false);
     expect(needsConfirmation(dev, "it_dead_slot")).toBe(true);

@@ -386,3 +386,8 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .waits-groups section { min-width: 0; }
 /* Текст запроса в топе — не длиннее двух строк; целиком он в подсказке. */
 .waits-query { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; max-width: 70ch; overflow: hidden; white-space: normal; overflow-wrap: anywhere; }
+
+/* Выбор в диалоге действия Patroni (кандидат, время): варианты столбцом, причина отказа — рядом с недоступным вариантом. */
+.choice { border: 0; margin: 0; padding: 0; min-width: 0; }
+.choice legend { padding: 0; margin-bottom: 2px; color: var(--muted); }
+.choice label { display: flex; flex-wrap: wrap; gap: 0 6px; align-items: baseline; margin: 3px 0; }

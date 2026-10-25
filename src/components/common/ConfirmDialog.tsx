@@ -17,6 +17,8 @@ interface Props {
   objectLabel?: string;
   danger?: boolean;
   busy?: boolean;
+  /** Подтвердить нельзя, пока не заполнено то, что стоит над диалогом (например, время расписания); отмена и поля работают. */
+  disabled?: boolean;
   children?: ReactNode;
   onConfirm: (c: Confirmation) => void;
   onCancel: () => void;
@@ -34,6 +36,7 @@ export function ConfirmDialog({
   objectLabel,
   danger,
   busy,
+  disabled,
   children,
   onConfirm,
   onCancel,
@@ -63,7 +66,7 @@ export function ConfirmDialog({
       if (!busy) onCancel();
     } else if (e.key === "Enter" && !(e.target instanceof HTMLButtonElement)) {
       e.preventDefault();
-      if (ok && !busy) submit();
+      if (ok && !busy && !disabled) submit();
     }
   };
 
@@ -87,7 +90,7 @@ export function ConfirmDialog({
         <button
           type="button"
           className={danger ? "danger" : "primary"}
-          disabled={!ok || busy}
+          disabled={!ok || busy || disabled}
           onClick={submit}
         >
           {confirmLabel}

@@ -3,8 +3,8 @@ import type { Candidate, DiagReport, DynConfig, FailoverData, FailoverReason } f
 import { formatBytes, formatCount, formatDuration } from "../../lib/format";
 import { bytesText } from "./viewText";
 
-/** Причина отказа кандидату: ключ подписи выбирается по значению, поэтому — литералами. */
-const REASON_KEYS: Record<FailoverReason, string> = {
+/** Причина отказа кандидату: ключ подписи выбирается по значению, поэтому — литералами. Общий с диалогом failover и switchover. */
+export const REASON_KEYS: Record<FailoverReason, string> = {
   unreachable: "diag.failover.reasons.unreachable",
   notStreaming: "diag.failover.reasons.notStreaming",
   lagTooHigh: "diag.failover.reasons.lagTooHigh",

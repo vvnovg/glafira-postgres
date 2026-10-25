@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { i18n } from "../i18n";
-import { formatAas, formatBytes, formatCount, formatDuration, formatInt64, formatPercent, formatTimestamp } from "./format";
+import { formatAas, formatBytes, formatCount, formatDuration, formatInt64, formatPercent, formatScheduled, formatTimestamp } from "./format";
 
 describe("format", () => {
   it("timestamp в UTC с миллисекундами", () => {
@@ -127,5 +127,12 @@ describe("форматы по языку", () => {
   it("длительность: отрицательное значение сервера (−0,001 с) показывается как 0", async () => {
     await i18n.changeLanguage("ru");
     expect([formatDuration(-0.001), formatDuration(-5), formatDuration(-86_400)]).toEqual(["0 с", "0 с", "0 с"]);
+  });
+
+  it("запланированное время: ISO 8601 со смещением — местным временем тем же форматом, что и метки; неразборчивое — как есть", () => {
+    expect(formatScheduled("2026-10-25T02:00:00+00:00")).toBe(formatTimestamp(Date.parse("2026-10-25T02:00:00+00:00")));
+    expect(formatScheduled("2026-10-25T05:00:00+03:00")).toBe(formatScheduled("2026-10-25T02:00:00Z"));
+    expect(formatScheduled("завтра")).toBe("завтра");
+    expect(formatScheduled("")).toBe("");
   });
 });

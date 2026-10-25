@@ -683,7 +683,8 @@
       "versions": "Версии",
       "uptime": "Работает",
       "connections": "Соединения",
-      "databases": "БД"
+      "databases": "БД",
+      "actions": "Действия"
     },
     "event": {
       "leaderChanged": "Смена лидера: {{from}} → {{to}}",
@@ -1439,6 +1440,62 @@
     "findings": {
       "terminateIdle": "Завершить idle in transaction старше {{duration}}",
       "terminateRoot": "Завершить сессию {{pid}}"
+    },
+    "patroni": {
+      "switchover": "Switchover…",
+      "failover": "Failover…",
+      "pause": "Пауза",
+      "resume": "Снять паузу",
+      "restart": "Restart…",
+      "restartNamed": "Restart {{member}}…",
+      "cancel": "Отменить…",
+      "cancelRestart": "Отменить restart…",
+      "cancelRestartNamed": "Отменить restart {{member}}…",
+      "candidate": "Кандидат",
+      "candidateAuto": "Patroni выберет сам",
+      "candidateLabel": "имя кандидата",
+      "candidateLag": "лаг {{lag}}",
+      "noReadyCandidate": "Нет реплики, готовой стать лидером",
+      "when": "Когда",
+      "now": "Сейчас",
+      "scheduled": "По расписанию",
+      "scheduleAt": "Дата и время",
+      "scheduleInvalid": "Укажите дату и время, чтобы запланировать действие",
+      "onlyPending": "Только если нужен перезапуск",
+      "leader": "Лидер: {{name}}",
+      "leaderUnreachable": "Лидер не отвечает на опрос: действие может не пройти или затянуться",
+      "sessions": "Оборвётся клиентских сессий лидера: {{count}}",
+      "sessionsUnknown": "Оборвётся клиентских сессий лидера: не удалось прочитать",
+      "writeDown": "Запись будет недоступна несколько секунд",
+      "oldLeader": "Старый лидер станет репликой",
+      "leaderRestart": "Перезапуск лидера — запись недоступна до конца перезапуска",
+      "pauseNote": "Patroni перестанет управлять кластером: ни failover, ни перезапусков, пока пауза не снята",
+      "resumeNote": "Patroni снова начнёт управлять кластером",
+      "authRequired": "Укажите в подключении логин API Patroni, чтобы выполнять действия",
+      "run": "Выполнить",
+      "title": "Patroni: {{action}}",
+      "response": "Ответ Patroni: {{text}}",
+      "accepted": "Patroni принял запрос",
+      "outcomeUnknown": "Patroni не ответил — выполнилось ли действие, покажет наблюдение",
+      "outcomeUnknownNoWatch": "Patroni не ответил — выполнилось ли действие, проверьте обзор"
+    },
+    "watch": {
+      "title": "Ход действия",
+      "step": {
+        "accepted": "Принято",
+        "leaderStepped": "Старый лидер сложил полномочия",
+        "newLeaderRunning": "Новый лидер работает",
+        "timelineIncreased": "Таймлайн вырос",
+        "replicasStreaming": "Реплики получают WAL",
+        "restarted": "Перезапущен",
+        "memberRunning": "Узел работает",
+        "pendingCleared": "Отметка «нужен перезапуск» снята",
+        "pauseApplied": "Состояние кластера изменилось",
+        "done": "Готово"
+      },
+      "reached": "выполнен",
+      "timedOut": "Срок наблюдения вышел — смотрите обзор",
+      "failed": "Действие не удалось"
     }
   },
   "hints": {
