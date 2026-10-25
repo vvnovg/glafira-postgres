@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useEffect } from "react";
 import { api } from "../api/client";
 import type { AppError, ConnState, TopologyEvent, TopologyView } from "../api/types";
+import { useConnectionEpochs } from "../state/connectionEpoch";
 
 export const EVENTS_CAP = 500;
 
@@ -35,6 +36,9 @@ export const ofConnection = (prefixes: readonly string[], id: string) => (q: { q
  */
 export function refreshAfterConnect(qc: QueryClient, id: string) {
   void qc.invalidateQueries({ predicate: ofConnection(PG_QUERY_KEYS, id) });
+  // Подписки вкладок на сэмплер перезапускаются: переподключение живого подключения не шлёт `stopped` и не
+  // размонтирует вкладку, а остановка сэмплера после отказа во входе иначе длилась бы до переоткрытия вкладки.
+  useConnectionEpochs.getState().bump(id);
 }
 
 const topologyKey = (id: string) => ["topology", id];

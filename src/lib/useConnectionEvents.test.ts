@@ -5,6 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TopologyEvent, TopologyView } from "../api/types";
 import { api } from "../api/client";
+import { useConnectionEpochs } from "../state/connectionEpoch";
 import { topologyView } from "../test/fixtures";
 
 // Мок событий Tauri: запоминает подписчиков, чтобы доставить им событие и проверить отписку.
@@ -154,6 +155,15 @@ describe("события наблюдения", () => {
     refreshAfterConnect(qc, "c");
     for (const k of mine) expect(qc.getQueryState(k)!.isInvalidated).toBe(true);
     for (const k of rest) expect(qc.getQueryState(k)!.isInvalidated).toBe(false);
+  });
+
+  it("подключение пользователем увеличивает номер подключения: подписки вкладок перезапускаются, чужие — нет", () => {
+    useConnectionEpochs.setState({ epochs: {} });
+    const qc = new QueryClient();
+    refreshAfterConnect(qc, "c");
+    refreshAfterConnect(qc, "c");
+    refreshAfterConnect(qc, "other");
+    expect(useConnectionEpochs.getState().epochs).toEqual({ c: 2, other: 1 });
   });
 
   it("тот же узел каталога каталог не сбрасывает", () => {

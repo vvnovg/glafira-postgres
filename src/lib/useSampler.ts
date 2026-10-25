@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, toAppError } from "../api/client";
 import type { AppError } from "../api/types";
+import { useConnectionEpoch } from "../state/connectionEpoch";
 
 /** Последние показания сэмплера: момент тика (часы приложения), активных сессий и ждущих блокировку. */
 export interface SamplerLive {
@@ -26,18 +27,23 @@ function stop(session: string) {
  * размонтирования, сразу отписывается: иначе сэмплер работал бы без вкладки.
  * События канала принимаются, только пока подписка действует: после `stopped` и после отписки (смена узла,
  * размонтирование) поздний тик или промежуток может ещё прийти, и показания прежнего узла не должны вернуться.
- * `stopped` не несёт причины: сэмплер остановили закрытие подключения, уход участника или переоткрытие подключения
- * («Переподключить») — вкладка при этом остаётся на экране, и без новой подписки она осталась бы мёртвой до
- * переоткрытия. Поэтому, пока вкладка включена, через `RESUBSCRIBE_DELAY_MS` она подписывается заново. Исключение —
- * отказ во входе (`AUTH_FAILED`, который сэмплер присылает событием `error` перед `stopped`): повтор подбирал бы пароль
- * (LDAP, fail2ban), как и повтор отчётов (`diagRefetchInterval`). Отказ самой повторной подписки (подключение ещё не
- * открыто, участника нет) — ошибка хука, как у первой подписки; новых попыток нет.
+ * `stopped` не несёт причины. При закрытии и повторном открытии подключения тело вкладки размонтируется и подписывается
+ * заново само; «Переподключить» живого подключения `stopped` не шлёт. Остаются исчезновение участника и отклонённая
+ * запоздавшая подписка: вкладка при этом остаётся на экране, и без новой подписки она осталась бы мёртвой. Поэтому, пока
+ * вкладка включена, через `RESUBSCRIBE_DELAY_MS` она подписывается заново. Исключение — отказ во входе (`AUTH_FAILED`,
+ * который сэмплер присылает событием `error` перед `stopped`): повтор подбирал бы пароль (LDAP, fail2ban), как и повтор
+ * отчётов (`diagRefetchInterval`). Эту остановку снимает только пользователь: «Переподключить» (и «Подключиться») через
+ * `refreshAfterConnect` увеличивает номер подключения (`useConnectionEpoch`), и подписка перезапускается, как перечитываются
+ * отчёты. Отказ самой повторной подписки (подключение ещё не открыто, участника нет) — ошибка хука, как у первой подписки;
+ * новых попыток нет.
  */
 export function useSampler(connectionId: string, member: string | null, enabled: boolean): { live: SamplerLive | null; error: AppError | null } {
   const [live, setLive] = useState<SamplerLive | null>(null);
   const [error, setError] = useState<AppError | null>(null);
   // Номер подписки: растёт, когда сэмплер остановлен не по отказу во входе, и перезапускает эффект.
   const [round, setRound] = useState(0);
+  // Номер подключения: растёт, когда пользователь его подключил или переподключил.
+  const epoch = useConnectionEpoch(connectionId);
   useEffect(() => {
     if (!enabled || !member) return;
     let session: string | null = null;
@@ -80,6 +86,6 @@ export function useSampler(connectionId: string, member: string | null, enabled:
       clearTimeout(retry);
       if (session) stop(session);
     };
-  }, [connectionId, member, enabled, round]);
+  }, [connectionId, member, enabled, round, epoch]);
   return { live, error };
 }

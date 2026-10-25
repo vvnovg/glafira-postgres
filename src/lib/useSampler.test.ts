@@ -8,6 +8,7 @@ vi.mock("../api/client", async (importOriginal) => {
 });
 
 import { api } from "../api/client";
+import { useConnectionEpochs } from "../state/connectionEpoch";
 import { RESUBSCRIBE_DELAY_MS, useSampler } from "./useSampler";
 
 const authFailed: AppError = { code: "AUTH_FAILED", message: "password authentication failed", retryable: false };
@@ -128,6 +129,7 @@ describe("useSampler: повторная подписка после stopped", (
   beforeEach(() => {
     vi.resetAllMocks();
     vi.useFakeTimers();
+    useConnectionEpochs.setState({ epochs: {} });
   });
   afterEach(() => vi.useRealTimers());
 
@@ -241,5 +243,36 @@ describe("useSampler: повторная подписка после stopped", (
     rerender({ enabled: false });
     await advance(10 * RESUBSCRIBE_DELAY_MS);
     expect(api.startSampler).toHaveBeenCalledTimes(1);
+  });
+
+  it("переподключение пользователем снимает остановку после отказа во входе: ровно одна новая подписка, чужое подключение — нет", async () => {
+    const emits = channels();
+    const { result } = renderHook(() => useSampler("c", "pg-1", true));
+    await advance(0);
+    act(() => emits[0]({ kind: "error", error: authFailed }));
+    act(() => emits[0]({ kind: "stopped" }));
+    await advance(10 * RESUBSCRIBE_DELAY_MS);
+    // Пароль автоматически не перебирается: пока пользователь не переподключил, подписки заново нет.
+    expect(api.startSampler).toHaveBeenCalledTimes(1);
+    expect(result.current.error).toEqual(authFailed);
+
+    // Переподключение другого подключения вкладку не затрагивает.
+    act(() => useConnectionEpochs.getState().bump("other"));
+    await advance(0);
+    expect(api.startSampler).toHaveBeenCalledTimes(1);
+
+    act(() => useConnectionEpochs.getState().bump("c"));
+    await advance(0);
+    expect(api.startSampler).toHaveBeenCalledTimes(2);
+    expect(api.startSampler).toHaveBeenLastCalledWith("c", "pg-1", expect.any(Function));
+    expect(result.current.error).toBeNull();
+    // Старая подписка отписана, канал прежней молчит, живая — новая.
+    expect(api.stopSession).toHaveBeenCalledWith("s-1");
+    act(() => emits[0]({ kind: "tick", atMs: 9, active: 9, waiting: 9 }));
+    expect(result.current.live).toBeNull();
+    act(() => emits[1]({ kind: "tick", atMs: 3, active: 1, waiting: 0 }));
+    expect(result.current.live).toEqual({ atMs: 3, active: 1, waiting: 0 });
+    await advance(10 * RESUBSCRIBE_DELAY_MS);
+    expect(api.startSampler).toHaveBeenCalledTimes(2);
   });
 });
