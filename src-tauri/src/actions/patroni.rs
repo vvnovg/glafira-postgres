@@ -294,9 +294,24 @@ pub fn bases(t: &Topology, route: &Route, profile_urls: &[String]) -> Vec<String
     }
 }
 
-/// Отправляет запрос по адресам `bases`: следующий адрес — только при отказе соединения (Patroni не ответил);
-/// ответ Patroni (любой код) — окончательный. 2xx — `Ok((адрес, ответ))`; 401/403 — `AUTH_FAILED`;
-/// иначе — `errors.patroni.actionRejected` с кодом и первыми 500 символами ответа в `details`.
+/// Запрос наверняка не дошёл до Patroni: соединение не установлено (отказ, недоступный адрес, имя не
+/// разрешилось), не удалось рукопожатие TLS либо туннель ssh не пробросил соединение. Только тогда можно
+/// пробовать следующий адрес. Таймаут сюда не входит: запрос мог дойти и выполниться, а повтор не
+/// идемпотентного действия на другом узле дал бы ложный отказ или двойное выполнение.
+fn not_delivered(e: &AppError) -> bool {
+    matches!(
+        e.key.as_str(),
+        "errors.patroni.unreachable"
+            | "errors.patroni.tls"
+            | "errors.ssh.forwardFailed"
+            | "errors.ssh.tunnelDown"
+    )
+}
+
+/// Отправляет запрос по адресам `bases`: следующий адрес — только когда запрос наверняка не дошёл до Patroni
+/// (`not_delivered`); ответ Patroni (любой код), таймаут и любая иная ошибка — окончательны. 2xx —
+/// `Ok((адрес, ответ))`; 401/403 — `AUTH_FAILED`; иначе — `errors.patroni.actionRejected` с кодом и первыми
+/// 500 символами ответа в `details`.
 pub async fn send(
     http: &dyn PatroniHttp,
     req: &PatroniRequest,
@@ -327,8 +342,8 @@ pub async fn send(
                     crate::actions::journal::RESPONSE_CHARS,
                 )));
             }
-            Err(e) if e.code == ErrorCode::AuthFailed => return Err(e),
-            Err(e) => last = Some(e),
+            Err(e) if not_delivered(&e) => last = Some(e),
+            Err(e) => return Err(e),
         }
     }
     Err(last.unwrap_or_else(|| {
@@ -829,5 +844,141 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(e.details.as_deref().map(|d| d.chars().count()), Some(500));
+    }
+    /// Подделка со сценарием: `fail(url)` решает, чем отвечает адрес — ошибкой или `200`; вызовы записываются.
+    type Script = Box<dyn Fn(&str) -> Option<AppError> + Send + Sync>;
+
+    struct Scripted {
+        fail: Script,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl Scripted {
+        fn new(fail: impl Fn(&str) -> Option<AppError> + Send + Sync + 'static) -> Self {
+            Self {
+                fail: Box::new(fail),
+                calls: Mutex::new(vec![]),
+            }
+        }
+    }
+
+    impl PatroniHttp for Scripted {
+        fn get_json<'a>(&'a self, _url: &'a str) -> BoxFuture<'a, AppResult<serde_json::Value>> {
+            Box::pin(async { Ok(serde_json::Value::Null) })
+        }
+        fn get_status<'a>(&'a self, _url: &'a str) -> BoxFuture<'a, AppResult<u16>> {
+            Box::pin(async { Ok(200) })
+        }
+        fn send_json<'a>(
+            &'a self,
+            _method: HttpMethod,
+            url: &'a str,
+            _body: Option<&'a serde_json::Value>,
+        ) -> BoxFuture<'a, AppResult<HttpReply>> {
+            self.calls.lock_safe().push(url.to_string());
+            let failure = (self.fail)(url);
+            Box::pin(async move {
+                match failure {
+                    Some(e) => Err(e),
+                    None => Ok(HttpReply {
+                        status: 200,
+                        body: String::new(),
+                    }),
+                }
+            })
+        }
+    }
+
+    fn timeout_err(url: &str) -> AppError {
+        app_err!(
+            ErrorCode::PatroniError,
+            "errors.patroni.timeout",
+            "Patroni API at {{url}} did not answer within 5 s",
+            url = url
+        )
+    }
+
+    #[test]
+    fn only_a_request_that_certainly_did_not_arrive_may_move_to_the_next_address() {
+        let url = "http://pg-1:8008";
+        let unreachable = app_err!(
+            ErrorCode::PatroniError,
+            "errors.patroni.unreachable",
+            "Patroni API at {{url}} is unreachable",
+            url = url
+        );
+        let tls = app_err!(
+            ErrorCode::TlsError,
+            "errors.patroni.tls",
+            "TLS error talking to the Patroni API at {{url}}",
+            url = url
+        );
+        let forward = crate::net::ssh::socks::forward_failed("bastion", "pg-1", 8008, "closed");
+        let tunnel = crate::net::ssh::socks::tunnel_down("bastion", 1080, "refused");
+        for e in [&unreachable, &tls, &forward, &tunnel] {
+            assert!(not_delivered(e), "{}", e.key);
+        }
+        let timeout = timeout_err(url);
+        let withheld = app_err!(
+            ErrorCode::AuthFailed,
+            "errors.patroni.credentialsWithheld",
+            "The Patroni API at {{url}} asks for credentials over plain HTTP; they are not sent because the connection uses https: set an https API address for the member in “Node address overrides”",
+            url = url
+        );
+        let unsupported = app_err!(
+            ErrorCode::Internal,
+            "errors.patroni.sendUnsupported",
+            "This Patroni client cannot send changes to {{url}}",
+            url = url
+        );
+        for e in [&timeout, &withheld, &unsupported] {
+            assert!(!not_delivered(e), "{}", e.key);
+        }
+    }
+
+    #[tokio::test]
+    async fn send_does_not_repeat_a_request_after_a_timeout() {
+        let req = request(
+            &PatroniAction::Switchover {
+                candidate: None,
+                scheduled_at: None,
+            },
+            &cluster(),
+        );
+        let bases = vec![
+            "http://pg-1:8008".to_string(),
+            "http://pg-2:8008".to_string(),
+        ];
+        // Первый адрес не ответил за срок: запрос мог дойти и выполниться — второй адрес не трогаем.
+        let slow = Scripted::new(|url| url.starts_with("http://pg-1").then(|| timeout_err(url)));
+        let e = send(&slow, &req, &bases).await.unwrap_err();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (ErrorCode::PatroniError, "errors.patroni.timeout")
+        );
+        assert_eq!(*slow.calls.lock_safe(), ["http://pg-1:8008/switchover"]);
+        // То же для любой иной ошибки, не похожей на «не дошёл».
+        let broken = Scripted::new(|url| {
+            Some(app_err!(
+                ErrorCode::Internal,
+                "errors.patroni.sendUnsupported",
+                "This Patroni client cannot send changes to {{url}}",
+                url = url
+            ))
+        });
+        let e = send(&broken, &req, &bases).await.unwrap_err();
+        assert_eq!(e.key, "errors.patroni.sendUnsupported");
+        assert_eq!(broken.calls.lock_safe().len(), 1);
+        // Туннель ssh не пробросил соединение к первому узлу — второй адрес пробуется.
+        let forward = Scripted::new(|url| {
+            url.starts_with("http://pg-1")
+                .then(|| crate::net::ssh::socks::forward_failed("bastion", "pg-1", 8008, "closed"))
+        });
+        let (url, reply) = send(&forward, &req, &bases).await.unwrap();
+        assert_eq!(
+            (url.as_str(), reply.status),
+            ("http://pg-2:8008/switchover", 200)
+        );
+        assert_eq!(forward.calls.lock_safe().len(), 2);
     }
 }
