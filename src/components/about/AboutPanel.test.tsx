@@ -22,6 +22,7 @@ vi.mock("../../api/client", async (importOriginal) => {
 import { save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api } from "../../api/client";
+import { i18n } from "../../i18n";
 import { LICENSE_URL, SUPPORT_URL } from "../../lib/links";
 import { useDiagnosticsRequest } from "../../state/diagnosticsRequest";
 import { AboutPanel } from "./AboutPanel";
@@ -107,14 +108,62 @@ describe("AboutPanel", () => {
 
   it("обновление доступно: описание и установка", async () => {
     vi.mocked(api.installUpdate).mockClear();
-    vi.mocked(api.checkUpdate).mockResolvedValueOnce({ status: "available", version: "0.2.0", notes: "Исправления", date: null });
+    // Релиз без notes_i18n (0.2.0 и раньше): показывается обычный notes.
+    vi.mocked(api.checkUpdate).mockResolvedValueOnce({ status: "available", version: "0.2.0", notes: "Исправления", notesI18n: {}, date: null });
     const user = userEvent.setup();
     renderWithClient(<AboutPanel />);
     await user.click(await screen.findByRole("button", { name: "Проверить обновления" }));
     expect(await screen.findByText("Доступна версия 0.2.0")).toBeInTheDocument();
-    expect(screen.getByText("Исправления")).toBeInTheDocument();
+    expect(await screen.findByText("Исправления")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Установить и перезапустить" }));
     expect(api.installUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it("заметки к обновлению — Markdown на языке интерфейса, ссылки — в системный браузер", async () => {
+    vi.mocked(openUrl).mockClear();
+    vi.mocked(api.checkUpdate).mockResolvedValueOnce({
+      status: "available",
+      version: "0.4.0",
+      notes: "- **Fixes**",
+      notesI18n: { en: "- **Fixes**", ru: "- **Исправления** для `pg_stat_activity`\n- [Подробнее](https://example.com/r)" },
+      date: null,
+    });
+    const user = userEvent.setup();
+    renderWithClient(<AboutPanel />);
+    await user.click(await screen.findByRole("button", { name: "Проверить обновления" }));
+    const notes = await screen.findByRole("region", { name: "Что нового в версии 0.4.0" });
+    expect((await screen.findByText("Исправления")).tagName).toBe("STRONG");
+    expect(screen.getByText("pg_stat_activity").tagName).toBe("CODE");
+    expect(notes.querySelectorAll("li")).toHaveLength(2);
+    expect(notes.textContent).not.toContain("**");
+    expect(screen.queryByText(/Fixes/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("link", { name: "Подробнее" }));
+    expect(openUrl).toHaveBeenCalledWith("https://example.com/r");
+  });
+
+  it("смена языка меняет заметки без новой проверки; нет перевода — английские", async () => {
+    vi.mocked(api.checkUpdate).mockClear();
+    vi.mocked(api.checkUpdate).mockResolvedValueOnce({
+      status: "available",
+      version: "0.4.0",
+      notes: "- Fixes",
+      notesI18n: { en: "- Fixes", ru: "- Исправления" },
+      date: null,
+    });
+    const user = userEvent.setup();
+    renderWithClient(<AboutPanel />);
+    await user.click(await screen.findByRole("button", { name: "Проверить обновления" }));
+    expect(await screen.findByText("Исправления")).toBeInTheDocument();
+    try {
+      await act(() => i18n.changeLanguage("en"));
+      expect(await screen.findByText("Fixes")).toBeInTheDocument();
+      // Языка нет в notes_i18n — английский раздел.
+      await act(() => i18n.changeLanguage("de"));
+      expect(await screen.findByText("Fixes")).toBeInTheDocument();
+      expect(api.checkUpdate).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(() => i18n.changeLanguage("ru"));
+    }
   });
 
   it("политика выключила обновления", async () => {
@@ -142,7 +191,7 @@ describe("AboutPanel", () => {
   });
 
   it("ошибка установки — баннер", async () => {
-    vi.mocked(api.checkUpdate).mockResolvedValueOnce({ status: "available", version: "0.2.0", notes: null, date: null });
+    vi.mocked(api.checkUpdate).mockResolvedValueOnce({ status: "available", version: "0.2.0", notes: null, notesI18n: {}, date: null });
     vi.mocked(api.installUpdate).mockRejectedValueOnce({ code: "INTERNAL", message: "Не удалось установить обновление", retryable: false });
     const user = userEvent.setup();
     renderWithClient(<AboutPanel />);
@@ -152,7 +201,7 @@ describe("AboutPanel", () => {
   });
 
   it("установка идёт: кнопки заблокированы, виден статус", async () => {
-    vi.mocked(api.checkUpdate).mockResolvedValueOnce({ status: "available", version: "0.2.0", notes: null, date: null });
+    vi.mocked(api.checkUpdate).mockResolvedValueOnce({ status: "available", version: "0.2.0", notes: null, notesI18n: {}, date: null });
     vi.mocked(api.installUpdate).mockImplementationOnce(() => new Promise(() => {}));
     const user = userEvent.setup();
     renderWithClient(<AboutPanel />);
@@ -165,8 +214,8 @@ describe("AboutPanel", () => {
 
   it("новая проверка убирает ошибку установки", async () => {
     vi.mocked(api.checkUpdate)
-      .mockResolvedValueOnce({ status: "available", version: "0.2.0", notes: null, date: null })
-      .mockResolvedValueOnce({ status: "available", version: "0.2.0", notes: null, date: null });
+      .mockResolvedValueOnce({ status: "available", version: "0.2.0", notes: null, notesI18n: {}, date: null })
+      .mockResolvedValueOnce({ status: "available", version: "0.2.0", notes: null, notesI18n: {}, date: null });
     vi.mocked(api.installUpdate).mockRejectedValueOnce({ code: "INTERNAL", message: "Не удалось установить обновление", retryable: false });
     const user = userEvent.setup();
     renderWithClient(<AboutPanel />);

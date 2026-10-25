@@ -19,7 +19,7 @@ describe("UpdateNotice", () => {
   });
 
   it("показывает доступную версию и открывает «О программе»", async () => {
-    vi.mocked(api.checkUpdate).mockResolvedValue({ status: "available", version: "0.2.0", notes: null, date: null });
+    vi.mocked(api.checkUpdate).mockResolvedValue({ status: "available", version: "0.2.0", notes: null, notesI18n: {}, date: null });
     const user = userEvent.setup();
     renderWithClient(<UpdateNotice />);
     expect(await screen.findByText("Доступна версия 0.2.0.")).toBeInTheDocument();

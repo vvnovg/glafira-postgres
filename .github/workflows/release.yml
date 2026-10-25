@@ -258,11 +258,10 @@ jobs:
             if [ "$base" != "$new" ]; then mv "$f" "release/assets/$new"; fi
           done
           ls -la release/assets
+      # Описание релиза — английский раздел CHANGELOG.md; в latest.json он же в `notes`, а все языки — в `notes_i18n`.
       - name: Описание и latest.json
         run: |
-          awk -v v="## $VERSION" '$0 ~ ("^" v "[[:space:]]*$"){f=1;next} /^## /{f=0} f' CHANGELOG.md > release/notes.md
-          if [ ! -s release/notes.md ]; then echo "::error::пустой раздел CHANGELOG для $VERSION"; exit 1; fi
-          node scripts/make-latest-json.mjs --version "$VERSION" --notes-file release/notes.md \
+          node scripts/make-latest-json.mjs --version "$VERSION" --notes-out release/notes.md \
             --base-url "https://github.com/${RELEASES_REPO}/releases/download/${TAG}" --dir release/assets \
             --require-all > latest.json
           mv latest.json release/assets/latest.json

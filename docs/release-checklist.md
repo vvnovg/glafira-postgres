@@ -28,13 +28,16 @@
 сборка по тегу всегда строгая.
 
 ## Каждый релиз
-1. Версия в `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`; раздел `## X.Y.Z` в `CHANGELOG.md`
-   покрывает всё с прошлого тега — из него собирается описание релиза (накопленный раздел `## Unreleased` переименовать в `## X.Y.Z`).
+1. Версия в `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`. Заметки к выпуску — раздел `## X.Y.Z`
+   в `CHANGELOG.md` (английский: тело GitHub-релиза и `notes` в `latest.json`, его видят версии до 0.2.0 включительно)
+   и в `docs/changelog/ru.md` (по смыслу); раздел покрывает всё с прошлого тега (накопленный `## Unreleased` переименовать
+   в `## X.Y.Z`), вторая строка — «Release date: ГГГГ-ММ-ДД.» / «Дата выпуска: ГГГГ-ММ-ДД.». Оба языка идут в `notes_i18n`,
+   и «О программе» показывает заметки на языке интерфейса как Markdown. `pnpm i18n:check` проверяет файлы.
 2. `cargo update -w --offline --manifest-path src-tauri/Cargo.toml` — новая версия попадает в `Cargo.lock`
    (без этого `cargo metadata --locked` в скрипте ниже падает), затем `node scripts/third-party.mjs` →
    обновлённый `THIRD_PARTY.md` (лицензии зависимостей); закоммитить. При обновлении зависимостей сверить список
    C-библиотек в `scripts/third-party.mjs` (OpenSSL 3 от `openssl-src`, AWS-LC от `aws-lc-sys`).
-3. `node scripts/check-release.mjs vX.Y.Z` → «можно выпускать».
+3. `node scripts/check-release.mjs vX.Y.Z` → «можно выпускать» (в том числе раздел версии на обоих языках).
 4. `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z` → workflow `release`. Релиз создаётся черновиком со всеми ассетами
    и публикуется атомарно (`--draft=false --latest`); updater читает `releases/latest/download/latest.json`
    (артефакты updater — формат v2).
@@ -82,12 +85,14 @@
 1. **Старая версия (A).** Ветка с версией выпуска, например `0.1.0`. Пробный прогон: `gh workflow run release -f dry_run=true`;
    скачать артефакт `release-v0.1.0` (установщики A).
 2. **Новая версия (B).** Временная ветка от той же ревизии, версия `0.1.1` в `package.json`, `src-tauri/Cargo.toml`,
-   `src-tauri/tauri.conf.json` и раздел `## 0.1.1` в `CHANGELOG.md` (ветку не сливать). Пробный прогон из неё
+   `src-tauri/tauri.conf.json` и раздел `## 0.1.1` в `CHANGELOG.md` (ветку не сливать; без перевода в `docs/changelog`
+   пробный прогон только предупреждает, а приложение покажет английские заметки). Пробный прогон из неё
    (`gh workflow run release --ref <ветка> -f dry_run=true`, workflow должен быть в `main`) → артефакт `release-v0.1.1`.
 3. **Тестовое зеркало (https).** Один из вариантов:
    - тестовый релиз в отдельном публичном репозитории (например, `vvnovg/glafira-postgres-updater-test`):
-     `gh release create v0.1.1 <ассеты B> --repo …`, затем пересобрать `latest.json` с адресами этого репозитория:
-     `node scripts/make-latest-json.mjs --version 0.1.1 --notes-file notes.md --base-url https://github.com/<repo>/releases/download/v0.1.1 --dir <ассеты B> --require-all`;
+     `gh release create v0.1.1 <ассеты B> --repo …`, затем пересобрать `latest.json` с адресами этого репозитория
+     (из корня рабочей копии ветки B: заметки берутся из её `CHANGELOG.md` и `docs/changelog`):
+     `node scripts/make-latest-json.mjs --version 0.1.1 --base-url https://github.com/<repo>/releases/download/v0.1.1 --dir <ассеты B> --require-all`;
    - статический https-сервер в локальной сети (с доверенным сертификатом) с теми же файлами и `latest.json`,
      пересобранным с его `--base-url`.
    Проверить: `curl -fsSL <url>/latest.json` открывается, `curl -fsSI` по каждому `url` из него — 200.

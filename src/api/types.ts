@@ -514,7 +514,7 @@ export interface PolicyStatus {
 export type UpdateCheck =
   | { status: "disabled"; reason: LocalizedText }
   | { status: "upToDate" }
-  | { status: "available"; version: string; notes: string | null; date: string | null };
+  | { status: "available"; version: string; notes: string | null; notesI18n: Record<string, string>; date: string | null };
 
 export interface AppInfo {
   name: string;

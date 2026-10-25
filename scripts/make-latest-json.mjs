@@ -2,10 +2,14 @@
 // latest.json для tauri-plugin-updater (артефакты v2) из собранных файлов и их .sig.
 // macOS-архив Tauri называется «<productName>.app.tar.gz» без архитектуры —
 // release.yml переименовывает его в «…_<версия>_<aarch64|x64>.app.tar.gz» до загрузки.
-import { readdirSync, readFileSync } from "node:fs";
+// Заметки: `notes` — английский раздел CHANGELOG.md (его показывают версии до 0.2.0 включительно), `notes_i18n` —
+// разделы на всех языках интерфейса; tauri-plugin-updater пропускает незнакомое поле, приложение читает его из raw_json.
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { readChangelogs, releaseNotes } from "./changelog.mjs";
+import { languageCodes } from "./i18n-check.mjs";
 
 // tauri-plugin-updater 2.x ищет в latest.json сначала «{os}-{arch}-{установщик}» (тип установки
 // зашит в бинарь бандлером: deb, rpm, appimage, msi, app), затем «{os}-{arch}». Установка из .deb/.rpm
@@ -37,8 +41,9 @@ function platformsOf(name) {
   return [];
 }
 
-/** files: { имя артефакта: содержимое .sig } */
+/** notes: { код языка: Markdown }, en обязателен; files: { имя артефакта: содержимое .sig } */
 export function buildLatest({ version, notes, baseUrl, files, pubDate }) {
+  if (!notes.en) throw new Error(`нет английских заметок к ${version} (раздел в CHANGELOG.md)`);
   const platforms = {};
   for (const [name, signature] of Object.entries(files)) {
     const keys = platformsOf(name);
@@ -49,21 +54,34 @@ export function buildLatest({ version, notes, baseUrl, files, pubDate }) {
       platforms[platform] = { signature: signature.trim(), url: `${baseUrl}/${encodeURIComponent(name)}` };
     }
   }
-  return { version, notes, pub_date: pubDate, platforms };
+  return { version, notes: notes.en, notes_i18n: notes, pub_date: pubDate, platforms };
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const { values } = parseArgs({
     options: {
-      version: { type: "string" }, "notes-file": { type: "string" }, "base-url": { type: "string" }, dir: { type: "string" },
+      version: { type: "string" }, "base-url": { type: "string" }, dir: { type: "string" }, "notes-out": { type: "string" },
       "require-all": { type: "boolean", default: false },
     },
   });
-  for (const k of ["version", "notes-file", "base-url", "dir"]) {
+  for (const k of ["version", "base-url", "dir"]) {
     if (!values[k]) {
-      console.error("использование: make-latest-json.mjs --version <v> --notes-file <f> --base-url <url> --dir <артефакты> [--require-all]");
+      console.error(
+        "использование: make-latest-json.mjs --version <v> --base-url <url> --dir <артефакты> [--notes-out <файл>] [--require-all]\n" +
+          "запускать из корня репозитория: заметки — разделы «## <v>» из CHANGELOG.md и docs/changelog/<код>.md",
+      );
       process.exit(2);
     }
+  }
+  const codes = languageCodes(readFileSync("src/i18n/languages.ts", "utf8"));
+  const notes = releaseNotes(readChangelogs(process.cwd(), codes), values.version);
+  if (!notes.en) {
+    console.error(`CHANGELOG.md: нет раздела «## ${values.version}» или он пуст`);
+    process.exit(1);
+  }
+  const untranslated = codes.filter((c) => !notes[c]);
+  if (untranslated.length > 0) {
+    console.error(`::warning::нет заметок к ${values.version} на языках ${untranslated.join(", ")} — приложение покажет английские`);
   }
   const dir = values.dir;
   const names = readdirSync(dir);
@@ -74,7 +92,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   );
   const latest = buildLatest({
     version: values.version,
-    notes: readFileSync(values["notes-file"], "utf8").trim(),
+    notes,
     baseUrl: values["base-url"].replace(/\/+$/, ""),
     files,
     pubDate: new Date().toISOString(),
@@ -90,5 +108,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       process.exit(1);
     }
   }
+  // Тело GitHub-релиза — тот же английский раздел, что и `notes`.
+  if (values["notes-out"]) writeFileSync(values["notes-out"], `${notes.en}\n`);
   process.stdout.write(JSON.stringify(latest, null, 2) + "\n");
 }

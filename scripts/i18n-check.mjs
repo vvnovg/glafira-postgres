@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Проверки локализации: одинаковые ключи и параметры во всех словарях, ключи из Rust, забытая кириллица в коде.
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { changelogPath, changelogSection, changelogVersions, readChangelogs } from "./changelog.mjs";
 
 const PLURAL = /_(zero|one|two|few|many|other)$/;
 
@@ -690,6 +691,31 @@ export function checkGuide(files, codes, enFlat, chapters = GUIDE_CHAPTERS, lang
   return problems;
 }
 
+/**
+ * Списки изменений (scripts/changelog.mjs). files: { код: текст | null } для всех языков; extra — файлы docs/changelog без языка.
+ * У каждого языка свой файл; в переводах — только версии из CHANGELOG.md и не копия английского раздела; типографика zh/ja.
+ */
+export function checkChangelogs(files, extra = []) {
+  const problems = extra.map((name) => `docs/changelog/${name}: лишний файл, такого языка нет в src/i18n/languages.ts`);
+  const en = files.en ?? "";
+  const enVersions = changelogVersions(en);
+  for (const [code, text] of Object.entries(files)) {
+    const path = changelogPath(code);
+    if (text === null) {
+      problems.push(`${path}: нет файла`);
+      continue;
+    }
+    if (code !== "en") {
+      for (const v of changelogVersions(text)) {
+        if (!enVersions.includes(v)) problems.push(`${path}: раздел «## ${v}» — такой версии нет в CHANGELOG.md`);
+        else if (changelogSection(text, v) === changelogSection(en, v)) problems.push(`${path}: раздел «## ${v}» не переведён (совпадает с CHANGELOG.md)`);
+      }
+    }
+    for (const pr of cjkProblems(text, code)) problems.push(`${path}: ${pr}`);
+  }
+  return problems;
+}
+
 function walk(dir, exts, out = []) {
   for (const name of readdirSync(dir)) {
     const p = join(dir, name);
@@ -732,6 +758,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const guideFiles = Object.fromEntries(walk(guideDir, [".md"]).map((p) => [relative(guideDir, p).split(sep).join("/"), readFileSync(p, "utf8")]));
   const langFlat = Object.fromEntries(Object.entries(dicts).map(([c, d]) => [c, flatten(d)]));
   problems.push(...checkGuide(guideFiles, codes, flatten(dicts.en), GUIDE_CHAPTERS, langFlat));
+  const changelogDir = join(root, "docs/changelog");
+  const changelogNames = new Set(codes.filter((c) => c !== "en").map((c) => `${c}.md`));
+  const extraChangelogs = existsSync(changelogDir) ? readdirSync(changelogDir).filter((n) => !changelogNames.has(n)) : [];
+  problems.push(...checkChangelogs(readChangelogs(root, codes), extraChangelogs));
   if (!process.argv.includes("--no-cyrillic-scan")) {
     const files = srcFiles;
     for (const hit of findCyrillic(files)) problems.push(`кириллица в коде: ${hit}`);

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CJK_TYPO_LANGS, GUIDE_CHAPTERS, HAN_SPACE_LANGS, cjkProblems, visualWidth, checkGuide, parseGuideChapter, checkDictionaries, checkFrontendKeys, checkHints, hintKeys, checkLanguageFiles, checkSameAsEn, checkTypography, languageCodes, lengthReport, tags, checkRustKeys, frontendKeys, expandRustPaths, findCyrillic, findRustCyrillic, flatten, placeholders, rustKeys } from "./i18n-check.mjs";
+import { CJK_TYPO_LANGS, GUIDE_CHAPTERS, HAN_SPACE_LANGS, cjkProblems, visualWidth, checkChangelogs, checkGuide, parseGuideChapter, checkDictionaries, checkFrontendKeys, checkHints, hintKeys, checkLanguageFiles, checkSameAsEn, checkTypography, languageCodes, lengthReport, tags, checkRustKeys, frontendKeys, expandRustPaths, findCyrillic, findRustCyrillic, flatten, placeholders, rustKeys } from "./i18n-check.mjs";
 
 test("flatten и placeholders", () => {
   assert.deepEqual([...flatten({ a: { b: "x", c: { d: "y" } } }).keys()], ["a.b", "a.c.d"]);
@@ -471,4 +471,25 @@ test("глава, совпадающая с en байт в байт, — не п
   assert.ok(p(enCh).some((x) => x.includes("zh-CN/getting-started.md") && x.includes("глава не переведена (совпадает с en)")));
   assert.ok(!p("# 开始\n\n打开[[ui:sidebar.settings]]。\n").some((x) => x.includes("не переведена")));
   assert.ok(p(enCh.replace("Open", "Öffnen")).some((x) => x.includes("полуширинная")), "изменённая глава проверяется типографикой");
+});
+
+test("списки изменений: файл у каждого языка, лишний файл", () => {
+  const files = { en: "## 1.0.0\n- one\n", ru: "## 1.0.0\n- один\n", de: null };
+  assert.deepEqual(checkChangelogs(files, ["xx.md"]), [
+    "docs/changelog/xx.md: лишний файл, такого языка нет в src/i18n/languages.ts",
+    "docs/changelog/de.md: нет файла",
+  ]);
+});
+
+test("списки изменений: версия не из CHANGELOG.md и непереведённый раздел", () => {
+  const files = { en: "## 1.0.0\n- one\n\n## 0.9.0\n- old\n", ru: "## 1.0.1\n- опечатка\n\n## 1.0.0\n- один\n\n## 0.9.0\n- old\n" };
+  assert.deepEqual(checkChangelogs(files), [
+    "docs/changelog/ru.md: раздел «## 1.0.1» — такой версии нет в CHANGELOG.md",
+    "docs/changelog/ru.md: раздел «## 0.9.0» не переведён (совпадает с CHANGELOG.md)",
+  ]);
+});
+
+test("списки изменений: типографика zh/ja как в руководстве, код в обратных кавычках не проверяется", () => {
+  const files = { en: "## 1.0.0\n- one\n", "zh-CN": "## 1.0.0\n- 修复问题.\n- 设置 `a.b`。\n", ja: "## 1.0.0\n- 修正しました。\n" };
+  assert.deepEqual(checkChangelogs(files), ["docs/changelog/zh-CN.md: полуширинная пунктуация после иероглифа «题.» — нужна полноширинная"]);
 });

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -6,7 +6,17 @@ import { api } from "../../api/client";
 import { tr } from "../../i18n/text";
 import { openLicense, openSupport } from "../../lib/links";
 import { useDiagnosticsRequest } from "../../state/diagnosticsRequest";
+import type { UpdateCheck } from "../../api/types";
+import { ChunkBoundary } from "../common/ChunkBoundary";
 import { ErrorBanner } from "../common/ErrorBanner";
+
+// Заметки рисует react-markdown — отдельным чанком при первом показе, как справку.
+const ReleaseNotes = lazy(() => import("./ReleaseNotes").then((m) => ({ default: m.ReleaseNotes })));
+
+/** Заметки на языке интерфейса, иначе английские, иначе `notes` (у старых релизов `notes_i18n` нет). */
+function notesFor(update: Extract<UpdateCheck, { status: "available" }>, language: string): string | null {
+  return update.notesI18n[language] ?? update.notesI18n.en ?? update.notes;
+}
 
 export function AboutPanel() {
   const { t } = useTranslation();
@@ -88,10 +98,11 @@ export function AboutPanel() {
 
 /** Ручная проверка и установка обновлений; подтверждения нет — длительных операций у приложения нет. */
 function UpdatesSection() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const check = useMutation({ mutationFn: api.checkUpdate });
   const install = useMutation({ mutationFn: api.installUpdate });
   const r = check.data;
+  const notes = r?.status === "available" ? notesFor(r, i18n.language) : null;
   return (
     <section className="panel">
       <h3>{t("about.updates.title")}</h3>
@@ -113,7 +124,15 @@ function UpdatesSection() {
       {r?.status === "available" && (
         <>
           <p role="status">{t("about.updates.available", { version: r.version })}</p>
-          {r.notes && <pre>{r.notes}</pre>}
+          {notes && (
+            <section className="release-notes" aria-label={t("about.updates.notesAria", { version: r.version })}>
+              <ChunkBoundary fallback={<pre>{notes}</pre>}>
+                <Suspense fallback={<p className="muted">{t("common.loading")}</p>}>
+                  <ReleaseNotes markdown={notes} />
+                </Suspense>
+              </ChunkBoundary>
+            </section>
+          )}
           <div className="toolbar">
             <button type="button" disabled={install.isPending} onClick={() => install.mutate()}>
               {t("about.updates.install")}

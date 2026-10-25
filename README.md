@@ -128,7 +128,7 @@ GPG_IT_PATRONI=http://localhost:8011,http://localhost:8012,http://localhost:8013
 ```
 
 ## Релиз
-`docs/release-checklist.md`: версии в трёх манифестах, раздел в `CHANGELOG.md`, `THIRD_PARTY.md`,
+`docs/release-checklist.md`: версии в трёх манифестах, раздел версии в `CHANGELOG.md` (английский) и `docs/changelog/ru.md`, `THIRD_PARTY.md`,
 `node scripts/check-release.mjs vX.Y.Z`, тег `vX.Y.Z` → workflow `release` собирает установщики на трёх ОС,
 подписывает macOS-сборки и публикует релиз с `latest.json` в `vvnovg/glafira-postgres-releases`.
 

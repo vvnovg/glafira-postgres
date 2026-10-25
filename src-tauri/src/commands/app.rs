@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_updater::UpdaterExt;
@@ -85,8 +87,27 @@ pub enum UpdateCheck {
     Available {
         version: String,
         notes: Option<String>,
+        /// Заметки на языках интерфейса (код языка → Markdown); у релизов до этого поля — пусто.
+        #[serde(rename = "notesI18n")]
+        notes_i18n: BTreeMap<String, String>,
         date: Option<String>,
     },
+}
+
+/// `notes_i18n` из latest.json — расширение формата Tauri: updater его пропускает, а приложение берёт из `raw_json`.
+/// Остаются только непустые строки: испорченное поле не мешает показать обычные `notes`.
+fn notes_i18n(raw: &serde_json::Value) -> BTreeMap<String, String> {
+    raw.get("notes_i18n")
+        .and_then(serde_json::Value::as_object)
+        .map(|m| {
+            m.iter()
+                .filter_map(|(code, v)| {
+                    let text = v.as_str().filter(|t| !t.trim().is_empty())?;
+                    Some((code.clone(), text.to_owned()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Debug)]
@@ -297,6 +318,7 @@ pub async fn check_update(app: AppHandle, state: State<'_, AppState>) -> AppResu
         Some(u) => Ok(UpdateCheck::Available {
             version: u.version.clone(),
             notes: u.body.clone(),
+            notes_i18n: notes_i18n(&u.raw_json),
             date: u.date.and_then(|d| d.format(&Rfc3339).ok()),
         }),
     }
@@ -371,12 +393,14 @@ mod tests {
         let v = serde_json::to_value(UpdateCheck::Available {
             version: "0.1.0".into(),
             notes: None,
+            notes_i18n: BTreeMap::from([("ru".into(), "- Исправления".into())]),
             date: None,
         })
         .unwrap();
         assert_eq!(v["status"], "available");
         assert_eq!(v["version"], "0.1.0");
         assert!(v["notes"].is_null());
+        assert_eq!(v["notesI18n"]["ru"], "- Исправления");
         assert_eq!(
             serde_json::to_value(UpdateCheck::UpToDate).unwrap()["status"],
             "upToDate"
@@ -391,6 +415,41 @@ mod tests {
             d["reason"]["text"],
             "Updates are not configured in this build"
         );
+    }
+
+    #[test]
+    fn notes_i18n_from_raw_json() {
+        let raw = serde_json::json!({
+            "version": "0.4.0",
+            "notes": "- fixes",
+            "notes_i18n": { "en": "- fixes", "ru": "- Исправления", "de": "  ", "fr": 1, "ja": null },
+            "platforms": {}
+        });
+        assert_eq!(
+            notes_i18n(&raw),
+            BTreeMap::from([
+                ("en".to_owned(), "- fixes".to_owned()),
+                ("ru".to_owned(), "- Исправления".to_owned()),
+            ])
+        );
+        // Релизы без поля (0.2.0 и раньше) и испорченное поле — пустой набор, остаются обычные notes.
+        assert!(notes_i18n(&serde_json::json!({ "notes": "- x" })).is_empty());
+        assert!(notes_i18n(&serde_json::json!({ "notes_i18n": "- x" })).is_empty());
+    }
+
+    #[test]
+    fn updater_accepts_latest_json_with_notes_i18n() {
+        // Так latest.json читают и уже установленные версии: лишнее поле не ломает разбор, notes — как раньше.
+        let raw = serde_json::json!({
+            "version": "0.4.0",
+            "notes": "- fixes",
+            "notes_i18n": { "en": "- fixes", "ru": "- Исправления" },
+            "pub_date": "2026-11-01T00:00:00Z",
+            "platforms": { "darwin-aarch64": { "signature": "S", "url": "https://x/a.app.tar.gz" } }
+        });
+        let release: tauri_plugin_updater::RemoteRelease = serde_json::from_value(raw).unwrap();
+        assert_eq!(release.notes.as_deref(), Some("- fixes"));
+        assert_eq!(release.version.to_string(), "0.4.0");
     }
 
     #[test]

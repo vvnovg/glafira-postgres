@@ -460,6 +460,7 @@
       "check": "Check for updates",
       "upToDate": "You have the latest version",
       "available": "Version {{version}} is available",
+      "notesAria": "What's new in version {{version}}",
       "install": "Install and restart",
       "installing": "Downloading and installing the update…"
     },
