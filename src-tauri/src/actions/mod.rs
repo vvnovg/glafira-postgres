@@ -2,6 +2,7 @@
 
 pub mod conn;
 pub mod journal;
+pub mod patroni;
 pub mod sessions;
 pub mod slots;
 

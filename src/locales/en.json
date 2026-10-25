@@ -156,7 +156,10 @@
       "unauthorized": "The Patroni API at {{url}} rejected the credentials",
       "credentialsWithheld": "The Patroni API at {{url}} asks for credentials over plain HTTP; they are not sent because the connection uses https: set an https API address for the member in “Node address overrides”",
       "httpStatus": "Patroni API at {{url}} answered {{status}}",
-      "noUrls": "No Patroni API addresses"
+      "noUrls": "No Patroni API addresses",
+      "actionRejected": "Patroni rejected the action ({{status}})",
+      "sendUnsupported": "This Patroni client cannot send changes to {{url}}",
+      "authRequired": "Set the Patroni API login in the connection to run actions"
     },
     "topology": {
       "notConnected": "The connection is not open",
@@ -197,7 +200,14 @@
       "badTarget": "The sessions do not match the action target",
       "slotNotFound": "Slot {{slot}} is not on node {{member}}",
       "slotActiveOrGone": "The slot became active or is gone",
-      "replicationRequired": "Dropping a slot needs the REPLICATION attribute or superuser"
+      "replicationRequired": "Dropping a slot needs the REPLICATION attribute or superuser",
+      "noLeader": "There is no running leader to switch over from",
+      "leaderHealthy": "The leader is healthy: use switchover",
+      "badCandidate": "{{member}} cannot become the leader: it is not a replica of this cluster",
+      "badSchedule": "The schedule time {{value}} is not valid",
+      "pastSchedule": "The schedule time is in the past",
+      "nothingScheduled": "Nothing is scheduled",
+      "pauseUnchanged": "The cluster is already in this state"
     }
   },
   "connections": {

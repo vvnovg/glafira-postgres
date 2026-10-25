@@ -158,7 +158,10 @@
       "unauthorized": "API Patroni {{url}} отклонил учётные данные",
       "credentialsWithheld": "API Patroni {{url}} просит учётные данные по обычному HTTP; они не отправляются, потому что подключение работает по https: укажите участнику https-адрес API в «Подмене адресов узлов»",
       "httpStatus": "API Patroni {{url}} ответил {{status}}",
-      "noUrls": "Нет адресов API Patroni"
+      "noUrls": "Нет адресов API Patroni",
+      "actionRejected": "Patroni отклонил действие ({{status}})",
+      "sendUnsupported": "Этот клиент Patroni не отправляет изменения на {{url}}",
+      "authRequired": "Чтобы выполнять действия, укажите в подключении логин API Patroni"
     },
     "topology": {
       "notConnected": "Подключение не открыто",
@@ -199,7 +202,14 @@
       "badTarget": "Сессии не совпадают с целью действия",
       "slotNotFound": "Слота {{slot}} нет на узле {{member}}",
       "slotActiveOrGone": "Слот стал активным или исчез",
-      "replicationRequired": "Для удаления слота нужен атрибут REPLICATION или роль суперпользователя"
+      "replicationRequired": "Для удаления слота нужен атрибут REPLICATION или роль суперпользователя",
+      "noLeader": "Нет работающего лидера, с которого можно переключиться",
+      "leaderHealthy": "Лидер здоров — используйте switchover",
+      "badCandidate": "{{member}} не может стать лидером: это не реплика этого кластера",
+      "badSchedule": "Время расписания {{value}} задано неверно",
+      "pastSchedule": "Время расписания уже прошло",
+      "nothingScheduled": "Ничего не запланировано",
+      "pauseUnchanged": "Кластер уже в этом состоянии"
     }
   },
   "connections": {

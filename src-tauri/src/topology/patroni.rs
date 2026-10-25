@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::conn::errors::{chain, stream_closed};
 use crate::conn::profile::{ConnectionKind, PatroniSettings};
@@ -24,11 +24,54 @@ pub const DISCOVER_TIMEOUT: Duration = Duration::from_secs(20);
 /// Сколько текста ответа с ошибкой сохраняется в `details`.
 const BODY_SNIPPET: usize = 500;
 
+/// Метод изменяющего запроса к REST API Patroni (P2b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum HttpMethod {
+    Post,
+    Patch,
+    Delete,
+}
+
+impl HttpMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HttpMethod::Post => "POST",
+            HttpMethod::Patch => "PATCH",
+            HttpMethod::Delete => "DELETE",
+        }
+    }
+}
+
+/// Ответ на изменяющий запрос: любой HTTP-код (смысл решает вызывающий) и тело как текст.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpReply {
+    pub status: u16,
+    pub body: String,
+}
+
 /// GET JSON из Patroni; трейт — чтобы подменять сеть в тестах.
 pub trait PatroniHttp: Send + Sync {
     fn get_json<'a>(&'a self, url: &'a str) -> BoxFuture<'a, AppResult<serde_json::Value>>;
     /// HTTP-код ответа на GET (матрица health: тело не читается, авторизация не нужна).
     fn get_status<'a>(&'a self, url: &'a str) -> BoxFuture<'a, AppResult<u16>>;
+    /// Изменяющий запрос (действия P2b) с basic auth профиля. По умолчанию не поддерживается: подделки чтения
+    /// в тестах P1/P2a его не реализуют.
+    fn send_json<'a>(
+        &'a self,
+        _method: HttpMethod,
+        url: &'a str,
+        _body: Option<&'a serde_json::Value>,
+    ) -> BoxFuture<'a, AppResult<HttpReply>> {
+        Box::pin(async move {
+            Err(app_err!(
+                ErrorCode::Internal,
+                "errors.patroni.sendUnsupported",
+                "This Patroni client cannot send changes to {{url}}",
+                url = url
+            ))
+        })
+    }
 }
 
 pub struct ReqwestHttp {
@@ -308,6 +351,41 @@ impl PatroniHttp for ReqwestHttp {
                 .await
                 .map_err(|e| self.request_error(url, &e))?;
             Ok(resp.status().as_u16())
+        })
+    }
+
+    fn send_json<'a>(
+        &'a self,
+        method: HttpMethod,
+        url: &'a str,
+        body: Option<&'a serde_json::Value>,
+    ) -> BoxFuture<'a, AppResult<HttpReply>> {
+        Box::pin(async move {
+            let m = match method {
+                HttpMethod::Post => reqwest::Method::POST,
+                HttpMethod::Patch => reqwest::Method::PATCH,
+                HttpMethod::Delete => reqwest::Method::DELETE,
+            };
+            let mut req = self.client.request(m, url);
+            if let Some(b) = body {
+                req = req.json(b);
+            }
+            let withheld = self.withholds_credentials(url);
+            if !withheld && let Some((u, p)) = &self.auth {
+                req = req.basic_auth(u, Some(p));
+            }
+            let resp = req.send().await.map_err(|e| self.request_error(url, &e))?;
+            let status = resp.status().as_u16();
+            let text = resp.text().await.map_err(|e| self.request_error(url, &e))?;
+            if withheld && matches!(status, 401 | 403) {
+                return Err(app_err!(
+                    ErrorCode::AuthFailed,
+                    "errors.patroni.credentialsWithheld",
+                    "The Patroni API at {{url}} asks for credentials over plain HTTP; they are not sent because the connection uses https: set an https API address for the member in “Node address overrides”",
+                    url = url
+                ));
+            }
+            Ok(HttpReply { status, body: text })
         })
     }
 }
@@ -1668,6 +1746,216 @@ mod tests {
         assert_eq!(
             (err.code, err.key.as_str()),
             (ErrorCode::PatroniError, "errors.patroni.unreachable")
+        );
+    }
+
+    /// Запрос, принятый `capture_server`: метод, путь, заголовок авторизации и тело.
+    type Captured = (String, String, String, String);
+
+    /// HTTP-сервер для изменяющих запросов: записывает метод, путь, авторизацию и тело (дочитывает по
+    /// `Content-Length`); ответ — по пути: `/rejected` — 412, `/denied` — 401, остальное — 200.
+    async fn capture_server() -> (String, std::sync::Arc<Mutex<Vec<Captured>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let seen = std::sync::Arc::new(Mutex::new(Vec::<Captured>::new()));
+        let log = seen.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let log = log.clone();
+                tokio::spawn(async move {
+                    let mut raw = Vec::<u8>::new();
+                    let mut buf = vec![0u8; 4096];
+                    let (head, body) = loop {
+                        let n = sock.read(&mut buf).await.unwrap_or(0);
+                        raw.extend_from_slice(&buf[..n]);
+                        let text = String::from_utf8_lossy(&raw).into_owned();
+                        if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                            let want = head
+                                .lines()
+                                .find_map(|l| {
+                                    l.to_ascii_lowercase()
+                                        .strip_prefix("content-length: ")
+                                        .and_then(|v| v.trim().parse::<usize>().ok())
+                                })
+                                .unwrap_or(0);
+                            if body.len() >= want || n == 0 {
+                                break (head.to_string(), body.to_string());
+                            }
+                        } else if n == 0 {
+                            break (text, String::new());
+                        }
+                    };
+                    let mut first = head.lines().next().unwrap_or("").split_whitespace();
+                    let method = first.next().unwrap_or("").to_string();
+                    let path = first.next().unwrap_or("").to_string();
+                    let auth = head
+                        .lines()
+                        .find_map(|l| {
+                            l.strip_prefix("authorization: ")
+                                .or_else(|| l.strip_prefix("Authorization: "))
+                        })
+                        .unwrap_or("")
+                        .to_string();
+                    let status = match path.as_str() {
+                        "/rejected" => 412,
+                        "/denied" => 401,
+                        _ => 200,
+                    };
+                    log.lock_safe().push((method, path, auth, body));
+                    let text = "Done";
+                    let resp = format!(
+                        "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
+                        text.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        (format!("http://{addr}"), seen)
+    }
+
+    /// Подделка чтения без `send_json`: проверяет реализацию по умолчанию.
+    struct ReadOnlyHttp;
+
+    impl PatroniHttp for ReadOnlyHttp {
+        fn get_json<'a>(&'a self, _url: &'a str) -> BoxFuture<'a, AppResult<serde_json::Value>> {
+            Box::pin(async { Ok(serde_json::Value::Null) })
+        }
+        fn get_status<'a>(&'a self, _url: &'a str) -> BoxFuture<'a, AppResult<u16>> {
+            Box::pin(async { Ok(200) })
+        }
+    }
+
+    #[tokio::test]
+    async fn send_json_is_unsupported_by_default() {
+        let e = ReadOnlyHttp
+            .send_json(HttpMethod::Post, "http://pg-1:8008/switchover", None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (ErrorCode::Internal, "errors.patroni.sendUnsupported")
+        );
+        assert_eq!(e.params["url"], "http://pg-1:8008/switchover");
+        assert_eq!(HttpMethod::Patch.as_str(), "PATCH");
+        assert_eq!(
+            serde_json::to_string(&HttpMethod::Delete).unwrap(),
+            "\"DELETE\""
+        );
+    }
+
+    #[tokio::test]
+    async fn reqwest_http_sends_changes_with_method_body_and_basic_auth() {
+        let (base, seen) = capture_server().await;
+        let mut s = settings(&[&base]);
+        s.username = Some("patroni".into());
+        let http = ReqwestHttp::new(&s, Some("secret".into()), None, None, None).unwrap();
+        let basic = "Basic cGF0cm9uaTpzZWNyZXQ=";
+
+        let body = serde_json::json!({"leader": "pg-1", "candidate": "pg-2"});
+        let r = http
+            .send_json(HttpMethod::Post, &format!("{base}/switchover"), Some(&body))
+            .await
+            .unwrap();
+        assert_eq!((r.status, r.body.as_str()), (200, "Done"));
+        let null = serde_json::json!({"pause": null});
+        http.send_json(HttpMethod::Patch, &format!("{base}/config"), Some(&null))
+            .await
+            .unwrap();
+        http.send_json(HttpMethod::Delete, &format!("{base}/switchover"), None)
+            .await
+            .unwrap();
+        {
+            let calls = seen.lock_safe();
+            assert_eq!(calls.len(), 3);
+            assert_eq!(
+                (
+                    calls[0].0.as_str(),
+                    calls[0].1.as_str(),
+                    calls[0].2.as_str()
+                ),
+                ("POST", "/switchover", basic)
+            );
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&calls[0].3).unwrap(),
+                body
+            );
+            assert_eq!(
+                (calls[1].0.as_str(), calls[1].1.as_str()),
+                ("PATCH", "/config")
+            );
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&calls[1].3).unwrap(),
+                null,
+                "null уходит в теле как есть"
+            );
+            assert_eq!(
+                (
+                    calls[2].0.as_str(),
+                    calls[2].1.as_str(),
+                    calls[2].3.as_str()
+                ),
+                ("DELETE", "/switchover", "")
+            );
+        }
+
+        // Любой HTTP-код — ответ, а не ошибка: смысл (в том числе 401) решает вызывающий.
+        let rejected = http
+            .send_json(HttpMethod::Post, &format!("{base}/rejected"), None)
+            .await
+            .unwrap();
+        assert_eq!((rejected.status, rejected.body.as_str()), (412, "Done"));
+        let denied = http
+            .send_json(HttpMethod::Post, &format!("{base}/denied"), None)
+            .await
+            .unwrap();
+        assert_eq!(denied.status, 401);
+
+        // Адрес без слушателя — ошибка запроса, а не ответ.
+        let port = {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let e = http
+            .send_json(
+                HttpMethod::Post,
+                &format!("http://127.0.0.1:{port}/switchover"),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (ErrorCode::PatroniError, "errors.patroni.unreachable")
+        );
+    }
+
+    #[tokio::test]
+    async fn send_json_withholds_the_password_from_http_when_the_profile_is_https() {
+        let (base, seen) = capture_server().await;
+        let mut s = settings(&["https://pg-1:8008"]);
+        s.username = Some("patroni".into());
+        let http = ReqwestHttp::new(&s, Some("secret".into()), None, None, None).unwrap();
+        // Успешный запрос уходит без пароля.
+        http.send_json(HttpMethod::Post, &format!("{base}/switchover"), None)
+            .await
+            .unwrap();
+        // А 401 на таком адресе — не «неверный пароль», а «пароль не отправлен».
+        let e = http
+            .send_json(HttpMethod::Post, &format!("{base}/denied"), None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (ErrorCode::AuthFailed, "errors.patroni.credentialsWithheld")
+        );
+        assert!(!format!("{e:?}").contains("secret"));
+        assert!(
+            seen.lock_safe().iter().all(|c| c.2.is_empty()),
+            "{:?}",
+            seen.lock_safe()
         );
     }
 
