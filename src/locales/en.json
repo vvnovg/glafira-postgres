@@ -148,7 +148,7 @@
     },
     "patroni": {
       "setup": "Could not prepare the Patroni API client",
-      "timeout": "Patroni API at {{url}} did not answer within 5 s",
+      "timeout": "Patroni API at {{url}} did not answer within {{secs}} s",
       "discoverTimeout": "Patroni API did not answer within {{secs}} s",
       "tls": "TLS error talking to the Patroni API at {{url}}",
       "unreachable": "Patroni API at {{url}} is unreachable",

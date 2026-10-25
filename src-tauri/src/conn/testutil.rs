@@ -204,6 +204,8 @@ enum HttpBehavior {
     DropMidAnswer,
     /// Ответить кодом.
     Answer(u16),
+    /// Ответить кодом после паузы (Patroni отвечает на switchover и failover после смены лидера).
+    SlowAnswer(u16, Duration),
     /// Ответить перенаправлением `status` на адрес.
     Redirect(u16, String),
 }
@@ -230,6 +232,15 @@ fn http_stub(behavior: HttpBehavior) -> HttpStub {
                         )
                         .into_bytes(),
                     ),
+                    HttpBehavior::SlowAnswer(status, delay) => {
+                        std::thread::sleep(delay);
+                        Some(
+                            format!(
+                                "HTTP/1.1 {status} X\r\nContent-Length: 4\r\nConnection: close\r\n\r\nDone"
+                            )
+                            .into_bytes(),
+                        )
+                    }
                     HttpBehavior::Answer(status) => Some(
                         format!(
                             "HTTP/1.1 {status} X\r\nContent-Length: 4\r\nConnection: close\r\n\r\nDone"
@@ -268,6 +279,11 @@ pub fn redirecting_http_server(status: u16, location: &str) -> HttpStub {
 /// Читает запрос целиком и отвечает `status` с телом `Done`.
 pub fn answering_http_server(status: u16) -> HttpStub {
     http_stub(HttpBehavior::Answer(status))
+}
+
+/// Читает запрос целиком и отвечает `status` с телом `Done` через `delay`.
+pub fn slow_http_server(status: u16, delay: Duration) -> HttpStub {
+    http_stub(HttpBehavior::SlowAnswer(status, delay))
 }
 
 /// Сообщение `ErrorResponse` протокола PostgreSQL: FATAL, SQLSTATE 28000.

@@ -62,8 +62,14 @@ pub enum WatchPlan {
     },
     Restart {
         member: String,
+        /// `postmaster_start_time` участника до действия; `None` — не прочитался.
         start_before: Option<String>,
         only_pending: bool,
+        /// Когда ушёл запрос (мс эпохи): без `start_before` перезапуск подтверждает время запуска позже него.
+        sent_at_ms: i64,
+        /// Наблюдение видело участника остановленным или недоступным (`observe`): без `start_before` и без
+        /// разборчивого времени запуска это подтверждает перезапуск.
+        seen_down: bool,
     },
     Pause {
         paused: bool,
@@ -72,10 +78,12 @@ pub enum WatchPlan {
 
 impl WatchPlan {
     /// Наблюдается то, что происходит сейчас: запланированные действия и отмены — нет (обзор покажет баннер).
+    /// `restart_start` — `postmaster_start_time` участника restart до действия, `sent_at_ms` — когда ушёл запрос.
     pub fn for_action(
         a: &PatroniAction,
         before: &Topology,
         restart_start: Option<String>,
+        sent_at_ms: i64,
     ) -> Option<WatchPlan> {
         match a {
             PatroniAction::Switchover {
@@ -99,6 +107,8 @@ impl WatchPlan {
                 member: member.clone(),
                 start_before: restart_start,
                 only_pending: *only_pending,
+                sent_at_ms,
+                seen_down: false,
             }),
             PatroniAction::Pause { paused } => Some(WatchPlan::Pause { paused: *paused }),
             _ => None,
@@ -121,6 +131,18 @@ impl WatchPlan {
             } => vec![Accepted, Restarted, MemberRunning, PendingCleared, Done],
             WatchPlan::Restart { .. } => vec![Accepted, Restarted, MemberRunning, Done],
             WatchPlan::Pause { .. } => vec![Accepted, PauseApplied, Done],
+        }
+    }
+
+    /// Запоминает увиденное на очередном опросе: участник restart остановлен, недоступен или пропал из топологии.
+    pub fn observe(&mut self, t: &Topology) {
+        if let WatchPlan::Restart {
+            member, seen_down, ..
+        } = self
+            && t.member(member)
+                .is_none_or(|m| !m.reachable || !running_or_streaming(m.state.as_deref()))
+        {
+            *seen_down = true;
         }
     }
 
@@ -173,9 +195,28 @@ fn reached(plan: &WatchPlan, step: WatchStep, t: &Topology, start_now: Option<&s
             .iter()
             .filter(|m| m.reachable && !is_leader(m.role))
             .all(|m| running_or_streaming(m.state.as_deref())),
-        (WatchPlan::Restart { start_before, .. }, Restarted) => {
-            start_now.is_some() && start_now != start_before.as_deref()
-        }
+        // Время запуска до действия известно — подтверждает другое время запуска.
+        (
+            WatchPlan::Restart {
+                start_before: Some(before),
+                ..
+            },
+            Restarted,
+        ) => start_now.is_some_and(|now| now != before),
+        // Неизвестно: просто прочитанное время ничего не значит. Разборчивое время должно быть позже отправки
+        // запроса, неразборчивое — подтверждено простоем участника, который наблюдение видело.
+        (
+            WatchPlan::Restart {
+                start_before: None,
+                sent_at_ms,
+                seen_down,
+                ..
+            },
+            Restarted,
+        ) => match start_now.map(start_time_ms) {
+            Some(Some(started)) => started > *sent_at_ms,
+            _ => *seen_down,
+        },
         (WatchPlan::Restart { member, .. }, MemberRunning) => t
             .member(member)
             .is_some_and(|m| m.reachable && running_or_streaming(m.state.as_deref())),
@@ -185,6 +226,14 @@ fn reached(plan: &WatchPlan, step: WatchStep, t: &Topology, start_now: Option<&s
         (WatchPlan::Pause { paused }, PauseApplied) => t.paused.unwrap_or(false) == *paused,
         _ => false,
     }
+}
+
+/// `postmaster_start_time` Patroni (`2026-10-25 09:52:53.829+00:00`) в миллисекундах эпохи; другой вид — `None`.
+fn start_time_ms(s: &str) -> Option<i64> {
+    let rfc3339 = s.trim().replacen(' ', "T", 1);
+    let t = time::OffsetDateTime::parse(&rfc3339, &time::format_description::well_known::Rfc3339)
+        .ok()?;
+    i64::try_from(t.unix_timestamp_nanos() / 1_000_000).ok()
 }
 
 /// Последний шаг, до которого дошло действие: шаги проходятся по порядку, первый невыполненный останавливает.
@@ -213,8 +262,9 @@ pub fn start(st: &AppState, id: &str, plan: WatchPlan, sink: Arc<dyn WatchSink>)
     let sessions = st.sessions.clone();
     let (conn, sid) = (id.to_string(), session_id.clone());
     let deadline = Instant::now() + plan.deadline();
-    runtimes.boost(id, BOOST_INTERVAL, deadline);
+    runtimes.boost(id, &session_id, BOOST_INTERVAL, deadline);
     let task = tokio::spawn(async move {
+        let mut plan = plan;
         let mut last = WatchStep::Accepted;
         sink.send(WatchEvent {
             step: last,
@@ -240,6 +290,7 @@ pub fn start(st: &AppState, id: &str, plan: WatchPlan, sink: Arc<dyn WatchSink>)
                 },
                 _ => None,
             };
+            plan.observe(&t);
             let step = progress(&plan, &t, start_now.as_deref());
             if step > last {
                 last = step;
@@ -269,7 +320,7 @@ pub fn start(st: &AppState, id: &str, plan: WatchPlan, sink: Arc<dyn WatchSink>)
                 detail: None,
             });
         }
-        runtimes.unboost(&conn);
+        runtimes.unboost(&conn, &sid);
         sessions.forget(&sid);
     });
     // Задача не закончится раньше вставки сессии: первым она ждёт интервал опроса (2 с), а срок не меньше 30 с.
@@ -277,12 +328,13 @@ pub fn start(st: &AppState, id: &str, plan: WatchPlan, sink: Arc<dyn WatchSink>)
         session_id.clone(),
         id,
         SessionKind::Watch,
-        stop_watch(task.abort_handle(), &st.runtimes, id),
+        stop_watch(task.abort_handle(), &st.runtimes, id, &session_id),
     );
     session_id
 }
 
-/// Остановка сессии наблюдения: прерывание задачи и снятие ускорения — быстро и без `await`. Вызывается и из
+/// Остановка сессии наблюдения `session_id`: прерывание задачи и снятие её ускорения (ускорения других
+/// наблюдений подключения остаются) — быстро и без `await`. Вызывается и из
 /// слушателя закрытия под `entries` `Runtimes` (`disconnect`, переоткрытие): поэтому `Runtimes::unboost` берёт
 /// только свой мьютекс ускорений, а не `entries`, — иначе тот же поток захватил бы `entries` повторно и завис.
 /// `Runtimes` — слабой ссылкой: реестр сессий сам слушатель закрытия `Runtimes`, сильная дала бы цикл ссылок.
@@ -290,12 +342,17 @@ pub(crate) fn stop_watch(
     abort: AbortHandle,
     runtimes: &Arc<Runtimes>,
     connection: &str,
+    session_id: &str,
 ) -> Box<dyn FnOnce() + Send> {
-    let (runtimes, connection) = (Arc::downgrade(runtimes), connection.to_string());
+    let (runtimes, connection, session_id) = (
+        Arc::downgrade(runtimes),
+        connection.to_string(),
+        session_id.to_string(),
+    );
     Box::new(move || {
         abort.abort();
         if let Some(rt) = runtimes.upgrade() {
-            rt.unboost(&connection);
+            rt.unboost(&connection, &session_id);
         }
     })
 }
@@ -365,6 +422,8 @@ mod tests {
             member: "pg-2".into(),
             start_before: Some("t0".into()),
             only_pending: true,
+            sent_at_ms: 0,
+            seen_down: false,
         };
         let mut r = m("pg-2", Role::Replica, "streaming", 2);
         r.pending_restart = true;
@@ -378,8 +437,97 @@ mod tests {
             member: "pg-2".into(),
             start_before: Some("t0".into()),
             only_pending: false,
+            sent_at_ms: 0,
+            seen_down: false,
         };
         assert!(!plain.steps().contains(&WatchStep::PendingCleared));
+    }
+
+    /// Время запуска Patroni (`postmaster_start_time`) читается в миллисекундах эпохи; другой вид — `None`.
+    #[test]
+    fn postmaster_start_time_is_read_in_patroni_format() {
+        assert_eq!(start_time_ms("1970-01-01 00:00:01.5+00:00"), Some(1500));
+        assert_eq!(start_time_ms("1970-01-01 03:00:02+03:00"), Some(2000));
+        let a = start_time_ms("2026-10-25 13:54:45.548590+00:00").unwrap();
+        let b = start_time_ms("2026-10-25 13:54:44.548590+00:00").unwrap();
+        assert_eq!(a - b, 1000);
+        assert_eq!(start_time_ms("t1"), None);
+        assert_eq!(start_time_ms("2026-10-25 13:54:45+00"), None);
+    }
+
+    /// Время запуска до действия неизвестно: перезапуск подтверждает время запуска позже отправки запроса, а если
+    /// время не разобрать — простой участника, увиденный наблюдением; просто прочитанное время — не подтверждение.
+    #[test]
+    fn restart_without_a_known_start_time_needs_a_later_start_or_a_seen_downtime() {
+        let sent = start_time_ms("2026-10-25 09:52:53.829+00:00").unwrap();
+        let mut plan = WatchPlan::Restart {
+            member: "pg-2".into(),
+            start_before: None,
+            only_pending: false,
+            sent_at_ms: sent,
+            seen_down: false,
+        };
+        let running = topo(vec![
+            m("pg-1", Role::Primary, "running", 2),
+            m("pg-2", Role::Replica, "streaming", 2),
+        ]);
+        let old = Some("2026-10-25 09:00:00.000+00:00");
+        let new = Some("2026-10-25 09:53:10.001+00:00");
+        plan.observe(&running);
+        assert_eq!(progress(&plan, &running, None), WatchStep::Accepted);
+        assert_eq!(
+            progress(&plan, &running, old),
+            WatchStep::Accepted,
+            "старый запуск"
+        );
+        assert_eq!(
+            progress(&plan, &running, Some("t1")),
+            WatchStep::Accepted,
+            "время не разобрать"
+        );
+        assert_eq!(
+            progress(&plan, &running, new),
+            WatchStep::Done,
+            "запуск после отправки"
+        );
+
+        // Время не разобрать: подтверждает простой (остановлен или недоступен), увиденный после отправки.
+        let mut stopped = running.clone();
+        stopped.members[1].state = Some("stopped".into());
+        plan.observe(&stopped);
+        assert_eq!(progress(&plan, &stopped, Some("t1")), WatchStep::Restarted);
+        assert_eq!(progress(&plan, &running, Some("t1")), WatchStep::Done);
+        let mut unseen = WatchPlan::Restart {
+            member: "pg-2".into(),
+            start_before: None,
+            only_pending: false,
+            sent_at_ms: sent,
+            seen_down: false,
+        };
+        let mut unreachable = running.clone();
+        unreachable.members[1].reachable = false;
+        unseen.observe(&unreachable);
+        assert_eq!(
+            progress(&unseen, &running, None),
+            WatchStep::Done,
+            "недоступен — тоже простой"
+        );
+    }
+
+    /// Время запуска до действия известно — подтверждает только другое время; простой тут не нужен.
+    #[test]
+    fn restart_with_a_known_start_time_compares_the_two() {
+        let plan = WatchPlan::Restart {
+            member: "pg-2".into(),
+            start_before: Some("t0".into()),
+            only_pending: false,
+            sent_at_ms: 0,
+            seen_down: false,
+        };
+        let running = topo(vec![m("pg-2", Role::Replica, "streaming", 2)]);
+        assert_eq!(progress(&plan, &running, Some("t0")), WatchStep::Accepted);
+        assert_eq!(progress(&plan, &running, None), WatchStep::Accepted);
+        assert_eq!(progress(&plan, &running, Some("t1")), WatchStep::Done);
     }
 
     #[test]
@@ -399,14 +547,14 @@ mod tests {
             candidate: None,
             scheduled_at: Some("2030-01-01T00:00:00Z".into()),
         };
-        assert!(WatchPlan::for_action(&sched, &t, None).is_none());
-        assert!(WatchPlan::for_action(&PatroniAction::CancelSwitchover, &t, None).is_none());
+        assert!(WatchPlan::for_action(&sched, &t, None, 0).is_none());
+        assert!(WatchPlan::for_action(&PatroniAction::CancelSwitchover, &t, None, 0).is_none());
         let now = PatroniAction::Switchover {
             candidate: None,
             scheduled_at: None,
         };
         assert_eq!(
-            WatchPlan::for_action(&now, &t, None).unwrap().deadline(),
+            WatchPlan::for_action(&now, &t, None, 0).unwrap().deadline(),
             Duration::from_secs(120)
         );
         let restart = PatroniAction::Restart {
@@ -415,13 +563,13 @@ mod tests {
             scheduled_at: None,
         };
         assert_eq!(
-            WatchPlan::for_action(&restart, &t, Some("t0".into()))
+            WatchPlan::for_action(&restart, &t, Some("t0".into()), 0)
                 .unwrap()
                 .deadline(),
             Duration::from_secs(300)
         );
         assert_eq!(
-            WatchPlan::for_action(&PatroniAction::Pause { paused: true }, &t, None)
+            WatchPlan::for_action(&PatroniAction::Pause { paused: true }, &t, None, 0)
                 .unwrap()
                 .deadline(),
             Duration::from_secs(30)

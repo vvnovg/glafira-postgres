@@ -295,11 +295,19 @@ pub struct Runtimes {
     connect_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     sink: Mutex<Option<Arc<dyn RuntimeSink>>>,
     listeners: Mutex<Vec<Arc<dyn CloseListener>>>,
-    /// Ускоренный опрос наблюдений после действий (P2b): подключение → интервал и срок. Не в `Entry`, а под
-    /// своим мьютексом: `unboost` вызывает остановка сессии наблюдения, а её — и слушатель закрытия, который
-    /// работает под `entries` (`disconnect`, переоткрытие). Взятие `entries` там было бы повторным захватом
-    /// std-мьютекса тем же потоком — взаимной блокировкой; `boosts` же последний в порядке блокировок.
-    boosts: Mutex<HashMap<String, (Duration, Instant)>>,
+    /// Ускоренный опрос наблюдений после действий (P2b): подключение → ускорения его наблюдений (у каждого своё:
+    /// конец одного наблюдения не замедляет другое). Не в `Entry`, а под своим мьютексом: `unboost` вызывает
+    /// остановка сессии наблюдения, а её — и слушатель закрытия, который работает под `entries` (`disconnect`,
+    /// переоткрытие). Взятие `entries` там было бы повторным захватом std-мьютекса тем же потоком — взаимной
+    /// блокировкой; `boosts` же последний в порядке блокировок.
+    boosts: Mutex<HashMap<String, Vec<Boost>>>,
+}
+
+/// Ускорение опроса одного наблюдения: `owner` — id его сессии.
+struct Boost {
+    owner: String,
+    interval: Duration,
+    until: Instant,
 }
 
 /// Подключение не открыто (или закрыто, пока шла операция).
@@ -535,37 +543,51 @@ impl Runtimes {
         })
     }
 
-    /// Опрос раз в `interval` до `until` (наблюдение после действия). Фоновый опрос просыпается сразу.
-    pub fn boost(&self, id: &str, interval: Duration, until: Instant) {
+    /// Опрос раз в `interval` до `until` для наблюдения `owner` (id его сессии); повтор того же `owner` заменяет
+    /// его ускорение. Фоновый опрос просыпается сразу.
+    pub fn boost(&self, id: &str, owner: &str, interval: Duration, until: Instant) {
         let entries = self.entries.lock_safe();
         if let Some(e) = entries.get(id) {
-            self.boosts
-                .lock_safe()
-                .insert(id.to_string(), (interval, until));
+            let mut boosts = self.boosts.lock_safe();
+            let list = boosts.entry(id.to_string()).or_default();
+            list.retain(|b| b.owner != owner);
+            list.push(Boost {
+                owner: owner.to_string(),
+                interval,
+                until,
+            });
             e.wake.notify_one();
         }
     }
 
-    /// Снимает ускорение (панель наблюдения закрыта, наблюдение кончилось). Берёт только `boosts`, не `entries`:
-    /// вызывается и из слушателя закрытия, который работает под `entries`.
-    pub fn unboost(&self, id: &str) {
-        self.boosts.lock_safe().remove(id);
+    /// Снимает ускорение наблюдения `owner` (панель закрыта, наблюдение кончилось); ускорения других наблюдений
+    /// остаются. Берёт только `boosts`, не `entries`: вызывается и из слушателя закрытия, который работает под
+    /// `entries`.
+    pub fn unboost(&self, id: &str, owner: &str) {
+        let mut boosts = self.boosts.lock_safe();
+        if let Some(list) = boosts.get_mut(id) {
+            list.retain(|b| b.owner != owner);
+            if list.is_empty() {
+                boosts.remove(id);
+            }
+        }
     }
 
     /// Сколько ждать до следующего опроса открытия `generation` и чем его разбудить; `None` — открытия нет.
-    /// Истёкшее ускорение снимается здесь же.
+    /// Ждётся самый частый интервал среди живых ускорений; истёкшие снимаются здесь же.
     fn next_wait(&self, id: &str, generation: u64) -> Option<(Duration, Arc<tokio::sync::Notify>)> {
         let entries = self.entries.lock_safe();
         let e = entries.get(id).filter(|e| e.generation == generation)?;
         let mut boosts = self.boosts.lock_safe();
-        let wait = match boosts.get(id) {
-            Some(&(interval, until)) if Instant::now() < until => interval.min(self.interval),
-            Some(_) => {
+        let mut wait = self.interval;
+        if let Some(list) = boosts.get_mut(id) {
+            let now = Instant::now();
+            list.retain(|b| now < b.until);
+            wait = list.iter().map(|b| b.interval).fold(wait, Duration::min);
+            if list.is_empty() {
                 boosts.remove(id);
-                self.interval
             }
-            None => self.interval,
-        };
+        }
         Some((wait, e.wake.clone()))
     }
 
@@ -1077,6 +1099,7 @@ mod tests {
         let base = src.calls();
         rt.boost(
             "c",
+            "w",
             Duration::from_millis(30),
             Instant::now() + Duration::from_millis(300),
         );
@@ -1094,17 +1117,46 @@ mod tests {
         );
         rt.boost(
             "c",
+            "w",
             Duration::from_millis(30),
             Instant::now() + Duration::from_secs(60),
         );
         eventually("снова ускорен", || src.calls() >= after + 2).await;
-        rt.unboost("c");
+        rt.unboost("c", "w");
         let stopped = src.calls();
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(
             src.calls() <= stopped + 1,
             "unboost возвращает обычный интервал"
         );
+    }
+
+    /// Два наблюдения одного подключения не мешают друг другу: снятие ускорения одного не замедляет опрос, пока
+    /// идёт другое; опрос идёт по самому частому из живых ускорений и замедляется, когда частых не осталось.
+    #[tokio::test]
+    async fn two_watches_keep_fast_polling_until_the_last_fast_one_ends() {
+        let (rt, src, _rec, _pools) = manual(vec![Ok(two("a"))]);
+        rt.connect(patroni_profile()).await.unwrap();
+        let later = Instant::now() + Duration::from_secs(60);
+        rt.boost("c", "w1", Duration::from_millis(30), later);
+        rt.boost("c", "w2", Duration::from_millis(30), later);
+        rt.boost("c", "slow", Duration::from_secs(10), later);
+        rt.unboost("c", "w1");
+        let base = src.calls();
+        eventually(
+            "второе наблюдение держит частый опрос",
+            || src.calls() >= base + 3,
+        )
+        .await;
+        rt.unboost("c", "w2");
+        let stopped = src.calls();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            src.calls() <= stopped + 1,
+            "осталось только медленное ускорение (10 с)"
+        );
+        rt.unboost("c", "slow");
+        assert!(rt.boosts.lock_safe().is_empty(), "ускорений не осталось");
     }
 
     /// Закрытие подключения во время наблюдения: слушатель закрытия (реестр сессий) останавливает сессию
@@ -1118,6 +1170,7 @@ mod tests {
         rt.connect(patroni_profile()).await.unwrap();
         rt.boost(
             "c",
+            "w",
             Duration::from_millis(30),
             Instant::now() + Duration::from_secs(60),
         );
@@ -1126,7 +1179,7 @@ mod tests {
             "w".into(),
             "c",
             crate::session::SessionKind::Watch,
-            crate::actions::watch::stop_watch(watch.abort_handle(), &rt, "c"),
+            crate::actions::watch::stop_watch(watch.abort_handle(), &rt, "c", "w"),
         );
         let (tx, rx) = mpsc::channel();
         let closing = rt.clone();

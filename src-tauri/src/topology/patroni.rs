@@ -59,13 +59,15 @@ pub trait PatroniHttp: Send + Sync {
     fn get_json<'a>(&'a self, url: &'a str) -> BoxFuture<'a, AppResult<serde_json::Value>>;
     /// HTTP-код ответа на GET (матрица health: тело не читается, авторизация не нужна).
     fn get_status<'a>(&'a self, url: &'a str) -> BoxFuture<'a, AppResult<u16>>;
-    /// Изменяющий запрос (действия P2b) с basic auth профиля. По умолчанию не поддерживается: подделки чтения
-    /// в тестах P1/P2a его не реализуют.
+    /// Изменяющий запрос (действия P2b) с basic auth профиля; `timeout` — общий срок этого запроса (у switchover
+    /// и failover он длиннее обычного: Patroni отвечает после смены лидера), срок соединения —
+    /// `HTTP_CONNECT_TIMEOUT`. По умолчанию не поддерживается: подделки чтения в тестах P1/P2a его не реализуют.
     fn send_json<'a>(
         &'a self,
         _method: HttpMethod,
         url: &'a str,
         _body: Option<&'a serde_json::Value>,
+        _timeout: Duration,
     ) -> BoxFuture<'a, AppResult<HttpReply>> {
         Box::pin(async move {
             Err(app_err!(
@@ -220,7 +222,8 @@ impl ReqwestHttp {
     /// Ошибка запроса. Через туннель обрыв потока (`ssh -D` закрывает соединение, когда бастион не достучался до
     /// узла: клиент OpenSSH 10.x — посреди рукопожатия SOCKS5, старый — сразу после его успеха) — сбой проброса к
     /// узлу из адреса запроса; отказ порта туннеля (процесс ssh умер) — туннель не работает; срок и TLS — как обычно.
-    fn request_error(&self, url: &str, e: &reqwest::Error) -> AppError {
+    /// `timeout` — срок запроса (для текста ошибки срока).
+    fn request_error(&self, url: &str, e: &reqwest::Error, timeout: Duration) -> AppError {
         if let Some(proxy) = self.proxy
             && !e.is_timeout()
             && !is_certificate_error(e)
@@ -247,7 +250,7 @@ impl ReqwestHttp {
                 return crate::net::ssh::socks::forward_failed(target, &host, port, &cause);
             }
         }
-        request_error(url, e)
+        request_error(url, e, timeout)
     }
 
     /// Пароль API не отправляется на этот адрес: профиль только https, а адрес — нет.
@@ -295,14 +298,15 @@ fn socks_failure_text(text: &str) -> bool {
     text.contains("io error during SOCKS handshake") || text.contains("SOCKS error:")
 }
 
-fn request_error(url: &str, e: &reqwest::Error) -> AppError {
+fn request_error(url: &str, e: &reqwest::Error, timeout: Duration) -> AppError {
     let text = chain(e);
     if e.is_timeout() {
         app_err!(
             ErrorCode::PatroniError,
             "errors.patroni.timeout",
-            "Patroni API at {{url}} did not answer within 5 s",
-            url = url
+            "Patroni API at {{url}} did not answer within {{secs}} s",
+            url = url,
+            secs = timeout.as_secs()
         )
     } else if is_certificate_error(e) {
         app_err!(
@@ -397,9 +401,15 @@ impl PatroniHttp for ReqwestHttp {
             } else if let Some((u, p)) = &self.auth {
                 req = req.basic_auth(u, Some(p));
             }
-            let resp = req.send().await.map_err(|e| self.request_error(url, &e))?;
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| self.request_error(url, &e, HTTP_TIMEOUT))?;
             let status = resp.status();
-            let body = resp.text().await.map_err(|e| self.request_error(url, &e))?;
+            let body = resp
+                .text()
+                .await
+                .map_err(|e| self.request_error(url, &e, HTTP_TIMEOUT))?;
             let parsed = serde_json::from_str::<serde_json::Value>(&body);
             match (status.as_u16(), parsed) {
                 (200..=299, Ok(v)) => Ok(v),
@@ -438,7 +448,7 @@ impl PatroniHttp for ReqwestHttp {
                 .get(url)
                 .send()
                 .await
-                .map_err(|e| self.request_error(url, &e))?;
+                .map_err(|e| self.request_error(url, &e, HTTP_TIMEOUT))?;
             Ok(resp.status().as_u16())
         })
     }
@@ -448,6 +458,7 @@ impl PatroniHttp for ReqwestHttp {
         method: HttpMethod,
         url: &'a str,
         body: Option<&'a serde_json::Value>,
+        timeout: Duration,
     ) -> BoxFuture<'a, AppResult<HttpReply>> {
         Box::pin(async move {
             // Неверный адрес — ошибка настройки: до сети дело не доходит, и «не дошёл» тут ни при чём (обход
@@ -465,7 +476,8 @@ impl PatroniHttp for ReqwestHttp {
                 HttpMethod::Patch => reqwest::Method::PATCH,
                 HttpMethod::Delete => reqwest::Method::DELETE,
             };
-            let mut req = self.send_client.request(m, url);
+            // Срок — этого запроса (перекрывает срок клиента); срок соединения остаётся `HTTP_CONNECT_TIMEOUT`.
+            let mut req = self.send_client.request(m, url).timeout(timeout);
             if let Some(b) = body {
                 req = req.json(b);
             }
@@ -487,7 +499,7 @@ impl PatroniHttp for ReqwestHttp {
                     return Err(connect_timed_out(url, &e));
                 }
                 Err(e) if e.is_connect() || e.is_timeout() => {
-                    return Err(self.request_error(url, &e));
+                    return Err(self.request_error(url, &e, timeout));
                 }
                 Err(e) => return Err(connection_lost(url, &e)),
             };
@@ -1947,7 +1959,12 @@ mod tests {
     #[tokio::test]
     async fn send_json_is_unsupported_by_default() {
         let e = ReadOnlyHttp
-            .send_json(HttpMethod::Post, "http://pg-1:8008/switchover", None)
+            .send_json(
+                HttpMethod::Post,
+                "http://pg-1:8008/switchover",
+                None,
+                HTTP_TIMEOUT,
+            )
             .await
             .unwrap_err();
         assert_eq!(
@@ -1972,17 +1989,32 @@ mod tests {
 
         let body = serde_json::json!({"leader": "pg-1", "candidate": "pg-2"});
         let r = http
-            .send_json(HttpMethod::Post, &format!("{base}/switchover"), Some(&body))
+            .send_json(
+                HttpMethod::Post,
+                &format!("{base}/switchover"),
+                Some(&body),
+                HTTP_TIMEOUT,
+            )
             .await
             .unwrap();
         assert_eq!((r.status, r.body.as_str()), (200, "Done"));
         let null = serde_json::json!({"pause": null});
-        http.send_json(HttpMethod::Patch, &format!("{base}/config"), Some(&null))
-            .await
-            .unwrap();
-        http.send_json(HttpMethod::Delete, &format!("{base}/switchover"), None)
-            .await
-            .unwrap();
+        http.send_json(
+            HttpMethod::Patch,
+            &format!("{base}/config"),
+            Some(&null),
+            HTTP_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        http.send_json(
+            HttpMethod::Delete,
+            &format!("{base}/switchover"),
+            None,
+            HTTP_TIMEOUT,
+        )
+        .await
+        .unwrap();
         {
             let calls = seen.lock_safe();
             assert_eq!(calls.len(), 3);
@@ -2019,12 +2051,22 @@ mod tests {
 
         // Любой HTTP-код — ответ, а не ошибка: смысл (в том числе 401) решает вызывающий.
         let rejected = http
-            .send_json(HttpMethod::Post, &format!("{base}/rejected"), None)
+            .send_json(
+                HttpMethod::Post,
+                &format!("{base}/rejected"),
+                None,
+                HTTP_TIMEOUT,
+            )
             .await
             .unwrap();
         assert_eq!((rejected.status, rejected.body.as_str()), (412, "Done"));
         let denied = http
-            .send_json(HttpMethod::Post, &format!("{base}/denied"), None)
+            .send_json(
+                HttpMethod::Post,
+                &format!("{base}/denied"),
+                None,
+                HTTP_TIMEOUT,
+            )
             .await
             .unwrap();
         assert_eq!(denied.status, 401);
@@ -2039,6 +2081,7 @@ mod tests {
                 HttpMethod::Post,
                 &format!("http://127.0.0.1:{port}/switchover"),
                 None,
+                HTTP_TIMEOUT,
             )
             .await
             .unwrap_err();
@@ -2063,6 +2106,7 @@ mod tests {
                     HttpMethod::Post,
                     &format!("{}/switchover", server.base),
                     Some(&body),
+                    HTTP_TIMEOUT,
                 )
                 .await
                 .unwrap_err();
@@ -2088,7 +2132,12 @@ mod tests {
         let http = ReqwestHttp::new(&s, None, None, Some(proxy), Some("bastion".into())).unwrap();
         let started = std::time::Instant::now();
         let (sent, read) = tokio::join!(
-            http.send_json(HttpMethod::Post, "http://dead:8008/switchover", None),
+            http.send_json(
+                HttpMethod::Post,
+                "http://dead:8008/switchover",
+                None,
+                HTTP_TIMEOUT
+            ),
             http.get_json("http://dead:8008/cluster"),
         );
         let took = started.elapsed();
@@ -2117,6 +2166,7 @@ mod tests {
                 HttpMethod::Post,
                 &format!("http://127.0.0.1:{}/switchover", server.port),
                 None,
+                HTTP_TIMEOUT,
             )
             .await
             .unwrap_err();
@@ -2129,6 +2179,53 @@ mod tests {
         assert!(
             took >= Duration::from_secs(4) && took < Duration::from_secs(7),
             "общий срок ≈ 5 с, получилось {took:?}"
+        );
+    }
+
+    /// Срок изменяющего запроса — свой у каждого запроса: switchover и failover ждут ответа Patroni дольше обычных
+    /// 5 с (Patroni отвечает после смены лидера), а соединение — по-прежнему `HTTP_CONNECT_TIMEOUT`.
+    #[tokio::test]
+    async fn send_json_waits_for_a_slow_answer_within_its_own_timeout() {
+        let slow = testutil::slow_http_server(200, Duration::from_secs(6));
+        let http = ReqwestHttp::new(&settings(&["http://x"]), None, None, None, None).unwrap();
+        let started = std::time::Instant::now();
+        let reply = http
+            .send_json(
+                HttpMethod::Post,
+                &format!("{}/failover", slow.base),
+                None,
+                Duration::from_secs(60),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply.status, 200);
+        assert!(
+            started.elapsed() >= Duration::from_secs(6),
+            "ответ ждали дольше обычных 5 с"
+        );
+    }
+
+    /// Короткий срок запроса тоже свой: ошибка срока называет его, а не обычные 5 с.
+    #[tokio::test]
+    async fn send_json_timeout_names_the_request_timeout() {
+        let server = testutil::silent_server();
+        let http = ReqwestHttp::new(&settings(&["http://x"]), None, None, None, None).unwrap();
+        let started = std::time::Instant::now();
+        let e = http
+            .send_json(
+                HttpMethod::Post,
+                &format!("http://127.0.0.1:{}/switchover", server.port),
+                None,
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(e.key, "errors.patroni.timeout", "{e:?}");
+        assert_eq!(e.params["secs"], "1");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "срок запроса 1 с, а не 5 с: {:?}",
+            started.elapsed()
         );
     }
 
@@ -2145,7 +2242,12 @@ mod tests {
                 ReqwestHttp::new(&settings(&[&server.base]), None, None, None, None).unwrap();
             for method in [HttpMethod::Post, HttpMethod::Patch, HttpMethod::Delete] {
                 let reply = http
-                    .send_json(method, &format!("{}/switchover", server.base), None)
+                    .send_json(
+                        method,
+                        &format!("{}/switchover", server.base),
+                        None,
+                        HTTP_TIMEOUT,
+                    )
                     .await
                     .unwrap();
                 assert_eq!(
@@ -2185,6 +2287,7 @@ mod tests {
                 HttpMethod::Post,
                 &format!("http://user:secret@127.0.0.1:{}/switchover", server.port),
                 None,
+                HTTP_TIMEOUT,
             )
             .await
             .unwrap_err();
@@ -2195,7 +2298,12 @@ mod tests {
         );
         assert!(!format!("{e:?}").contains("secret"), "{e:?}");
         let bad = http
-            .send_json(HttpMethod::Post, "ftp://user:secret@host/switchover", None)
+            .send_json(
+                HttpMethod::Post,
+                "ftp://user:secret@host/switchover",
+                None,
+                HTTP_TIMEOUT,
+            )
             .await
             .unwrap_err();
         assert_eq!(bad.key, "errors.patroni.badUrl", "{bad:?}");
@@ -2217,7 +2325,7 @@ mod tests {
             String::new(),
         ] {
             let e = http
-                .send_json(HttpMethod::Post, &url, None)
+                .send_json(HttpMethod::Post, &url, None, HTTP_TIMEOUT)
                 .await
                 .unwrap_err();
             assert_eq!(
@@ -2238,12 +2346,22 @@ mod tests {
         s.username = Some("patroni".into());
         let http = ReqwestHttp::new(&s, Some("secret".into()), None, None, None).unwrap();
         // Успешный запрос уходит без пароля.
-        http.send_json(HttpMethod::Post, &format!("{base}/switchover"), None)
-            .await
-            .unwrap();
+        http.send_json(
+            HttpMethod::Post,
+            &format!("{base}/switchover"),
+            None,
+            HTTP_TIMEOUT,
+        )
+        .await
+        .unwrap();
         // А 401 на таком адресе — не «неверный пароль», а «пароль не отправлен».
         let e = http
-            .send_json(HttpMethod::Post, &format!("{base}/denied"), None)
+            .send_json(
+                HttpMethod::Post,
+                &format!("{base}/denied"),
+                None,
+                HTTP_TIMEOUT,
+            )
             .await
             .unwrap_err();
         assert_eq!(
@@ -2418,7 +2536,12 @@ mod tests {
         let s = settings(&["http://patroni1:8008"]);
         let http = ReqwestHttp::new(&s, None, None, Some(proxy), Some("bastion".into())).unwrap();
         let e = http
-            .send_json(HttpMethod::Post, "http://patroni1:8008/switchover", None)
+            .send_json(
+                HttpMethod::Post,
+                "http://patroni1:8008/switchover",
+                None,
+                HTTP_TIMEOUT,
+            )
             .await
             .unwrap_err();
         assert_eq!(
@@ -2432,7 +2555,12 @@ mod tests {
         };
         let down = ReqwestHttp::new(&s, None, None, Some(closed), Some("bastion".into())).unwrap();
         let e = down
-            .send_json(HttpMethod::Post, "http://patroni1:8008/switchover", None)
+            .send_json(
+                HttpMethod::Post,
+                "http://patroni1:8008/switchover",
+                None,
+                HTTP_TIMEOUT,
+            )
             .await
             .unwrap_err();
         assert_eq!(e.key, "errors.ssh.tunnelDown", "{e:?}");
@@ -2452,7 +2580,12 @@ mod tests {
         let s = settings(&["http://patroni1:8008"]);
         let http = ReqwestHttp::new(&s, None, None, Some(socks), Some("bastion".into())).unwrap();
         let e = http
-            .send_json(HttpMethod::Post, "http://patroni1:8008/switchover", None)
+            .send_json(
+                HttpMethod::Post,
+                "http://patroni1:8008/switchover",
+                None,
+                HTTP_TIMEOUT,
+            )
             .await
             .unwrap_err();
         assert_eq!(

@@ -403,7 +403,11 @@ async fn switchover_now_is_watched_until_done() {
     let r = pa::execute(&st, "it", &action, &Confirmation::default(), events.clone())
         .await
         .unwrap();
-    assert!(r.watch.is_some() && r.journal_written);
+    // Patroni отвечает на switchover после смены лидера: срок запроса это ожидание покрывает, исход известен.
+    assert!(
+        r.watch.is_some() && r.journal_written && !r.outcome_unknown,
+        "{r:?}"
+    );
     let last = events.until_finished(Duration::from_secs(130)).await;
     assert_eq!(
         (last.step, last.status),
@@ -530,7 +534,7 @@ async fn failover_after_the_leader_stops() {
         confirm: None,
         typed_name: Some(candidate.clone()),
     };
-    pa::execute(
+    let r = pa::execute(
         &st,
         "it",
         &PatroniAction::Failover {
@@ -541,6 +545,8 @@ async fn failover_after_the_leader_stops() {
     )
     .await
     .unwrap();
+    // Ответ Patroni приходит после смены лидера (дольше обычных 5 с): исход известен, наблюдение открыто.
+    assert!(r.watch.is_some() && !r.outcome_unknown, "{r:?}");
     let last = events.until_finished(Duration::from_secs(130)).await;
     assert!(
         last.step >= WatchStep::NewLeaderRunning,

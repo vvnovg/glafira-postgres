@@ -1,7 +1,7 @@
 //! Действия Patroni (спец. P2 §8.5): модель действия, предусловия на топологии, запрос и адреса, отправка,
 //! предпросмотр и выполнение с журналом; `execute` добавляет наблюдение за исходом (`actions::watch`).
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use pg_advisor::failover::{Candidate, DynConfig};
 use pg_advisor::rules::horizon::quote_literal;
@@ -21,7 +21,7 @@ use crate::state::AppState;
 use crate::sync::MutexExt;
 use crate::topology::BoxFuture;
 use crate::topology::model::{Member, Role, ScheduledRestart, ScheduledSwitchover, Topology};
-use crate::topology::patroni::{HttpMethod, HttpReply, PatroniHttp};
+use crate::topology::patroni::{HTTP_TIMEOUT, HttpMethod, HttpReply, PatroniHttp};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -57,12 +57,19 @@ pub enum Route {
     Member(String),
 }
 
+/// Срок ответа на switchover «сейчас» и failover. Patroni отвечает на них только после смены лидера (опрашивает
+/// DCS до `2 * max(10, loop_wait)` с, при `loop_wait` 10 с — 20 с), обычные 5 с тут оборвали бы ожидание
+/// выполняющегося действия.
+pub const LEADER_CHANGE_TIMEOUT: Duration = Duration::from_secs(60);
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PatroniRequest {
     pub method: HttpMethod,
     pub path: &'static str,
     pub body: Option<Value>,
     pub route: Route,
+    /// Срок ответа: `LEADER_CHANGE_TIMEOUT` у смены лидера «сейчас», иначе `HTTP_TIMEOUT`.
+    pub timeout: Duration,
 }
 
 /// Имя действия в журнале.
@@ -222,6 +229,12 @@ pub fn request(a: &PatroniAction, t: &Topology) -> PatroniRequest {
                 path: "/switchover",
                 body: Some(Value::Object(body)),
                 route: Route::Leader,
+                // Запланированный switchover Patroni только записывает — отвечает сразу.
+                timeout: if scheduled_at.is_none() {
+                    LEADER_CHANGE_TIMEOUT
+                } else {
+                    HTTP_TIMEOUT
+                },
             }
         }
         PatroniAction::CancelSwitchover => PatroniRequest {
@@ -229,12 +242,14 @@ pub fn request(a: &PatroniAction, t: &Topology) -> PatroniRequest {
             path: "/switchover",
             body: None,
             route: Route::Leader,
+            timeout: HTTP_TIMEOUT,
         },
         PatroniAction::Failover { candidate } => PatroniRequest {
             method: HttpMethod::Post,
             path: "/failover",
             body: Some(json!({ "candidate": candidate })),
             route: Route::Leader,
+            timeout: LEADER_CHANGE_TIMEOUT,
         },
         PatroniAction::Restart {
             member,
@@ -253,6 +268,7 @@ pub fn request(a: &PatroniAction, t: &Topology) -> PatroniRequest {
                 path: "/restart",
                 body: Some(Value::Object(body)),
                 route: Route::Member(member.clone()),
+                timeout: HTTP_TIMEOUT,
             }
         }
         PatroniAction::CancelRestart { member } => PatroniRequest {
@@ -260,6 +276,7 @@ pub fn request(a: &PatroniAction, t: &Topology) -> PatroniRequest {
             path: "/restart",
             body: None,
             route: Route::Member(member.clone()),
+            timeout: HTTP_TIMEOUT,
         },
         PatroniAction::Pause { paused } => PatroniRequest {
             method: HttpMethod::Patch,
@@ -271,6 +288,7 @@ pub fn request(a: &PatroniAction, t: &Topology) -> PatroniRequest {
                 json!({ "pause": null })
             }),
             route: Route::Leader,
+            timeout: HTTP_TIMEOUT,
         },
     }
 }
@@ -345,7 +363,10 @@ pub async fn send(
     let mut last: Option<AppError> = None;
     for base in bases {
         let url = format!("{base}{}", req.path);
-        match http.send_json(req.method, &url, req.body.as_ref()).await {
+        match http
+            .send_json(req.method, &url, req.body.as_ref(), req.timeout)
+            .await
+        {
             Ok(r) if (200..300).contains(&r.status) => return Ok((url, r)),
             Ok(r) if matches!(r.status, 401 | 403) => {
                 return Err(app_err!(
@@ -418,6 +439,8 @@ pub struct Performed {
     pub journal_written: bool,
     pub before: Topology,
     pub restart_start: Option<String>,
+    /// Когда ушёл запрос (мс эпохи).
+    pub sent_at_ms: i64,
 }
 
 pub fn patroni_record(
@@ -612,9 +635,10 @@ impl PatroniHttp for LastSent<'_> {
         method: HttpMethod,
         url: &'a str,
         body: Option<&'a Value>,
+        timeout: Duration,
     ) -> BoxFuture<'a, AppResult<HttpReply>> {
         *self.url.lock_safe() = Some(url.to_string());
-        self.inner.send_json(method, url, body)
+        self.inner.send_json(method, url, body, timeout)
     }
 }
 
@@ -670,14 +694,43 @@ async fn send_recorded(http: &dyn PatroniHttp, req: &PatroniRequest, bases: &[St
     }
 }
 
+/// Итог отправки: ответ Patroni или ошибка отправки (журнал записан в обоих случаях) и то, что нужно
+/// наблюдению. Ошибки до отправки (защита, предусловия, клиент HTTP) сюда не доходят.
+struct Dispatched {
+    sent: AppResult<HttpReply>,
+    journal_written: bool,
+    before: Topology,
+    restart_start: Option<String>,
+    sent_at_ms: i64,
+}
+
 /// Проверяет защиту и предусловия, отправляет запрос Patroni и пишет журнал (ошибку Patroni — тоже). Отказы
-/// защиты и предусловий в журнал не попадают: запрос не отправлялся.
+/// защиты и предусловий в журнал не попадают: запрос не отправлялся. Ошибка отправки — тоже ошибка;
+/// `execute` различает неизвестный исход сам.
 pub async fn perform(
     st: &AppState,
     id: &str,
     action: &PatroniAction,
     confirmation: &Confirmation,
 ) -> AppResult<Performed> {
+    let d = dispatch(st, id, action, confirmation).await?;
+    let reply = d.sent?;
+    Ok(Performed {
+        response: reply.body,
+        journal_written: d.journal_written,
+        before: d.before,
+        restart_start: d.restart_start,
+        sent_at_ms: d.sent_at_ms,
+    })
+}
+
+/// Защита и предусловия (ошибка — запрос не отправлялся), затем отправка с журналом (`send_and_record`).
+async fn dispatch(
+    st: &AppState,
+    id: &str,
+    action: &PatroniAction,
+    confirmation: &Confirmation,
+) -> AppResult<Dispatched> {
     let profile = st.profile(id)?;
     ensure_mutation_allowed(&profile, confirmation.confirm.as_deref())?;
     if let PatroniAction::Failover { candidate } = action {
@@ -700,19 +753,41 @@ pub async fn perform(
     }
     let before = st.runtimes.diag_target(id, None, true)?.topology;
     check(action, &before, journal::now_ms())?;
-    let req = request(action, &before);
-    let bases = bases(&before, &req.route, &settings.urls);
     let http = st.live.http_for(&profile).await?;
+    Ok(send_and_record(
+        http.as_ref(),
+        &st.actions,
+        &profile,
+        &settings.urls,
+        action,
+        before,
+    )
+    .await)
+}
+
+/// Отправка проверенного действия и запись журнала: время запуска участника restart «сейчас» (для наблюдения),
+/// запрос по адресам `bases`, запись с итогом. Сеть — через `http` (в тестах — подделка).
+async fn send_and_record(
+    http: &dyn PatroniHttp,
+    journal: &std::sync::Arc<journal::ActionJournal>,
+    profile: &crate::conn::profile::ConnectionProfile,
+    profile_urls: &[String],
+    action: &PatroniAction,
+    before: Topology,
+) -> Dispatched {
+    let req = request(action, &before);
+    let bases = bases(&before, &req.route, profile_urls);
     let restart_start = match action {
         PatroniAction::Restart {
             member,
             scheduled_at: None,
             ..
-        } => postmaster_start(http.as_ref(), &before, member).await,
+        } => postmaster_start(http, &before, member).await,
         _ => None,
     };
     let started = Instant::now();
-    let sent = send_recorded(http.as_ref(), &req, &bases).await;
+    let sent_at_ms = journal::now_ms();
+    let sent = send_recorded(http, &req, &bases).await;
     let member = match &req.route {
         Route::Member(m) => Some(m.clone()),
         Route::Leader => before.leader().map(|m| m.name.clone()),
@@ -720,7 +795,7 @@ pub async fn perform(
     let entry = ActionRecord {
         ts: journal::now_ms(),
         action: action_name(action).into(),
-        connection: RecordConnection::of(&profile),
+        connection: RecordConnection::of(profile),
         member,
         prod_confirmed: profile.environment == Environment::Prod,
         outcome: sent.outcome,
@@ -730,30 +805,32 @@ pub async fn perform(
         slot: None,
         patroni: Some(sent.record),
     };
-    let log = st.actions.clone();
+    let log = journal.clone();
     let journal_written = crate::conn::run_blocking(move || Ok(log.append(&entry)))
         .await
         .unwrap_or(false);
-    let (_, reply) = sent.result?;
-    Ok(Performed {
-        response: reply.body,
+    Dispatched {
+        sent: sent.result.map(|(_, reply)| reply),
         journal_written,
         before,
         restart_start,
-    })
+        sent_at_ms,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PatroniActionResult {
+    /// Ответ Patroni; пусто при неизвестном исходе.
     pub response: String,
     /// Сессия наблюдения (switchover / failover / restart «сейчас», pause / resume); `None` — не наблюдается.
     pub watch: Option<String>,
     pub journal_written: bool,
+    /// Запрос ушёл, но ответа нет (таймаут, обрыв после отправки): выполнилось ли действие, покажет наблюдение.
+    pub outcome_unknown: bool,
 }
 
-/// Выполнение (`perform`) и наблюдение за исходом. Ошибка выполнения — и таймаут или обрыв после отправки, когда
-/// исход неизвестен, — возвращается как есть, без наблюдения: что случилось, показывает обзор кластера.
+/// Выполнение и наблюдение за исходом (`finish`).
 pub async fn execute(
     st: &AppState,
     id: &str,
@@ -761,17 +838,45 @@ pub async fn execute(
     confirmation: &Confirmation,
     sink: std::sync::Arc<dyn crate::actions::watch::WatchSink>,
 ) -> AppResult<PatroniActionResult> {
-    let done = perform(st, id, action, confirmation).await?;
-    let watch = crate::actions::watch::WatchPlan::for_action(
-        action,
-        &done.before,
-        done.restart_start.clone(),
+    let d = dispatch(st, id, action, confirmation).await?;
+    finish(st, id, action, d, sink)
+}
+
+/// Таймаут после установки соединения или обрыв после отправки: запрос мог дойти и выполниться.
+fn outcome_unknown(e: &AppError) -> bool {
+    matches!(
+        e.key.as_str(),
+        "errors.patroni.timeout" | "errors.patroni.connectionLost"
     )
-    .map(|plan| crate::actions::watch::start(st, id, plan, sink));
+}
+
+/// Итог выполнения и наблюдение. Ответ Patroni — наблюдение по плану действия (если план есть). Неизвестный
+/// исход (`outcome_unknown`) у действия с планом — тоже наблюдение, с отметкой `outcome_unknown`: оно и покажет,
+/// выполнилось ли действие (switchover и failover отвечают только после смены лидера). Любая иная ошибка — и
+/// неизвестный исход действия без плана (отмены, запланированные действия) — возвращается как есть, без наблюдения.
+fn finish(
+    st: &AppState,
+    id: &str,
+    action: &PatroniAction,
+    d: Dispatched,
+    sink: std::sync::Arc<dyn crate::actions::watch::WatchSink>,
+) -> AppResult<PatroniActionResult> {
+    let plan = crate::actions::watch::WatchPlan::for_action(
+        action,
+        &d.before,
+        d.restart_start,
+        d.sent_at_ms,
+    );
+    let (response, unknown) = match d.sent {
+        Ok(reply) => (reply.body, false),
+        Err(e) if outcome_unknown(&e) && plan.is_some() => (String::new(), true),
+        Err(e) => return Err(e),
+    };
     Ok(PatroniActionResult {
-        response: done.response,
-        watch,
-        journal_written: done.journal_written,
+        response,
+        watch: plan.map(|plan| crate::actions::watch::start(st, id, plan, sink)),
+        journal_written: d.journal_written,
+        outcome_unknown: unknown,
     })
 }
 
@@ -1069,6 +1174,7 @@ mod tests {
             method: HttpMethod,
             url: &'a str,
             body: Option<&'a serde_json::Value>,
+            _timeout: Duration,
         ) -> BoxFuture<'a, AppResult<HttpReply>> {
             self.calls
                 .lock_safe()
@@ -1283,6 +1389,7 @@ mod tests {
                 _method: HttpMethod,
                 _url: &'a str,
                 _body: Option<&'a serde_json::Value>,
+                _timeout: Duration,
             ) -> BoxFuture<'a, AppResult<HttpReply>> {
                 Box::pin(async {
                     Ok(HttpReply {
@@ -1328,6 +1435,7 @@ mod tests {
             _method: HttpMethod,
             url: &'a str,
             _body: Option<&'a serde_json::Value>,
+            _timeout: Duration,
         ) -> BoxFuture<'a, AppResult<HttpReply>> {
             self.calls.lock_safe().push(url.to_string());
             let failure = (self.fail)(url);
@@ -1347,8 +1455,9 @@ mod tests {
         app_err!(
             ErrorCode::PatroniError,
             "errors.patroni.timeout",
-            "Patroni API at {{url}} did not answer within 5 s",
-            url = url
+            "Patroni API at {{url}} did not answer within {{secs}} s",
+            url = url,
+            secs = 5
         )
     }
 
@@ -1642,6 +1751,213 @@ mod tests {
     }
 
     /// Сессии самого Glafira не считаются: оборвутся и они, но это не клиенты, о которых предупреждает диалог.
+    /// Patroni отвечает на switchover «сейчас» и failover только после смены лидера (до `2 * max(10, loop_wait)` с):
+    /// у этих запросов срок `LEADER_CHANGE_TIMEOUT`, у остальных — обычный `HTTP_TIMEOUT`.
+    #[test]
+    fn leader_changes_get_a_long_timeout_and_the_rest_the_usual_one() {
+        use crate::topology::patroni::HTTP_TIMEOUT;
+        let t = cluster();
+        let long = [
+            PatroniAction::Switchover {
+                candidate: Some("pg-2".into()),
+                scheduled_at: None,
+            },
+            PatroniAction::Failover {
+                candidate: "pg-2".into(),
+            },
+        ];
+        for a in &long {
+            assert_eq!(request(a, &t).timeout, LEADER_CHANGE_TIMEOUT, "{a:?}");
+        }
+        assert_eq!(LEADER_CHANGE_TIMEOUT, Duration::from_secs(60));
+        let usual = [
+            PatroniAction::Switchover {
+                candidate: None,
+                scheduled_at: Some("2030-01-01T00:00:00Z".into()),
+            },
+            PatroniAction::CancelSwitchover,
+            PatroniAction::Restart {
+                member: "pg-2".into(),
+                only_pending: false,
+                scheduled_at: None,
+            },
+            PatroniAction::CancelRestart {
+                member: "pg-2".into(),
+            },
+            PatroniAction::Pause { paused: true },
+        ];
+        for a in &usual {
+            assert_eq!(request(a, &t).timeout, HTTP_TIMEOUT, "{a:?}");
+        }
+    }
+
+    /// Срок запроса доходит до клиента HTTP: `send` передаёт `send_json` срок самого запроса.
+    #[tokio::test]
+    async fn send_passes_the_request_timeout_to_the_client() {
+        struct Timeouts(Mutex<Vec<Duration>>);
+        impl PatroniHttp for Timeouts {
+            fn get_json<'a>(
+                &'a self,
+                _url: &'a str,
+            ) -> BoxFuture<'a, AppResult<serde_json::Value>> {
+                Box::pin(async { Ok(serde_json::Value::Null) })
+            }
+            fn get_status<'a>(&'a self, _url: &'a str) -> BoxFuture<'a, AppResult<u16>> {
+                Box::pin(async { Ok(200) })
+            }
+            fn send_json<'a>(
+                &'a self,
+                _method: HttpMethod,
+                _url: &'a str,
+                _body: Option<&'a serde_json::Value>,
+                timeout: Duration,
+            ) -> BoxFuture<'a, AppResult<HttpReply>> {
+                self.0.lock_safe().push(timeout);
+                Box::pin(async {
+                    Ok(HttpReply {
+                        status: 200,
+                        body: String::new(),
+                    })
+                })
+            }
+        }
+        let http = Timeouts(Mutex::new(vec![]));
+        let failover = request(
+            &PatroniAction::Failover {
+                candidate: "pg-2".into(),
+            },
+            &cluster(),
+        );
+        send(&http, &failover, &["http://pg-1:8008".into()])
+            .await
+            .unwrap();
+        let pause = request(&PatroniAction::Pause { paused: true }, &cluster());
+        send(&http, &pause, &["http://pg-1:8008".into()])
+            .await
+            .unwrap();
+        assert_eq!(
+            *http.0.lock_safe(),
+            [
+                LEADER_CHANGE_TIMEOUT,
+                crate::topology::patroni::HTTP_TIMEOUT
+            ]
+        );
+    }
+
+    fn lost_err(url: &str) -> AppError {
+        app_err!(
+            ErrorCode::PatroniError,
+            "errors.patroni.connectionLost",
+            "The connection to the Patroni API at {{url}} was lost after the request was sent: the outcome is unknown, check the overview",
+            url = url
+        )
+    }
+
+    /// Состояние приложения во временном каталоге (журнал действий, реестр сессий) и профиль Patroni `c`.
+    fn app() -> (
+        tempfile::TempDir,
+        AppState,
+        crate::conn::profile::ConnectionProfile,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let st = AppState::new(
+            dir.path(),
+            std::sync::Arc::new(crate::secrets::MemoryStore::default()),
+        )
+        .unwrap();
+        let mut p = crate::conn::profile::sample_profile("c");
+        p.kind = ConnectionKind::Patroni;
+        (dir, st, p)
+    }
+
+    struct NoEvents;
+    impl crate::actions::watch::WatchSink for NoEvents {
+        fn send(&self, _: crate::actions::watch::WatchEvent) -> bool {
+            true
+        }
+    }
+
+    /// Запрос ушёл, а ответа нет (таймаут, обрыв после отправки): исход неизвестен. У действия с планом наблюдения
+    /// итог — успех с `outcomeUnknown` и наблюдением (оно и покажет, сменился ли лидер); в журнале — ошибка.
+    #[tokio::test]
+    async fn an_unknown_outcome_is_watched_instead_of_failing() {
+        let (_dir, st, profile) = app();
+        let failover = PatroniAction::Failover {
+            candidate: "pg-2".into(),
+        };
+        for fail in [timeout_err as fn(&str) -> AppError, lost_err] {
+            let http = Scripted::new(move |url| Some(fail(url)));
+            let d = send_and_record(&http, &st.actions, &profile, &[], &failover, cluster()).await;
+            let r = finish(&st, "c", &failover, d, std::sync::Arc::new(NoEvents)).unwrap();
+            assert!(
+                r.outcome_unknown && r.journal_written && r.response.is_empty(),
+                "{r:?}"
+            );
+            assert_eq!(serde_json::to_value(&r).unwrap()["outcomeUnknown"], true);
+            let watch = r.watch.expect("наблюдение открыто");
+            assert!(st.sessions.stop(&watch), "наблюдение — сессия");
+        }
+        let records = st.actions.list(Some("c"), 10);
+        assert_eq!(records.len(), 2);
+        assert!(
+            records.iter().all(|r| r.outcome == Outcome::Error),
+            "{records:?}"
+        );
+    }
+
+    /// Остальное — как раньше: отказ Patroni — ошибка без наблюдения; неизвестный исход у действия без плана
+    /// наблюдения (отмена расписания) — ошибка; ответ Patroni — наблюдение без отметки.
+    #[tokio::test]
+    async fn rejections_and_unwatched_actions_stay_errors() {
+        let (_dir, st, profile) = app();
+        let failover = PatroniAction::Failover {
+            candidate: "pg-2".into(),
+        };
+        let answer = |status| Fake {
+            dead: vec![],
+            status,
+            calls: Mutex::new(vec![]),
+        };
+        let d = send_and_record(
+            &answer(412),
+            &st.actions,
+            &profile,
+            &[],
+            &failover,
+            cluster(),
+        )
+        .await;
+        let e = finish(&st, "c", &failover, d, std::sync::Arc::new(NoEvents)).unwrap_err();
+        assert_eq!(e.key, "errors.patroni.actionRejected");
+
+        let cancel = PatroniAction::CancelSwitchover;
+        let mut scheduled = cluster();
+        scheduled.scheduled_switchover = Some(ScheduledSwitchover {
+            at: "2030-01-01T00:00:00Z".into(),
+            from: Some("pg-1".into()),
+            to: None,
+        });
+        let slow = Scripted::new(|url| Some(timeout_err(url)));
+        let d = send_and_record(&slow, &st.actions, &profile, &[], &cancel, scheduled).await;
+        let e = finish(&st, "c", &cancel, d, std::sync::Arc::new(NoEvents)).unwrap_err();
+        assert_eq!(e.key, "errors.patroni.timeout");
+
+        let d = send_and_record(
+            &answer(200),
+            &st.actions,
+            &profile,
+            &[],
+            &failover,
+            cluster(),
+        )
+        .await;
+        let r = finish(&st, "c", &failover, d, std::sync::Arc::new(NoEvents)).unwrap();
+        assert!(!r.outcome_unknown, "{r:?}");
+        assert_eq!(r.response, "Successfully switched over");
+        assert_eq!(serde_json::to_value(&r).unwrap()["outcomeUnknown"], false);
+        assert!(st.sessions.stop(&r.watch.expect("наблюдение открыто")));
+    }
+
     #[test]
     fn leader_sessions_skip_the_apps_own_sessions() {
         let sql = leader_sessions_sql();

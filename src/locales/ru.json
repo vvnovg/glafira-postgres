@@ -150,7 +150,7 @@
     },
     "patroni": {
       "setup": "Не удалось подготовить клиент API Patroni",
-      "timeout": "API Patroni {{url}} не ответил за 5 с",
+      "timeout": "API Patroni {{url}} не ответил за {{secs}} с",
       "discoverTimeout": "API Patroni не ответил за {{secs}} с",
       "tls": "Ошибка TLS при обращении к API Patroni {{url}}",
       "unreachable": "API Patroni {{url}} недоступен",
