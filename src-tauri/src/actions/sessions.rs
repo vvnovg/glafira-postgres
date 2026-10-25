@@ -1,11 +1,28 @@
 //! Отмена запроса и завершение сессий (спец. P2 §8.3): предпросмотр (задача 3) и выполнение (задача 4).
 
+use std::time::{Duration, Instant};
+
 use serde::{Deserialize, Serialize};
 use tokio_postgres::Client;
+use tokio_postgres::error::SqlState;
 
+use crate::actions::Confirmation;
+use crate::actions::journal::{self, ActionRecord, RecordConnection, SessionRecord};
+use crate::conn::profile::Environment;
+use crate::diag::caps::{Caps, V14};
 use crate::diag::sql::BACKEND_START_US;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult, ErrorCode};
+use crate::guard::{ensure_mutation_allowed, ensure_name_confirmed};
 use crate::state::AppState;
+
+/// Больше сессий за одно действие не принимается.
+pub const MAX_BATCH: usize = 500;
+/// Общий предел времени пакета: оставшиеся сессии получают `failed` (`errors.actions.batchTimeout`).
+pub const BATCH_LIMIT: Duration = Duration::from_secs(60);
+/// Сколько после `pg_terminate_backend` ждать исчезновения сессии.
+pub const GONE_WAIT: Duration = Duration::from_secs(5);
+/// Как часто в это время проверять, что сессия исчезла.
+pub const GONE_POLL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -233,6 +250,297 @@ pub async fn preview(
     })
 }
 
+/// Запрос выполнения: сессии, показанные в предпросмотре и разрешённые пользователем, и критерий цели для проверки.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionActionExecute {
+    pub member: String,
+    pub kind: SignalKind,
+    pub target: SessionTarget,
+    /// Сессии, показанные в предпросмотре и разрешённые пользователем.
+    pub sessions: Vec<SessionRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "result", rename_all = "camelCase")]
+pub enum SessionOutcome {
+    /// После terminate сессия с тем же `backend_start` исчезла за 5 с.
+    Terminated,
+    /// Отмена отправлена, или после terminate сессия ещё жива через 5 с.
+    SignalSent,
+    /// Сессии с таким `backend_start` уже нет.
+    Gone,
+    /// Сессия есть, но критерий цели больше не выполняется (проснулась, отпустила блокировки).
+    NoLongerMatches,
+    /// 42501: прав на сигнал нет.
+    NotAllowed,
+    Failed {
+        error: AppError,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionResult {
+    pub pid: i32,
+    pub backend_start_us: i64,
+    #[serde(flatten)]
+    pub outcome: SessionOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionActionResult {
+    pub member: String,
+    pub results: Vec<SessionResult>,
+    pub outcome: journal::Outcome,
+    /// `false` — действие выполнено, но запись в журнал не удалась.
+    pub journal_written: bool,
+}
+
+/// Критерий цели, который проверяется заново в том же запросе, что и сигнал (`$3` — порог в секундах).
+fn criterion(target: &SessionTarget) -> &'static str {
+    match target {
+        SessionTarget::Selected { .. } => "TRUE",
+        SessionTarget::IdleInTransaction { .. } => {
+            "a.state IN ('idle in transaction', 'idle in transaction (aborted)') \
+             AND a.state_change <= now() - make_interval(secs => $3)"
+        }
+        SessionTarget::RootBlocker { .. } => {
+            "EXISTS (SELECT 1 FROM pg_stat_activity w WHERE w.wait_event_type = 'Lock' \
+             AND a.pid = ANY(pg_blocking_pids(w.pid)))"
+        }
+    }
+}
+
+/// Сигнал сессии одним запросом с повторной проверкой критерия (спец. §8.3): строка есть — сигнал отправлен.
+/// `$1` — pid, `$2` — `backend_start` в микросекундах, `$3` — порог (только для `idleInTransaction`).
+pub fn signal_sql(kind: SignalKind, target: &SessionTarget, caps: Caps) -> String {
+    let func = match kind {
+        SignalKind::Cancel => "pg_cancel_backend",
+        SignalKind::Terminate => "pg_terminate_backend",
+    };
+    let query_id = caps.col(V14, "a.query_id::text", "text");
+    format!(
+        "SELECT a.usename::text, a.datname::text, a.application_name, host(a.client_addr), a.state, {query_id}, \
+                left(a.query, 500), extract(epoch FROM now() - a.xact_start)::float8, {func}(a.pid) \
+         FROM pg_stat_activity a \
+         WHERE a.pid = $1 AND {BACKEND_START_US} = $2 AND a.backend_type = 'client backend' \
+           AND a.pid <> pg_backend_pid() AND {}",
+        criterion(target)
+    )
+}
+
+fn exists_sql() -> String {
+    format!("SELECT 1 FROM pg_stat_activity a WHERE a.pid = $1 AND {BACKEND_START_US} = $2")
+}
+
+/// Итог пакета для журнала: отказ в правах и сбой считаются неудачей сессии; `gone` и `noLongerMatches` — нет.
+pub fn batch_outcome(results: &[SessionResult]) -> journal::Outcome {
+    let failed = results
+        .iter()
+        .filter(|r| {
+            matches!(
+                r.outcome,
+                SessionOutcome::NotAllowed | SessionOutcome::Failed { .. }
+            )
+        })
+        .count();
+    match failed {
+        0 => journal::Outcome::Ok,
+        n if n == results.len() => journal::Outcome::Error,
+        _ => journal::Outcome::Partial,
+    }
+}
+
+fn result_name(o: &SessionOutcome) -> &'static str {
+    match o {
+        SessionOutcome::Terminated => "terminated",
+        SessionOutcome::SignalSent => "signalSent",
+        SessionOutcome::Gone => "gone",
+        SessionOutcome::NoLongerMatches => "noLongerMatches",
+        SessionOutcome::NotAllowed => "notAllowed",
+        SessionOutcome::Failed { .. } => "failed",
+    }
+}
+
+async fn still_there(c: &Client, s: SessionRef) -> Result<bool, tokio_postgres::Error> {
+    Ok(!c
+        .query(&exists_sql(), &[&s.pid, &s.backend_start_us])
+        .await?
+        .is_empty())
+}
+
+fn failed(e: &tokio_postgres::Error) -> SessionOutcome {
+    SessionOutcome::Failed {
+        error: crate::conn::errors::from_pg(e),
+    }
+}
+
+/// Одна сессия пакета: сигнал с перепроверкой; итог и строка журнала (если сигнал был отправлен).
+async fn one(
+    c: &Client,
+    sql: &str,
+    kind: SignalKind,
+    target: &SessionTarget,
+    s: SessionRef,
+) -> (SessionOutcome, Option<SessionRecord>) {
+    let rows = match target {
+        SessionTarget::IdleInTransaction { older_than_s } => {
+            c.query(sql, &[&s.pid, &s.backend_start_us, older_than_s])
+                .await
+        }
+        _ => c.query(sql, &[&s.pid, &s.backend_start_us]).await,
+    };
+    let row = match rows {
+        Ok(rows) => rows.into_iter().next(),
+        Err(e) if e.code() == Some(&SqlState::INSUFFICIENT_PRIVILEGE) => {
+            return (SessionOutcome::NotAllowed, None);
+        }
+        Err(e) => return (failed(&e), None),
+    };
+    let Some(row) = row else {
+        // Сигнал не отправлен: сессии нет или она больше не подходит под цель.
+        return match still_there(c, s).await {
+            Ok(true) => (SessionOutcome::NoLongerMatches, None),
+            Ok(false) => (SessionOutcome::Gone, None),
+            Err(e) => (failed(&e), None),
+        };
+    };
+    let mut record = SessionRecord {
+        pid: s.pid,
+        backend_start_us: s.backend_start_us,
+        user: row.get(0),
+        database: row.get(1),
+        application: row.get(2),
+        client: row.get(3),
+        state: row.get(4),
+        query_id: row.get(5),
+        query: row
+            .get::<_, Option<String>>(6)
+            .map(|q| journal::cut(&q, journal::QUERY_CHARS)),
+        xact_age_s: row.get(7),
+        result: String::new(),
+    };
+    let outcome = if kind == SignalKind::Terminate {
+        let deadline = Instant::now() + GONE_WAIT;
+        loop {
+            match still_there(c, s).await {
+                Ok(false) => break SessionOutcome::Terminated,
+                Ok(true) if Instant::now() >= deadline => break SessionOutcome::SignalSent,
+                Ok(true) => tokio::time::sleep(GONE_POLL).await,
+                Err(_) => break SessionOutcome::SignalSent,
+            }
+        }
+    } else {
+        SessionOutcome::SignalSent
+    };
+    record.result = result_name(&outcome).to_string();
+    (outcome, Some(record))
+}
+
+/// Порог возраста должен быть конечным неотрицательным числом секунд: отрицательный дал бы «будущее» время,
+/// `NaN` и бесконечность сервер отвергает ошибкой на каждой сессии.
+fn ensure_valid_target(target: &SessionTarget) -> AppResult<()> {
+    match target {
+        SessionTarget::IdleInTransaction { older_than_s }
+            if !older_than_s.is_finite() || *older_than_s < 0.0 =>
+        {
+            Err(app_err!(
+                ErrorCode::InvalidInput,
+                "errors.actions.badThreshold",
+                "The age threshold must be a non-negative number of seconds"
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Выполняет отмену или завершение сессий, разрешённых в предпросмотре (спец. §8.3). Защита — до обращения к серверу.
+pub async fn execute(
+    st: &AppState,
+    id: &str,
+    req: &SessionActionExecute,
+    confirmation: &Confirmation,
+) -> AppResult<SessionActionResult> {
+    let profile = st.profile(id)?;
+    ensure_mutation_allowed(&profile, confirmation.confirm.as_deref())?;
+    // Пакет — несколько сессий или любой выбор по критерию: на prod нужно ещё ввести число сессий.
+    let batch =
+        req.sessions.len() > 1 || matches!(req.target, SessionTarget::IdleInTransaction { .. });
+    if batch && profile.environment == Environment::Prod {
+        ensure_name_confirmed(
+            &req.sessions.len().to_string(),
+            confirmation.typed_name.as_deref(),
+        )?;
+    }
+    if req.sessions.len() > MAX_BATCH {
+        return Err(app_err!(
+            ErrorCode::InvalidInput,
+            "errors.actions.batchTooLarge",
+            "At most {{max}} sessions per action",
+            max = MAX_BATCH
+        ));
+    }
+    ensure_valid_target(&req.target)?;
+    let started = Instant::now();
+    // Ошибка соединения или чтения версии — ошибка команды: действие не началось, строки журнала нет.
+    let c = crate::actions::conn::open(st, id, &req.member, None).await?;
+    let caps = Caps::new(crate::diag::head(&c.client).await?.version_num);
+    let sql = signal_sql(req.kind, &req.target, caps);
+    let mut results = Vec::with_capacity(req.sessions.len());
+    let mut records = Vec::new();
+    for s in &req.sessions {
+        let outcome = if started.elapsed() >= BATCH_LIMIT {
+            SessionOutcome::Failed {
+                error: app_err!(
+                    ErrorCode::Timeout,
+                    "errors.actions.batchTimeout",
+                    "The batch did not finish within {{secs}} s",
+                    secs = BATCH_LIMIT.as_secs()
+                ),
+            }
+        } else {
+            let (o, rec) = one(&c.client, &sql, req.kind, &req.target, *s).await;
+            records.extend(rec);
+            o
+        };
+        results.push(SessionResult {
+            pid: s.pid,
+            backend_start_us: s.backend_start_us,
+            outcome,
+        });
+    }
+    let outcome = batch_outcome(&results);
+    let record = ActionRecord {
+        ts: journal::now_ms(),
+        action: match req.kind {
+            SignalKind::Cancel => "cancel",
+            SignalKind::Terminate => "terminate",
+        }
+        .into(),
+        connection: RecordConnection::of(&profile),
+        member: Some(req.member.clone()),
+        prod_confirmed: profile.environment == Environment::Prod,
+        outcome,
+        code: None,
+        ms: started.elapsed().as_millis() as u64,
+        sessions: records,
+        slot: None,
+        patroni: None,
+    };
+    let journal = st.actions.clone();
+    let journal_written = crate::conn::run_blocking(move || Ok(journal.append(&record)))
+        .await
+        .unwrap_or(false);
+    Ok(SessionActionResult {
+        member: req.member.clone(),
+        results,
+        outcome,
+        journal_written,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,5 +649,211 @@ mod tests {
                 older_than_s: 300.0
             }
         );
+    }
+
+    use crate::diag::caps::Caps;
+
+    #[test]
+    fn signal_sql_rechecks_the_criterion_in_the_same_statement() {
+        let caps = Caps::new(170000);
+        let t = signal_sql(
+            SignalKind::Terminate,
+            &SessionTarget::IdleInTransaction {
+                older_than_s: 300.0,
+            },
+            caps,
+        );
+        assert!(t.contains("pg_terminate_backend(a.pid)"));
+        assert!(t.contains("make_interval(secs => $3)"));
+        assert!(t.contains(&format!("{} = $2", crate::diag::sql::BACKEND_START_US)));
+        assert!(t.contains("a.backend_type = 'client backend' AND a.pid <> pg_backend_pid()"));
+        let c = signal_sql(
+            SignalKind::Cancel,
+            &SessionTarget::Selected { sessions: vec![] },
+            caps,
+        );
+        assert!(c.contains("pg_cancel_backend(a.pid)") && !c.contains("$3"));
+        let r = signal_sql(
+            SignalKind::Terminate,
+            &SessionTarget::RootBlocker {
+                pid: 1,
+                backend_start_us: 2,
+            },
+            caps,
+        );
+        assert!(r.contains("a.pid = ANY(pg_blocking_pids(w.pid))"));
+        // query_id — с 14; на 13 типизированный NULL.
+        assert!(t.contains("a.query_id::text"));
+        assert!(
+            signal_sql(
+                SignalKind::Terminate,
+                &SessionTarget::Selected { sessions: vec![] },
+                Caps::new(130000)
+            )
+            .contains("NULL::text")
+        );
+    }
+
+    #[test]
+    fn batch_outcome_counts_failures() {
+        let r = |outcome| SessionResult {
+            pid: 1,
+            backend_start_us: 1,
+            outcome,
+        };
+        let err = || {
+            crate::error::AppError::localized(
+                crate::error::ErrorCode::Internal,
+                crate::i18n::LocalizedText {
+                    key: "k".into(),
+                    params: Default::default(),
+                    text: "t".into(),
+                },
+            )
+        };
+        use journal::Outcome::*;
+        assert_eq!(
+            batch_outcome(&[r(SessionOutcome::Terminated), r(SessionOutcome::Gone)]),
+            Ok
+        );
+        assert_eq!(batch_outcome(&[r(SessionOutcome::NoLongerMatches)]), Ok);
+        assert_eq!(
+            batch_outcome(&[r(SessionOutcome::Terminated), r(SessionOutcome::NotAllowed)]),
+            Partial
+        );
+        assert_eq!(
+            batch_outcome(&[r(SessionOutcome::Failed { error: err() })]),
+            Error
+        );
+        assert_eq!(batch_outcome(&[r(SessionOutcome::NotAllowed)]), Error);
+    }
+
+    #[test]
+    fn result_json_carries_the_result_tag() {
+        let v = serde_json::to_value(SessionResult {
+            pid: 7,
+            backend_start_us: 9,
+            outcome: SessionOutcome::SignalSent,
+        })
+        .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"pid": 7, "backendStartUs": 9, "result": "signalSent"})
+        );
+    }
+
+    /// Состояние с одним сохранённым профилем и без открытого подключения: до сервера дело не доходит,
+    /// а всё, что проверка пропускает дальше, упирается в «подключение не открыто».
+    fn state_with(
+        profile: crate::conn::profile::ConnectionProfile,
+    ) -> (tempfile::TempDir, AppState) {
+        let dir = tempfile::tempdir().unwrap();
+        let st = AppState::new(
+            dir.path(),
+            std::sync::Arc::new(crate::secrets::MemoryStore::default()),
+        )
+        .unwrap();
+        st.connections.upsert(profile).unwrap();
+        (dir, st)
+    }
+
+    fn execute_req(target: SessionTarget, sessions: usize) -> SessionActionExecute {
+        SessionActionExecute {
+            member: "m".into(),
+            kind: SignalKind::Terminate,
+            target,
+            sessions: (0..sessions as i32)
+                .map(|pid| SessionRef {
+                    pid,
+                    backend_start_us: 1,
+                })
+                .collect(),
+        }
+    }
+
+    async fn rejection(
+        st: &AppState,
+        req: &SessionActionExecute,
+        c: &Confirmation,
+    ) -> crate::error::AppError {
+        match execute(st, "a", req, c).await {
+            Ok(r) => panic!("действие не должно выполняться: {r:?}"),
+            Err(e) => e,
+        }
+    }
+
+    #[tokio::test]
+    async fn bad_threshold_is_rejected_before_connecting() {
+        let (_dir, st) = state_with(crate::conn::profile::sample_profile("a"));
+        for bad in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let req = execute_req(SessionTarget::IdleInTransaction { older_than_s: bad }, 1);
+            let e = rejection(&st, &req, &Confirmation::default()).await;
+            assert_eq!(e.code, crate::error::ErrorCode::InvalidInput, "{bad}");
+            assert_eq!(e.key, "errors.actions.badThreshold", "{bad}");
+            assert_eq!(
+                e.message,
+                "The age threshold must be a non-negative number of seconds"
+            );
+        }
+        // Ноль — допустимый порог: проверка пройдена, дальше нет открытого подключения.
+        let ok = execute_req(SessionTarget::IdleInTransaction { older_than_s: 0.0 }, 1);
+        let e = rejection(&st, &ok, &Confirmation::default()).await;
+        assert_eq!(e.key, "errors.topology.notConnected");
+    }
+
+    #[tokio::test]
+    async fn guard_runs_before_any_other_check() {
+        let mut p = crate::conn::profile::sample_profile("a");
+        p.read_only = true;
+        let (_dir, st) = state_with(p);
+        let req = execute_req(
+            SessionTarget::IdleInTransaction { older_than_s: -1.0 },
+            MAX_BATCH + 1,
+        );
+        let e = rejection(&st, &req, &Confirmation::default()).await;
+        assert_eq!(e.code, crate::error::ErrorCode::ReadOnly);
+    }
+
+    #[tokio::test]
+    async fn oversized_batch_is_rejected_before_connecting() {
+        let (_dir, st) = state_with(crate::conn::profile::sample_profile("a"));
+        let req = execute_req(SessionTarget::Selected { sessions: vec![] }, MAX_BATCH + 1);
+        let e = rejection(&st, &req, &Confirmation::default()).await;
+        assert_eq!(e.code, crate::error::ErrorCode::InvalidInput);
+        assert_eq!(e.key, "errors.actions.batchTooLarge");
+        assert_eq!(e.message, "At most 500 sessions per action");
+        // Ровно предел — проходит дальше проверок.
+        let req = execute_req(SessionTarget::Selected { sessions: vec![] }, MAX_BATCH);
+        let e = rejection(&st, &req, &Confirmation::default()).await;
+        assert_eq!(e.key, "errors.topology.notConnected");
+    }
+
+    #[tokio::test]
+    async fn prod_batch_needs_the_session_count_typed() {
+        let mut p = crate::conn::profile::sample_profile("a");
+        p.environment = crate::conn::profile::Environment::Prod;
+        let name = p.name.clone();
+        let (_dir, st) = state_with(p);
+        let confirm = |typed: Option<&str>| Confirmation {
+            confirm: Some(name.clone()),
+            typed_name: typed.map(str::to_string),
+        };
+        let batch = execute_req(SessionTarget::Selected { sessions: vec![] }, 3);
+        for typed in [None, Some("2"), Some("три")] {
+            let e = rejection(&st, &batch, &confirm(typed)).await;
+            assert_eq!(e.code, crate::error::ErrorCode::ConfirmationRequired);
+            assert_eq!(e.key, "errors.guard.typeToConfirm", "{typed:?}");
+            assert_eq!(e.params["expected"], "3");
+        }
+        let e = rejection(&st, &batch, &confirm(Some("3"))).await;
+        assert_eq!(e.key, "errors.topology.notConnected");
+        // Одна сессия — не пакет: число вводить не нужно, достаточно имени подключения.
+        let one = execute_req(SessionTarget::Selected { sessions: vec![] }, 1);
+        let e = rejection(&st, &one, &confirm(None)).await;
+        assert_eq!(e.key, "errors.topology.notConnected");
+        // Пакет по критерию — пакет даже из одной сессии.
+        let idle = execute_req(SessionTarget::IdleInTransaction { older_than_s: 60.0 }, 1);
+        let e = rejection(&st, &idle, &confirm(None)).await;
+        assert_eq!(e.key, "errors.guard.typeToConfirm");
     }
 }

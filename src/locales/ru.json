@@ -191,7 +191,10 @@
       "typeToConfirm": "Введите «{{expected}}» для подтверждения"
     },
     "actions": {
-      "nodeUnavailable": "Узел {{member}} недоступен"
+      "nodeUnavailable": "Узел {{member}} недоступен",
+      "batchTooLarge": "Не больше {{max}} сессий за одно действие",
+      "batchTimeout": "Пакет не уложился в {{secs}} с",
+      "badThreshold": "Порог возраста — неотрицательное число секунд"
     }
   },
   "connections": {

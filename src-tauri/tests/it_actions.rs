@@ -2,10 +2,14 @@
 
 mod common;
 
+use glafira_pg_lib::actions::Confirmation;
 use glafira_pg_lib::actions::conn;
+use glafira_pg_lib::actions::journal::Outcome;
 use glafira_pg_lib::actions::sessions::{
-    self as sa, DenyReason, SessionActionRequest, SessionRef, SessionTarget, SignalKind,
+    self as sa, DenyReason, SessionActionExecute, SessionActionRequest, SessionOutcome, SessionRef,
+    SessionTarget, SignalKind,
 };
+use glafira_pg_lib::conn::profile::Environment;
 use glafira_pg_lib::diag::sql::BACKEND_START_US;
 
 /// Сессия, простаивающая в транзакции: `BEGIN; SELECT 1` и ожидание. Возвращает pid; клиент держит сессию.
@@ -256,4 +260,387 @@ async fn preview_skips_sessions_the_role_cannot_see() {
     assert_eq!(pids, [app_pid], "{p:?}");
     // Своя роль — можно и без pg_signal_backend.
     assert!(p.rows[0].allowed, "{:?}", p.rows[0]);
+}
+
+/// Есть ли в `pg_stat_activity` сессия с таким pid (смотрит посторонний сеанс `probe`).
+async fn session_exists(probe: &tokio_postgres::Client, pid: i32) -> bool {
+    probe
+        .query_opt("SELECT 1 FROM pg_stat_activity WHERE pid = $1", &[&pid])
+        .await
+        .unwrap()
+        .is_some()
+}
+
+fn exec(
+    member: &str,
+    kind: SignalKind,
+    target: SessionTarget,
+    sessions: Vec<SessionRef>,
+) -> SessionActionExecute {
+    SessionActionExecute {
+        member: member.into(),
+        kind,
+        target,
+        sessions,
+    }
+}
+
+/// Строки журнала действий как JSON (по одной на действие).
+fn journal_lines(dir: &std::path::Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(dir.join("actions.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn terminating_the_root_blocker_frees_the_queue_and_writes_the_journal() {
+    let Some(addr) = common::env("GPG_IT_SINGLE") else {
+        return;
+    };
+    common::ensure_fixtures(&addr).await;
+    let holder = common::app(&addr).await;
+    holder
+        .batch_execute(
+            "BEGIN; UPDATE shop.orders SET id = id WHERE id = (SELECT min(id) FROM shop.orders)",
+        )
+        .await
+        .unwrap();
+    let holder_pid: i32 = holder
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .unwrap()
+        .get(0);
+    let victim = common::app(&addr).await;
+    let victim_pid: i32 = victim
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .unwrap()
+        .get(0);
+    let waiting = tokio::spawn(async move {
+        victim
+            .execute(
+                "UPDATE shop.orders SET id = id WHERE id = (SELECT min(id) FROM shop.orders)",
+                &[],
+            )
+            .await
+    });
+    let probe = common::superuser(&addr, "orders").await;
+    common::wait_lock_wait(&probe, victim_pid, "жертва ждёт держателя").await;
+    let start = backend_start_us(&probe, holder_pid).await;
+    let (dir, st) = common::open_server_in(&addr, "orders").await;
+    let member = st.runtimes.view("it").topology.unwrap().members[0]
+        .name
+        .clone();
+    let r = sa::execute(
+        &st,
+        "it",
+        &exec(
+            &member,
+            SignalKind::Terminate,
+            SessionTarget::RootBlocker {
+                pid: holder_pid,
+                backend_start_us: start,
+            },
+            vec![SessionRef {
+                pid: holder_pid,
+                backend_start_us: start,
+            }],
+        ),
+        &Confirmation::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.results[0].outcome, SessionOutcome::Terminated, "{r:?}");
+    assert_eq!(r.outcome, Outcome::Ok);
+    assert!(r.journal_written);
+    // Очередь освободилась: жертва дождалась блокировки.
+    tokio::time::timeout(std::time::Duration::from_secs(10), waiting)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let journal = std::fs::read_to_string(dir.path().join("actions.jsonl")).unwrap();
+    assert!(
+        journal.contains("\"action\":\"terminate\"")
+            && journal.contains("\"result\":\"terminated\""),
+        "{journal}"
+    );
+    // Строка сессии в журнале — снимок до сигнала: роль, база, состояние, возраст транзакции, последний запрос.
+    let line = &journal_lines(dir.path())[0];
+    let s = &line["sessions"][0];
+    assert_eq!(s["pid"], holder_pid);
+    assert_eq!(s["backendStartUs"], start);
+    assert_eq!(s["user"], "glafira_app");
+    assert_eq!(s["database"], "orders");
+    assert_eq!(s["state"], "idle in transaction");
+    assert!(s["xactAgeS"].as_f64().is_some(), "{s}");
+    // Последний запрос держателя — вызов pid после UPDATE.
+    assert_eq!(s["query"], "SELECT pg_backend_pid()");
+    assert_eq!(line["connection"]["id"], "it");
+    assert_eq!(line["member"], member.as_str());
+    assert_eq!(line["outcome"], "ok");
+}
+
+#[tokio::test]
+async fn stale_backend_start_is_gone_and_woken_session_no_longer_matches() {
+    let Some(addr) = common::env("GPG_IT_SINGLE") else {
+        return;
+    };
+    common::ensure_fixtures(&addr).await;
+    let app = common::app(&addr).await;
+    let pid = idle_in_transaction(&app).await;
+    let probe = common::superuser(&addr, "postgres").await;
+    let start = backend_start_us(&probe, pid).await;
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let (_dir, st) = common::open_server(&addr).await;
+    let member = st.runtimes.view("it").topology.unwrap().members[0]
+        .name
+        .clone();
+    let execute = async |sessions, target| {
+        sa::execute(
+            &st,
+            "it",
+            &exec(&member, SignalKind::Terminate, target, sessions),
+            &Confirmation::default(),
+        )
+        .await
+        .unwrap()
+    };
+    // Чужой backend_start — сессии «нет», живая сессия не тронута.
+    let r = execute(
+        vec![SessionRef {
+            pid,
+            backend_start_us: start - 1,
+        }],
+        SessionTarget::Selected { sessions: vec![] },
+    )
+    .await;
+    assert_eq!(r.results[0].outcome, SessionOutcome::Gone);
+    assert_eq!(r.outcome, Outcome::Ok);
+    assert!(app.query_one("SELECT 1", &[]).await.is_ok(), "сессия жива");
+    // Сессия проснулась (транзакция закончилась) — критерий idle in transaction не выполняется.
+    app.batch_execute("COMMIT").await.unwrap();
+    let r = execute(
+        vec![SessionRef {
+            pid,
+            backend_start_us: start,
+        }],
+        SessionTarget::IdleInTransaction { older_than_s: 1.0 },
+    )
+    .await;
+    assert_eq!(r.results[0].outcome, SessionOutcome::NoLongerMatches);
+    assert!(app.query_one("SELECT 1", &[]).await.is_ok(), "сессия жива");
+}
+
+#[tokio::test]
+async fn cancel_interrupts_a_running_query() {
+    let Some(addr) = common::env("GPG_IT_SINGLE") else {
+        return;
+    };
+    common::ensure_fixtures(&addr).await;
+    let app = common::app(&addr).await;
+    let pid: i32 = app
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .unwrap()
+        .get(0);
+    let sleeping = tokio::spawn(async move { app.execute("SELECT pg_sleep(60)", &[]).await });
+    let probe = common::superuser(&addr, "postgres").await;
+    common::wait_until(
+        "pg_sleep идёт",
+        std::time::Duration::from_secs(10),
+        async || {
+            probe
+                .query_opt(
+                    "SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND wait_event = 'PgSleep'",
+                    &[&pid],
+                )
+                .await
+                .unwrap()
+                .is_some()
+        },
+    )
+    .await;
+    let start = backend_start_us(&probe, pid).await;
+    let (_dir, st) = common::open_server(&addr).await;
+    let member = st.runtimes.view("it").topology.unwrap().members[0]
+        .name
+        .clone();
+    let r = sa::execute(
+        &st,
+        "it",
+        &exec(
+            &member,
+            SignalKind::Cancel,
+            SessionTarget::Selected { sessions: vec![] },
+            vec![SessionRef {
+                pid,
+                backend_start_us: start,
+            }],
+        ),
+        &Confirmation::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.results[0].outcome, SessionOutcome::SignalSent);
+    let err = sleeping.await.unwrap().unwrap_err();
+    assert_eq!(
+        err.code(),
+        Some(&tokio_postgres::error::SqlState::QUERY_CANCELED),
+        "57014 у клиента"
+    );
+}
+
+/// Пакет по критерию: обе сессии, простаивающие в транзакции, завершены; на prod — с именем подключения и числом
+/// сессий; в журнале — обе строки и пометка `prodConfirmed`.
+#[tokio::test]
+async fn idle_in_transaction_batch_terminates_every_session_and_is_journaled() {
+    let Some(addr) = common::env("GPG_IT_SINGLE") else {
+        return;
+    };
+    common::ensure_fixtures(&addr).await;
+    let (a, b) = (common::app(&addr).await, common::app(&addr).await);
+    let (pid_a, pid_b) = (idle_in_transaction(&a).await, idle_in_transaction(&b).await);
+    let probe = common::superuser(&addr, "postgres").await;
+    let sessions = vec![
+        SessionRef {
+            pid: pid_a,
+            backend_start_us: backend_start_us(&probe, pid_a).await,
+        },
+        SessionRef {
+            pid: pid_b,
+            backend_start_us: backend_start_us(&probe, pid_b).await,
+        },
+    ];
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let (dir, st) = common::open_server(&addr).await;
+    let member = st.runtimes.view("it").topology.unwrap().members[0]
+        .name
+        .clone();
+    let mut p = st.profile("it").unwrap();
+    p.environment = Environment::Prod;
+    st.connections.upsert(p.clone()).unwrap();
+    let req = exec(
+        &member,
+        SignalKind::Terminate,
+        SessionTarget::IdleInTransaction { older_than_s: 1.0 },
+        sessions,
+    );
+    // Без числа сессий пакет на prod не стартует.
+    let named = Confirmation {
+        confirm: Some(p.name.clone()),
+        typed_name: None,
+    };
+    let e = sa::execute(&st, "it", &req, &named).await.unwrap_err();
+    assert_eq!(e.key, "errors.guard.typeToConfirm");
+    // Живость проверяет посторонний сеанс: запрос самой сессии сдвинул бы её `state_change` и сбил критерий.
+    assert!(session_exists(&probe, pid_a).await, "сессия жива");
+    let confirmed = Confirmation {
+        typed_name: Some("2".into()),
+        ..named
+    };
+    let r = sa::execute(&st, "it", &req, &confirmed).await.unwrap();
+    assert_eq!(
+        r.results.iter().map(|x| &x.outcome).collect::<Vec<_>>(),
+        [&SessionOutcome::Terminated, &SessionOutcome::Terminated],
+        "{r:?}"
+    );
+    assert_eq!(r.outcome, Outcome::Ok);
+    assert!(
+        a.query_one("SELECT 1", &[]).await.is_err(),
+        "сессия A завершена"
+    );
+    assert!(
+        b.query_one("SELECT 1", &[]).await.is_err(),
+        "сессия B завершена"
+    );
+    // Отказ guard ничего не записал; запись о пакете — одна.
+    let lines = journal_lines(dir.path());
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0]["prodConfirmed"], true);
+    assert_eq!(lines[0]["connection"]["environment"], "prod");
+    assert_eq!(lines[0]["sessions"].as_array().unwrap().len(), 2);
+}
+
+/// `glafira_diag` состоит в `pg_signal_backend`, но не суперпользователь: сигнал сессии суперпользователя сервер
+/// отвергает кодом 42501 — итог сессии `notAllowed`, сессия не тронута, действие записано как ошибка.
+#[tokio::test]
+async fn signal_to_a_superuser_session_is_not_allowed() {
+    let Some(addr) = common::env("GPG_IT_SINGLE") else {
+        return;
+    };
+    let su = common::superuser(&addr, "postgres").await;
+    let pid = idle_in_transaction(&su).await;
+    let start = backend_start_us(&su, pid).await;
+    let (dir, st) = common::open_server(&addr).await;
+    let member = st.runtimes.view("it").topology.unwrap().members[0]
+        .name
+        .clone();
+    let r = sa::execute(
+        &st,
+        "it",
+        &exec(
+            &member,
+            SignalKind::Terminate,
+            SessionTarget::Selected { sessions: vec![] },
+            vec![SessionRef {
+                pid,
+                backend_start_us: start,
+            }],
+        ),
+        &Confirmation::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.results[0].outcome, SessionOutcome::NotAllowed, "{r:?}");
+    assert_eq!(r.outcome, Outcome::Error);
+    assert!(r.journal_written);
+    assert!(su.query_one("SELECT 1", &[]).await.is_ok(), "сессия жива");
+    let lines = journal_lines(dir.path());
+    assert_eq!(lines[0]["outcome"], "error");
+    assert!(
+        lines[0].get("sessions").is_none(),
+        "сигнала не было: {lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn read_only_and_prod_are_guarded_in_rust() {
+    let Some(addr) = common::env("GPG_IT_SINGLE") else {
+        return;
+    };
+    let (_dir, st) = common::open_server(&addr).await;
+    let member = st.runtimes.view("it").topology.unwrap().members[0]
+        .name
+        .clone();
+    let req = exec(
+        &member,
+        SignalKind::Cancel,
+        SessionTarget::Selected { sessions: vec![] },
+        vec![SessionRef {
+            pid: 1,
+            backend_start_us: 1,
+        }],
+    );
+    let mut p = st.profile("it").unwrap();
+    p.read_only = true;
+    st.connections.upsert(p.clone()).unwrap();
+    let e = sa::execute(&st, "it", &req, &Confirmation::default())
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, glafira_pg_lib::error::ErrorCode::ReadOnly);
+    p.read_only = false;
+    p.environment = Environment::Prod;
+    st.connections.upsert(p.clone()).unwrap();
+    let e = sa::execute(&st, "it", &req, &Confirmation::default())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        e.code,
+        glafira_pg_lib::error::ErrorCode::ConfirmationRequired
+    );
+    // Отказ guard ничего не пишет в журнал.
+    assert!(st.actions.list(Some("it"), 10).is_empty());
 }

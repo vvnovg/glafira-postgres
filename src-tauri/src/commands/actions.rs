@@ -27,3 +27,14 @@ pub async fn preview_session_action(
 ) -> AppResult<crate::actions::sessions::SessionActionPreview> {
     crate::actions::sessions::preview(&state, &id, &request).await
 }
+
+/// Отмена или завершение сессий из предпросмотра; защита read-only и prod — в Rust.
+#[tauri::command]
+pub async fn execute_session_action(
+    state: State<'_, AppState>,
+    id: String,
+    request: crate::actions::sessions::SessionActionExecute,
+    confirmation: crate::actions::Confirmation,
+) -> AppResult<crate::actions::sessions::SessionActionResult> {
+    crate::actions::sessions::execute(&state, &id, &request, &confirmation).await
+}

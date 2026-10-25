@@ -189,7 +189,10 @@
       "typeToConfirm": "Type “{{expected}}” to confirm"
     },
     "actions": {
-      "nodeUnavailable": "Node {{member}} is unavailable"
+      "nodeUnavailable": "Node {{member}} is unavailable",
+      "batchTooLarge": "At most {{max}} sessions per action",
+      "batchTimeout": "The batch did not finish within {{secs}} s",
+      "badThreshold": "The age threshold must be a non-negative number of seconds"
     }
   },
   "connections": {
