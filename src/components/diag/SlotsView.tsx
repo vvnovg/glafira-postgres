@@ -36,7 +36,25 @@ function SlotFlags({ s }: { s: Slot }) {
   );
 }
 
-function SlotRow({ s, patroni }: { s: Slot; patroni: boolean }) {
+/** Куда ведёт кнопка удаления: нет `onDrop` — подключение только для чтения (или узла нет), столбца действий нет совсем. */
+interface DropControl {
+  canDrop: boolean;
+  onDrop: (slot: string) => void;
+}
+
+/** Кнопка удаления слота; неактивной она остаётся с названной причиной. Активный слот сервер не удалит, а права роль не исправит сама. */
+function DropButton({ s, drop }: { s: Slot; drop: DropControl }) {
+  const { t } = useTranslation();
+  // Причин может быть две; называется первая: «слот активен» не лечится выдачей прав.
+  const reason = s.active ? t("actions.slots.active") : drop.canDrop ? undefined : t("actions.slots.needReplication");
+  return (
+    <button type="button" disabled={reason !== undefined} title={reason} onClick={() => drop.onDrop(s.name)}>
+      {t("actions.slots.drop")}
+    </button>
+  );
+}
+
+function SlotRow({ s, patroni, drop }: { s: Slot; patroni: boolean; drop?: DropControl }) {
   const { t } = useTranslation();
   const state = s.active ? (s.activePid === null ? t("diag.slots.active") : t("diag.slots.activePid", { pid: s.activePid })) : t("diag.slots.inactive");
   return (
@@ -55,11 +73,16 @@ function SlotRow({ s, patroni }: { s: Slot; patroni: boolean }) {
         <SlotFlags s={s} />
       </td>
       {patroni && <td>{s.patroni === null ? "" : t(PATRONI_KEYS[s.patroni])}</td>}
+      {drop && (
+        <td>
+          <DropButton s={s} drop={drop} />
+        </td>
+      )}
     </tr>
   );
 }
 
-function SlotsTable({ slots, labelId }: { slots: Slot[]; labelId: string }) {
+function SlotsTable({ slots, labelId, drop }: { slots: Slot[]; labelId: string; drop?: DropControl }) {
   const { t } = useTranslation();
   // Столбец Patroni нужен, только если сервер хоть у одного слота поставил отметку (подключение `patroni`).
   const patroni = slots.some((s) => s.patroni !== null);
@@ -80,12 +103,17 @@ function SlotsTable({ slots, labelId }: { slots: Slot[]; labelId: string }) {
             <th scope="col">{t("diag.slots.columns.inactiveSince")}</th>
             <th scope="col">{t("diag.slots.columns.flags")}</th>
             {patroni && <th scope="col">{t("diag.slots.columns.patroni")}</th>}
+            {drop && (
+              <th scope="col">
+                <span className="sr-only">{t("actions.journal.columns.action")}</span>
+              </th>
+            )}
           </tr>
         </thead>
         <tbody>
           {slots.map((s) => (
             // Имя слота уникально в кластере.
-            <SlotRow key={s.name} s={s} patroni={patroni} />
+            <SlotRow key={s.name} s={s} patroni={patroni} drop={drop} />
           ))}
         </tbody>
       </table>
@@ -128,7 +156,7 @@ function SubscriptionsTable({ subscriptions, labelId }: { subscriptions: Subscri
   );
 }
 
-function SlotsBody({ data }: { data: SlotsData }) {
+function SlotsBody({ data, onDropSlot }: { data: SlotsData; onDropSlot?: (slot: string) => void }) {
   const { t } = useTranslation();
   const slotsId = useId();
   const subsId = useId();
@@ -137,7 +165,7 @@ function SlotsBody({ data }: { data: SlotsData }) {
     <div className="diag-view">
       <section>
         <h3 id={slotsId}>{t("diag.slots.table")}</h3>
-        {data.slots.length === 0 ? <p className="muted">{t("diag.slots.none")}</p> : <SlotsTable slots={data.slots} labelId={slotsId} />}
+        {data.slots.length === 0 ? <p className="muted">{t("diag.slots.none")}</p> : <SlotsTable slots={data.slots} labelId={slotsId} drop={onDropSlot && { canDrop: data.canDropSlots, onDrop: onDropSlot }} />}
         {keep !== null && (
           // Мегабайты из настройки; -1 — слоты могут удерживать WAL без предела.
           <p className="muted">{t("diag.slots.keepSize", { value: keep < 0 ? t("diag.slots.unlimited") : bytesText(keep * 1024 * 1024) })}</p>
@@ -157,8 +185,9 @@ function SlotsBody({ data }: { data: SlotsData }) {
 /**
  * Слоты репликации и подписки (спец. P2 §5.7): сколько WAL держит каждый слот и в каком он состоянии, отметка слотов
  * Patroni (участник или постоянный), `max_slot_wal_keep_size`; ниже — подписки логической репликации.
+ * `onDropSlot` — удаление слота (спец. P2 §8.4): нет его — подключение только для чтения, кнопок нет.
  */
-export function SlotsView({ report }: { connectionId: string; report: DiagReport }) {
+export function SlotsView({ report, onDropSlot }: { connectionId: string; report: DiagReport; onDropSlot?: (slot: string) => void }) {
   if (report.data.kind !== "slots") return null;
-  return <SlotsBody data={report.data} />;
+  return <SlotsBody data={report.data} onDropSlot={onDropSlot} />;
 }

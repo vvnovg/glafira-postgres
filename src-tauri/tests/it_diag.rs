@@ -993,9 +993,11 @@ async fn slots_sql_runs_on_every_version() {
         )
         .await;
         let h = diag::head(&c).await.unwrap();
-        diag::slots::collect(&c, Caps::new(h.version_num))
+        let (d, _) = diag::slots::collect(&c, Caps::new(h.version_num))
             .await
             .unwrap_or_else(|e| panic!("{addr}: {e:?}"));
+        // glafira_diag — не суперпользователь и без REPLICATION (пункт чек-листа «Удаление слотов репликации»).
+        assert!(!d.can_drop_slots, "{addr}");
     }
 }
 

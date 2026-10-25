@@ -1386,6 +1386,17 @@
         "failed": "Failed"
       }
     },
+    "slots": {
+      "drop": "Drop…",
+      "dropTitle": "Drop slot {{slot}}?",
+      "confirm": "Drop slot",
+      "nameLabel": "slot name",
+      "done": "Slot dropped",
+      "active": "The slot is active",
+      "needReplication": "Needs the REPLICATION attribute: see the readiness item “Dropping replication slots”",
+      "patroniMember": "Patroni will recreate the slot while the member is in the cluster: remove the member",
+      "patroniPermanent": "Remove the slot from /config (patronictl edit-config), or Patroni will recreate it"
+    },
     "buttons": {
       "cancel": "Cancel query…",
       "terminate": "Terminate session…",

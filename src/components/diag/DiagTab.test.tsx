@@ -4,12 +4,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DiagTool, Finding } from "../../api/types";
 import { formatTime, formatTimestamp } from "../../lib/format";
 import { useWorkspace } from "../../state/workspace";
-import { connection, diagReport, holder, member, pulseFacts, pulseRates, replication, sender, sessionRow, slot, topology, topologyView, waitsData } from "../../test/fixtures";
+import { connection, diagReport, holder, member, pulseFacts, pulseRates, replication, sender, sessionRow, slot, slotsData, topology, topologyView, waitsData } from "../../test/fixtures";
 import { renderWithClient } from "../../test/render";
 
 vi.mock("../../api/client", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../../api/client")>();
-  return { ...orig, api: { runDiagnostic: vi.fn(), getTopology: vi.fn(), listConnections: vi.fn(), connect: vi.fn(), startSampler: vi.fn(), stopSession: vi.fn(), previewSessionAction: vi.fn(), executeSessionAction: vi.fn() } };
+  return { ...orig, api: { runDiagnostic: vi.fn(), getTopology: vi.fn(), listConnections: vi.fn(), connect: vi.fn(), startSampler: vi.fn(), stopSession: vi.fn(), previewSessionAction: vi.fn(), executeSessionAction: vi.fn(), previewDropSlot: vi.fn(), dropSlot: vi.fn() } };
 });
 
 import { api } from "../../api/client";
@@ -262,7 +262,7 @@ describe("DiagTab", () => {
     const reports: Record<string, ReturnType<typeof diagReport>> = {
       horizon: diagReport({ kind: "horizon", holders: [holder({ kind: "slot", name: "forgotten", xminAge: 5 })], hotStandbyFeedback: false }),
       replication: diagReport({ kind: "replication", ...replication({ senders: [sender({ application: "pg-2", member: "pg-2" })] }) }),
-      slots: diagReport({ kind: "slots", slots: [slot({ name: "pg_2" })], subscriptions: [], maxSlotWalKeepSizeMb: null, subscriptionErrorsGrowth: null }),
+      slots: diagReport(slotsData({ slots: [slot({ name: "pg_2" })] })),
       failover: diagReport({ kind: "failover", paused: false, readyCount: 1, config: { maximumLagOnFailover: 1048576, synchronousMode: "off", synchronousModeStrict: false, synchronousNodeCount: null, ttl: 30, loopWait: 10, retryTimeout: 10, permanentSlots: [] }, candidates: [{ member: "pg-2", ready: true, reasons: [], lagBytes: 0, pendingRestart: false }] }, { member: null }),
       health: diagReport({ kind: "health", endpoints: ["primary"], members: [{ member: "pg-1", apiUrl: "http://pg-1:8008", cells: [{ endpoint: "primary", status: 200, error: null, grade: "ok" }] }] }, { member: null }),
     };
@@ -459,6 +459,115 @@ describe("DiagTab", () => {
       renderWithClient(<DiagTab connectionId="c" tool="idleTx" member={null} active tabId="diag:c:idleTx" />);
       await user.click(await screen.findByRole("row", { name: /5/ }));
       expect(screen.queryByRole("button", { name: /Завершить|Отменить запрос/ })).toBeNull();
+    });
+  });
+
+  describe("удаление слота", () => {
+    const slotsReport = (patch: Partial<Parameters<typeof diagReport>[1]> = {}) =>
+      diagReport(slotsData({ slots: [slot({ name: "dead", active: false }), slot({ name: "other", active: false })], canDropSlots: true }), patch);
+    const dropPreview = (name: string) => ({ member: "pg-1", slot: slot({ name, active: false, walStatus: "extended" }) });
+
+    it("кнопка слота открывает диалог на узле отчёта; закрытие убирает его; после удаления отчёт и журнал перечитываются", async () => {
+      vi.mocked(api.runDiagnostic).mockResolvedValue(slotsReport());
+      vi.mocked(api.previewDropSlot).mockImplementation(async (_id, req) => dropPreview(req.slot));
+      vi.mocked(api.dropSlot).mockResolvedValue({ journalWritten: true });
+      const user = userEvent.setup();
+      const { client } = renderWithClient(<DiagTab connectionId="c" tool="slots" member={null} active tabId="diag:c:slots" />);
+      await user.click(within(await screen.findByRole("row", { name: /dead/ })).getByRole("button", { name: "Удалить…" }));
+      expect(await screen.findByRole("group", { name: "Удалить слот dead?" })).toBeInTheDocument();
+      expect(api.previewDropSlot).toHaveBeenCalledWith("c", { member: "pg-1", slot: "dead" });
+      await user.click(screen.getByRole("button", { name: "Отмена" }));
+      expect(screen.queryByRole("group", { name: "Удалить слот dead?" })).toBeNull();
+      // Повторное открытие того же слота читает его заново.
+      await user.click(within(screen.getByRole("row", { name: /dead/ })).getByRole("button", { name: "Удалить…" }));
+      await user.type(await screen.findByLabelText("Подтверждение: имя слота"), "dead");
+      expect(api.previewDropSlot).toHaveBeenCalledTimes(2);
+      const spy = vi.spyOn(client, "invalidateQueries");
+      const before = vi.mocked(api.runDiagnostic).mock.calls.length;
+      await user.click(screen.getByRole("button", { name: "Удалить слот" }));
+      expect(await screen.findByText("Слот удалён")).toBeInTheDocument();
+      expect(api.dropSlot).toHaveBeenCalledWith("c", { member: "pg-1", slot: "dead" }, { confirm: null, typedName: "dead" });
+      expect(spy).toHaveBeenCalledWith({ queryKey: ["actions", "c"] });
+      await waitFor(() => expect(vi.mocked(api.runDiagnostic).mock.calls.length).toBeGreaterThan(before));
+    });
+
+    it("повторное нажатие той же кнопки при открытом диалоге открывает его заново: слот читается снова, а не берётся из кэша", async () => {
+      vi.mocked(api.runDiagnostic).mockResolvedValue(slotsReport());
+      vi.mocked(api.previewDropSlot).mockImplementation(async (_id, req) => dropPreview(req.slot));
+      const user = userEvent.setup();
+      renderWithClient(<DiagTab connectionId="c" tool="slots" member={null} active tabId="diag:c:slots" />);
+      const open = async () => user.click(within(await screen.findByRole("row", { name: /dead/ })).getByRole("button", { name: "Удалить…" }));
+      await open();
+      await user.type(await screen.findByLabelText("Подтверждение: имя слота"), "dead");
+      await open();
+      await waitFor(() => expect(api.previewDropSlot).toHaveBeenCalledTimes(2));
+      // Новый диалог: введённое имя прошлого не остаётся.
+      expect(await screen.findByLabelText("Подтверждение: имя слота")).toHaveValue("");
+    });
+
+    it("узел диалога — узел отчёта на момент открытия, а не тот, что придёт позже", async () => {
+      vi.mocked(api.runDiagnostic)
+        .mockResolvedValueOnce(slotsReport({ member: "pg-1" }))
+        .mockResolvedValue(slotsReport({ member: "pg-2" }));
+      vi.mocked(api.previewDropSlot).mockResolvedValue({ member: "pg-1", slot: slot({ name: "dead", active: false }) });
+      const user = userEvent.setup();
+      renderWithClient(<DiagTab connectionId="c" tool="slots" member={null} active tabId="diag:c:slots" />);
+      await user.click(within(await screen.findByRole("row", { name: /dead/ })).getByRole("button", { name: "Удалить…" }));
+      await screen.findByRole("group", { name: "Удалить слот dead?" });
+      await user.click(screen.getByRole("button", { name: "Обновить" }));
+      await screen.findByText("Узел сменился: pg-1 → pg-2");
+      expect(api.previewDropSlot).toHaveBeenCalledTimes(1);
+      expect(api.previewDropSlot).toHaveBeenCalledWith("c", { member: "pg-1", slot: "dead" });
+    });
+
+    it("пока слот удаляется, кнопка другого слота диалог не подменяет", async () => {
+      vi.mocked(api.runDiagnostic).mockResolvedValue(slotsReport());
+      vi.mocked(api.previewDropSlot).mockImplementation(async (_id, req) => dropPreview(req.slot));
+      vi.mocked(api.dropSlot).mockReturnValue(new Promise(() => {}));
+      const user = userEvent.setup();
+      renderWithClient(<DiagTab connectionId="c" tool="slots" member={null} active tabId="diag:c:slots" />);
+      const dropOf = async (name: string) => within(await screen.findByRole("row", { name: new RegExp(name) })).getByRole("button", { name: "Удалить…" });
+      await user.click(await dropOf("dead"));
+      await user.type(await screen.findByLabelText("Подтверждение: имя слота"), "dead");
+      await user.click(screen.getByRole("button", { name: "Удалить слот" }));
+      await waitFor(() => expect(api.dropSlot).toHaveBeenCalled());
+      await user.click(await dropOf("other"));
+      expect(screen.getByRole("group", { name: "Удалить слот dead?" })).toBeInTheDocument();
+      expect(screen.queryByRole("group", { name: "Удалить слот other?" })).toBeNull();
+      expect(api.previewDropSlot).toHaveBeenCalledTimes(1);
+    });
+
+    it("без права REPLICATION кнопка неактивна и диалог не открывается", async () => {
+      vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport(slotsData({ slots: [slot({ name: "dead", active: false })], canDropSlots: false })));
+      const user = userEvent.setup();
+      renderWithClient(<DiagTab connectionId="c" tool="slots" member={null} active tabId="diag:c:slots" />);
+      const button = within(await screen.findByRole("row", { name: /dead/ })).getByRole("button", { name: "Удалить…" });
+      expect(button).toBeDisabled();
+      await user.click(button);
+      expect(api.previewDropSlot).not.toHaveBeenCalled();
+    });
+
+    it("подключение только для чтения, профиль не загружен, отчёт без узла: кнопок нет", async () => {
+      vi.mocked(api.runDiagnostic).mockResolvedValue(slotsReport());
+      vi.mocked(api.listConnections).mockResolvedValue([connection({ id: "c", kind: "patroni", readOnly: true })]);
+      const first = renderWithClient(<DiagTab connectionId="c" tool="slots" member={null} active tabId="diag:c:slots" />);
+      await screen.findByRole("row", { name: /dead/ });
+      await waitFor(() => expect(api.listConnections).toHaveBeenCalled());
+      expect(screen.queryByRole("button", { name: "Удалить…" })).toBeNull();
+      first.unmount();
+
+      vi.mocked(api.listConnections).mockReturnValue(new Promise(() => {}));
+      const second = renderWithClient(<DiagTab connectionId="c" tool="slots" member={null} active tabId="diag:c:slots" />);
+      await screen.findByRole("row", { name: /dead/ });
+      expect(screen.queryByRole("button", { name: "Удалить…" })).toBeNull();
+      second.unmount();
+
+      vi.mocked(api.listConnections).mockResolvedValue([connection({ id: "c", kind: "patroni" })]);
+      vi.mocked(api.runDiagnostic).mockResolvedValue(slotsReport({ member: null }));
+      renderWithClient(<DiagTab connectionId="c" tool="slots" member={null} active tabId="diag:c:slots" />);
+      await screen.findByRole("row", { name: /dead/ });
+      await waitFor(() => expect(api.listConnections).toHaveBeenCalledTimes(3));
+      expect(screen.queryByRole("button", { name: "Удалить…" })).toBeNull();
     });
   });
 });

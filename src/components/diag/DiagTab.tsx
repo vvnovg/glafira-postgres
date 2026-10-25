@@ -1,4 +1,4 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { useIsMutating, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../api/client";
@@ -7,6 +7,7 @@ import { canAct, useConnectionProfile } from "../../lib/useConnectionProfile";
 import { DEFAULT_WAITS_WINDOW_S, defaultIntervalS, isClusterTool, useDiagnostic } from "../../lib/useDiagnostic";
 import { refreshAfterConnect, useTopology } from "../../lib/useConnectionEvents";
 import { useWorkspace } from "../../state/workspace";
+import { DropSlotDialog } from "../actions/DropSlotDialog";
 import { type SessionActionChoice, SessionActionDialog } from "../actions/SessionActionDialog";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { DiagHeader } from "./DiagHeader";
@@ -35,21 +36,27 @@ function linkAction(a: SessionActionLink): SessionActionChoice {
  */
 type OpenAction = SessionActionChoice & { member: string; id: number };
 
+/** Открытое удаление слота: узел фиксируется при открытии, `id` — как у `OpenAction` (повторный выбор слота открывает диалог заново). */
+type OpenDrop = { id: number; member: string; slot: string };
+
 /**
  * Тело инструмента: вид данных выбирается по `report.data.kind`.
  * `tool` отличает вкладку `idleTx` от `sessions`: данные у них одни, а набор сессий разный.
- * `onSessionAction` — отмена и завершение сессий (нет — подключение только для чтения или профиль не загружен).
+ * `onSessionAction` — отмена и завершение сессий, `onDropSlot` — удаление слота (нет — подключение только для чтения,
+ * профиль не загружен или у отчёта нет узла).
  */
 function ToolBody({
   tool,
   report,
   connectionId,
   onSessionAction,
+  onDropSlot,
 }: {
   tool: DiagTool;
   report: DiagReport;
   connectionId: string;
   onSessionAction?: (choice: SessionActionChoice) => void;
+  onDropSlot?: (slot: string) => void;
 }) {
   switch (report.data.kind) {
     case "pulse":
@@ -63,7 +70,7 @@ function ToolBody({
     case "replication":
       return <ReplicationView connectionId={connectionId} report={report} />;
     case "slots":
-      return <SlotsView connectionId={connectionId} report={report} />;
+      return <SlotsView connectionId={connectionId} report={report} onDropSlot={onDropSlot} />;
     case "failover":
       return <FailoverView connectionId={connectionId} report={report} />;
     case "health":
@@ -91,11 +98,14 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
   // Лидер, на котором прошлый отчёт «за лидером» был получен; смена объявляется строкой, пока пользователь не выберет узел сам.
   const lastLeader = useRef<string | null>(null);
   const [moved, setMoved] = useState<{ from: string; to: string } | null>(null);
-  // Действия над сессиями: профиль нужен диалогу (окружение, имя для подтверждения) и условию показа кнопок.
+  // Действия над сессиями и слотами: профиль нужен диалогу (окружение, имя для подтверждения) и условию показа кнопок.
   const profile = useConnectionProfile(connectionId);
   const actor = profile !== undefined && canAct(profile) ? profile : undefined;
   const [action, setAction] = useState<OpenAction | null>(null);
   const actionSeq = useRef(0);
+  const [dropSlot, setDropSlot] = useState<OpenDrop | null>(null);
+  // Пока слот удаляется, кнопки слотов другой диалог не открывают: результат удаления не должен потеряться.
+  const dropping = useIsMutating({ mutationKey: ["dropSlot", connectionId] }) > 0;
 
   const cluster = isClusterTool(tool);
   const state = view.data?.state;
@@ -110,10 +120,22 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
   const report = q.data;
   // Подключение закрыто: подтверждение не ждёт переоткрытия (после него предпросмотр был бы устаревшим).
   useEffect(() => {
-    if (!live) setAction(null);
+    if (!live) {
+      setAction(null);
+      setDropSlot(null);
+    }
   }, [live]);
   // `node` — узел действия; параметр назван не `member`, чтобы не затенять проп вкладки.
-  const startAction = (node: string, choice: SessionActionChoice) => setAction({ ...choice, member: node, id: ++actionSeq.current });
+  // Диалог действия один на вкладку: новый вытесняет открытый (диалог сессий — удаление слота и наоборот).
+  const startAction = (node: string, choice: SessionActionChoice) => {
+    setDropSlot(null);
+    setAction({ ...choice, member: node, id: ++actionSeq.current });
+  };
+  const startDrop = (node: string, name: string) => {
+    if (dropping) return;
+    setAction(null);
+    setDropSlot({ id: ++actionSeq.current, member: node, slot: name });
+  };
   // Узел отчёта: без него (отчёт кластера «пульс», сервер не назвал узел) кнопки инструментов не показываются — выполнять негде.
   const reportNode = report?.member ?? null;
 
@@ -218,6 +240,9 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
           onClose={() => setAction(null)}
         />
       )}
+      {dropSlot && actor && (
+        <DropSlotDialog key={dropSlot.id} connectionId={connectionId} profile={actor} member={dropSlot.member} slot={dropSlot.slot} onClose={() => setDropSlot(null)} />
+      )}
       {report ? (
         <div className={placeholder ? "diag-body diag-pending" : "diag-body"} aria-busy={placeholder}>
           <FindingsPanel
@@ -245,7 +270,13 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
               ))}
             </div>
           )}
-          <ToolBody tool={tool} report={report} connectionId={connectionId} onSessionAction={actor && reportNode !== null ? (choice) => startAction(reportNode, choice) : undefined} />
+          <ToolBody
+            tool={tool}
+            report={report}
+            connectionId={connectionId}
+            onSessionAction={actor && reportNode !== null ? (choice) => startAction(reportNode, choice) : undefined}
+            onDropSlot={actor && reportNode !== null ? (name) => startDrop(reportNode, name) : undefined}
+          />
         </div>
       ) : (
         !q.error && <p className="empty">{t("common.loading")}</p>

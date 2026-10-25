@@ -928,6 +928,8 @@ export interface SlotsData {
   /** Мегабайты; `-1` — без ограничения. */
   maxSlotWalKeepSizeMb: number | null;
   subscriptionErrorsGrowth: number | null;
+  /** Роль подключения может удалять слоты: суперпользователь или `REPLICATION`. */
+  canDropSlots: boolean;
 }
 
 // Готовность к failover (`pg_advisor::failover`) и матрица health (`diag::patroni`).

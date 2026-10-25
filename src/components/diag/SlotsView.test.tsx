@@ -1,16 +1,14 @@
 import { screen, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
-import type { SlotsData } from "../../api/types";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
 import { formatCount, formatTimestamp } from "../../lib/format";
-import { diagReport, slot, subscription } from "../../test/fixtures";
+import { diagReport, slot, slotsData, subscription } from "../../test/fixtures";
 import { renderWithClient } from "../../test/render";
 import { SlotsView } from "./SlotsView";
 
-const data = (patch: Partial<SlotsData> = {}): SlotsData & { kind: "slots" } => ({ kind: "slots", slots: [], subscriptions: [], maxSlotWalKeepSizeMb: null, subscriptionErrorsGrowth: null, ...patch });
-
 describe("SlotsView", () => {
   it("слоты с удерживаемым WAL и отметкой Patroni, подписки", () => {
-    renderWithClient(<SlotsView connectionId="c" report={diagReport({ kind: "slots", slots: [slot({ name: "patroni2", active: true, patroni: "member" }), slot({ name: "dead", active: false, retainedBytes: 2 * 1024 ** 3, walStatus: "extended" })], subscriptions: [subscription({ name: "lab_sub", pid: 77, applyErrorCount: 0 })], maxSlotWalKeepSizeMb: -1, subscriptionErrorsGrowth: null })} />);
+    renderWithClient(<SlotsView connectionId="c" report={diagReport(slotsData({ slots: [slot({ name: "patroni2", active: true, patroni: "member" }), slot({ name: "dead", active: false, retainedBytes: 2 * 1024 ** 3, walStatus: "extended" })], subscriptions: [subscription({ name: "lab_sub", pid: 77, applyErrorCount: 0 })], maxSlotWalKeepSizeMb: -1 }))} />);
     expect(screen.getByRole("row", { name: /patroni2/ })).toHaveTextContent("участник Patroni");
     expect(screen.getByRole("row", { name: /dead/ })).toHaveTextContent("2,0 GB");
     expect(screen.getByText(/max_slot_wal_keep_size: без ограничения/)).toBeInTheDocument();
@@ -18,13 +16,13 @@ describe("SlotsView", () => {
   });
 
   it("постоянный слот Patroni; слот без отметки её не получает", () => {
-    renderWithClient(<SlotsView connectionId="c" report={diagReport(data({ slots: [slot({ name: "perm", patroni: "permanent" }), slot({ name: "manual", patroni: null })] }))} />);
+    renderWithClient(<SlotsView connectionId="c" report={diagReport(slotsData({ slots: [slot({ name: "perm", patroni: "permanent" }), slot({ name: "manual", patroni: null })] }))} />);
     expect(screen.getByRole("row", { name: /perm/ })).toHaveTextContent("постоянный слот Patroni");
     expect(screen.getByRole("row", { name: /manual/ })).not.toHaveTextContent("Patroni");
   });
 
   it("столбца Patroni нет, когда отметок нет ни у одного слота (подключение не Patroni)", () => {
-    renderWithClient(<SlotsView connectionId="c" report={diagReport(data({ slots: [slot({ name: "a" })] }))} />);
+    renderWithClient(<SlotsView connectionId="c" report={diagReport(slotsData({ slots: [slot({ name: "a" })] }))} />);
     expect(screen.queryByRole("columnheader", { name: "Patroni" })).not.toBeInTheDocument();
   });
 
@@ -32,7 +30,7 @@ describe("SlotsView", () => {
     renderWithClient(
       <SlotsView
         connectionId="c"
-        report={diagReport(data({ slots: [slot({ name: "lab_sub", slotType: "logical", plugin: "pgoutput", database: "lab", active: true, activePid: 4242, xminAge: 1500, catalogXminAge: 2500 })] }))}
+        report={diagReport(slotsData({ slots: [slot({ name: "lab_sub", slotType: "logical", plugin: "pgoutput", database: "lab", active: true, activePid: 4242, xminAge: 1500, catalogXminAge: 2500 })] }))}
       />,
     );
     const row = screen.getByRole("row", { name: /lab_sub/ });
@@ -53,7 +51,7 @@ describe("SlotsView", () => {
     renderWithClient(
       <SlotsView
         connectionId="c"
-        report={diagReport(data({ slots: [slot({ name: "old", active: false, inactiveSinceMs: at, walStatus: "lost", invalidationReason: "wal_removed", safeWalSize: null })] }))}
+        report={diagReport(slotsData({ slots: [slot({ name: "old", active: false, inactiveSinceMs: at, walStatus: "lost", invalidationReason: "wal_removed", safeWalSize: null })] }))}
       />,
     );
     const row = screen.getByRole("row", { name: /old/ });
@@ -67,7 +65,7 @@ describe("SlotsView", () => {
     renderWithClient(
       <SlotsView
         connectionId="c"
-        report={diagReport(data({ slots: [slot({ name: "copy", safeWalSize: 3 * 1024 ** 2, failover: true, synced: true, temporary: true, twoPhase: true, conflicting: true }), slot({ name: "plain", failover: false, synced: false, temporary: false })] }))}
+        report={diagReport(slotsData({ slots: [slot({ name: "copy", safeWalSize: 3 * 1024 ** 2, failover: true, synced: true, temporary: true, twoPhase: true, conflicting: true }), slot({ name: "plain", failover: false, synced: false, temporary: false })] }))}
       />,
     );
     const row = screen.getByRole("row", { name: /copy/ });
@@ -77,9 +75,9 @@ describe("SlotsView", () => {
   });
 
   it("max_slot_wal_keep_size в мегабайтах показывается в байтовых единицах; неизвестная — строки нет", () => {
-    const { rerender } = renderWithClient(<SlotsView connectionId="c" report={diagReport(data({ slots: [slot()], maxSlotWalKeepSizeMb: 2048 }))} />);
+    const { rerender } = renderWithClient(<SlotsView connectionId="c" report={diagReport(slotsData({ slots: [slot()], maxSlotWalKeepSizeMb: 2048 }))} />);
     expect(screen.getByText("max_slot_wal_keep_size: 2,0 GB")).toBeInTheDocument();
-    rerender(<SlotsView connectionId="c" report={diagReport(data({ slots: [slot()], maxSlotWalKeepSizeMb: null }))} />);
+    rerender(<SlotsView connectionId="c" report={diagReport(slotsData({ slots: [slot()], maxSlotWalKeepSizeMb: null }))} />);
     expect(screen.queryByText(/max_slot_wal_keep_size/)).not.toBeInTheDocument();
   });
 
@@ -88,7 +86,7 @@ describe("SlotsView", () => {
       <SlotsView
         connectionId="c"
         report={diagReport(
-          data({
+          slotsData({
             subscriptions: [
               subscription({ name: "ok_sub", pid: 77, receivedLsn: "0/3000060", lastMsgAgeS: 5, applyErrorCount: 0, syncErrorCount: 0 }),
               subscription({ name: "dead_sub", pid: null, applyErrorCount: 4, syncErrorCount: 1 }),
@@ -108,9 +106,48 @@ describe("SlotsView", () => {
   });
 
   it("без подписок таблицы подписок нет; без слотов — сообщение", () => {
-    renderWithClient(<SlotsView connectionId="c" report={diagReport(data())} />);
+    renderWithClient(<SlotsView connectionId="c" report={diagReport(slotsData())} />);
     expect(screen.queryByRole("table", { name: "Подписки" })).not.toBeInTheDocument();
     expect(screen.getByText("Слотов репликации нет")).toBeInTheDocument();
+  });
+
+  describe("удаление слота", () => {
+    const slots = [slot({ name: "dead", active: false }), slot({ name: "busy", active: true })];
+
+    it("с onDropSlot у неактивного слота есть кнопка «Удалить…» (вызывает onDropSlot с именем), у активного — неактивная с подсказкой", async () => {
+      const user = userEvent.setup();
+      const onDropSlot = vi.fn();
+      renderWithClient(<SlotsView connectionId="c" report={diagReport(slotsData({ slots, canDropSlots: true }))} onDropSlot={onDropSlot} />);
+      const dead = within(screen.getByRole("row", { name: /dead/ })).getByRole("button", { name: "Удалить…" });
+      expect(dead).toBeEnabled();
+      expect(dead).not.toHaveAttribute("title");
+      const busy = within(screen.getByRole("row", { name: /busy/ })).getByRole("button", { name: "Удалить…" });
+      expect(busy).toBeDisabled();
+      expect(busy).toHaveAttribute("title", "Слот активен");
+      await user.click(dead);
+      expect(onDropSlot).toHaveBeenCalledTimes(1);
+      expect(onDropSlot).toHaveBeenCalledWith("dead");
+    });
+
+    it("роль без REPLICATION: кнопки неактивны, подсказка называет пункт чек-листа; у активного слота подсказка про активность", () => {
+      renderWithClient(<SlotsView connectionId="c" report={diagReport(slotsData({ slots, canDropSlots: false }))} onDropSlot={vi.fn()} />);
+      const dead = within(screen.getByRole("row", { name: /dead/ })).getByRole("button", { name: "Удалить…" });
+      expect(dead).toBeDisabled();
+      expect(dead).toHaveAttribute("title", "Нужен атрибут REPLICATION — пункт чек-листа «Удаление слотов репликации»");
+      // Причин две — называется та, которую роль не исправит: слот активен.
+      expect(within(screen.getByRole("row", { name: /busy/ })).getByRole("button", { name: "Удалить…" })).toHaveAttribute("title", "Слот активен");
+    });
+
+    it("без onDropSlot (подключение только для чтения) кнопок и столбца действий нет", () => {
+      renderWithClient(<SlotsView connectionId="c" report={diagReport(slotsData({ slots, canDropSlots: true }))} />);
+      expect(screen.queryByRole("button")).toBeNull();
+      expect(screen.queryByRole("columnheader", { name: "Действие" })).toBeNull();
+    });
+
+    it("столбец действий назван для диктора, а не пустой", () => {
+      renderWithClient(<SlotsView connectionId="c" report={diagReport(slotsData({ slots, canDropSlots: true }))} onDropSlot={vi.fn()} />);
+      expect(screen.getByRole("columnheader", { name: "Действие" })).toBeInTheDocument();
+    });
   });
 
   it("чужой вид отчёта не рисуется", () => {

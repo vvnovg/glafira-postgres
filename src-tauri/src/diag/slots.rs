@@ -79,6 +79,11 @@ const KEEP_SIZE_SQL: &str = "SELECT setting::bigint, (extract(epoch FROM now()) 
     (SELECT max((extract(epoch FROM stats_reset) * 1000)::bigint) FROM pg_stat_database) \
   FROM pg_settings WHERE name = 'max_slot_wal_keep_size'";
 
+/// Может ли роль подключения удалять слоты (`pg_drop_replication_slot` требует суперпользователя или `REPLICATION`).
+/// `current_user`, а не `session_user`: права проверяются по нему.
+pub const CAN_DROP_SQL: &str =
+    "SELECT rolsuper OR rolreplication FROM pg_roles WHERE rolname = current_user";
+
 /// Ключ счётчика ошибок подписок (сумма применения и синхронизации) в снимке.
 const ERRORS_KEY: &str = "subscriptionErrors";
 
@@ -172,6 +177,12 @@ pub async fn collect(c: &Client, caps: Caps) -> AppResult<(SlotsData, CounterSna
     }
     let r = c.query_one(KEEP_SIZE_SQL, &[]).await.map_err(pg)?;
     d.max_slot_wal_keep_size_mb = r.get(0);
+    // Право нужно только кнопке удаления: сбой этого запроса отчёт не роняет, кнопка остаётся неактивной.
+    d.can_drop_slots = c
+        .query_one(CAN_DROP_SQL, &[])
+        .await
+        .map(|r| r.get::<_, bool>(0))
+        .unwrap_or(false);
     let values = if caps.at_least(V15) {
         BTreeMap::from([(ERRORS_KEY.to_string(), errors)])
     } else {
@@ -268,6 +279,22 @@ mod tests {
                 None
             ]
         );
+    }
+
+    #[test]
+    fn can_drop_slots_is_read_for_the_current_role() {
+        // Суперпользователь или REPLICATION; роль — `current_user`, как в проверке прав самого сервера.
+        assert!(CAN_DROP_SQL.contains("rolsuper OR rolreplication"));
+        assert!(CAN_DROP_SQL.contains("rolreplication"));
+        assert!(CAN_DROP_SQL.contains("rolname = current_user"));
+        // Старые сохранённые отчёты поля не знают: «нельзя».
+        let d: SlotsData = serde_json::from_str(r#"{"slots":[],"subscriptions":[],"maxSlotWalKeepSizeMb":null,"subscriptionErrorsGrowth":null}"#).unwrap();
+        assert!(!d.can_drop_slots);
+        let on = SlotsData {
+            can_drop_slots: true,
+            ..Default::default()
+        };
+        assert_eq!(serde_json::to_value(&on).unwrap()["canDropSlots"], true);
     }
 
     #[test]

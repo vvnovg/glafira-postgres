@@ -1414,6 +1414,17 @@
         "failed": "Ошибка"
       }
     },
+    "slots": {
+      "drop": "Удалить…",
+      "dropTitle": "Удалить слот {{slot}}?",
+      "confirm": "Удалить слот",
+      "nameLabel": "имя слота",
+      "done": "Слот удалён",
+      "active": "Слот активен",
+      "needReplication": "Нужен атрибут REPLICATION — пункт чек-листа «Удаление слотов репликации»",
+      "patroniMember": "Patroni пересоздаст слот, пока участник есть в кластере; удалите участника",
+      "patroniPermanent": "Уберите слот из /config (patronictl edit-config), иначе Patroni его пересоздаст"
+    },
     "buttons": {
       "cancel": "Отменить запрос…",
       "terminate": "Завершить сессию…",

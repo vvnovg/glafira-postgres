@@ -1,4 +1,4 @@
-import type { ConnectionProfile, DiagData, DiagReport, Holder, Member, PulseFacts, PulseRates, ReplicationData, SessionRow, Sender, Slot, Subscription, Topology, TopologyView, WaitsData } from "../api/types";
+import type { ConnectionProfile, DiagData, DiagReport, Holder, Member, PulseFacts, PulseRates, ReplicationData, SessionRow, Sender, Slot, SlotsData, Subscription, Topology, TopologyView, WaitsData } from "../api/types";
 
 export function member(name: string, patch: Partial<Member> = {}): Member {
   return {
@@ -237,6 +237,11 @@ export function slot(patch: Partial<Slot> = {}): Slot {
     patroni: null,
     ...patch,
   };
+}
+
+/** Данные слотов вместе с `kind` (годятся и для `diagReport`): ни слотов, ни подписок, удалять слоты роль не может; `patch` меняет нужные поля. */
+export function slotsData(patch: Partial<SlotsData> = {}): { kind: "slots" } & SlotsData {
+  return { kind: "slots", slots: [], subscriptions: [], maxSlotWalKeepSizeMb: null, subscriptionErrorsGrowth: null, canDropSlots: false, ...patch };
 }
 
 /** Подписка логической репликации с работающим процессом применения; `patch` меняет нужные поля. */
