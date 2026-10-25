@@ -24,6 +24,13 @@ describe("WaitsChart", () => {
     expect(within(table).getAllByRole("row")[1]).toHaveTextContent("1,4");
   });
 
+  it("таблица для диктора скрыта обёрткой: sr-only на <table> не обрезает строки и удлиняет вкладку", () => {
+    renderWithClient(<WaitsChart data={waitsData({ bucketS: 5, buckets: [bucket(0, { cpu: 1 })] })} />);
+    const table = screen.getByRole("table", { name: "Профиль ожиданий по интервалам" });
+    expect(table).not.toHaveClass("sr-only");
+    expect(table.parentElement).toHaveClass("sr-only");
+  });
+
   it("порядок классов — как в брифе; сегмент столбца ложится в порядке классов снизу вверх", () => {
     expect(WAIT_CLASS_ORDER).toEqual(["cpu", "lock", "lwlock", "io", "ipc", "client", "timeout", "bufferPin", "extension", "activity", "other"]);
     renderWithClient(<WaitsChart data={waitsData({ bucketS: 5, buckets: [bucket(0, { other: 0.5, io: 1, cpu: 2 })] })} />);

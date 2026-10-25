@@ -1,6 +1,6 @@
 import { useId, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { Finding, FindingTarget, Severity } from "../../api/types";
+import type { DiagTool, Finding, FindingTarget, Severity } from "../../api/types";
 import { useWorkspace } from "../../state/workspace";
 import { CopyButton } from "../common/CopyButton";
 import { findingFix, findingTitle } from "./findingText";
@@ -30,7 +30,20 @@ function findingKeys(findings: Finding[]): string[] {
  * и кнопки перехода в другой инструмент. Блок сворачивается; без находок — «Проблем не найдено».
  * `showMember` — у отчёта кластера: находки относятся к разным узлам, и узел показывается отдельной меткой.
  */
-export function FindingsPanel({ connectionId, findings, showMember = false }: { connectionId: string; findings: Finding[]; showMember?: boolean }) {
+export function FindingsPanel({
+  connectionId,
+  findings,
+  showMember = false,
+  tool,
+  member,
+}: {
+  connectionId: string;
+  findings: Finding[];
+  showMember?: boolean;
+  /** Инструмент и узел вкладки, где показан блок: переход «в себя» не предлагается. */
+  tool?: DiagTool;
+  member?: string | null;
+}) {
   const { t } = useTranslation();
   const open = useWorkspace((s) => s.open);
   const titleId = useId();
@@ -53,6 +66,8 @@ export function FindingsPanel({ connectionId, findings, showMember = false }: { 
         <ul className="findings-list">
           {sorted.map((f, i) => {
             const command = typeof f.params.command === "string" ? f.params.command : null;
+            // Ссылка без узла ведёт туда же, что и узел отчёта: вкладка инструмента одна на подключение.
+            const links = f.links.filter((l) => !(l.tool === tool && (l.member == null || l.member === member)));
             return (
               <li key={keys[i]} className={`finding sev-${f.severity}`}>
                 <div className="finding-main">
@@ -64,10 +79,10 @@ export function FindingsPanel({ connectionId, findings, showMember = false }: { 
                   <summary>{t("diag.findings.fix")}</summary>
                   <p>{findingFix(f)}</p>
                 </details>
-                {(command !== null || f.links.length > 0) && (
+                {(command !== null || links.length > 0) && (
                   <div className="finding-actions">
                     {command !== null && <CopyButton text={command} label={t("diag.findings.copy")} />}
-                    {f.links.map((link) => (
+                    {links.map((link) => (
                       <button
                         key={`${link.tool}:${link.member ?? ""}`}
                         type="button"

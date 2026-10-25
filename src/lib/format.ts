@@ -12,6 +12,12 @@ export function formatTimestamp(ms: number | null, utc = false): string {
   return `${y}-${pad(mo)}-${pad(da)} ${pad(h)}:${pad(mi)}:${pad(s)}.${pad(milli, 3)}`;
 }
 
+/** Время дня «ЧЧ:ММ:СС» по местным часам: в «Обновлено» шапки дата и миллисекунды — шум (полное время — в подсказке). */
+export function formatTime(ms: number): string {
+  const d = new Date(ms);
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
 const num = (n: number, digits = 0) =>
   n.toLocaleString(currentLocale(), { minimumFractionDigits: digits, maximumFractionDigits: digits });
 

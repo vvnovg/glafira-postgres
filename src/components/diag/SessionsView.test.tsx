@@ -56,6 +56,8 @@ describe("SessionsView", () => {
     expect(screen.getByRole("tab", { name: "Idle in transaction", selected: true })).toBeInTheDocument();
     expect(rowOf(2)).toHaveTextContent("15 мин");
     expect(screen.getByRole("columnheader", { name: "Держит блокировок" })).toBeInTheDocument();
+    // Колонки, которые в этом наборе одинаковы у всех строк, не показываются: таблица помещается в окно.
+    for (const name of ["Состояние", "Ожидание", "Запрос", "Ждёт"]) expect(screen.queryByRole("columnheader", { name })).toBeNull();
     expect(screen.getByText(/idle_in_transaction_session_timeout = 0/)).toBeInTheDocument();
   });
 
@@ -153,9 +155,9 @@ describe("SessionsView", () => {
     expect([...group(/^\(не задано\)/)].map((c) => c.textContent)).toEqual(["(не задано)", "1", "1", "0", "0", "0"]);
     expect(within(table).getByRole("columnheader", { name: "Роль" })).toBeInTheDocument();
     // Список сессий при группировке не показывается.
-    expect(screen.queryByRole("columnheader", { name: "Состояние" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("columnheader", { name: "Простой" })).not.toBeInTheDocument();
     await user.selectOptions(screen.getByRole("combobox", { name: "Группировать" }), "none");
-    expect(screen.getByRole("columnheader", { name: "Состояние" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Простой" })).toBeInTheDocument();
   });
 
   it("ждущие: pid блокирующих; 0 — prepared transaction или завершившаяся сессия, а не «сессия 0»", async () => {

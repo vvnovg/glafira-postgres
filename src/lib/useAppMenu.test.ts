@@ -167,13 +167,23 @@ describe("useAppMenu", () => {
     expect(h.menus[0].closed).toBe(true);
   });
 
+  it("«Руководство» открывает раздел текущего инструмента диагностики, как F1", async () => {
+    setUA("Macintosh");
+    renderHook(() => useAppMenu());
+    await waitFor(() => expect(helpSubmenu()).toBeDefined());
+    useWorkspace.setState({ tabs: [{ id: "diag:c:locks", kind: "diag", connectionId: "c", tool: "locks" }], activeId: "diag:c:locks" });
+    click("guide");
+    expect(useWorkspace.getState().tabs.find((t) => t.kind === "help")).toMatchObject({ chapter: "diagnostics", anchor: "locks" });
+  });
+
   it("пункты открывают справку, «О программе» и сбор диагностики", async () => {
     setUA("Macintosh");
     renderHook(() => useAppMenu());
     await waitFor(() => expect(helpSubmenu()).toBeDefined());
 
+    // Без открытых вкладок — глава по умолчанию, как у F1.
     click("guide");
-    expect(useWorkspace.getState().tabs).toEqual([{ id: "help", kind: "help" }]);
+    expect(useWorkspace.getState().tabs).toEqual([{ id: "help", kind: "help", chapter: "getting-started" }]);
 
     click("about");
     expect(useWorkspace.getState().activeId).toBe("about");

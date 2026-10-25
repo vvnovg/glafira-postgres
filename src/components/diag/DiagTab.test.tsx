@@ -2,7 +2,7 @@ import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DiagTool } from "../../api/types";
-import { formatTimestamp } from "../../lib/format";
+import { formatTime, formatTimestamp } from "../../lib/format";
 import { useWorkspace } from "../../state/workspace";
 import { connection, diagReport, holder, member, pulseFacts, pulseRates, replication, sender, slot, topology, topologyView, waitsData } from "../../test/fixtures";
 import { renderWithClient } from "../../test/render";
@@ -105,8 +105,9 @@ describe("DiagTab", () => {
       vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport({ kind: "locks", roots: [], cycles: [], ddlQueue: [] }, { observedAtMs: serverClock }));
       renderWithClient(<DiagTab connectionId="c" tool="locks" member={null} active tabId="diag:c:locks" />);
       await screen.findByText("Проблем не найдено");
-      expect(screen.getByText(`Обновлено ${formatTimestamp(received)}`)).toBeInTheDocument();
-      expect(screen.queryByText(`Обновлено ${formatTimestamp(serverClock)}`)).not.toBeInTheDocument();
+      expect(screen.getByText(`Обновлено ${formatTime(received)}`)).toBeInTheDocument();
+      expect(screen.getByText(`Обновлено ${formatTime(received)}`)).toHaveAttribute("title", formatTimestamp(received));
+      expect(screen.queryByText(`Обновлено ${formatTime(serverClock)}`)).not.toBeInTheDocument();
     } finally {
       now.mockRestore();
     }
@@ -117,7 +118,7 @@ describe("DiagTab", () => {
       unavailable: [{ part: "queryId", reason: { key: "diag.unavailable.version", params: { part: "queryId", version: "14" }, text: "queryId: PostgreSQL 14+" } }],
     }));
     renderWithClient(<DiagTab connectionId="c" tool="locks" member={null} active tabId="diag:c:locks" />);
-    expect(await screen.findByText("queryId: PostgreSQL 14+")).toBeInTheDocument();
+    expect(await screen.findByText("Идентификатор запроса (query_id): только с PostgreSQL 14")).toBeInTheDocument();
   });
 
   it("закрепленный в спеке узел: запрос идёт на него, «за лидером» не помечается", async () => {
@@ -148,7 +149,7 @@ describe("DiagTab", () => {
     expect(await screen.findByRole("heading", { name: "Idle in transaction" })).toBeInTheDocument();
     expect(api.runDiagnostic).toHaveBeenCalledWith("c", { tool: "sessions", member: null });
     // Данные те же, что у «Сессий», но список открывается на наборе idle in transaction.
-    expect(screen.getByRole("tab", { name: "Idle in transaction", selected: true })).toBeInTheDocument();
+    expect(await screen.findByRole("tab", { name: "Idle in transaction", selected: true })).toBeInTheDocument();
   });
 
   it("вкладка «Сессии» открывается на наборе «Все»", async () => {
@@ -184,7 +185,7 @@ describe("DiagTab", () => {
     expect(await screen.findByRole("heading", { name: "Пульс" })).toBeInTheDocument();
     expect(api.runDiagnostic).toHaveBeenCalledWith("c", { tool: "pulse", member: null });
     expect(screen.queryByRole("combobox", { name: "Узел" })).not.toBeInTheDocument();
-    expect(await screen.findByText("pg-2: walDir: нужна роль pg_monitor")).toBeInTheDocument();
+    expect(await screen.findByText("pg-2: Размер pg_wal: нужна роль pg_monitor")).toBeInTheDocument();
   });
 
   it("у одиночного сервера выбора узла нет", async () => {
@@ -263,7 +264,7 @@ describe("DiagTab", () => {
       replication: diagReport({ kind: "replication", ...replication({ senders: [sender({ application: "pg-2", member: "pg-2" })] }) }),
       slots: diagReport({ kind: "slots", slots: [slot({ name: "pg_2" })], subscriptions: [], maxSlotWalKeepSizeMb: null, subscriptionErrorsGrowth: null }),
       failover: diagReport({ kind: "failover", paused: false, readyCount: 1, config: { maximumLagOnFailover: 1048576, synchronousMode: "off", synchronousModeStrict: false, synchronousNodeCount: null, ttl: 30, loopWait: 10, retryTimeout: 10, permanentSlots: [] }, candidates: [{ member: "pg-2", ready: true, reasons: [], lagBytes: 0, pendingRestart: false }] }, { member: null }),
-      health: diagReport({ kind: "health", endpoints: ["primary"], members: [{ member: "pg-1", apiUrl: "http://pg-1:8008", cells: [{ endpoint: "primary", status: 200, error: null }] }] }, { member: null }),
+      health: diagReport({ kind: "health", endpoints: ["primary"], members: [{ member: "pg-1", apiUrl: "http://pg-1:8008", cells: [{ endpoint: "primary", status: 200, error: null, grade: "ok" }] }] }, { member: null }),
     };
     const tables: Record<string, string> = { horizon: "Держатели горизонта xmin", replication: "Отправители WAL", slots: "Слоты репликации", failover: "Кандидаты на роль лидера", health: "Матрица health" };
     for (const tool of ["horizon", "replication", "slots", "failover", "health"] as const) {

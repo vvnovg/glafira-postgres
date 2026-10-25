@@ -77,8 +77,10 @@ const COLS = {
 } satisfies Record<string, Col>;
 
 const BASE_COLS: Col[] = [COLS.pid, COLS.state, COLS.wait, COLS.queryAge, COLS.xactAge, COLS.user, COLS.application, COLS.client, COLS.database, COLS.blockedBy, COLS.text];
-// У idle in transaction важнее простой, число блокировок и возраст xmin: они встают сразу за состоянием.
-const IDLE_TX_COLS: Col[] = [COLS.pid, COLS.state, COLS.idleFor, COLS.locksHeld, COLS.xminAge, ...BASE_COLS.slice(2)];
+// У idle in transaction важнее простой, число блокировок и возраст xmin. Состояние (всегда idle in transaction), ожидание
+// (всегда Client:ClientRead), «Ждёт» (простаивающая сессия ничего не ждёт) и время запроса (≈ простой) в этом наборе
+// ничего не говорят — без них таблица помещается в окно.
+const IDLE_TX_COLS: Col[] = [COLS.pid, COLS.idleFor, COLS.locksHeld, COLS.xminAge, COLS.xactAge, COLS.user, COLS.application, COLS.client, COLS.database, COLS.text];
 
 /** Строка подходит под фильтр: подстрока (без учёта регистра) в pid, роли, приложении, клиенте, БД или запросе. */
 function haystack(r: SessionRow): string {

@@ -2,6 +2,7 @@ import { type ReactNode, useId } from "react";
 import { useTranslation } from "react-i18next";
 import type { Conflicts, DiagReport, Receiver, ReplicationData, Sender } from "../../api/types";
 import { formatCount, formatDuration } from "../../lib/format";
+import { Hint } from "../common/Hint";
 import { bytesText, uniqueKeys } from "./viewText";
 
 /** Состояние паузы применения WAL (`pg_get_wal_replay_pause_state`): ключи подписей — литералами. */
@@ -105,7 +106,7 @@ function ReceiverCard({ data, receiver }: { data: ReplicationData; receiver: Rec
   const down = receiver.status === null && !data.detailsHidden;
   const source = receiver.senderHost === null ? null : receiver.senderPort === null ? receiver.senderHost : `${receiver.senderHost}:${receiver.senderPort}`;
   const pause = replay?.pause ?? null;
-  const fields: { id: string; label: string; value: ReactNode | null }[] = [
+  const fields: { id: string; label: string; value: ReactNode | null; hint?: string }[] = [
     ...(down
       ? []
       : [
@@ -114,7 +115,8 @@ function ReceiverCard({ data, receiver }: { data: ReplicationData; receiver: Rec
           { id: "slot", label: t("diag.replication.fields.slot"), value: receiver.slotName },
           { id: "timeline", label: t("diag.replication.fields.timeline"), value: receiver.receivedTli === null ? null : String(receiver.receivedTli) },
           { id: "lastMsg", label: t("diag.replication.fields.lastMsg"), value: receiver.lastMsgAgeS === null ? null : formatDuration(receiver.lastMsgAgeS) },
-          { id: "lastEnd", label: t("diag.replication.fields.lastEnd"), value: receiver.latestEndAgeS === null ? null : formatDuration(receiver.latestEndAgeS) },
+          // На простаивающем кластере позиция не двигается и это время растёт часами: без пояснения похоже на сбой.
+          { id: "lastEnd", label: t("diag.replication.fields.lastEnd"), value: receiver.latestEndAgeS === null ? null : formatDuration(receiver.latestEndAgeS), hint: "hints.diag.lastEnd" },
         ]),
     { id: "gap", label: t("diag.replication.fields.gap"), value: replay?.receiveReplayGapBytes == null ? null : bytesText(replay.receiveReplayGapBytes) },
     { id: "replayDelay", label: t("diag.replication.fields.replayDelay"), value: replay?.replayDelayS == null ? null : formatDuration(replay.replayDelayS) },
@@ -131,7 +133,10 @@ function ReceiverCard({ data, receiver }: { data: ReplicationData; receiver: Rec
       <dl className="stats">
         {shown.map((f) => (
           <div key={f.id}>
-            <dt>{f.label}</dt>
+            <dt>
+              {f.label}
+              {f.hint && <Hint k={f.hint} label={f.label} />}
+            </dt>
             <dd>{f.value ?? "—"}</dd>
           </div>
         ))}

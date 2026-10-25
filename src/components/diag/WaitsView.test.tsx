@@ -83,6 +83,14 @@ describe("WaitsView", () => {
     expect(screen.queryByRole("table", { name: "Топ ожиданий" })).toBeNull();
   });
 
+  it("срезы были, но пустые (сервер простаивал) — «активных сессий не было», а не «сэмплов нет»", () => {
+    const T = new Date(2026, 9, 25, 12, 0, 0).getTime();
+    const data = waitsData({ bucketS: 10, buckets: [{ startMs: T, sampledS: 10, aas: {} }] });
+    renderWithClient(<WaitsView connectionId="c" report={diagReport(data)} />);
+    expect(screen.getByText("За выбранное окно активных сессий не было")).toBeInTheDocument();
+    expect(screen.queryByText("За выбранное окно сэмплов нет")).toBeNull();
+  });
+
   it("группы — по приложениям, ролям, базам и клиентам; пустое имя — «(не задано)»; пустые группы не показываются", () => {
     const data = waitsData({ totalSamples: 5,
       topEvents: [{ class: "io", event: "DataFileRead", samples: 5, share: 1 }],

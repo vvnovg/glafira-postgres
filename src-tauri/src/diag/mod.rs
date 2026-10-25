@@ -370,6 +370,7 @@ mod tests {
                     endpoint: "primary".into(),
                     status: Some(503),
                     error: None,
+                    grade: pg_advisor::rules::patroni::HealthGrade::NotApplicable,
                 }],
             }],
         }))
@@ -378,7 +379,7 @@ mod tests {
         assert_eq!(
             h["members"][0],
             serde_json::json!({"member": "a", "apiUrl": "http://a:8008",
-                "cells": [{"endpoint": "primary", "status": 503, "error": null}]})
+                "cells": [{"endpoint": "primary", "status": 503, "error": null, "grade": "notApplicable"}]})
         );
     }
 

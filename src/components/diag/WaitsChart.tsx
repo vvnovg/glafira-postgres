@@ -85,7 +85,8 @@ const totalOf = (b: WaitBucket) => segments(b).reduce((sum, s) => sum + s.v, 0);
 /**
  * Профиль ожиданий (спец. P2 §7.4): столбцы с накоплением — среднее число активных сессий (AAS) по классам ожиданий в
  * каждом интервале окна. Свой SVG без библиотек. Промежутки, когда сэмплер не работал, затенены штриховкой. Для экранного
- * диктора — таблица тех же чисел; подсказка столбца (`<title>`) — время, всего и классы.
+ * диктора — таблица тех же чисел; подсказка столбца (`<title>`) — время, всего и классы. Класс `sr-only` — на обёртке
+ * таблицы, а не на `<table>`: у таблицы height и overflow не обрезают строки, и невидимая таблица удлиняла вкладку.
  * `memo`: вид перерисовывается каждую секунду (тик сэмплера), а данные графика берутся из отчёта и меняются только
  * с ним — до 90 столбцов на каждый тик перерисовывать незачем.
  */
@@ -196,36 +197,38 @@ export const WaitsChart = memo(function WaitsChart({ data }: { data: WaitsData }
           ))}
         </ul>
       )}
-      <table className="sr-only" aria-label={t("diag.waits.tableLabel")}>
-        <thead>
-          <tr>
-            <th scope="col">{t("diag.waits.columns.interval")}</th>
-            <th scope="col">{t("diag.waits.columns.total")}</th>
-            {present.map((cls) => (
-              <th key={cls} scope="col">
-                {label(cls)}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {buckets.map((b) => (
-            <tr key={b.startMs}>
-              <th scope="row">{stamp(b.startMs)}</th>
-              {b.sampledS <= 0 ? (
-                <td colSpan={1 + present.length}>{t("diag.waits.noData")}</td>
-              ) : (
-                <>
-                  <td>{formatAas(totalOf(b))}</td>
-                  {present.map((cls) => (
-                    <td key={cls}>{formatAas(b.aas[cls] ?? 0)}</td>
-                  ))}
-                </>
-              )}
+      <div className="sr-only">
+        <table aria-label={t("diag.waits.tableLabel")}>
+          <thead>
+            <tr>
+              <th scope="col">{t("diag.waits.columns.interval")}</th>
+              <th scope="col">{t("diag.waits.columns.total")}</th>
+              {present.map((cls) => (
+                <th key={cls} scope="col">
+                  {label(cls)}
+                </th>
+              ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {buckets.map((b) => (
+              <tr key={b.startMs}>
+                <th scope="row">{stamp(b.startMs)}</th>
+                {b.sampledS <= 0 ? (
+                  <td colSpan={1 + present.length}>{t("diag.waits.noData")}</td>
+                ) : (
+                  <>
+                    <td>{formatAas(totalOf(b))}</td>
+                    {present.map((cls) => (
+                      <td key={cls}>{formatAas(b.aas[cls] ?? 0)}</td>
+                    ))}
+                  </>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 });

@@ -10,7 +10,7 @@ The header is the same in every tab:
 
 A tab polls the server only while it is visible: a hidden tab sends nothing, and when you return to it, data that went stale is read at once. After a login is rejected, polling stops: repeated attempts with a wrong password can lock the account. If the connection is closed, the tab says [[ui:diag.closed]] and offers [[ui:diag.connect]].
 
-For the full picture the role needs `pg_monitor` (it includes `pg_read_all_stats`): without it the server hides the query texts of other sessions, replica details and the size of `pg_wal`. The tool says so: the hidden part is listed as grey lines under the findings block, for example “walDir: needs the pg_monitor role”. What the server version lacks is explained the same way, for example “queryId: PostgreSQL 14+”. Privileges and the load on the server are described in the administrator guide, in the “Diagnostics” section.
+For the full picture the role needs `pg_monitor` (it includes `pg_read_all_stats`): without it the server hides the query texts of other sessions, replica details and the size of `pg_wal`. The tool says so: the hidden part is listed as grey lines under the findings block, for example “pg_wal size: needs the pg_monitor role”. What the server version lacks is explained the same way, for example “Query ID (query_id): PostgreSQL 14+”. Privileges and the load on the server are described in the administrator guide, in the “Diagnostics” section.
 
 ## Pulse {#pulse}
 
@@ -142,9 +142,16 @@ Findings: no ready candidate at all (critical), one ready candidate among three 
 
 ## Health matrix {#health}
 
-This tool exists only for a Patroni cluster. [[ui:diag.tools.health]] is a grid of members by REST API addresses: for every member that has an API address, `GET /primary`, `/standby-leader`, `/replica`, `/read-only`, `/sync`, `/async` and `/health` run in parallel (without authorization, 5 seconds per request). A cell holds the HTTP status code: 200 is marked as success, any other code as a failure, and [[ui:diag.health.noAnswer]] means the API did not answer (the reason is in the cell's tooltip). A member without an API address has no cells ([[ui:diag.health.noApi]]).
+This tool exists only for a Patroni cluster. [[ui:diag.tools.health]] is a grid of members by REST API addresses: for every member that has an API address, `GET /primary`, `/standby-leader`, `/replica`, `/read-only`, `/sync`, `/async` and `/health` run in parallel (without authorization, 5 seconds per request). A cell holds the HTTP status code, or [[ui:diag.health.noAnswer]] if the API did not answer (the reason is in the cell's tooltip). A member without an API address has no cells ([[ui:diag.health.noApi]]).
 
-This is how a load balancer sees the cluster, for example HAProxy with `option httpchk GET /primary`. A healthy cluster also shows red cells: the leader answers 503 on `/replica` and a replica answers 503 on `/primary`, and that is normal. Parameters like `/replica?lag=…` are not checked.
+The cell color depends not on the code but on whether the response matches the member's role:
+
+- green: the expected 200, such as `/primary` on the leader or `/replica` on a replica;
+- gray: the endpoint does not apply to the role, so 503 is normal, such as `/primary` on a replica, `/replica` on the leader or `/sync` on an asynchronous replica;
+- yellow: the node works, but the load balancer sends it no traffic for this endpoint, such as a replica answering 503 on `/replica` because of lag or the `noloadbalance` tag;
+- red: the response contradicts the role (a replica answers 200 on `/primary`, or the leader answers as a leader nowhere), `/health` is not 200, or the API did not answer.
+
+So a healthy cluster looks green and gray, and red shows at once where to look. The meaning of the color is in the cell's tooltip. This is how a load balancer sees the cluster, for example HAProxy with `option httpchk GET /primary`. Parameters like `/replica?lag=…` are not checked.
 
 Findings: exactly one member must answer 200 on `/primary` (on `/standby-leader` in a standby cluster), otherwise a load balancer sends writes to the wrong place or nowhere (critical); `/health` is not 200 on a member whose API answered — PostgreSQL on that member is not running (critical); a replica whose `/replica` is not 200 is excluded from reads (warning: lag, the `noloadbalance` tag or a stopped replica).
 

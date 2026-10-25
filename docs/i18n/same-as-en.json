@@ -36,7 +36,6 @@
     "diag.slots.keepSize",
     "diag.tools.idleTx",
     "diag.unavailable.onMember",
-    "diag.unavailable.version",
     "diag.waits.classes.activity",
     "diag.waits.classes.bufferPin",
     "diag.waits.classes.client",

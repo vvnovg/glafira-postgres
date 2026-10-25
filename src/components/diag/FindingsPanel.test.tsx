@@ -7,6 +7,18 @@ import { useWorkspace } from "../../state/workspace";
 import { FindingsPanel } from "./FindingsPanel";
 
 describe("FindingsPanel", () => {
+  it("переход в инструмент той же вкладки (тот же или любой узел) не предлагается, в другой — предлагается", () => {
+    const idle: Finding = { id: "idleInTransaction", severity: "critical", member: "pg-1", target: null, params: { maxS: 2000, count: 1 }, links: [{ kind: "openTool", tool: "idleTx", member: "pg-1" }] };
+    const blocker: Finding = { id: "rootBlocker", severity: "warning", member: "pg-1", target: null, params: { count: 1, maxS: 20 }, links: [{ kind: "openTool", tool: "sessions", member: null }] };
+    const { rerender } = renderWithClient(<FindingsPanel connectionId="c" findings={[idle, blocker]} tool="idleTx" member="pg-1" />);
+    expect(screen.queryByRole("button", { name: "Открыть «Idle in transaction»" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Открыть «Сессии»" })).toBeInTheDocument();
+    // Ссылка без узла на вкладке «Сессии» — тоже «в себя».
+    rerender(<FindingsPanel connectionId="c" findings={[idle, blocker]} tool="sessions" member="pg-1" />);
+    expect(screen.queryByRole("button", { name: "Открыть «Сессии»" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Открыть «Idle in transaction»" })).toBeInTheDocument();
+  });
+
   it("находки по строгости с текстом, «что сделать», командой и переходом в инструмент", async () => {
     const user = userEvent.setup();
     useWorkspace.setState({ tabs: [], activeId: null });

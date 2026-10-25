@@ -1,8 +1,23 @@
 import { useTranslation } from "react-i18next";
 import type { ConnectionKind, DiagTool, Member } from "../../api/types";
-import { formatTimestamp } from "../../lib/format";
+import { formatTime, formatTimestamp } from "../../lib/format";
 import { roleLabel } from "../../lib/topology";
+import { Hint } from "../common/Hint";
 import { DIAG_INTERVALS_S, WAITS_WINDOWS_S } from "../../lib/useDiagnostic";
+
+/** Пояснение «?» у названия инструмента. Ключи — литералами: `pnpm i18n:check` сверяет значки с ключами `hints`. */
+const TOOL_HINTS: Record<DiagTool, string> = {
+  pulse: "hints.diag.pulse",
+  sessions: "hints.diag.sessions",
+  idleTx: "hints.diag.idleTx",
+  waits: "hints.diag.waits",
+  locks: "hints.diag.locks",
+  horizon: "hints.diag.horizon",
+  replication: "hints.diag.replication",
+  slots: "hints.diag.slots",
+  failover: "hints.diag.failover",
+  health: "hints.diag.health",
+};
 
 /** Значение пункта «За лидером» в выборе узла и пункта «Пауза» в выборе интервала. */
 const FOLLOW = "";
@@ -38,7 +53,10 @@ export function DiagHeader({ tool, controls }: { tool: DiagTool; controls?: Diag
   const c = controls;
   return (
     <div className="toolbar diag-head">
-      <h2>{t(`diag.tools.${tool}`)}</h2>
+      <div className="diag-title">
+        <h2>{t(`diag.tools.${tool}`)}</h2>
+        <Hint k={TOOL_HINTS[tool]} label={t(`diag.tools.${tool}`)} />
+      </div>
       {c?.members && (
         <label className="inline">
           <span>{t("diag.header.node")}</span>
@@ -84,7 +102,11 @@ export function DiagHeader({ tool, controls }: { tool: DiagTool; controls?: Diag
           <button type="button" onClick={c.onRefresh}>
             {t("diag.header.refresh")}
           </button>
-          {c.updatedAtMs !== null && <span className="muted">{t("diag.header.updated", { time: formatTimestamp(c.updatedAtMs) })}</span>}
+          {c.updatedAtMs !== null && (
+            <span className="muted" title={formatTimestamp(c.updatedAtMs)}>
+              {t("diag.header.updated", { time: formatTime(c.updatedAtMs) })}
+            </span>
+          )}
           {c.stale && (
             <span className="warn" role="status">
               {t("diag.header.stale")}

@@ -4,6 +4,7 @@ import { i18n } from "../i18n";
 import { openSupport } from "./links";
 import { useDiagnosticsRequest } from "../state/diagnosticsRequest";
 import { useWorkspace } from "../state/workspace";
+import { openContextHelp } from "./useHelpShortcut";
 
 /** id пустого подменю Help в меню Tauri по умолчанию (`tauri::menu::HELP_SUBMENU_ID`). */
 const TAURI_HELP_ID = "__tauri_help_menu__";
@@ -43,7 +44,8 @@ async function buildAppMenu(): Promise<BuiltMenu> {
   }
   const items = [
     // ⌘? — на раскладке US это ⇧⌘/; символ «?» как клавишу Tauri не принимает.
-    await MenuItem.new({ id: id("guide"), text: t("menu.guide"), accelerator: "CmdOrCtrl+Shift+/", action: () => open({ kind: "help" }) }),
+    // Как F1: глава и раздел текущего экрана.
+    await MenuItem.new({ id: id("guide"), text: t("menu.guide"), accelerator: "CmdOrCtrl+Shift+/", action: openContextHelp }),
     await PredefinedMenuItem.new({ item: "Separator" }),
     await MenuItem.new({ id: id("support"), text: t("support.title"), action: openSupport }),
     await MenuItem.new({ id: id("about"), text: t("menu.about"), action: () => open({ kind: "about" }) }),

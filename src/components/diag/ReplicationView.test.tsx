@@ -91,7 +91,10 @@ describe("ReplicationView", () => {
     );
     const card = screen.getByRole("region", { name: "Приёмник WAL" });
     // Подпись и значение сверяются целиком: подстрока «3» нашлась бы и в «30 с».
-    const fields = Object.fromEntries([...card.querySelectorAll("dl > div")].map((d) => [d.querySelector("dt")?.textContent, d.querySelector("dd")?.textContent]));
+    // Подпись — первый текстовый узел `dt` (за ним может стоять значок «?»).
+    const fields = Object.fromEntries([...card.querySelectorAll("dl > div")].map((d) => [d.querySelector("dt")?.firstChild?.textContent, d.querySelector("dd")?.textContent]));
+    // Время отчёта о позиции на простаивающем кластере растёт часами — у подписи есть пояснение.
+    expect(within(card).getByRole("button", { name: "Подсказка: Последний отчёт о позиции" })).toBeInTheDocument();
     expect(fields).toMatchObject({
       Статус: "streaming",
       Источник: "pg-1:5432",

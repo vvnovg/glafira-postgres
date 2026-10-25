@@ -1,9 +1,28 @@
 import { useTranslation } from "react-i18next";
-import type { DiagReport, HealthCell, HealthData, HealthMember } from "../../api/types";
+import type { TFunction } from "i18next";
+import type { DiagReport, HealthCell, HealthData, HealthGrade, HealthMember } from "../../api/types";
 import { tr } from "../../i18n/text";
 
-/** Класс клетки: 200 — `ok`, любой иной код — `bad`, API не ответил — `none`. Код (или слова «нет ответа») остаётся в клетке: цвет не единственный признак. */
-const cellClass = (c: HealthCell) => (c.status === null ? "none" : c.status === 200 ? "ok" : "bad");
+/**
+ * Класс клетки — по оценке Rust (роль участника), а не по коду: 503 на адресе чужой роли — серый, а не красный.
+ * Код (или «нет ответа») остаётся в клетке, а смысл оценки — в подсказке: цвет не единственный признак.
+ */
+const CELL_CLASS: Record<HealthGrade, string> = { ok: "ok", notApplicable: "na", degraded: "degraded", bad: "bad" };
+
+/** Подсказка клетки: причина молчания API или смысл оценки. Ключи — литералами (правило словарей). */
+function cellTitle(c: HealthCell, t: TFunction): string | undefined {
+  if (c.error) return tr(c.error);
+  switch (c.grade) {
+    case "notApplicable":
+      return t("diag.health.grade.notApplicable");
+    case "degraded":
+      return t("diag.health.grade.degraded");
+    case "bad":
+      return t("diag.health.grade.bad");
+    default:
+      return undefined;
+  }
+}
 
 function MemberRow({ m, columns }: { m: HealthMember; columns: number }) {
   const { t } = useTranslation();
@@ -17,7 +36,7 @@ function MemberRow({ m, columns }: { m: HealthMember; columns: number }) {
         </td>
       ) : (
         m.cells.map((c) => (
-          <td key={c.endpoint} className={cellClass(c)} title={c.error ? tr(c.error) : undefined}>
+          <td key={c.endpoint} className={CELL_CLASS[c.grade]} title={cellTitle(c, t)}>
             {c.status === null ? t("diag.health.noAnswer") : String(c.status)}
           </td>
         ))
@@ -51,6 +70,7 @@ function HealthBody({ data }: { data: HealthData }) {
           </table>
         </div>
       )}
+      <p className="muted">{t("diag.health.legend")}</p>
       <p className="muted">{t("diag.health.note")}</p>
     </div>
   );

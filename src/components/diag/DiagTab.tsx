@@ -3,7 +3,6 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../api/client";
 import type { AppError, DiagReport, DiagTool } from "../../api/types";
-import { tr } from "../../i18n/text";
 import { DEFAULT_WAITS_WINDOW_S, defaultIntervalS, isClusterTool, useDiagnostic } from "../../lib/useDiagnostic";
 import { refreshAfterConnect, useTopology } from "../../lib/useConnectionEvents";
 import { useWorkspace } from "../../state/workspace";
@@ -18,6 +17,7 @@ import { PulseView } from "./PulseView";
 import { ReplicationView } from "./ReplicationView";
 import { SessionsView } from "./SessionsView";
 import { SlotsView } from "./SlotsView";
+import { unavailableText } from "./unavailable";
 import { WaitsView } from "./WaitsView";
 
 /**
@@ -170,12 +170,12 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
       {q.error && <ErrorBanner error={q.error} />}
       {report ? (
         <div className={placeholder ? "diag-body diag-pending" : "diag-body"} aria-busy={placeholder}>
-          <FindingsPanel connectionId={connectionId} findings={report.findings} showMember={cluster} />
+          <FindingsPanel connectionId={connectionId} findings={report.findings} showMember={cluster} tool={tool} member={report.member} />
           {report.unavailable.length > 0 && (
             <div className="diag-unavailable">
               {report.unavailable.map((u, i) => (
                 <p key={`${u.part}:${u.member ?? ""}:${i}`} className="muted">
-                  {u.member ? t("diag.unavailable.onMember", { member: u.member, text: tr(u.reason) }) : tr(u.reason)}
+                  {u.member ? t("diag.unavailable.onMember", { member: u.member, text: unavailableText(u) }) : unavailableText(u)}
                 </p>
               ))}
             </div>

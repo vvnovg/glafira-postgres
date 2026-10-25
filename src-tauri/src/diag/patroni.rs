@@ -4,7 +4,9 @@ use futures_util::future::join_all;
 use pg_advisor::failover::{
     self, CandidateFacts, CandidateRole, DEFAULT_MAXIMUM_LAG_ON_FAILOVER, DynConfig, SyncMode,
 };
-use pg_advisor::rules::patroni::{HEALTH_ENDPOINTS, HealthFacts, evaluate_health};
+use pg_advisor::rules::patroni::{
+    HEALTH_ENDPOINTS, HealthFacts, HealthGrade, evaluate_health, grade_member,
+};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -102,6 +104,8 @@ pub struct HealthCell {
     pub endpoint: String,
     pub status: Option<u16>,
     pub error: Option<AppError>,
+    /// Оценка по роли участника (`grade_member`): от неё цвет клетки.
+    pub grade: HealthGrade,
 }
 
 /// Строка матрицы: участник и его клетки по `HealthData.endpoints`. Без адреса API клеток нет.
@@ -140,7 +144,7 @@ pub async fn failover_report(st: &AppState, target: &DiagTarget) -> AppResult<Di
 pub async fn health_report(st: &AppState, target: &DiagTarget) -> AppResult<DiagReport> {
     let http = st.live.http_for(&target.profile).await?;
     // Все участники и все адреса параллельно; у каждого запроса свой срок клиента (5 с).
-    let members = join_all(target.topology.members.iter().map(|m| {
+    let mut members = join_all(target.topology.members.iter().map(|m| {
         let http = http.clone();
         async move {
             let Some(base) = m.api_url.clone() else {
@@ -154,15 +158,18 @@ pub async fn health_report(st: &AppState, target: &DiagTarget) -> AppResult<Diag
                 let (http, url) = (http.clone(), format!("{base}/{e}"));
                 async move {
                     match http.get_status(&url).await {
+                        // Оценку ставит `grade_member` ниже, когда известны роль и все коды участника.
                         Ok(code) => HealthCell {
                             endpoint: e.to_string(),
                             status: Some(code),
                             error: None,
+                            grade: HealthGrade::Bad,
                         },
                         Err(err) => HealthCell {
                             endpoint: e.to_string(),
                             status: None,
                             error: Some(err),
+                            grade: HealthGrade::Bad,
                         },
                     }
                 }
@@ -190,6 +197,12 @@ pub async fn health_report(st: &AppState, target: &DiagTarget) -> AppResult<Diag
         })
         .collect();
     let findings = evaluate_health(&facts);
+    for (m, f) in members.iter_mut().zip(&facts) {
+        let grades = grade_member(f);
+        for c in &mut m.cells {
+            c.grade = grades.get(&c.endpoint).copied().unwrap_or(HealthGrade::Bad);
+        }
+    }
     let data = HealthData {
         endpoints: HEALTH_ENDPOINTS.iter().map(|e| e.to_string()).collect(),
         members,

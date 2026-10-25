@@ -137,7 +137,8 @@ function WaitsBody({ connectionId, member, data }: { connectionId: string; membe
       <WaitsChart data={data} />
       <p className="muted">{t("diag.waits.cpuNote")}</p>
       {data.totalSamples === 0 ? (
-        <p className="muted">{t("diag.waits.noSamples")}</p>
+        // Пустые срезы тоже приходят: сервер простаивал — это не «сэмплов нет».
+        <p className="muted">{data.buckets.some((b) => b.sampledS > 0) ? t("diag.waits.noActive") : t("diag.waits.noSamples")}</p>
       ) : (
         <>
           {data.topEvents.length > 0 && <TopEvents events={data.topEvents} />}

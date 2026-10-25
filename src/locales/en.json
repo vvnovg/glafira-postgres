@@ -757,7 +757,20 @@
       "version": "{{part}}: PostgreSQL {{version}}+",
       "privilege": "{{part}}: needs the pg_monitor role",
       "patroniConfig": "{{part}}: the Patroni configuration could not be read",
-      "onMember": "{{member}}: {{text}}"
+      "onMember": "{{member}}: {{text}}",
+      "parts": {
+        "queryId": "Query ID (query_id)",
+        "walDir": "pg_wal size",
+        "otherSessionsXmin": "xmin of other sessions",
+        "replicationDetails": "Replication details",
+        "replayPauseState": "Replay pause state",
+        "conflictActiveLogicalSlot": "Conflicts with logical slots",
+        "slotTwoPhase": "Two-phase decoding of slots (two_phase)",
+        "slotConflicting": "Slot conflict with recovery",
+        "slotInactiveSince": "Slot inactive since",
+        "subscriptionErrors": "Subscription errors",
+        "patroniSlots": "Patroni slot marks"
+      }
     },
     "tools": {
       "pulse": "Pulse",
@@ -1063,7 +1076,13 @@
       "noAnswer": "no response",
       "noApi": "no REST API address",
       "none": "There are no members",
-      "note": "This is how a load balancer sees the cluster, for example HAProxy with option httpchk GET /primary; parameters like /replica?lag= are not checked."
+      "note": "This is how a load balancer sees the cluster, for example HAProxy with option httpchk GET /primary; parameters like /replica?lag= are not checked.",
+      "legend": "Green: the expected 200; gray: the endpoint does not apply to the member role, so 503 is normal; yellow: the node works, but the load balancer sends it no traffic for this endpoint; red: the response contradicts the role, /health is not 200, or no response.",
+      "grade": {
+        "notApplicable": "The endpoint does not apply to the member role: 503 is normal here",
+        "degraded": "The node works, but the load balancer sends it no traffic for this endpoint",
+        "bad": "The response contradicts the member role, or the node is unhealthy"
+      }
     },
     "waits": {
       "window": "Window",
@@ -1071,6 +1090,7 @@
       "notRunning": "Sampler is not running: history is not being updated",
       "truncated": "History is shorter than the window: the sampler has been running since {{time}}",
       "noSamples": "No samples in the selected window",
+      "noActive": "There were no active sessions in the selected window",
       "chartLabel": "Average active sessions by wait class",
       "tableLabel": "Wait profile by interval",
       "legendLabel": "Wait classes",
@@ -1271,7 +1291,18 @@
       "updateExisting": "Existing connections get the settings from the file and keep their place. Saved passwords are kept only if the connection settings (address, user, database, TLS, Patroni, SSH) do not change."
     },
     "diag": {
-      "idleTimeout": "Ends sessions idle in a transaction longer than this. Set it per application role; <code>0</code> — off."
+      "idleTimeout": "Ends sessions idle in a transaction longer than this. Set it per application role; <code>0</code> — off.",
+      "pulse": "A summary per node: connections, TPS, cache hits, WAL, long transactions and queries, lock waits, XID age and lag. A highlighted cell opens the tool that explains it.",
+      "sessions": "Sessions from <code>pg_stat_activity</code>: what they run, what they wait for and how long they hold a transaction. Presets and grouping show who uses the connections.",
+      "idleTx": "Sessions that opened a transaction and do nothing. They hold locks and the xmin horizon until the application ends the transaction.",
+      "waits": "While this tab is open, the sampler records once a second what active sessions wait for. Bar height is the average number of active sessions, color is the wait class.",
+      "locks": "Who blocks whom: a tree from the root blocker down to its victims. Queued DDL is doubly dangerous: it waits itself and holds up every later query on the table.",
+      "horizon": "The oldest transaction whose row versions are still needed: VACUUM cannot remove newer dead rows, so tables bloat. Held by long transactions, prepared transactions, slots and <code>hot_standby_feedback</code>.",
+      "replication": "On a primary: the replicas it sends WAL to and their lag in bytes and time. On a replica: WAL receive and replay, replay pause and recovery conflicts.",
+      "slots": "A slot keeps WAL on the server until its consumer reads it. An inactive or lagging slot accumulates WAL and can fill the disk.",
+      "failover": "Whether Patroni can fail over to a replica if the leader fails: a verdict and reasons for each candidate, next to the settings it depends on.",
+      "health": "Response codes of Patroni REST API endpoints per member, as a load balancer sees them. 200 means the node fits the endpoint, 503 means it does not.",
+      "lastEnd": "When the replica last reported a new WAL position to the primary. If nothing is written to the cluster, the position stays put and this time grows; that is normal."
     }
   }
 }

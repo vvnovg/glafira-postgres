@@ -949,11 +949,14 @@ export interface FailoverData {
   candidates: Candidate[];
   readyCount: number;
 }
+/** Оценка клетки по роли участника (Rust `HealthGrade`): от неё цвет клетки. */
+export type HealthGrade = "ok" | "notApplicable" | "degraded" | "bad";
 export interface HealthCell {
   endpoint: string;
   /** HTTP-код; `null` — API не ответил (причина в `error`). */
   status: number | null;
   error: AppError | null;
+  grade: HealthGrade;
 }
 export interface HealthMember {
   member: string;
