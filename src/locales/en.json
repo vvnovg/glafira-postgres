@@ -160,6 +160,7 @@
       "actionRejected": "Patroni rejected the action ({{status}})",
       "sendUnsupported": "This Patroni client cannot send changes to {{url}}",
       "connectionLost": "The connection to the Patroni API at {{url}} was lost after the request was sent: the outcome is unknown, check the overview",
+      "badUrl": "The Patroni API address {{url}} is not a valid http(s) URL",
       "authRequired": "Set the Patroni API login in the connection to run actions"
     },
     "topology": {

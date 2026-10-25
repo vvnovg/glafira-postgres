@@ -388,6 +388,16 @@ impl PatroniHttp for ReqwestHttp {
         body: Option<&'a serde_json::Value>,
     ) -> BoxFuture<'a, AppResult<HttpReply>> {
         Box::pin(async move {
+            // Неверный адрес — ошибка настройки: до сети дело не доходит, и «не дошёл» тут ни при чём (обход
+            // адресов на ней останавливается).
+            if !reqwest::Url::parse(url).is_ok_and(|u| matches!(u.scheme(), "http" | "https")) {
+                return Err(app_err!(
+                    ErrorCode::InvalidInput,
+                    "errors.patroni.badUrl",
+                    "The Patroni API address {{url}} is not a valid http(s) URL",
+                    url = url
+                ));
+            }
             let m = match method {
                 HttpMethod::Post => reqwest::Method::POST,
                 HttpMethod::Patch => reqwest::Method::PATCH,
@@ -404,16 +414,17 @@ impl PatroniHttp for ReqwestHttp {
             // Изменяющий запрос нельзя повторять вслепую: «не дошёл» решается здесь, где известна фаза сбоя.
             // Соединение не установилось за `HTTP_CONNECT_TIMEOUT` (фаза соединителя: у такого сбоя `is_connect()`
             // тоже истинно, поэтому проверяется первым) — запрос наверняка не отправлен: адрес недоступен. Прочий
-            // сбой соединения (TCP, SOCKS, TLS) либо невозможность собрать запрос — обычная классификация, как у
-            // чтения. Срок вышел уже после соединения — `errors.patroni.timeout`, исход неизвестен. Любой другой
-            // сбой (обрыв после отправки) и любой сбой при чтении ответа — запрос мог дойти до Patroni и
-            // выполниться: исход неизвестен.
+            // сбой соединения (TCP, SOCKS, TLS) — обычная классификация, как у чтения. Срок вышел уже после
+            // соединения — `errors.patroni.timeout`, исход неизвестен. Любой другой сбой (обрыв после отправки, а
+            // также ошибка `Builder` после перенаправления, которое reqwest выполняет уже после ответа сервера) и
+            // любой сбой при чтении ответа — запрос мог дойти до Patroni и выполниться: исход неизвестен. Неверный
+            // адрес отсекается до сети.
             let resp = match req.send().await {
                 Ok(r) => r,
                 Err(e) if e.is_connect() && e.is_timeout() => {
                     return Err(connect_timed_out(url, &e));
                 }
-                Err(e) if e.is_connect() || e.is_timeout() || e.is_builder() => {
+                Err(e) if e.is_connect() || e.is_timeout() => {
                     return Err(self.request_error(url, &e));
                 }
                 Err(e) => return Err(connection_lost(url, &e)),
@@ -2057,6 +2068,56 @@ mod tests {
             took >= Duration::from_secs(4) && took < Duration::from_secs(7),
             "общий срок ≈ 5 с, получилось {took:?}"
         );
+    }
+
+    /// Перенаправление на адрес, который клиент не открывает: reqwest сообщает об этом ошибкой `Builder`, но уже
+    /// после того, как сервер принял запрос и ответил, — это не «запрос не собрался», исход неизвестен.
+    #[tokio::test]
+    async fn send_json_after_a_redirect_to_a_bad_scheme_is_connection_lost() {
+        let server = testutil::redirecting_http_server("ftp://x/");
+        let http = ReqwestHttp::new(&settings(&[&server.base]), None, None, None, None).unwrap();
+        let e = http
+            .send_json(
+                HttpMethod::Post,
+                &format!("{}/switchover", server.base),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (ErrorCode::PatroniError, "errors.patroni.connectionLost"),
+            "{e:?}"
+        );
+        assert_eq!(server.accepted(), 1);
+    }
+
+    /// Неверный адрес (не http(s), без схемы, без узла) — ошибка настройки: сеть не трогается.
+    #[tokio::test]
+    async fn send_json_rejects_a_bad_address_before_touching_the_network() {
+        let server = testutil::answering_http_server(200);
+        let http = ReqwestHttp::new(&settings(&[&server.base]), None, None, None, None).unwrap();
+        for url in [
+            format!("ftp://127.0.0.1:{}/switchover", server.port),
+            format!("127.0.0.1:{}/switchover", server.port),
+            "localhost:8008/switchover".to_string(),
+            "http://".to_string(),
+            "not a url".to_string(),
+            String::new(),
+        ] {
+            let e = http
+                .send_json(HttpMethod::Post, &url, None)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                (e.code, e.key.as_str()),
+                (ErrorCode::InvalidInput, "errors.patroni.badUrl"),
+                "{url}: {e:?}"
+            );
+            assert_eq!(e.params["url"], url);
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(server.accepted(), 0);
     }
 
     #[tokio::test]

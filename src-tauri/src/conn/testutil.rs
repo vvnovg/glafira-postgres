@@ -204,6 +204,8 @@ enum HttpBehavior {
     DropMidAnswer,
     /// Ответить кодом.
     Answer(u16),
+    /// Ответить перенаправлением `302` на адрес.
+    Redirect(&'static str),
 }
 
 fn http_stub(behavior: HttpBehavior) -> HttpStub {
@@ -220,6 +222,12 @@ fn http_stub(behavior: HttpBehavior) -> HttpStub {
                     HttpBehavior::DropMidAnswer => Some(
                         b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\npartial"
                             .to_vec(),
+                    ),
+                    HttpBehavior::Redirect(location) => Some(
+                        format!(
+                            "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        )
+                        .into_bytes(),
                     ),
                     HttpBehavior::Answer(status) => Some(
                         format!(
@@ -249,6 +257,11 @@ pub fn dropping_http_server(partial_answer: bool) -> HttpStub {
     } else {
         HttpBehavior::Drop
     })
+}
+
+/// Читает запрос целиком и отвечает перенаправлением `302` на `location`.
+pub fn redirecting_http_server(location: &'static str) -> HttpStub {
+    http_stub(HttpBehavior::Redirect(location))
 }
 
 /// Читает запрос целиком и отвечает `status` с телом `Done`.

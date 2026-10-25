@@ -304,9 +304,12 @@ pub fn bases(t: &Topology, route: &Route, profile_urls: &[String]) -> Vec<String
 }
 
 /// Запрос наверняка не дошёл до Patroni: соединение не установлено (отказ, недоступный адрес, имя не
-/// разрешилось), не удалось рукопожатие TLS либо туннель ssh не пробросил соединение. Только тогда можно
-/// пробовать следующий адрес. Таймаут сюда не входит: запрос мог дойти и выполниться, а повтор не
-/// идемпотентного действия на другом узле дал бы ложный отказ или двойное выполнение.
+/// разрешилось, срок соединения), не удалось рукопожатие TLS либо туннель ssh не пробросил соединение. Только
+/// тогда можно пробовать следующий адрес. Клиент сам решает, что запрос не отправлялся, и сообщает об этом ключом
+/// `unreachable`: так же он отдаёт и срок соединения (`HTTP_CONNECT_TIMEOUT`), поэтому такой сбой принимается.
+/// Таймаут после установки соединения (`timeout`), обрыв после отправки (`connectionLost`) и неверный адрес
+/// (`badUrl`) сюда не входят: запрос мог дойти и выполниться, а повтор не идемпотентного действия на другом
+/// узле дал бы ложный отказ или двойное выполнение; ошибка настройки адреса — не повод идти дальше.
 fn not_delivered(e: &AppError) -> bool {
     matches!(
         e.key.as_str(),
@@ -983,7 +986,13 @@ mod tests {
             "The connection to the Patroni API at {{url}} was lost after the request was sent: the outcome is unknown, check the overview",
             url = url
         );
-        for e in [&timeout, &withheld, &unsupported, &lost] {
+        let bad_url = app_err!(
+            ErrorCode::InvalidInput,
+            "errors.patroni.badUrl",
+            "The Patroni API address {{url}} is not a valid http(s) URL",
+            url = url
+        );
+        for e in [&timeout, &withheld, &unsupported, &lost, &bad_url] {
             assert!(!not_delivered(e), "{}", e.key);
         }
     }
@@ -1033,6 +1042,7 @@ mod tests {
         );
         assert_eq!(forward.calls.lock_safe().len(), 2);
     }
+
     /// Настоящий клиент и настоящие сокеты: соединение оборвалось после того, как сервер принял запрос целиком, —
     /// исход неизвестен, и второй адрес не трогаем; а вот адрес, где соединение не установилось, пропускается.
     #[tokio::test]
@@ -1076,6 +1086,7 @@ mod tests {
             "после обрыва следующий адрес не трогаем"
         );
     }
+
     /// Failover при мёртвом лидере: его адрес молчит на соединение, запрос наверняка не отправлялся — `send` идёт
     /// к следующему адресу, не дожидаясь общего срока запроса. Настоящий клиент, прокси SOCKS «молчит» для узла
     /// `dead-leader` и отвечает за `live`.
@@ -1118,5 +1129,51 @@ mod tests {
                 && took < HTTP_TIMEOUT,
             "ожидание у мёртвого адреса ≈ срок соединения, получилось {took:?}"
         );
+    }
+
+    /// Ответ-перенаправление на адрес, который клиент не открывает (`ftp://`), — ошибка уже ПОСЛЕ приёма запроса
+    /// сервером: исход неизвестен, `send` не повторяет запрос на втором адресе. Неверный адрес в списке — ошибка
+    /// настройки: `send` останавливается, ничего не отправляя.
+    #[tokio::test]
+    async fn send_stops_after_a_bad_redirect_and_on_a_bad_address() {
+        use crate::conn::profile::PatroniSettings;
+        use crate::conn::testutil;
+        use crate::topology::patroni::ReqwestHttp;
+        let redirecting = testutil::redirecting_http_server("ftp://x/");
+        let untouched = testutil::answering_http_server(200);
+        let settings = PatroniSettings {
+            urls: vec![redirecting.base.clone()],
+            username: None,
+            tls: None,
+            host_overrides: vec![],
+        };
+        let http = ReqwestHttp::new(&settings, None, None, None, None).unwrap();
+        let req = request(
+            &PatroniAction::Switchover {
+                candidate: None,
+                scheduled_at: None,
+            },
+            &cluster(),
+        );
+        let bases = [redirecting.base.clone(), untouched.base.clone()];
+        let e = send(&http, &req, &bases).await.unwrap_err();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (ErrorCode::PatroniError, "errors.patroni.connectionLost"),
+            "{e:?}"
+        );
+        assert_eq!(redirecting.accepted(), 1);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert_eq!(untouched.accepted(), 0);
+
+        let bases = ["not a url".to_string(), untouched.base.clone()];
+        let e = send(&http, &req, &bases).await.unwrap_err();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (ErrorCode::InvalidInput, "errors.patroni.badUrl"),
+            "{e:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert_eq!(untouched.accepted(), 0, "после неверного адреса стоп");
     }
 }
