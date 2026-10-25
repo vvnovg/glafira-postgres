@@ -9,6 +9,8 @@
   /* Красный для текста: сам --danger остаётся фоном значков (белый текст на нём), а как цвет текста он темноват на тёмной теме. */
   --danger-text: var(--danger);
   --warn: #f59e0b;
+  /* Подкраска «готов» и кода 200 в видах диагностики: только фон клетки, слово или код остаётся текстом. */
+  --ok: #16a34a;
   /* Флажки, переключатели, списки и полосы прокрутки рисуются системой в цветах текущей темы. */
   color-scheme: light dark;
   accent-color: var(--accent);
@@ -289,3 +291,25 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .lock-toggle { display: inline-block; flex: none; width: 16px; padding: 0; text-align: center; }
 .lock-victims { font-weight: 600; color: color-mix(in srgb, var(--danger-text) 85%, var(--fg)); }
 .lock-wait { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* Горизонт, реплики, слоты, failover и health: таблицы и сводки под находками. */
+.diag-view { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.diag-view section { display: flex; flex-direction: column; gap: 6px; }
+.diag-view h3 { margin: 0; font-size: 13px; }
+.diag-view p { margin: 0; }
+.diag-table td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* Отметки слота не ломаются посреди слова: узкая колонка растягивает таблицу, и появляется прокрутка. */
+.diag-table .kind-badge { white-space: nowrap; }
+/* Вторая строка внутри значения карточки (`.stats div` красит любой div, поэтому это span). */
+.diag-sub { display: block; }
+.diag-command { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.diag-facts { display: flex; flex-direction: column; gap: 2px; }
+/* Предупреждение в тексте вида: чистый --warn на светлом фоне ниже 4,5:1, поэтому подмешивается цвет текста (как у меток находок). */
+.diag-warn { color: color-mix(in srgb, var(--warn) 55%, var(--fg)); font-weight: 600; }
+/* Вердикт и коды health: фон клетки плюс слово или код внутри — смысл не держится на одном цвете. */
+.diag-table td.ok { background: color-mix(in srgb, var(--ok) 18%, transparent); box-shadow: inset 3px 0 0 var(--ok); }
+.diag-table td.bad { background: color-mix(in srgb, var(--danger) 16%, transparent); box-shadow: inset 3px 0 0 var(--danger); }
+.diag-table td.none { background: color-mix(in srgb, var(--muted) 14%, transparent); font-style: italic; }
+.health-table td { white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* Баннер запланированного switchover в шапке обзора: абзац в строке с переносом, без полей абзаца. */
+.toolbar-note { margin: 0; }

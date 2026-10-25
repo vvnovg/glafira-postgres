@@ -1,4 +1,4 @@
-import type { ConnectionProfile, DiagData, DiagReport, Member, PulseFacts, PulseRates, SessionRow, Topology, TopologyView } from "../api/types";
+import type { ConnectionProfile, DiagData, DiagReport, Holder, Member, PulseFacts, PulseRates, ReplicationData, SessionRow, Sender, Slot, Subscription, Topology, TopologyView } from "../api/types";
 
 export function member(name: string, patch: Partial<Member> = {}): Member {
   return {
@@ -142,6 +142,113 @@ export function sessionRow(patch: Partial<SessionRow> = {}): SessionRow {
     blockedBy: [],
     locksHeld: 0,
     glafira: false,
+    ...patch,
+  };
+}
+
+/** Держатель горизонта xmin: сессия без подробностей; `patch` меняет нужные поля. */
+export function holder(patch: Partial<Holder> = {}): Holder {
+  return {
+    kind: "session",
+    name: "1",
+    member: null,
+    xminAge: 0,
+    durationS: null,
+    pid: null,
+    backendStartUs: null,
+    user: null,
+    application: null,
+    database: null,
+    state: null,
+    gid: null,
+    slotType: null,
+    active: null,
+    catalog: false,
+    clientAddr: null,
+    ...patch,
+  };
+}
+
+/** Отправитель WAL: потоковая асинхронная реплика без отставания; `patch` меняет нужные поля. */
+export function sender(patch: Partial<Sender> = {}): Sender {
+  return {
+    pid: 100,
+    user: "replicator",
+    application: null,
+    member: null,
+    clientAddr: "10.0.0.2",
+    state: "streaming",
+    syncState: "async",
+    syncPriority: 0,
+    sentLagBytes: 0,
+    writeLagBytes: 0,
+    flushLagBytes: 0,
+    replayLagBytes: 0,
+    writeLagS: null,
+    flushLagS: null,
+    replayLagS: null,
+    replyAgeS: 0,
+    slotName: null,
+    xminAge: null,
+    ...patch,
+  };
+}
+
+/** Данные инструмента «Реплики» (без `kind`): primary без отправителей и настроек; `patch` меняет нужные поля. */
+export function replication(patch: Partial<ReplicationData> = {}): ReplicationData {
+  return {
+    inRecovery: false,
+    senders: [],
+    synchronousStandbyNames: null,
+    synchronousCommit: null,
+    receiver: null,
+    replay: null,
+    conflicts: null,
+    hotStandbyFeedback: null,
+    maxStandbyStreamingDelayMs: null,
+    detailsHidden: false,
+    ...patch,
+  };
+}
+
+/** Слот репликации: активный физический слот без отметок версий PostgreSQL 14+; `patch` меняет нужные поля. */
+export function slot(patch: Partial<Slot> = {}): Slot {
+  return {
+    name: "slot_1",
+    slotType: "physical",
+    plugin: null,
+    database: null,
+    temporary: false,
+    active: true,
+    activePid: null,
+    xminAge: null,
+    catalogXminAge: null,
+    restartLsn: null,
+    confirmedFlushLsn: null,
+    walStatus: "reserved",
+    safeWalSize: null,
+    retainedBytes: null,
+    twoPhase: null,
+    conflicting: null,
+    inactiveSinceMs: null,
+    invalidationReason: null,
+    failover: null,
+    synced: null,
+    patroni: null,
+    ...patch,
+  };
+}
+
+/** Подписка логической репликации с работающим процессом применения; `patch` меняет нужные поля. */
+export function subscription(patch: Partial<Subscription> = {}): Subscription {
+  return {
+    name: "sub_1",
+    pid: 1,
+    receivedLsn: null,
+    lastMsgAgeS: null,
+    latestEndAgeS: null,
+    applyErrorCount: null,
+    syncErrorCount: null,
     ...patch,
   };
 }

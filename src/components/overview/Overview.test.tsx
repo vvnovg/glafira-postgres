@@ -400,6 +400,70 @@ describe("Overview", () => {
     expect(within(rows[2]).getByText("Нужен перезапуск")).toBeInTheDocument();
   });
 
+  describe("запланированные действия Patroni (спец. P2 §5.10)", () => {
+    const renderOverview = () => renderWithClient(<Overview connectionId="c" />);
+
+    it("запланированный switchover — баннер, запланированный restart — пометка участника", async () => {
+      vi.mocked(api.getTopology).mockResolvedValue(topologyView({ topology: topology({
+        scheduledSwitchover: { at: "2026-10-25T02:00:00+00:00", from: "pg-1", to: "pg-2" },
+        members: [member("pg-1", { role: "primary" }), member("pg-2", { role: "replica", scheduledRestart: { at: "2026-10-25T03:00:00+00:00", postgresVersion: null } })],
+      }) }));
+      renderOverview();
+      expect(await screen.findByText(/Запланирован switchover pg-1 → pg-2/)).toBeInTheDocument();
+      expect(screen.getByRole("row", { name: /pg-2/ })).toHaveTextContent("Запланирован рестарт");
+    });
+
+    it("время — в часовом поясе компьютера, тем же форматом, что и остальные метки; пометка стоит в ячейке тегов", async () => {
+      vi.mocked(api.getTopology).mockResolvedValue(topologyView({ topology: topology({
+        scheduledSwitchover: { at: "2026-10-25T02:00:00+00:00", from: "pg-1", to: "pg-2" },
+        members: [member("pg-1", { role: "primary" }), member("pg-2", { scheduledRestart: { at: "2026-10-25T03:00:00+00:00", postgresVersion: "17.2" } })],
+      }) }));
+      renderOverview();
+      const banner = await screen.findByText(/Запланирован switchover/);
+      expect(banner).toHaveTextContent(formatTimestamp(Date.parse("2026-10-25T02:00:00+00:00")));
+      const mark = within(screen.getByRole("row", { name: /pg-2/ })).getByText(/Запланирован рестарт/);
+      expect(mark).toHaveTextContent(formatTimestamp(Date.parse("2026-10-25T03:00:00+00:00")));
+      // Пометка в ячейке тегов: без тегов и без pending restart в ней нет «—».
+      expect(mark.closest("td")).not.toHaveTextContent("—");
+      expect(within(screen.getByRole("row", { name: /pg-1/ })).queryByText(/Запланирован рестарт/)).not.toBeInTheDocument();
+    });
+
+    it("switchover без указанных узлов — прочерки; время, которое не разобрать, — как пришло", async () => {
+      vi.mocked(api.getTopology).mockResolvedValue(topologyView({ topology: topology({
+        scheduledSwitchover: { at: "завтра", from: null, to: null },
+        members: [member("pg-1", { role: "primary", scheduledRestart: { at: "скоро", postgresVersion: null } })],
+      }) }));
+      renderOverview();
+      expect(await screen.findByText("Запланирован switchover — → — на завтра")).toBeInTheDocument();
+      expect(screen.getByText("Запланирован рестарт на скоро")).toBeInTheDocument();
+    });
+
+    it("запланированного нет — ни баннера, ни пометки", async () => {
+      vi.mocked(api.getTopology).mockResolvedValue(topologyView());
+      renderOverview();
+      await screen.findByText("Leader: pg-1");
+      expect(screen.queryByText(/Запланирован/)).not.toBeInTheDocument();
+    });
+
+    it("подписи на английском", async () => {
+      await i18n.changeLanguage("en");
+      let unmount: (() => void) | undefined;
+      try {
+        vi.mocked(api.getTopology).mockResolvedValue(topologyView({ topology: topology({
+          scheduledSwitchover: { at: "завтра", from: "pg-1", to: null },
+          members: [member("pg-1", { role: "primary", scheduledRestart: { at: "скоро", postgresVersion: null } })],
+        }) }));
+        ({ unmount } = renderOverview());
+        expect(await screen.findByText("Scheduled switchover pg-1 → — at завтра")).toBeInTheDocument();
+        expect(screen.getByText("Restart scheduled at скоро")).toBeInTheDocument();
+      } finally {
+        // Сначала размонтируем (иначе обратная смена языка обновит смонтированный вид вне act).
+        unmount?.();
+        await i18n.changeLanguage("ru");
+      }
+    });
+  });
+
   it("версии PG и Patroni, DCS, лаг и задержка replay", async () => {
     vi.mocked(api.getTopology).mockResolvedValue(
       topologyView({

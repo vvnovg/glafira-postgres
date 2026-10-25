@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DiagTool } from "../../api/types";
 import { useWorkspace } from "../../state/workspace";
-import { connection, diagReport, member, pulseFacts, pulseRates, topology, topologyView } from "../../test/fixtures";
+import { connection, diagReport, holder, member, pulseFacts, pulseRates, replication, sender, slot, topology, topologyView } from "../../test/fixtures";
 import { renderWithClient } from "../../test/render";
 
 vi.mock("../../api/client", async (importOriginal) => {
@@ -203,10 +203,11 @@ describe("DiagTab", () => {
   it("JSON тела не пересчитывается, пока данные отчёта те же", async () => {
     const stringify = vi.spyOn(JSON, "stringify");
     try {
-      // Инструмент без собственного вида (здесь матрица health): его тело — JSON отчёта.
-      vi.mocked(api.runDiagnostic).mockImplementation(async () => diagReport({ kind: "health", endpoints: [], members: [] }, { member: null, followsLeader: false, observedAtMs: Date.now() }));
+      // Инструмент без собственного вида (здесь профиль ожиданий, до задачи 13): его тело — JSON отчёта.
+      const waits = { kind: "waits" as const, windowS: 900, bucketS: 30, samplerRunning: false, truncated: false, totalSamples: 0, buckets: [], gaps: [], topEvents: [], topQueries: [], byApplication: [], byUser: [], byDatabase: [], byClient: [] };
+      vi.mocked(api.runDiagnostic).mockImplementation(async () => diagReport(waits, { observedAtMs: Date.now() }));
       const user = userEvent.setup();
-      renderWithClient(<DiagTab connectionId="c" tool="health" member={null} active tabId="diag:c:health" />);
+      renderWithClient(<DiagTab connectionId="c" tool="waits" member={null} active tabId="diag:c:waits" />);
       await screen.findByText("Проблем не найдено");
       const raw = () => stringify.mock.calls.filter((c) => c[2] === 2).length;
       expect(raw()).toBe(1);
@@ -219,6 +220,24 @@ describe("DiagTab", () => {
       expect(raw()).toBe(1);
     } finally {
       stringify.mockRestore();
+    }
+  });
+
+  it("тела инструментов задач 12: горизонт, реплики, слоты, готовность к failover и матрица health — свои виды, а не JSON", async () => {
+    const reports: Record<string, ReturnType<typeof diagReport>> = {
+      horizon: diagReport({ kind: "horizon", holders: [holder({ kind: "slot", name: "forgotten", xminAge: 5 })], hotStandbyFeedback: false }),
+      replication: diagReport({ kind: "replication", ...replication({ senders: [sender({ application: "pg-2", member: "pg-2" })] }) }),
+      slots: diagReport({ kind: "slots", slots: [slot({ name: "pg_2" })], subscriptions: [], maxSlotWalKeepSizeMb: null, subscriptionErrorsGrowth: null }),
+      failover: diagReport({ kind: "failover", paused: false, readyCount: 1, config: { maximumLagOnFailover: 1048576, synchronousMode: "off", synchronousModeStrict: false, synchronousNodeCount: null, ttl: 30, loopWait: 10, retryTimeout: 10, permanentSlots: [] }, candidates: [{ member: "pg-2", ready: true, reasons: [], lagBytes: 0, pendingRestart: false }] }, { member: null }),
+      health: diagReport({ kind: "health", endpoints: ["primary"], members: [{ member: "pg-1", apiUrl: "http://pg-1:8008", cells: [{ endpoint: "primary", status: 200, error: null }] }] }, { member: null }),
+    };
+    const tables: Record<string, string> = { horizon: "Держатели горизонта xmin", replication: "Отправители WAL", slots: "Слоты репликации", failover: "Кандидаты на роль лидера", health: "Матрица health" };
+    for (const tool of ["horizon", "replication", "slots", "failover", "health"] as const) {
+      vi.mocked(api.runDiagnostic).mockResolvedValue(reports[tool]);
+      const { unmount } = renderWithClient(<DiagTab connectionId="c" tool={tool} member={null} active tabId={`diag:c:${tool}`} />);
+      expect(await screen.findByRole("table", { name: tables[tool] })).toBeInTheDocument();
+      expect(document.querySelector(".diag-raw")).toBeNull();
+      unmount();
     }
   });
 

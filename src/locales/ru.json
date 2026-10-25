@@ -652,7 +652,9 @@
       "timelineChanged": "Таймлайн {{from}} → {{to}}",
       "paused": "Кластер переведён в паузу",
       "resumed": "Пауза снята"
-    }
+    },
+    "scheduledSwitchover": "Запланирован switchover {{from}} → {{to}} на {{at}}",
+    "scheduledRestart": "Запланирован рестарт на {{at}}"
   },
   "object": {
     "kinds": {
@@ -831,8 +833,20 @@
         "session": "сессия",
         "preparedXact": "prepared transaction",
         "slot": "слот",
-        "standbyFeedback": "feedback реплики"
-      }
+        "standbyFeedback": "feedback реплики",
+        "slotCatalog": "слот (catalog_xmin)"
+      },
+      "table": "Держатели горизонта xmin",
+      "columns": {
+        "kind": "Держатель",
+        "object": "Объект",
+        "xminAge": "Возраст xmin",
+        "duration": "Длительность"
+      },
+      "feedback": "hot_standby_feedback = {{value}}",
+      "pid": "pid {{pid}}",
+      "openOn": "Открыть горизонт на {{member}}",
+      "none": "Горизонт xmin ничто не удерживает"
     },
     "pulse": {
       "table": "Пульс по узлам",
@@ -942,6 +956,136 @@
       "cycles": "Циклы ожидания",
       "cycle": "Сессии ждут друг друга: {{pids}}",
       "logNote": "Подробности взаимных блокировок есть только в логе сервера"
+    },
+    "replication": {
+      "senders": "Отправители WAL",
+      "none": "К этому узлу не подключены реплики",
+      "hidden": "Сведения о репликах скрыты: у роли нет pg_read_all_stats (входит в pg_monitor).",
+      "hiddenSenders": "Подключено отправителей WAL: {{count}}",
+      "syncNames": "synchronous_standby_names: {{value}}",
+      "syncCommit": "synchronous_commit: {{value}}",
+      "lagTime": "отставание по времени: {{value}}",
+      "columns": {
+        "replica": "Реплика",
+        "client": "Клиент",
+        "state": "Состояние",
+        "sync": "Синхронность",
+        "sentLag": "Лаг отправки",
+        "writeLag": "Лаг записи",
+        "flushLag": "Лаг сброса",
+        "replayLag": "Лаг применения",
+        "replayDelay": "Задержка replay",
+        "replyAge": "Последний ответ",
+        "slot": "Слот",
+        "xminAge": "Возраст xmin"
+      },
+      "receiver": "Приёмник WAL",
+      "receiverDown": "Приёмник WAL не запущен",
+      "fields": {
+        "status": "Статус",
+        "source": "Источник",
+        "slot": "Слот",
+        "timeline": "Таймлайн",
+        "lastMsg": "Последнее сообщение",
+        "lastEnd": "Последний отчёт о позиции",
+        "gap": "Разрыв receive и replay",
+        "replayDelay": "Задержка replay",
+        "replayPause": "Применение WAL",
+        "conflicts": "Конфликты запросов"
+      },
+      "pause": {
+        "paused": "на паузе",
+        "pauseRequested": "запрошена пауза",
+        "notPaused": "не на паузе"
+      },
+      "conflictsGrowth": "{{value}} с прошлого обновления",
+      "feedback": "hot_standby_feedback = {{value}}",
+      "maxDelay": "max_standby_streaming_delay: {{value}}",
+      "unlimited": "без ограничения"
+    },
+    "slots": {
+      "table": "Слоты репликации",
+      "subscriptions": "Подписки",
+      "none": "Слотов репликации нет",
+      "columns": {
+        "name": "Имя",
+        "type": "Тип",
+        "database": "База данных",
+        "state": "Состояние",
+        "walStatus": "wal_status",
+        "retained": "Удерживает WAL",
+        "safeWal": "Запас WAL",
+        "xminAge": "Возраст xmin",
+        "catalogXminAge": "Возраст catalog_xmin",
+        "inactiveSince": "Неактивен с",
+        "flags": "Отметки",
+        "patroni": "Patroni"
+      },
+      "active": "активен",
+      "inactive": "неактивен",
+      "activePid": "активен, pid {{pid}}",
+      "flags": {
+        "failover": "failover",
+        "synced": "синхронизирован с primary",
+        "temporary": "временный",
+        "twoPhase": "two-phase",
+        "conflicting": "конфликтует",
+        "invalidated": "инвалидирован: {{reason}}"
+      },
+      "patroni": {
+        "member": "участник Patroni",
+        "permanent": "постоянный слот Patroni"
+      },
+      "keepSize": "max_slot_wal_keep_size: {{value}}",
+      "unlimited": "без ограничения",
+      "subColumns": {
+        "name": "Имя",
+        "worker": "Процесс применения",
+        "receivedLsn": "Полученный LSN",
+        "lastMsg": "Последнее сообщение",
+        "applyErrors": "Ошибок применения",
+        "syncErrors": "Ошибок синхронизации"
+      },
+      "noWorker": "не работает",
+      "errorsGrowth": "Ошибок с прошлого обновления: {{value}}"
+    },
+    "failover": {
+      "table": "Кандидаты на роль лидера",
+      "config": "Конфигурация Patroni",
+      "columns": {
+        "member": "Участник",
+        "verdict": "Вердикт",
+        "reasons": "Причины",
+        "lag": "Лаг"
+      },
+      "ready": "готов",
+      "notReady": "не готов",
+      "reasons": {
+        "unreachable": "недоступен",
+        "notStreaming": "не streaming",
+        "lagTooHigh": "лаг больше maximum_lag_on_failover",
+        "lagUnknown": "лаг неизвестен",
+        "noFailoverTag": "тег nofailover",
+        "zeroPriority": "failover_priority = 0",
+        "notSynchronous": "не синхронная реплика"
+      },
+      "pendingRestart": "ждёт рестарта",
+      "paused": "Кластер на паузе: автоматического failover нет",
+      "syncMode": "synchronous_mode: {{value}}",
+      "syncStrict": "synchronous_mode_strict: {{value}}",
+      "syncCount": "synchronous_node_count: {{value}}",
+      "maxLag": "maximum_lag_on_failover: {{value}}",
+      "timings": "ttl / loop_wait / retry_timeout: {{ttl}} / {{loopWait}} / {{retryTimeout}}",
+      "permanentSlots": "Постоянные слоты: {{names}}",
+      "readyCount": "Готовы принять роль лидера: {{ready}} из {{total}}",
+      "none": "Других участников, кроме лидера, нет"
+    },
+    "health": {
+      "member": "Участник",
+      "noAnswer": "нет ответа",
+      "noApi": "нет адреса REST API",
+      "none": "Участников нет",
+      "note": "Так видит кластер балансировщик, например HAProxy с option httpchk GET /primary; параметры вида /replica?lag= не проверяются."
     }
   },
   "findings": {

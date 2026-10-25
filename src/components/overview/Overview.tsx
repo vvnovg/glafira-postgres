@@ -55,6 +55,15 @@ function replayDelay(ms: number): string {
   return `${s} s`;
 }
 
+/**
+ * Время запланированного действия Patroni (`at` — ISO 8601 со смещением, как пришло из `/cluster`): в часовом поясе
+ * компьютера, тем же форматом, что и остальные метки. Строка, которую не разобрать, показывается как есть.
+ */
+function scheduledAt(at: string): string {
+  const ms = Date.parse(at);
+  return Number.isNaN(ms) ? at : formatTimestamp(ms);
+}
+
 /** Теги Patroni: включённые флаги — именем, остальные значения (replicatefrom, failover_priority) — `имя: значение`; выключенные не показываются. */
 function tagList(tags: Record<string, unknown>): string[] {
   return Object.entries(tags).flatMap(([k, v]) => {
@@ -210,11 +219,12 @@ function MembersTable({
             wrap: true,
             cell: (m: Member) => {
               const tags = tagList(m.tags);
-              if (tags.length === 0 && !m.pendingRestart) return "—";
+              if (tags.length === 0 && !m.pendingRestart && !m.scheduledRestart) return "—";
               return (
                 <>
                   {tags.join(", ")}
                   {m.pendingRestart && <div className="warn">{t("overview.pendingRestart")}</div>}
+                  {m.scheduledRestart && <div className="warn">{t("overview.scheduledRestart", { at: scheduledAt(m.scheduledRestart.at) })}</div>}
                 </>
               );
             },
@@ -374,6 +384,15 @@ export function Overview({ connectionId, member, active = true }: { connectionId
         <span className="muted">{conn ? t(`connections.form.kinds.${conn.kind}`) : ""}</span>
         {topo?.scope && <span className="muted">{t("overview.scope", { scope: topo.scope })}</span>}
         {topo?.paused && <span className="warn">{t("overview.paused")}</span>}
+        {topo?.scheduledSwitchover && (
+          <p className="warn toolbar-note">
+            {t("overview.scheduledSwitchover", {
+              at: scheduledAt(topo.scheduledSwitchover.at),
+              from: topo.scheduledSwitchover.from ?? "—",
+              to: topo.scheduledSwitchover.to ?? "—",
+            })}
+          </p>
+        )}
         {topo && !isServer && (
           <span>
             {t("overview.head", {

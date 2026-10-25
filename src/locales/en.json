@@ -630,7 +630,9 @@
       "timelineChanged": "Timeline {{from}} → {{to}}",
       "paused": "The cluster was paused",
       "resumed": "The pause was lifted"
-    }
+    },
+    "scheduledSwitchover": "Scheduled switchover {{from}} → {{to}} at {{at}}",
+    "scheduledRestart": "Restart scheduled at {{at}}"
   },
   "object": {
     "kinds": {
@@ -809,8 +811,20 @@
         "session": "session",
         "preparedXact": "prepared transaction",
         "slot": "slot",
-        "standbyFeedback": "replica feedback"
-      }
+        "standbyFeedback": "replica feedback",
+        "slotCatalog": "slot (catalog_xmin)"
+      },
+      "table": "xmin horizon holders",
+      "columns": {
+        "kind": "Holder",
+        "object": "Object",
+        "xminAge": "xmin age",
+        "duration": "Duration"
+      },
+      "feedback": "hot_standby_feedback = {{value}}",
+      "pid": "pid {{pid}}",
+      "openOn": "Open the horizon on {{member}}",
+      "none": "Nothing holds the xmin horizon"
     },
     "pulse": {
       "table": "Pulse by node",
@@ -920,6 +934,136 @@
       "cycles": "Wait cycles",
       "cycle": "Sessions waiting for each other: {{pids}}",
       "logNote": "Details of deadlocks are only in the server log"
+    },
+    "replication": {
+      "senders": "WAL senders",
+      "none": "No replicas are connected to this node",
+      "hidden": "Replica details are hidden: the role lacks pg_read_all_stats (part of pg_monitor).",
+      "hiddenSenders": "WAL senders connected: {{count}}",
+      "syncNames": "synchronous_standby_names: {{value}}",
+      "syncCommit": "synchronous_commit: {{value}}",
+      "lagTime": "time lag: {{value}}",
+      "columns": {
+        "replica": "Replica",
+        "client": "Client",
+        "state": "State",
+        "sync": "Sync",
+        "sentLag": "Sent lag",
+        "writeLag": "Write lag",
+        "flushLag": "Flush lag",
+        "replayLag": "Replay lag",
+        "replayDelay": "Replay delay",
+        "replyAge": "Last reply",
+        "slot": "Slot",
+        "xminAge": "xmin age"
+      },
+      "receiver": "WAL receiver",
+      "receiverDown": "The WAL receiver is not running",
+      "fields": {
+        "status": "Status",
+        "source": "Source",
+        "slot": "Slot",
+        "timeline": "Timeline",
+        "lastMsg": "Last message",
+        "lastEnd": "Last position report",
+        "gap": "Receive/replay gap",
+        "replayDelay": "Replay delay",
+        "replayPause": "WAL replay",
+        "conflicts": "Query conflicts"
+      },
+      "pause": {
+        "paused": "paused",
+        "pauseRequested": "pause requested",
+        "notPaused": "not paused"
+      },
+      "conflictsGrowth": "{{value}} since the previous refresh",
+      "feedback": "hot_standby_feedback = {{value}}",
+      "maxDelay": "max_standby_streaming_delay: {{value}}",
+      "unlimited": "no limit"
+    },
+    "slots": {
+      "table": "Replication slots",
+      "subscriptions": "Subscriptions",
+      "none": "There are no replication slots",
+      "columns": {
+        "name": "Name",
+        "type": "Type",
+        "database": "Database",
+        "state": "State",
+        "walStatus": "wal_status",
+        "retained": "Retained WAL",
+        "safeWal": "WAL headroom",
+        "xminAge": "xmin age",
+        "catalogXminAge": "catalog_xmin age",
+        "inactiveSince": "Inactive since",
+        "flags": "Flags",
+        "patroni": "Patroni"
+      },
+      "active": "active",
+      "inactive": "inactive",
+      "activePid": "active, pid {{pid}}",
+      "flags": {
+        "failover": "failover",
+        "synced": "synced from the primary",
+        "temporary": "temporary",
+        "twoPhase": "two-phase",
+        "conflicting": "conflicting",
+        "invalidated": "invalidated: {{reason}}"
+      },
+      "patroni": {
+        "member": "Patroni member",
+        "permanent": "Patroni permanent slot"
+      },
+      "keepSize": "max_slot_wal_keep_size: {{value}}",
+      "unlimited": "no limit",
+      "subColumns": {
+        "name": "Name",
+        "worker": "Apply worker",
+        "receivedLsn": "Received LSN",
+        "lastMsg": "Last message",
+        "applyErrors": "Apply errors",
+        "syncErrors": "Sync errors"
+      },
+      "noWorker": "not running",
+      "errorsGrowth": "Errors since the previous refresh: {{value}}"
+    },
+    "failover": {
+      "table": "Failover candidates",
+      "config": "Patroni configuration",
+      "columns": {
+        "member": "Member",
+        "verdict": "Verdict",
+        "reasons": "Reasons",
+        "lag": "Lag"
+      },
+      "ready": "ready",
+      "notReady": "not ready",
+      "reasons": {
+        "unreachable": "unreachable",
+        "notStreaming": "not streaming",
+        "lagTooHigh": "lag exceeds maximum_lag_on_failover",
+        "lagUnknown": "lag unknown",
+        "noFailoverTag": "nofailover tag",
+        "zeroPriority": "failover_priority = 0",
+        "notSynchronous": "not a synchronous replica"
+      },
+      "pendingRestart": "restart pending",
+      "paused": "The cluster is paused: automatic failover is off",
+      "syncMode": "synchronous_mode: {{value}}",
+      "syncStrict": "synchronous_mode_strict: {{value}}",
+      "syncCount": "synchronous_node_count: {{value}}",
+      "maxLag": "maximum_lag_on_failover: {{value}}",
+      "timings": "ttl / loop_wait / retry_timeout: {{ttl}} / {{loopWait}} / {{retryTimeout}}",
+      "permanentSlots": "Permanent slots: {{names}}",
+      "readyCount": "Ready to become the leader: {{ready}} of {{total}}",
+      "none": "There are no members other than the leader"
+    },
+    "health": {
+      "member": "Member",
+      "noAnswer": "no response",
+      "noApi": "no REST API address",
+      "none": "There are no members",
+      "note": "This is how a load balancer sees the cluster, for example HAProxy with option httpchk GET /primary; parameters like /replica?lag= are not checked."
     }
   },
   "findings": {

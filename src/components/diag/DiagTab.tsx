@@ -9,22 +9,27 @@ import { refreshAfterConnect, useTopology } from "../../lib/useConnectionEvents"
 import { useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { DiagHeader } from "./DiagHeader";
+import { FailoverView } from "./FailoverView";
 import { FindingsPanel } from "./FindingsPanel";
+import { HealthView } from "./HealthView";
+import { HorizonView } from "./HorizonView";
 import { LocksView } from "./LocksView";
 import { PulseView } from "./PulseView";
+import { ReplicationView } from "./ReplicationView";
 import { SessionsView } from "./SessionsView";
+import { SlotsView } from "./SlotsView";
 
 /** Окно профиля ожиданий, секунды: по умолчанию 15 минут (выбор окна — в шапке инструмента «Профиль ожиданий»). */
 const DEFAULT_WAITS_WINDOW_S = 900;
 
-/** JSON данных отчёта (до видов задач 12–13); строится заново только при изменении данных, а не при каждой отрисовке. */
+/** JSON данных отчёта (до вида задачи 13); строится заново только при изменении данных, а не при каждой отрисовке. */
 function RawData({ data }: { data: DiagData }) {
   const json = useMemo(() => JSON.stringify(data, null, 2), [data]);
   return <pre className="diag-raw">{json}</pre>;
 }
 
 /**
- * Тело инструмента. Виды данных подставляют свои компоненты по `report.data.kind` (задачи 12–13 — остальные); до них — JSON отчёта.
+ * Тело инструмента. Виды данных подставляют свои компоненты по `report.data.kind` (задача 13 — профиль ожиданий); до него — JSON отчёта.
  * `tool` отличает вкладку `idleTx` от `sessions`: данные у них одни, а набор сессий разный.
  */
 function ToolBody({ tool, report, connectionId }: { tool: DiagTool; report: DiagReport; connectionId: string }) {
@@ -35,12 +40,17 @@ function ToolBody({ tool, report, connectionId }: { tool: DiagTool; report: Diag
       return <SessionsView key={tool} report={report} preset={tool === "idleTx" ? "idleTx" : "all"} />;
     case "locks":
       return <LocksView report={report} />;
-    case "waits":
     case "horizon":
+      return <HorizonView connectionId={connectionId} report={report} />;
     case "replication":
+      return <ReplicationView connectionId={connectionId} report={report} />;
     case "slots":
+      return <SlotsView connectionId={connectionId} report={report} />;
     case "failover":
+      return <FailoverView connectionId={connectionId} report={report} />;
     case "health":
+      return <HealthView connectionId={connectionId} report={report} />;
+    case "waits":
       return <RawData data={report.data} />;
   }
 }
