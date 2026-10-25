@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
 import type { Confirmation, ConnectionProfile, PatroniAction, PatroniActionPreview, WatchEvent } from "../../api/types";
 import { formatScheduled } from "../../lib/format";
-import { toRfc3339 } from "../../lib/schedule";
+import { defaultScheduleLocal, secondsUntil, toRfc3339 } from "../../lib/schedule";
 import { isRunningLeader, roleLabel } from "../../lib/topology";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { ErrorBanner } from "../common/ErrorBanner";
@@ -145,6 +145,11 @@ export function PatroniActionDialog({ connectionId, profile, action, scope = "",
   const scheduling = isSwitchover || isRestart;
   const scheduledAt = scheduling && when === "scheduled" ? scheduleOf(local) : null;
   const scheduleMissing = scheduling && when === "scheduled" && scheduledAt === null;
+  // Запас до назначенного времени: прошедшее Patroni отвергнет, а меньше минуты — отменить уже не успеть.
+  const leadS = scheduledAt === null ? null : secondsUntil(local);
+  const schedulePast = leadS !== null && leadS <= 0;
+  const scheduleSoon = leadS !== null && leadS > 0 && leadS < 60;
+  const scheduleBlocked = scheduleMissing || schedulePast;
   const memberName = p?.member?.name ?? (action.kind === "restart" || action.kind === "cancelRestart" ? action.member : "");
   const onlyPending = pendingOnly ?? p?.member?.pendingRestart ?? (action.kind === "restart" ? action.onlyPending : false);
   const leaderRestart = isRestart && p?.member != null && isLeaderRole(p.member.role);
@@ -154,11 +159,11 @@ export function PatroniActionDialog({ connectionId, profile, action, scope = "",
     switch (action.kind) {
       // Лидер — тот, что показал предпросмотр: сменится — Rust откажет (`leaderChanged`), а не переключит с другого.
       case "switchover":
-        return scheduleMissing || !p?.leader ? null : { kind: "switchover", leader: p.leader, candidate, scheduledAt };
+        return scheduleBlocked || !p?.leader ? null : { kind: "switchover", leader: p.leader, candidate, scheduledAt };
       case "failover":
         return candidate === null ? null : { kind: "failover", candidate };
       case "restart":
-        return scheduleMissing ? null : { kind: "restart", member: memberName, onlyPending, scheduledAt };
+        return scheduleBlocked ? null : { kind: "restart", member: memberName, onlyPending, scheduledAt };
       default:
         return action;
     }
@@ -277,18 +282,27 @@ export function PatroniActionDialog({ connectionId, profile, action, scope = "",
         {t("actions.patroni.now")}
       </label>
       <label>
-        <input type="radio" name={`${groupId}-when`} checked={when === "scheduled"} onChange={() => setWhen("scheduled")} />
+        <input
+          type="radio"
+          name={`${groupId}-when`}
+          checked={when === "scheduled"}
+          onChange={() => {
+            setWhen("scheduled");
+            // Пустое поле — сразу время с запасом: «почти сейчас» Patroni выполнит раньше, чем его успеют отменить.
+            if (local === "") setLocal(defaultScheduleLocal());
+          }}
+        />
         {t("actions.patroni.scheduled")}
       </label>
       {when === "scheduled" && (
         <label>
           {t("actions.patroni.scheduleAt")}
-          <input type="datetime-local" value={local} required aria-describedby={scheduleMissing ? scheduleHintId : undefined} onChange={(e) => setLocal(e.target.value)} />
+          <input type="datetime-local" value={local} required aria-describedby={scheduleMissing || schedulePast || scheduleSoon ? scheduleHintId : undefined} onChange={(e) => setLocal(e.target.value)} />
         </label>
       )}
-      {scheduleMissing && (
+      {(scheduleMissing || schedulePast || scheduleSoon) && (
         <p id={scheduleHintId} className="diag-warn">
-          {t("actions.patroni.scheduleInvalid")}
+          {scheduleMissing ? t("actions.patroni.scheduleInvalid") : schedulePast ? t("actions.patroni.schedulePast") : t("actions.patroni.scheduleSoon")}
         </p>
       )}
     </fieldset>

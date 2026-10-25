@@ -1355,6 +1355,7 @@
     "sessions": {
       "cancelTitle": "Cancel the query?",
       "terminateTitle": "Terminate sessions?",
+      "terminateTitleOne": "Terminate the session?",
       "cancelOne": "Cancel the query",
       "cancel_one": "Cancel {{count}} query",
       "cancel_other": "Cancel {{count}} queries",
@@ -1367,6 +1368,8 @@
       "node": "Node: {{member}}",
       "noMatching": "No matching sessions",
       "nothing": "No session can be signalled",
+      "nothingCancelOne": "This session's query cannot be cancelled",
+      "nothingTerminateOne": "This session cannot be terminated",
       "countLabel": "number of sessions",
       "glafiraNote": "Glafira connection",
       "resultTable": "Result",
@@ -1378,7 +1381,8 @@
         "superuserSession": "Superuser session: needs the superuser role",
         "otherRole": "Another role: needs pg_signal_backend",
         "notClientBackend": "Not a client session",
-        "ownConnection": "The app's own connection"
+        "ownConnection": "The app's own connection",
+        "notRunning": "No query is running: cancelling does nothing; terminate the session to end its transaction"
       },
       "result": {
         "terminated": "Terminated",
@@ -1436,6 +1440,8 @@
       "scheduled": "Scheduled",
       "scheduleAt": "Date and time",
       "scheduleInvalid": "Set a date and time to schedule the action",
+      "scheduleSoon": "Less than a minute until the scheduled time: you will hardly have time to cancel the action",
+      "schedulePast": "The scheduled time has passed: set a time in the future",
       "onlyPending": "Only if a restart is pending",
       "leader": "Leader: {{name}}",
       "leaderUnreachable": "The leader is not answering the poll: the action may fail or take longer",

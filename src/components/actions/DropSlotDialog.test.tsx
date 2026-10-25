@@ -208,7 +208,7 @@ describe("DropSlotDialog", () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
     renderWithClient(dialog(dev, onClose));
-    await user.click(await screen.findByRole("button", { name: "Отмена" }));
+    await user.click(await screen.findByRole("button", { name: "Закрыть" }));
     expect(onClose).toHaveBeenCalledTimes(1);
     await user.type(screen.getByLabelText("Подтверждение: имя слота"), "it_dead_slot");
     await user.click(screen.getByRole("button", { name: "Удалить слот" }));
@@ -303,7 +303,7 @@ describe("DropSlotDialog", () => {
       await user.keyboard("{Escape}");
       expect(onClose).not.toHaveBeenCalled();
       // «Отмена» тоже ждёт конца команды.
-      expect(screen.getByRole("button", { name: "Отмена" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Закрыть" })).toBeDisabled();
     });
 
     it("у секции и группы подтверждения разные имена; после закрытия фокус возвращается на кнопку, открывшую диалог", async () => {

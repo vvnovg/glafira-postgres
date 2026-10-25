@@ -306,7 +306,8 @@ describe("DiagTab", () => {
       await user.click(screen.getByRole("button", { name: "Завершить сессию…" }));
       expect(await screen.findByRole("table", { name: "Сессии для завершения" })).toBeInTheDocument();
       expect(api.previewSessionAction).toHaveBeenCalledWith("c", { member: "pg-1", kind: "terminate", target: { kind: "selected", sessions: [{ pid: 5, backendStartUs: 50 }] } });
-      await user.click(screen.getByRole("button", { name: "Отмена" }));
+      // «Закрыть» есть и у панели сессии: нажимается кнопка диалога.
+      await user.click(within(screen.getByRole("region", { name: "Завершение сессий" })).getByRole("button", { name: "Закрыть" }));
       expect(screen.queryByRole("table", { name: "Сессии для завершения" })).toBeNull();
     });
 
@@ -476,7 +477,7 @@ describe("DiagTab", () => {
       await user.click(within(await screen.findByRole("row", { name: /dead/ })).getByRole("button", { name: "Удалить слот dead…" }));
       expect(await screen.findByRole("group", { name: "Удалить слот dead?" })).toBeInTheDocument();
       expect(api.previewDropSlot).toHaveBeenCalledWith("c", { member: "pg-1", slot: "dead" });
-      await user.click(screen.getByRole("button", { name: "Отмена" }));
+      await user.click(screen.getByRole("button", { name: "Закрыть" }));
       expect(screen.queryByRole("group", { name: "Удалить слот dead?" })).toBeNull();
       // Повторное открытие того же слота читает его заново.
       await user.click(within(screen.getByRole("row", { name: /dead/ })).getByRole("button", { name: "Удалить слот dead…" }));

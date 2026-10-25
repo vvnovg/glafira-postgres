@@ -291,13 +291,28 @@ describe("SessionsView", () => {
       const user = userEvent.setup();
       const onSessionAction = vi.fn();
       renderWithClient(<SessionsView report={report()} preset="all" onSessionAction={onSessionAction} />);
-      await user.click(rowOf(2));
-      const panel = screen.getByRole("region", { name: "Сессия 2" });
-      const start = rows[1].backendStartUs!;
+      await user.click(rowOf(1));
+      const panel = screen.getByRole("region", { name: "Сессия 1" });
+      const start = rows[0].backendStartUs!;
       await user.click(within(panel).getByRole("button", cancel));
-      expect(onSessionAction).toHaveBeenLastCalledWith({ kind: "cancel", target: { kind: "selected", sessions: [{ pid: 2, backendStartUs: start }] } });
+      expect(onSessionAction).toHaveBeenLastCalledWith({ kind: "cancel", target: { kind: "selected", sessions: [{ pid: 1, backendStartUs: start }] } });
       await user.click(within(panel).getByRole("button", terminate));
-      expect(onSessionAction).toHaveBeenLastCalledWith({ kind: "terminate", target: { kind: "selected", sessions: [{ pid: 2, backendStartUs: start }] } });
+      expect(onSessionAction).toHaveBeenLastCalledWith({ kind: "terminate", target: { kind: "selected", sessions: [{ pid: 1, backendStartUs: start }] } });
+    });
+
+    it("сессия без выполняемого запроса: отмена неактивна с причиной, завершение доступно", async () => {
+      const user = userEvent.setup();
+      const onSessionAction = vi.fn();
+      renderWithClient(<SessionsView report={report()} preset="all" onSessionAction={onSessionAction} />);
+      for (const pid of [2, 3]) {
+        await user.click(rowOf(pid));
+        const panel = screen.getByRole("region", { name: `Сессия ${pid}` });
+        const c = within(panel).getByRole("button", cancel);
+        expect(c).toBeDisabled();
+        expect(c).toHaveAttribute("title", "Запрос не выполняется: отмена ничего не сделает — чтобы снять транзакцию, завершите сессию");
+        expect(within(panel).getByRole("button", terminate)).toBeEnabled();
+      }
+      expect(onSessionAction).not.toHaveBeenCalled();
     });
 
     it("без onSessionAction (подключение только для чтения) кнопок нет ни в панели, ни в наборе idle in transaction", async () => {

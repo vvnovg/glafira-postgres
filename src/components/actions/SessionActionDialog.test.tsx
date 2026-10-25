@@ -149,11 +149,32 @@ describe("SessionActionDialog", () => {
     const onClose = vi.fn();
     vi.mocked(api.previewSessionAction).mockResolvedValue({ member: "pg-1", rows: [row(3, false)] });
     renderWithClient(<SessionActionDialog connectionId="c" profile={dev} member="pg-1" kind="terminate" target={one} onClose={onClose} />);
-    expect(await screen.findByText("Ни одну сессию нельзя отменить или завершить")).toBeInTheDocument();
+    // Одна сессия — о ней и речь: заголовок и отказ в единственном числе.
+    expect(await screen.findByText("Эту сессию нельзя завершить")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Завершить/ })).toBeNull();
     await user.click(screen.getByRole("button", { name: "Закрыть" }));
     expect(onClose).toHaveBeenCalled();
     expect(api.executeSessionAction).not.toHaveBeenCalled();
+  });
+
+  it("несколько сессий, ни одна не разрешена: общий отказ", async () => {
+    vi.mocked(api.previewSessionAction).mockResolvedValue({ member: "pg-1", rows: [row(3, false), row(4, false)] });
+    renderWithClient(<SessionActionDialog connectionId="c" profile={dev} member="pg-1" kind="terminate" target={target} onClose={() => {}} />);
+    expect(await screen.findByText("Ни одну сессию нельзя отменить или завершить")).toBeInTheDocument();
+  });
+
+  it("отмена сессии без выполняемого запроса: причина в строке, выполнять нечего", async () => {
+    vi.mocked(api.previewSessionAction).mockResolvedValue({ member: "pg-1", rows: [{ ...row(3, false), reason: "notRunning" }] });
+    renderWithClient(<SessionActionDialog connectionId="c" profile={dev} member="pg-1" kind="cancel" target={one} onClose={() => {}} />);
+    expect(await screen.findByText("Запрос этой сессии нельзя отменить")).toBeInTheDocument();
+    expect(screen.getByRole("table")).toHaveTextContent("Запрос не выполняется: отмена ничего не сделает — чтобы снять транзакцию, завершите сессию");
+    expect(screen.queryByRole("button", { name: /Отменить запрос/ })).toBeNull();
+  });
+
+  it("одна разрешённая сессия: заголовок в единственном числе", async () => {
+    vi.mocked(api.previewSessionAction).mockResolvedValue({ member: "pg-1", rows: [row(1)] });
+    renderWithClient(<SessionActionDialog connectionId="c" profile={dev} member="pg-1" kind="terminate" target={one} onClose={() => {}} />);
+    expect(await screen.findByRole("group", { name: "Завершить сессию?" })).toBeInTheDocument();
   });
 
   it("предпросмотр не удался: ошибка переведена, закрыть можно", async () => {

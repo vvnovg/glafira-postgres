@@ -76,6 +76,8 @@ pub enum DenyReason {
     NotClientBackend,
     /// Соединение самого приложения.
     OwnConnection,
+    /// Отмена сессии, которая не выполняет запрос: сервер её молча игнорирует, транзакция остаётся.
+    NotRunning,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -144,6 +146,19 @@ pub fn deny_reason(f: &PrivFacts) -> Option<DenyReason> {
     }
 }
 
+/// Сессия выполняет запрос — отменять есть что. `pg_cancel_backend` у сессии, ждущей команду клиента (`idle`,
+/// `idle in transaction`), сервер молча игнорирует. То же условие повторяет `signal_sql` для отмены.
+pub fn is_running(state: Option<&str>) -> bool {
+    matches!(state, Some("active" | "fastpath function call"))
+}
+
+/// Причина отказа строки предпросмотра: сначала права, затем — для отмены — выполняется ли запрос.
+pub fn row_reason(kind: SignalKind, f: &PrivFacts, state: Option<&str>) -> Option<DenyReason> {
+    deny_reason(f).or_else(|| {
+        (kind == SignalKind::Cancel && !is_running(state)).then_some(DenyReason::NotRunning)
+    })
+}
+
 /// Условие выбора строк по цели: `$1` — массив pid (`selected`), порог в секундах (`idleInTransaction`) или pid.
 fn target_filter(target: &SessionTarget) -> &'static str {
     match target {
@@ -171,7 +186,11 @@ pub fn preview_sql(target: &SessionTarget) -> String {
     )
 }
 
-async fn query_preview(c: &Client, target: &SessionTarget) -> AppResult<Vec<PreviewRow>> {
+async fn query_preview(
+    c: &Client,
+    kind: SignalKind,
+    target: &SessionTarget,
+) -> AppResult<Vec<PreviewRow>> {
     let sql = preview_sql(target);
     let rows = match target {
         SessionTarget::Selected { sessions } => {
@@ -209,7 +228,7 @@ async fn query_preview(c: &Client, target: &SessionTarget) -> AppResult<Vec<Prev
                 me_super: r.get::<_, Option<bool>>(15).unwrap_or(false),
                 signal: r.get(16),
             };
-            let reason = deny_reason(&f);
+            let reason = row_reason(kind, &f, r.get::<_, Option<&str>>(6));
             Some(PreviewRow {
                 session: PreviewSession {
                     pid: r.get(0),
@@ -241,9 +260,9 @@ pub async fn preview(
     let target = st
         .runtimes
         .diag_target(id, Some(req.member.as_str()), false)?;
-    let t = req.target.clone();
+    let (kind, t) = (req.kind, req.target.clone());
     let rows = crate::diag::on_member(st, id, &target, move |c| {
-        Box::pin(async move { query_preview(c, &t).await })
+        Box::pin(async move { query_preview(c, kind, &t).await })
     })
     .await?;
     Ok(SessionActionPreview {
@@ -317,10 +336,14 @@ fn criterion(target: &SessionTarget) -> &'static str {
 
 /// Сигнал сессии одним запросом с повторной проверкой критерия (спец. §8.3): строка есть — сигнал отправлен.
 /// `$1` — pid, `$2` — `backend_start` в микросекундах, `$3` — порог (только для `idleInTransaction`).
+/// Отмена ещё раз проверяет, что запрос выполняется (`is_running`): закончившийся — `noLongerMatches`.
 pub fn signal_sql(kind: SignalKind, target: &SessionTarget, caps: Caps) -> String {
-    let func = match kind {
-        SignalKind::Cancel => "pg_cancel_backend",
-        SignalKind::Terminate => "pg_terminate_backend",
+    let (func, running) = match kind {
+        SignalKind::Cancel => (
+            "pg_cancel_backend",
+            " AND a.state IN ('active', 'fastpath function call')",
+        ),
+        SignalKind::Terminate => ("pg_terminate_backend", ""),
     };
     let query_id = caps.col(V14, "a.query_id::text", "text");
     format!(
@@ -328,7 +351,7 @@ pub fn signal_sql(kind: SignalKind, target: &SessionTarget, caps: Caps) -> Strin
                 left(a.query, 500), extract(epoch FROM now() - a.xact_start)::float8, {func}(a.pid) \
          FROM pg_stat_activity a \
          WHERE a.pid = $1 AND {BACKEND_START_US} = $2 AND a.backend_type = 'client backend' \
-           AND a.pid <> pg_backend_pid() AND {}",
+           AND a.pid <> pg_backend_pid() AND {}{running}",
         criterion(target)
     )
 }
@@ -710,6 +733,36 @@ mod tests {
     }
 
     #[test]
+    fn cancel_needs_a_running_query_and_rights_come_first() {
+        let ok = facts(true, false, false, true, false, false);
+        let cancel = |state| row_reason(SignalKind::Cancel, &ok, state);
+        assert_eq!(cancel(Some("active")), None);
+        assert_eq!(cancel(Some("fastpath function call")), None);
+        for state in [
+            Some("idle"),
+            Some("idle in transaction"),
+            Some("idle in transaction (aborted)"),
+            None,
+        ] {
+            assert_eq!(cancel(state), Some(DenyReason::NotRunning), "{state:?}");
+        }
+        // Завершение не зависит от состояния.
+        assert_eq!(
+            row_reason(SignalKind::Terminate, &ok, Some("idle in transaction")),
+            None
+        );
+        // Без прав причина — права, а не состояние.
+        assert_eq!(
+            row_reason(
+                SignalKind::Cancel,
+                &facts(true, false, false, false, false, false),
+                Some("idle")
+            ),
+            Some(DenyReason::OtherRole)
+        );
+    }
+
+    #[test]
     fn preview_sql_filters_by_target() {
         let sel = preview_sql(&SessionTarget::Selected { sessions: vec![] });
         assert!(sel.contains("a.pid = ANY($1)"));
@@ -782,6 +835,8 @@ mod tests {
             caps,
         );
         assert!(c.contains("pg_cancel_backend(a.pid)") && !c.contains("$3"));
+        assert!(c.contains("AND a.state IN ('active', 'fastpath function call')"));
+        assert!(!t.contains("a.state IN ('active'"));
         let r = signal_sql(
             SignalKind::Terminate,
             &SessionTarget::RootBlocker {

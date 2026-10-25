@@ -643,6 +643,60 @@ async fn cancel_interrupts_a_running_query() {
     );
 }
 
+/// Отмена сессии, которая не выполняет запрос: сервер её молча игнорирует. Предпросмотр помечает строку
+/// `notRunning`, а выполнение с той же сессией перепроверяет состояние и не шлёт сигнал (`noLongerMatches`).
+#[tokio::test]
+async fn cancel_of_a_session_without_a_running_query_is_refused() {
+    let Some(addr) = common::env("GPG_IT_SINGLE") else {
+        return;
+    };
+    common::ensure_fixtures(&addr).await;
+    let app = common::app(&addr).await;
+    let pid = idle_in_transaction(&app).await;
+    let probe = common::superuser(&addr, "postgres").await;
+    let one = SessionRef {
+        pid,
+        backend_start_us: backend_start_us(&probe, pid).await,
+    };
+    let (_dir, st) = common::open_server(&addr).await;
+    let member = st.runtimes.view("it").topology.unwrap().members[0]
+        .name
+        .clone();
+    let target = SessionTarget::Selected {
+        sessions: vec![one],
+    };
+    let p = sa::preview(
+        &st,
+        "it",
+        &SessionActionRequest {
+            member: member.clone(),
+            kind: SignalKind::Cancel,
+            target: target.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(p.rows.len(), 1);
+    assert!(!p.rows[0].allowed);
+    assert_eq!(p.rows[0].reason, Some(DenyReason::NotRunning));
+    let r = sa::execute(
+        &st,
+        "it",
+        &exec(&member, SignalKind::Cancel, target, vec![one]),
+        &Confirmation::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.results[0].outcome, SessionOutcome::NoLongerMatches);
+    // Транзакция по-прежнему открыта: сессия ждёт команду в том же состоянии.
+    let state: Option<String> = probe
+        .query_one("SELECT state FROM pg_stat_activity WHERE pid = $1", &[&pid])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(state.as_deref(), Some("idle in transaction"));
+}
+
 /// Пакет по критерию: обе сессии, простаивающие в транзакции, завершены; на prod — с именем подключения и числом
 /// сессий; в журнале — обе строки и пометка `prodConfirmed`.
 #[tokio::test]

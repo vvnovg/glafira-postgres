@@ -293,6 +293,11 @@ function SessionPanel({
 }) {
   const { t } = useTranslation();
   const startUs = row.backendStartUs;
+  // Отменять есть что, только пока запрос выполняется (как `is_running` в Rust): у ждущей команду сессии сервер отмену молча игнорирует.
+  const running = row.state === "active" || row.state === "fastpath function call";
+  let cancelReason: string | undefined;
+  if (ended) cancelReason = t("diag.sessions.ended");
+  else if (!running) cancelReason = t("actions.sessions.reason.notRunning");
   const signal = (kind: SessionActionChoice["kind"]) => {
     if (startUs !== null) onSessionAction?.({ kind, target: { kind: "selected", sessions: [{ pid: row.pid, backendStartUs: startUs }] } });
   };
@@ -322,7 +327,7 @@ function SessionPanel({
         <h3 tabIndex={-1}>{t("diag.sessions.panel", { pid: row.pid })}</h3>
         {onSessionAction && startUs !== null && row.backendType === "client backend" && (
           <>
-            <button type="button" disabled={ended} title={ended ? t("diag.sessions.ended") : undefined} onClick={() => signal("cancel")}>
+            <button type="button" disabled={cancelReason !== undefined} title={cancelReason} onClick={() => signal("cancel")}>
               {t("actions.buttons.cancel")}
             </button>
             <button type="button" disabled={ended} title={ended ? t("diag.sessions.ended") : undefined} onClick={() => signal("terminate")}>

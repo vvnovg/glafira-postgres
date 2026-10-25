@@ -1037,7 +1037,7 @@ export interface SessionActionRequest {
   target: SessionTarget;
 }
 /** Почему сессию нельзя отменить или завершить. */
-export type DenyReason = "superuserSession" | "otherRole" | "notClientBackend" | "ownConnection";
+export type DenyReason = "superuserSession" | "otherRole" | "notClientBackend" | "ownConnection" | "notRunning";
 export interface PreviewSession {
   pid: number;
   backendStartUs: number;

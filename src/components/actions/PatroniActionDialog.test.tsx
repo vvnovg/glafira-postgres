@@ -131,20 +131,46 @@ describe("PatroniActionDialog", () => {
       expect(vi.mocked(api.executePatroniAction).mock.calls[0][1]).toEqual({ kind: "switchover", leader: "pg-1", candidate: "pg-2", scheduledAt: null });
     });
 
-    it("«По расписанию»: без времени выполнять нельзя и сказано почему; со временем оно уходит в scheduledAt (RFC 3339)", async () => {
+    it("«По расписанию»: время по умолчанию с запасом; без времени выполнять нельзя и сказано почему; со временем оно уходит в scheduledAt (RFC 3339)", async () => {
       const user = userEvent.setup();
       renderWithClient(dialog(switchover));
       const run = await screen.findByRole("button", { name: "Выполнить" });
       expect(screen.queryByLabelText("Дата и время")).toBeNull();
+      const before = Date.now();
       await user.click(screen.getByRole("radio", { name: "По расписанию" }));
+      // Поле сразу заполнено временем не раньше чем через 15 минут: «почти сейчас» Patroni выполнил бы до отмены.
+      const input = screen.getByLabelText("Дата и время") as HTMLInputElement;
+      const leadMin = (Date.parse(toRfc3339(input.value)) - before) / 60_000;
+      expect(leadMin).toBeGreaterThanOrEqual(14);
+      expect(leadMin).toBeLessThanOrEqual(21);
+      expect(run).toBeEnabled();
+      fireEvent.change(input, { target: { value: "" } });
       expect(run).toBeDisabled();
       expect(screen.getByText("Укажите дату и время, чтобы запланировать действие")).toBeInTheDocument();
-      fireEvent.change(screen.getByLabelText("Дата и время"), { target: { value: "2030-12-01T10:30" } });
+      fireEvent.change(input, { target: { value: "2030-12-01T10:30" } });
       expect(run).toBeEnabled();
       expect(screen.queryByText("Укажите дату и время, чтобы запланировать действие")).toBeNull();
       await user.click(run);
       // Расписание несёт того же лидера: Patroni не выполнит его, если к сроку лидер другой.
       expect(vi.mocked(api.executePatroniAction).mock.calls[0][1]).toEqual({ kind: "switchover", leader: "pg-1", candidate: null, scheduledAt: toRfc3339("2030-12-01T10:30") });
+    });
+
+    it("прошедшее время — выполнять нельзя; меньше минуты до срока — предупреждение, выполнить можно", async () => {
+      const user = userEvent.setup();
+      renderWithClient(dialog(switchover));
+      const run = await screen.findByRole("button", { name: "Выполнить" });
+      await user.click(screen.getByRole("radio", { name: "По расписанию" }));
+      const input = screen.getByLabelText("Дата и время");
+      fireEvent.change(input, { target: { value: "2020-01-01T10:30" } });
+      expect(run).toBeDisabled();
+      expect(screen.getByText("Назначенное время уже прошло — укажите время в будущем")).toBeInTheDocument();
+      // Через 30 секунд, с секундами: поле принимает «ГГГГ-ММ-ДДTЧЧ:ММ:СС».
+      const soon = new Date(Date.now() + 30_000);
+      const p2 = (n: number) => String(n).padStart(2, "0");
+      const local = `${soon.getFullYear()}-${p2(soon.getMonth() + 1)}-${p2(soon.getDate())}T${p2(soon.getHours())}:${p2(soon.getMinutes())}:${p2(soon.getSeconds())}`;
+      fireEvent.change(input, { target: { value: local } });
+      expect(run).toBeEnabled();
+      expect(screen.getByText("До назначенного времени меньше минуты — отменить действие вы, скорее всего, не успеете")).toBeInTheDocument();
     });
 
     it("время стёрли после ввода: кнопка снова неактивна, исключения нет; «Сейчас» отправляет без расписания", async () => {
@@ -808,7 +834,7 @@ describe("PatroniActionDialog", () => {
       section.focus();
       await user.keyboard("{Escape}");
       expect(onClose).not.toHaveBeenCalled();
-      expect(screen.getByRole("button", { name: "Отмена" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Закрыть" })).toBeDisabled();
     });
 
     it("у секции и группы подтверждения разные имена; после закрытия фокус возвращается на кнопку, открывшую диалог", async () => {

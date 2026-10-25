@@ -1130,7 +1130,7 @@ describe("Overview: действия Patroni", () => {
     const dialog = await screen.findByRole("region", { name: "Switchover" });
     const table = screen.getByRole("region", { name: "Таблица узлов" });
     expect(dialog.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    await user.click(await within(dialog).findByRole("button", { name: "Отмена" }));
+    await user.click(await within(dialog).findByRole("button", { name: "Закрыть" }));
     expect(screen.queryByRole("region", { name: "Switchover" })).toBeNull();
     expect(opener).toHaveFocus();
   });

@@ -159,6 +159,8 @@ tr.selected { background: color-mix(in srgb, var(--accent) 15%, transparent); }
 .confirm { border: 1px solid var(--warn); border-radius: 6px; padding: 8px; display: flex; flex-direction: column; gap: 6px; background: color-mix(in srgb, var(--warn) 8%, transparent); }
 .confirm label { display: flex; flex-direction: column; gap: 2px; }
 .panel { border: 1px solid var(--border); border-radius: 6px; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+/* Кнопка прямо в панели («Закрыть» в итоге действия) — обычной ширины, а не растянутая колонкой на всю панель. */
+.panel > button { align-self: flex-start; }
 
 .path-field { display: flex; gap: 6px; align-items: center; }
 .path-field > input:not([type="checkbox"]) { flex: 1; min-width: 0; }

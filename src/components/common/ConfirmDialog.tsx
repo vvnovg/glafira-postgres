@@ -96,7 +96,7 @@ export function ConfirmDialog({
           {confirmLabel}
         </button>
         <button type="button" disabled={busy} onClick={onCancel}>
-          {t("common.cancel")}
+          {t("common.close")}
         </button>
       </div>
     </div>

@@ -20,6 +20,7 @@ const REASON_KEYS: Record<DenyReason, string> = {
   otherRole: "actions.sessions.reason.otherRole",
   notClientBackend: "actions.sessions.reason.notClientBackend",
   ownConnection: "actions.sessions.reason.ownConnection",
+  notRunning: "actions.sessions.reason.notRunning",
 };
 const RESULT_KEYS: Record<SessionResult["result"], string> = {
   terminated: "actions.sessions.result.terminated",
@@ -91,7 +92,10 @@ export function SessionActionDialog({ connectionId, profile, member, kind, targe
     },
   });
 
-  const title = kind === "cancel" ? t("actions.sessions.cancelTitle") : t("actions.sessions.terminateTitle");
+  const one = (preview.data?.rows.length ?? 0) === 1;
+  let title: string;
+  if (kind === "cancel") title = t("actions.sessions.cancelTitle");
+  else title = one ? t("actions.sessions.terminateTitleOne") : t("actions.sessions.terminateTitle");
   // Одна сессия — без числа («Завершить сессию»); число нужно только пакету. Формы _one в ru ещё и «21», «31»: с числом.
   const count = allowed.length;
   let label: string;
@@ -104,6 +108,12 @@ export function SessionActionDialog({ connectionId, profile, member, kind, targe
     if (e.key !== "Escape") return;
     e.stopPropagation();
     if (!run.isPending) onClose();
+  };
+  // Почему выполнять нечего: пусто, одна сессия (о ней и речь) или несколько.
+  const refusal = (rows: number): string => {
+    if (rows === 0) return t("actions.sessions.noMatching");
+    if (rows > 1) return t("actions.sessions.nothing");
+    return kind === "cancel" ? t("actions.sessions.nothingCancelOne") : t("actions.sessions.nothingTerminateOne");
   };
   const noteOf = (r: PreviewRow): string => {
     if (!r.allowed) return r.reason ? t(REASON_KEYS[r.reason]) : "";
@@ -166,7 +176,7 @@ export function SessionActionDialog({ connectionId, profile, member, kind, targe
           {allowed.length === 0 ? (
             <>
               {/* Пустой набор (сессии уже нет или ни одна не подошла) — не то же самое, что «сессии есть, но прав нет». */}
-              <p className="muted">{preview.data.rows.length === 0 ? t("actions.sessions.noMatching") : t("actions.sessions.nothing")}</p>
+              <p className="muted">{refusal(preview.data.rows.length)}</p>
               <button type="button" onClick={onClose}>
                 {t("common.close")}
               </button>

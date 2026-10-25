@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { toRfc3339 } from "./schedule";
+import { defaultScheduleLocal, secondsUntil, toLocalInput, toRfc3339 } from "./schedule";
 
 describe("toRfc3339", () => {
   it("местное время со смещением", () => {
@@ -27,5 +27,27 @@ describe("toRfc3339", () => {
   it("високосный день и граничные значения принимаются", () => {
     expect(toRfc3339("2028-02-29T23:59:59", 0)).toBe("2028-02-29T23:59:59+00:00");
     expect(toRfc3339("2026-01-01T00:00", 60)).toBe("2026-01-01T00:00:00+01:00");
+  });
+});
+
+describe("время расписания по умолчанию", () => {
+  // Местное время машины: момент собирается из полей Date, а не из строки с часовым поясом.
+  const at = (h: number, m: number, s = 0) => new Date(2026, 9, 25, h, m, s).getTime();
+
+  it("через 15 минут, округлённое вверх до 5 минут", () => {
+    expect(defaultScheduleLocal(at(21, 57, 55))).toBe("2026-10-25T22:15");
+    expect(defaultScheduleLocal(at(22, 0))).toBe("2026-10-25T22:15");
+    expect(defaultScheduleLocal(at(23, 50))).toBe("2026-10-26T00:05");
+  });
+
+  it("значение поля по местным часам", () => {
+    expect(toLocalInput(at(9, 5))).toBe("2026-10-25T09:05");
+  });
+
+  it("секунд до срока; пустое и неразборчивое — null", () => {
+    expect(secondsUntil("2026-10-25T22:00", at(21, 59))).toBe(60);
+    expect(secondsUntil("2026-10-25T21:58", at(21, 59))).toBe(-60);
+    expect(secondsUntil("", at(21, 59))).toBeNull();
+    expect(secondsUntil("завтра", at(21, 59))).toBeNull();
   });
 });

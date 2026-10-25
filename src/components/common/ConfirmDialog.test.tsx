@@ -71,7 +71,7 @@ describe("ConfirmDialog", () => {
     const user = userEvent.setup();
     const onCancel = vi.fn();
     render(<ConfirmDialog connection={prod} title="x" confirmLabel="Да" onConfirm={() => {}} onCancel={onCancel} />);
-    await user.click(screen.getByRole("button", { name: "Отмена" }));
+    await user.click(screen.getByRole("button", { name: "Закрыть" }));
     expect(onCancel).toHaveBeenCalled();
   });
 
@@ -97,7 +97,7 @@ describe("ConfirmDialog", () => {
     expect(screen.getByLabelText("Подтверждение: имя")).toBeDisabled();
     unmount();
     render(<ConfirmDialog connection={dev} title="t" confirmLabel="Да" busy onConfirm={onConfirm} onCancel={onCancel} />);
-    expect(screen.getByRole("button", { name: "Отмена" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Закрыть" })).toBeDisabled();
     const dialog = screen.getByRole("group", { name: "t" });
     fireEvent.keyDown(dialog, { key: "Escape" });
     fireEvent.keyDown(dialog, { key: "Enter" });
@@ -116,8 +116,8 @@ describe("ConfirmDialog", () => {
     expect(screen.getByRole("button", { name: "Да" })).toBeDisabled();
     await user.keyboard("{Enter}");
     expect(onConfirm).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "Отмена" })).toBeEnabled();
-    await user.click(screen.getByRole("button", { name: "Отмена" }));
+    expect(screen.getByRole("button", { name: "Закрыть" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Закрыть" }));
     expect(onCancel).toHaveBeenCalledTimes(1);
   });
 
