@@ -57,10 +57,10 @@ pub enum Route {
     Member(String),
 }
 
-/// Срок ответа на switchover «сейчас» и failover. Patroni отвечает на них только после смены лидера (опрашивает
-/// DCS до `2 * max(10, loop_wait)` с, при `loop_wait` 10 с — 20 с), обычные 5 с тут оборвали бы ожидание
-/// выполняющегося действия.
-pub const LEADER_CHANGE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Срок ответа на действия, которые Patroni выполняет до ответа: switchover «сейчас» и failover (ответ — после
+/// смены лидера: Patroni опрашивает DCS до `2 * max(10, loop_wait)` с, при `loop_wait` 10 с — 20 с) и restart
+/// «сейчас» (ответ — после запуска PostgreSQL). Обычные 5 с оборвали бы ожидание выполняющегося действия.
+pub const LONG_ACTION_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PatroniRequest {
@@ -68,7 +68,7 @@ pub struct PatroniRequest {
     pub path: &'static str,
     pub body: Option<Value>,
     pub route: Route,
-    /// Срок ответа: `LEADER_CHANGE_TIMEOUT` у смены лидера «сейчас», иначе `HTTP_TIMEOUT`.
+    /// Срок ответа: `LONG_ACTION_TIMEOUT` у switchover, failover и restart «сейчас», иначе `HTTP_TIMEOUT`.
     pub timeout: Duration,
 }
 
@@ -231,7 +231,7 @@ pub fn request(a: &PatroniAction, t: &Topology) -> PatroniRequest {
                 route: Route::Leader,
                 // Запланированный switchover Patroni только записывает — отвечает сразу.
                 timeout: if scheduled_at.is_none() {
-                    LEADER_CHANGE_TIMEOUT
+                    LONG_ACTION_TIMEOUT
                 } else {
                     HTTP_TIMEOUT
                 },
@@ -249,7 +249,7 @@ pub fn request(a: &PatroniAction, t: &Topology) -> PatroniRequest {
             path: "/failover",
             body: Some(json!({ "candidate": candidate })),
             route: Route::Leader,
-            timeout: LEADER_CHANGE_TIMEOUT,
+            timeout: LONG_ACTION_TIMEOUT,
         },
         PatroniAction::Restart {
             member,
@@ -268,7 +268,12 @@ pub fn request(a: &PatroniAction, t: &Topology) -> PatroniRequest {
                 path: "/restart",
                 body: Some(Value::Object(body)),
                 route: Route::Member(member.clone()),
-                timeout: HTTP_TIMEOUT,
+                // Restart «сейчас» Patroni выполняет до ответа; запланированный только записывает.
+                timeout: if scheduled_at.is_none() {
+                    LONG_ACTION_TIMEOUT
+                } else {
+                    HTTP_TIMEOUT
+                },
             }
         }
         PatroniAction::CancelRestart { member } => PatroniRequest {
@@ -351,10 +356,20 @@ fn not_delivered(e: &AppError) -> bool {
     )
 }
 
+/// Patroni сам не дождался смены лидера: на `POST /switchover` или `/failover` он отвечает `503` с текстом
+/// «Switchover status unknown» / «Failover status unknown». Действие могло выполниться — исход неизвестен.
+fn patroni_status_unknown(req: &PatroniRequest, reply: &HttpReply) -> bool {
+    reply.status == 503
+        && req.method == HttpMethod::Post
+        && matches!(req.path, "/switchover" | "/failover")
+        && reply.body.to_lowercase().contains("status unknown")
+}
+
 /// Отправляет запрос по адресам `bases`: следующий адрес — только когда запрос наверняка не дошёл до Patroni
 /// (`not_delivered`); ответ Patroni (любой код), таймаут и любая иная ошибка — окончательны. 2xx —
-/// `Ok((адрес, ответ))`; 401/403 — `AUTH_FAILED`; иначе — `errors.patroni.actionRejected` с кодом и первыми
-/// 500 символами ответа в `details`.
+/// `Ok((адрес, ответ))`; 401/403 — `AUTH_FAILED`; «status unknown» Patroni (`patroni_status_unknown`) —
+/// `errors.patroni.statusUnknown`; иначе — `errors.patroni.actionRejected`. У обоих — код и первые 500 символов
+/// ответа в `details`.
 pub async fn send(
     http: &dyn PatroniHttp,
     req: &PatroniRequest,
@@ -375,6 +390,18 @@ pub async fn send(
                     "The Patroni API at {{url}} rejected the credentials",
                     url = url
                 ));
+            }
+            Ok(r) if patroni_status_unknown(req, &r) => {
+                return Err(app_err!(
+                    ErrorCode::PatroniError,
+                    "errors.patroni.statusUnknown",
+                    "Patroni did not confirm the action in time ({{status}}): the outcome is unknown, check the overview",
+                    status = r.status
+                )
+                .with_details(crate::actions::journal::cut(
+                    &r.body,
+                    crate::actions::journal::RESPONSE_CHARS,
+                )));
             }
             Ok(r) => {
                 return Err(app_err!(
@@ -826,8 +853,11 @@ pub struct PatroniActionResult {
     /// Сессия наблюдения (switchover / failover / restart «сейчас», pause / resume); `None` — не наблюдается.
     pub watch: Option<String>,
     pub journal_written: bool,
-    /// Запрос ушёл, но ответа нет (таймаут, обрыв после отправки): выполнилось ли действие, покажет наблюдение.
+    /// Запрос ушёл, но ответа нет (таймаут, обрыв после отправки, «status unknown» Patroni): выполнилось ли
+    /// действие, покажет наблюдение.
     pub outcome_unknown: bool,
+    /// Причина неизвестного исхода (при `outcome_unknown`).
+    pub error: Option<AppError>,
 }
 
 /// Выполнение и наблюдение за исходом (`finish`).
@@ -842,16 +872,18 @@ pub async fn execute(
     finish(st, id, action, d, sink)
 }
 
-/// Таймаут после установки соединения или обрыв после отправки: запрос мог дойти и выполниться.
+/// Таймаут после установки соединения, обрыв после отправки или «status unknown» Patroni: запрос мог дойти и
+/// выполниться.
 fn outcome_unknown(e: &AppError) -> bool {
     matches!(
         e.key.as_str(),
-        "errors.patroni.timeout" | "errors.patroni.connectionLost"
+        "errors.patroni.timeout" | "errors.patroni.connectionLost" | "errors.patroni.statusUnknown"
     )
 }
 
 /// Итог выполнения и наблюдение. Ответ Patroni — наблюдение по плану действия (если план есть). Неизвестный
-/// исход (`outcome_unknown`) у действия с планом — тоже наблюдение, с отметкой `outcome_unknown`: оно и покажет,
+/// исход (`outcome_unknown`) у действия с планом — тоже наблюдение, с отметкой `outcome_unknown` и причиной в
+/// `error`: оно и покажет,
 /// выполнилось ли действие (switchover и failover отвечают только после смены лидера). Любая иная ошибка — и
 /// неизвестный исход действия без плана (отмены, запланированные действия) — возвращается как есть, без наблюдения.
 fn finish(
@@ -867,16 +899,17 @@ fn finish(
         d.restart_start,
         d.sent_at_ms,
     );
-    let (response, unknown) = match d.sent {
-        Ok(reply) => (reply.body, false),
-        Err(e) if outcome_unknown(&e) && plan.is_some() => (String::new(), true),
+    let (response, error) = match d.sent {
+        Ok(reply) => (reply.body, None),
+        Err(e) if outcome_unknown(&e) && plan.is_some() => (String::new(), Some(e)),
         Err(e) => return Err(e),
     };
     Ok(PatroniActionResult {
         response,
         watch: plan.map(|plan| crate::actions::watch::start(st, id, plan, sink)),
         journal_written: d.journal_written,
-        outcome_unknown: unknown,
+        outcome_unknown: error.is_some(),
+        error,
     })
 }
 
@@ -1750,11 +1783,11 @@ mod tests {
         assert_eq!(cut.chars().count(), 500);
     }
 
-    /// Сессии самого Glafira не считаются: оборвутся и они, но это не клиенты, о которых предупреждает диалог.
-    /// Patroni отвечает на switchover «сейчас» и failover только после смены лидера (до `2 * max(10, loop_wait)` с):
-    /// у этих запросов срок `LEADER_CHANGE_TIMEOUT`, у остальных — обычный `HTTP_TIMEOUT`.
+    /// Patroni отвечает на switchover «сейчас» и failover только после смены лидера (до `2 * max(10, loop_wait)` с), а
+    /// на restart «сейчас» — после запуска PostgreSQL: у этих запросов срок `LONG_ACTION_TIMEOUT`, у остальных —
+    /// обычный `HTTP_TIMEOUT`.
     #[test]
-    fn leader_changes_get_a_long_timeout_and_the_rest_the_usual_one() {
+    fn long_actions_get_a_long_timeout_and_the_rest_the_usual_one() {
         use crate::topology::patroni::HTTP_TIMEOUT;
         let t = cluster();
         let long = [
@@ -1765,11 +1798,21 @@ mod tests {
             PatroniAction::Failover {
                 candidate: "pg-2".into(),
             },
+            PatroniAction::Restart {
+                member: "pg-2".into(),
+                only_pending: false,
+                scheduled_at: None,
+            },
+            PatroniAction::Restart {
+                member: "pg-2".into(),
+                only_pending: true,
+                scheduled_at: None,
+            },
         ];
         for a in &long {
-            assert_eq!(request(a, &t).timeout, LEADER_CHANGE_TIMEOUT, "{a:?}");
+            assert_eq!(request(a, &t).timeout, LONG_ACTION_TIMEOUT, "{a:?}");
         }
-        assert_eq!(LEADER_CHANGE_TIMEOUT, Duration::from_secs(60));
+        assert_eq!(LONG_ACTION_TIMEOUT, Duration::from_secs(60));
         let usual = [
             PatroniAction::Switchover {
                 candidate: None,
@@ -1779,7 +1822,7 @@ mod tests {
             PatroniAction::Restart {
                 member: "pg-2".into(),
                 only_pending: false,
-                scheduled_at: None,
+                scheduled_at: Some("2030-01-01T00:00:00Z".into()),
             },
             PatroniAction::CancelRestart {
                 member: "pg-2".into(),
@@ -1837,10 +1880,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             *http.0.lock_safe(),
-            [
-                LEADER_CHANGE_TIMEOUT,
-                crate::topology::patroni::HTTP_TIMEOUT
-            ]
+            [LONG_ACTION_TIMEOUT, crate::topology::patroni::HTTP_TIMEOUT]
         );
     }
 
@@ -1877,25 +1917,74 @@ mod tests {
         }
     }
 
+    /// События наблюдения, полученные тестом.
+    #[derive(Default)]
+    struct Events(Mutex<Vec<crate::actions::watch::WatchEvent>>);
+    impl crate::actions::watch::WatchSink for Events {
+        fn send(&self, e: crate::actions::watch::WatchEvent) -> bool {
+            self.0.lock_safe().push(e);
+            true
+        }
+    }
+
+    /// Подделка, отвечающая на изменяющий запрос заданным кодом и телом.
+    struct Answer(u16, &'static str);
+    impl PatroniHttp for Answer {
+        fn get_json<'a>(&'a self, _url: &'a str) -> BoxFuture<'a, AppResult<serde_json::Value>> {
+            Box::pin(async { Ok(serde_json::Value::Null) })
+        }
+        fn get_status<'a>(&'a self, _url: &'a str) -> BoxFuture<'a, AppResult<u16>> {
+            Box::pin(async { Ok(200) })
+        }
+        fn send_json<'a>(
+            &'a self,
+            _method: HttpMethod,
+            _url: &'a str,
+            _body: Option<&'a serde_json::Value>,
+            _timeout: Duration,
+        ) -> BoxFuture<'a, AppResult<HttpReply>> {
+            let reply = HttpReply {
+                status: self.0,
+                body: self.1.into(),
+            };
+            Box::pin(async move { Ok(reply) })
+        }
+    }
+
     /// Запрос ушёл, а ответа нет (таймаут, обрыв после отправки): исход неизвестен. У действия с планом наблюдения
-    /// итог — успех с `outcomeUnknown` и наблюдением (оно и покажет, сменился ли лидер); в журнале — ошибка.
+    /// итог — успех с `outcomeUnknown`, причиной в `error` и наблюдением (оно и покажет, сменился ли лидер); в журнале
+    /// — ошибка. Подключение в тесте не открыто, поэтому наблюдение сразу кончается событием `failed`.
     #[tokio::test]
     async fn an_unknown_outcome_is_watched_instead_of_failing() {
         let (_dir, st, profile) = app();
         let failover = PatroniAction::Failover {
             candidate: "pg-2".into(),
         };
-        for fail in [timeout_err as fn(&str) -> AppError, lost_err] {
+        for (fail, key) in [
+            (
+                timeout_err as fn(&str) -> AppError,
+                "errors.patroni.timeout",
+            ),
+            (lost_err, "errors.patroni.connectionLost"),
+        ] {
             let http = Scripted::new(move |url| Some(fail(url)));
             let d = send_and_record(&http, &st.actions, &profile, &[], &failover, cluster()).await;
-            let r = finish(&st, "c", &failover, d, std::sync::Arc::new(NoEvents)).unwrap();
+            let events = std::sync::Arc::new(Events::default());
+            let r = finish(&st, "c", &failover, d, events.clone()).unwrap();
             assert!(
-                r.outcome_unknown && r.journal_written && r.response.is_empty(),
+                r.outcome_unknown
+                    && r.journal_written
+                    && r.response.is_empty()
+                    && r.watch.is_some(),
                 "{r:?}"
             );
-            assert_eq!(serde_json::to_value(&r).unwrap()["outcomeUnknown"], true);
-            let watch = r.watch.expect("наблюдение открыто");
-            assert!(st.sessions.stop(&watch), "наблюдение — сессия");
+            assert_eq!(r.error.as_ref().map(|e| e.key.as_str()), Some(key));
+            let v = serde_json::to_value(&r).unwrap();
+            assert_eq!(
+                (v["outcomeUnknown"].clone(), v["error"]["key"].clone()),
+                (true.into(), key.into())
+            );
+            assert!(!events.0.lock_safe().is_empty(), "наблюдение начато");
         }
         let records = st.actions.list(Some("c"), 10);
         assert_eq!(records.len(), 2);
@@ -1905,8 +1994,78 @@ mod tests {
         );
     }
 
+    /// Patroni сам не дождался смены лидера: `503` с «… status unknown» на `POST /switchover` или `/failover` —
+    /// исход неизвестен, как и при таймауте: в журнале ошибка с кодом 503 и ответом, итог — наблюдение. `503` с
+    /// другим текстом или на другом пути остаётся отказом.
+    #[tokio::test]
+    async fn patronis_own_status_unknown_is_an_unknown_outcome() {
+        let (_dir, st, profile) = app();
+        let switchover = PatroniAction::Switchover {
+            candidate: Some("pg-2".into()),
+            scheduled_at: None,
+        };
+        let failover = PatroniAction::Failover {
+            candidate: "pg-2".into(),
+        };
+        for (action, body) in [
+            (&switchover, "Switchover status unknown"),
+            (&failover, "failover STATUS UNKNOWN"),
+        ] {
+            let d = send_and_record(
+                &Answer(503, body),
+                &st.actions,
+                &profile,
+                &[],
+                action,
+                cluster(),
+            )
+            .await;
+            let r = finish(&st, "c", action, d, std::sync::Arc::new(NoEvents)).unwrap();
+            assert!(r.outcome_unknown && r.watch.is_some(), "{r:?}");
+            let e = r.error.expect("причина");
+            assert_eq!(
+                (e.key.as_str(), e.params.get("status").map(String::as_str)),
+                ("errors.patroni.statusUnknown", Some("503"))
+            );
+            let rec = &st.actions.list(Some("c"), 1)[0];
+            assert_eq!(rec.outcome, Outcome::Error);
+            let p = rec.patroni.as_ref().unwrap();
+            assert_eq!((p.status, p.response.as_deref()), (Some(503), Some(body)));
+        }
+        let d = send_and_record(
+            &Answer(503, "Switchover failed"),
+            &st.actions,
+            &profile,
+            &[],
+            &switchover,
+            cluster(),
+        )
+        .await;
+        let e = finish(&st, "c", &switchover, d, std::sync::Arc::new(NoEvents)).unwrap_err();
+        assert_eq!(e.key, "errors.patroni.actionRejected");
+        let restart = PatroniAction::Restart {
+            member: "pg-2".into(),
+            only_pending: false,
+            scheduled_at: None,
+        };
+        let d = send_and_record(
+            &Answer(503, "status unknown"),
+            &st.actions,
+            &profile,
+            &[],
+            &restart,
+            cluster(),
+        )
+        .await;
+        let e = finish(&st, "c", &restart, d, std::sync::Arc::new(NoEvents)).unwrap_err();
+        assert_eq!(
+            e.key, "errors.patroni.actionRejected",
+            "только switchover и failover"
+        );
+    }
+
     /// Остальное — как раньше: отказ Patroni — ошибка без наблюдения; неизвестный исход у действия без плана
-    /// наблюдения (отмена расписания) — ошибка; ответ Patroni — наблюдение без отметки.
+    /// наблюдения (отмена расписания) — ошибка; ответ Patroni — наблюдение без отметки и без причины.
     #[tokio::test]
     async fn rejections_and_unwatched_actions_stay_errors() {
         let (_dir, st, profile) = app();
@@ -1952,12 +2111,19 @@ mod tests {
         )
         .await;
         let r = finish(&st, "c", &failover, d, std::sync::Arc::new(NoEvents)).unwrap();
-        assert!(!r.outcome_unknown, "{r:?}");
+        assert!(
+            !r.outcome_unknown && r.error.is_none() && r.watch.is_some(),
+            "{r:?}"
+        );
         assert_eq!(r.response, "Successfully switched over");
-        assert_eq!(serde_json::to_value(&r).unwrap()["outcomeUnknown"], false);
-        assert!(st.sessions.stop(&r.watch.expect("наблюдение открыто")));
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(
+            (v["outcomeUnknown"].clone(), v["error"].clone()),
+            (false.into(), serde_json::Value::Null)
+        );
     }
 
+    /// Сессии самого Glafira не считаются: оборвутся и они, но это не клиенты, о которых предупреждает диалог.
     #[test]
     fn leader_sessions_skip_the_apps_own_sessions() {
         let sql = leader_sessions_sql();

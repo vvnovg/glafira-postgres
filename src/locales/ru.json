@@ -162,6 +162,7 @@
       "actionRejected": "Patroni отклонил действие ({{status}})",
       "sendUnsupported": "Этот клиент Patroni не отправляет изменения на {{url}}",
       "connectionLost": "Связь с API Patroni {{url}} оборвалась после отправки запроса: результат неизвестен — проверьте обзор",
+      "statusUnknown": "Patroni не подтвердил действие вовремя ({{status}}): результат неизвестен — проверьте обзор",
       "badUrl": "Адрес API Patroni {{url}} — не корректный http(s)-адрес",
       "authRequired": "Чтобы выполнять действия, укажите в подключении логин API Patroni"
     },

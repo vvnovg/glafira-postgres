@@ -7,6 +7,7 @@ use serde::Serialize;
 use tokio::task::AbortHandle;
 
 use crate::actions::patroni::PatroniAction;
+use crate::error::AppError;
 use crate::session::SessionKind;
 use crate::state::AppState;
 use crate::topology::model::{Role, Topology};
@@ -45,7 +46,8 @@ pub struct WatchEvent {
     pub step: WatchStep,
     pub status: WatchStatus,
     pub at_ms: i64,
-    pub detail: Option<String>,
+    /// Причина `failed` (например, подключение закрыто).
+    pub detail: Option<AppError>,
 }
 
 /// Куда уходят события наблюдения; `false` — канал закрыт, наблюдение заканчивается.
@@ -67,8 +69,8 @@ pub enum WatchPlan {
         only_pending: bool,
         /// Когда ушёл запрос (мс эпохи): без `start_before` перезапуск подтверждает время запуска позже него.
         sent_at_ms: i64,
-        /// Наблюдение видело участника остановленным или недоступным (`observe`): без `start_before` и без
-        /// разборчивого времени запуска это подтверждает перезапуск.
+        /// Наблюдение видело участника остановленным или недоступным (`observe`): без `start_before` перезапуск
+        /// подтверждается только так.
         seen_down: bool,
     },
     Pause {
@@ -203,8 +205,10 @@ fn reached(plan: &WatchPlan, step: WatchStep, t: &Topology, start_now: Option<&s
             },
             Restarted,
         ) => start_now.is_some_and(|now| now != before),
-        // Неизвестно: просто прочитанное время ничего не значит. Разборчивое время должно быть позже отправки
-        // запроса, неразборчивое — подтверждено простоем участника, который наблюдение видело.
+        // Неизвестно: просто прочитанное время ничего не значит, и одним сравнением времён не обойтись — часы
+        // сервера могут расходиться с часами приложения. Нужен простой участника, который наблюдение видело, а
+        // разборчивое время запуска ещё и должно быть позже отправки запроса. Быстрый перезапуск между опросами
+        // так не подтвердится — наблюдение кончится по сроку, а не ложным «готово».
         (
             WatchPlan::Restart {
                 start_before: None,
@@ -213,10 +217,12 @@ fn reached(plan: &WatchPlan, step: WatchStep, t: &Topology, start_now: Option<&s
                 ..
             },
             Restarted,
-        ) => match start_now.map(start_time_ms) {
-            Some(Some(started)) => started > *sent_at_ms,
-            _ => *seen_down,
-        },
+        ) => {
+            *seen_down
+                && start_now
+                    .and_then(start_time_ms)
+                    .is_none_or(|started| started > *sent_at_ms)
+        }
         (WatchPlan::Restart { member, .. }, MemberRunning) => t
             .member(member)
             .is_some_and(|m| m.reachable && running_or_streaming(m.state.as_deref())),
@@ -254,6 +260,11 @@ fn now_ms() -> i64 {
 
 /// Открывает сессию наблюдения: ускоренный опрос, шаги по каждому опросу, срок; итог — id сессии для `stop_session`.
 /// Остановка сессии (панель закрыта, подключение закрыто) прерывает задачу и снимает ускорение. Нужен рантайм tokio.
+///
+/// Первое событие («принято») уходит отсюда, до задачи: её события идут не раньше, чем через интервал опроса.
+/// Сессия вносится в реестр до ускорения: подключение, закрытое после этого, остановит её своим слушателем, а
+/// закрытое раньше (или не открытое) `boost` покажет — тогда наблюдение кончается сразу событием `failed`, сессия
+/// снимается, а id остаётся id закончившегося наблюдения.
 pub fn start(st: &AppState, id: &str, plan: WatchPlan, sink: Arc<dyn WatchSink>) -> String {
     let session_id = uuid::Uuid::new_v4().to_string();
     let runtimes = st.runtimes.clone();
@@ -262,16 +273,17 @@ pub fn start(st: &AppState, id: &str, plan: WatchPlan, sink: Arc<dyn WatchSink>)
     let sessions = st.sessions.clone();
     let (conn, sid) = (id.to_string(), session_id.clone());
     let deadline = Instant::now() + plan.deadline();
-    runtimes.boost(id, &session_id, BOOST_INTERVAL, deadline);
+    sink.send(WatchEvent {
+        step: WatchStep::Accepted,
+        status: WatchStatus::Running,
+        at_ms: now_ms(),
+        detail: None,
+    });
+    let task_sink = sink.clone();
     let task = tokio::spawn(async move {
+        let sink = task_sink;
         let mut plan = plan;
         let mut last = WatchStep::Accepted;
-        sink.send(WatchEvent {
-            step: last,
-            status: WatchStatus::Running,
-            at_ms: now_ms(),
-            detail: None,
-        });
         while Instant::now() < deadline {
             tokio::time::sleep(BOOST_INTERVAL).await;
             let Some(t) = runtimes.view(&conn).topology else {
@@ -323,13 +335,23 @@ pub fn start(st: &AppState, id: &str, plan: WatchPlan, sink: Arc<dyn WatchSink>)
         runtimes.unboost(&conn, &sid);
         sessions.forget(&sid);
     });
-    // Задача не закончится раньше вставки сессии: первым она ждёт интервал опроса (2 с), а срок не меньше 30 с.
     st.sessions.insert(
         session_id.clone(),
         id,
         SessionKind::Watch,
         stop_watch(task.abort_handle(), &st.runtimes, id, &session_id),
     );
+    if !st.runtimes.boost(id, &session_id, BOOST_INTERVAL, deadline) {
+        // Задача прервана до первого события (оно — не раньше интервала опроса); сессии могло уже не быть, если
+        // её снял слушатель закрытия.
+        st.sessions.stop(&session_id);
+        sink.send(WatchEvent {
+            step: WatchStep::Accepted,
+            status: WatchStatus::Failed,
+            at_ms: now_ms(),
+            detail: Some(crate::topology::runtime::not_connected()),
+        });
+    }
     session_id
 }
 
@@ -455,12 +477,13 @@ mod tests {
         assert_eq!(start_time_ms("2026-10-25 13:54:45+00"), None);
     }
 
-    /// Время запуска до действия неизвестно: перезапуск подтверждает время запуска позже отправки запроса, а если
-    /// время не разобрать — простой участника, увиденный наблюдением; просто прочитанное время — не подтверждение.
+    /// Время запуска до действия неизвестно: перезапуск подтверждает простой участника, увиденный наблюдением, и
+    /// (если время запуска разборчиво) время запуска позже отправки запроса. Одно лишь время — не подтверждение:
+    /// часы сервера могут расходиться с часами приложения.
     #[test]
-    fn restart_without_a_known_start_time_needs_a_later_start_or_a_seen_downtime() {
+    fn restart_without_a_known_start_time_needs_a_seen_downtime() {
         let sent = start_time_ms("2026-10-25 09:52:53.829+00:00").unwrap();
-        let mut plan = WatchPlan::Restart {
+        let fresh = || WatchPlan::Restart {
             member: "pg-2".into(),
             start_before: None,
             only_pending: false,
@@ -473,45 +496,33 @@ mod tests {
         ]);
         let old = Some("2026-10-25 09:00:00.000+00:00");
         let new = Some("2026-10-25 09:53:10.001+00:00");
+        let mut plan = fresh();
         plan.observe(&running);
-        assert_eq!(progress(&plan, &running, None), WatchStep::Accepted);
-        assert_eq!(
-            progress(&plan, &running, old),
-            WatchStep::Accepted,
-            "старый запуск"
-        );
-        assert_eq!(
-            progress(&plan, &running, Some("t1")),
-            WatchStep::Accepted,
-            "время не разобрать"
-        );
-        assert_eq!(
-            progress(&plan, &running, new),
-            WatchStep::Done,
-            "запуск после отправки"
-        );
-
-        // Время не разобрать: подтверждает простой (остановлен или недоступен), увиденный после отправки.
+        for start in [None, old, Some("t1"), new] {
+            assert_eq!(
+                progress(&plan, &running, start),
+                WatchStep::Accepted,
+                "{start:?}: простоя не видели"
+            );
+        }
+        // Простой увиден (остановлен): время запуска позже отправки или неразборчивое — перезапуск, старое — нет.
         let mut stopped = running.clone();
         stopped.members[1].state = Some("stopped".into());
         plan.observe(&stopped);
         assert_eq!(progress(&plan, &stopped, Some("t1")), WatchStep::Restarted);
-        assert_eq!(progress(&plan, &running, Some("t1")), WatchStep::Done);
-        let mut unseen = WatchPlan::Restart {
-            member: "pg-2".into(),
-            start_before: None,
-            only_pending: false,
-            sent_at_ms: sent,
-            seen_down: false,
-        };
+        assert_eq!(progress(&plan, &running, new), WatchStep::Done);
+        assert_eq!(progress(&plan, &running, None), WatchStep::Done);
+        assert_eq!(
+            progress(&plan, &running, old),
+            WatchStep::Accepted,
+            "запуск раньше отправки"
+        );
+        // Недоступный участник — тоже простой.
+        let mut unseen = fresh();
         let mut unreachable = running.clone();
         unreachable.members[1].reachable = false;
         unseen.observe(&unreachable);
-        assert_eq!(
-            progress(&unseen, &running, None),
-            WatchStep::Done,
-            "недоступен — тоже простой"
-        );
+        assert_eq!(progress(&unseen, &running, new), WatchStep::Done);
     }
 
     /// Время запуска до действия известно — подтверждает только другое время; простой тут не нужен.
@@ -586,27 +597,34 @@ mod tests {
         }
     }
 
-    /// Наблюдение — сессия: первым идёт «принято», `stop_session` прерывает задачу (событий больше нет), второй
-    /// раз сессии уже нет. Подключение не открыто — ускорять нечего, наблюдение просто ждёт топологию.
+    /// Наблюдение на закрытом подключении (закрыто до начала или пока оно начиналось) кончается сразу: после
+    /// «принято» — `failed` с причиной `notConnected`; сессии нет.
     #[tokio::test]
-    async fn the_watch_is_a_session_that_stop_session_ends() {
+    async fn a_watch_on_a_closed_connection_fails_at_once() {
         let dir = tempfile::tempdir().unwrap();
         let st =
             AppState::new(dir.path(), Arc::new(crate::secrets::MemoryStore::default())).unwrap();
         let events = Arc::new(Events::default());
         let sid = start(&st, "c", WatchPlan::Pause { paused: true }, events.clone());
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while events.0.lock().unwrap().is_empty() {
-            assert!(Instant::now() < deadline, "нет первого события");
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        let first = events.0.lock().unwrap().clone();
+        let got = events.0.lock().unwrap().clone();
         assert_eq!(
-            (first.len(), first[0].step, first[0].status),
-            (1, WatchStep::Accepted, WatchStatus::Running)
+            got.iter().map(|e| (e.step, e.status)).collect::<Vec<_>>(),
+            [
+                (WatchStep::Accepted, WatchStatus::Running),
+                (WatchStep::Accepted, WatchStatus::Failed)
+            ]
         );
-        assert!(st.sessions.stop(&sid), "сессия наблюдения зарегистрирована");
-        assert!(!st.sessions.stop(&sid), "второй раз — сессии нет");
+        assert_eq!(
+            got[1].detail.as_ref().map(|e| e.key.as_str()),
+            Some("errors.topology.notConnected")
+        );
+        assert!(!st.sessions.stop(&sid), "сессии нет");
+        tokio::time::sleep(BOOST_INTERVAL + Duration::from_millis(200)).await;
+        assert_eq!(
+            events.0.lock().unwrap().len(),
+            2,
+            "задача наблюдения не идёт"
+        );
     }
 
     #[test]

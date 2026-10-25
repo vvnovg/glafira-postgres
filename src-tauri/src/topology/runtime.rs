@@ -544,20 +544,22 @@ impl Runtimes {
     }
 
     /// Опрос раз в `interval` до `until` для наблюдения `owner` (id его сессии); повтор того же `owner` заменяет
-    /// его ускорение. Фоновый опрос просыпается сразу.
-    pub fn boost(&self, id: &str, owner: &str, interval: Duration, until: Instant) {
+    /// его ускорение. Фоновый опрос просыпается сразу. `false` — подключение не открыто, ускорять нечего.
+    pub fn boost(&self, id: &str, owner: &str, interval: Duration, until: Instant) -> bool {
         let entries = self.entries.lock_safe();
-        if let Some(e) = entries.get(id) {
-            let mut boosts = self.boosts.lock_safe();
-            let list = boosts.entry(id.to_string()).or_default();
-            list.retain(|b| b.owner != owner);
-            list.push(Boost {
-                owner: owner.to_string(),
-                interval,
-                until,
-            });
-            e.wake.notify_one();
-        }
+        let Some(e) = entries.get(id) else {
+            return false;
+        };
+        let mut boosts = self.boosts.lock_safe();
+        let list = boosts.entry(id.to_string()).or_default();
+        list.retain(|b| b.owner != owner);
+        list.push(Boost {
+            owner: owner.to_string(),
+            interval,
+            until,
+        });
+        e.wake.notify_one();
+        true
     }
 
     /// Снимает ускорение наблюдения `owner` (панель закрыта, наблюдение кончилось); ускорения других наблюдений
@@ -1136,9 +1138,13 @@ mod tests {
     #[tokio::test]
     async fn two_watches_keep_fast_polling_until_the_last_fast_one_ends() {
         let (rt, src, _rec, _pools) = manual(vec![Ok(two("a"))]);
-        rt.connect(patroni_profile()).await.unwrap();
         let later = Instant::now() + Duration::from_secs(60);
-        rt.boost("c", "w1", Duration::from_millis(30), later);
+        assert!(
+            !rt.boost("c", "w0", Duration::from_millis(30), later),
+            "подключение не открыто"
+        );
+        rt.connect(patroni_profile()).await.unwrap();
+        assert!(rt.boost("c", "w1", Duration::from_millis(30), later));
         rt.boost("c", "w2", Duration::from_millis(30), later);
         rt.boost("c", "slow", Duration::from_secs(10), later);
         rt.unboost("c", "w1");
