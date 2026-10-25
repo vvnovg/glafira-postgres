@@ -624,7 +624,8 @@ failover, число сессий пакета на prod), имя подключ
   в обоих случаях только «Закрыть».
 - `execute_session_action(id, { member, kind, target, sessions }, confirmation)`. Порядок проверок после guard: пары сессий
   без повторов; `badThreshold`; `errors.actions.noSessions` (пусто); для `rootBlocker` сессии должны быть ровно парой цели
-  (`errors.actions.badTarget`); пакет на prod — число сессий в `typedName`; больше 500 — `errors.actions.batchTooLarge`.
+  (`errors.actions.badTarget`), для `selected` — только пары из выбора цели (тоже `badTarget`); пакет на prod — число сессий в
+  `typedName`; больше 500 — `errors.actions.batchTooLarge`.
   Сессии идут по одной, на одном соединении, общий предел 60 с (`BATCH_LIMIT`): оставшиеся после него получают
   `failed { errors.actions.batchTimeout }`. Одна сессия — один запрос:
   ```sql
@@ -680,16 +681,32 @@ failover, число сессий пакета на prod), имя подключ
 и секрет `patroniPassword`); без логина кнопки неактивны, а команда отказывает `errors.patroni.authRequired`
 (`PATRONI_ERROR`; предпросмотр сообщает `canSend`). Правило P1 о неотправке пароля на `http://`-адрес при https-профиле
 действует и здесь. Порядок в `execute`: guard → ввод имени кандидата failover → тип подключения → логин → предусловия на
-топологии последнего опроса (`diag_target(…).topology`, не старше интервала опроса: 10 с, при наблюдении 2 с) → запрос → журнал.
+топологии последнего опроса (`diag_target(…).topology`, не старше интервала опроса: 10 с, при наблюдении 2 с) → готовность
+названного кандидата (failover; switchover с кандидатом) → запрос → журнал. Отказы до запроса в журнал не пишутся.
 
 | Действие | Запрос | Предусловие (`actions::patroni::check`) |
 |---|---|---|
-| Switchover | `POST /switchover {leader, candidate?, scheduled_at?}` на API лидера | Есть доступный лидер в состоянии `running` (`errors.actions.noLeader`); кандидат — участник и не лидер (`badCandidate`); время — RFC 3339 (`badSchedule`) и в будущем (`pastSchedule`) |
+| Switchover | `POST /switchover {leader, candidate?, scheduled_at?}` на API лидера; `leader` — из действия (лидер предпросмотра) | Есть доступный лидер в состоянии `running` (`errors.actions.noLeader`), и это лидер предпросмотра `action.leader` (иначе `errors.actions.leaderChanged` с `expected` и `current`); кандидат — участник и не лидер (`badCandidate`) и готовая реплика (`candidateNotReady`); время — RFC 3339 (`badSchedule`) и в будущем (`pastSchedule`) |
 | Отмена switchover | `DELETE /switchover` | `scheduledSwitchover` есть (`nothingScheduled`) |
-| Failover | `POST /failover {candidate}` | Нет доступного лидера в состоянии `running` (иначе `errors.actions.leaderHealthy`: «Лидер здоров — используйте switchover»); кандидат — участник и не лидер (`badCandidate`) |
+| Failover | `POST /failover {candidate}` | Нет доступного лидера в состоянии `running` (иначе `errors.actions.leaderHealthy`: «Лидер здоров — используйте switchover»); кандидат — участник и не лидер (`badCandidate`) и готовая реплика (`errors.actions.candidateNotReady`) |
 | Restart | `POST /restart {restart_pending?, schedule?}` на API участника | Участник доступен (`NODE_UNAVAILABLE`); время — в будущем |
 | Отмена restart | `DELETE /restart` на API участника | У участника есть `scheduledRestart` (`nothingScheduled`) |
 | Pause / resume | `PATCH /config {"pause": true}` / `{"pause": null}` (`null` удаляет ключ из динамической конфигурации) на API лидера | Текущее `paused` другое (`pauseUnchanged`) |
+
+**Лидер switchover.** Действие несёт лидера, которого показал предпросмотр (`switchover { leader, … }`): если лидер сменился
+(например, автоматический failover, пока открыт диалог), `check` отказывает `leaderChanged`, а не переключает с лидера, которого
+пользователь не видел. Тот же `leader` уходит в тело запроса, поэтому оставшееся окно (до одного опроса) закрывает отказ самого
+Patroni (412 «leader name does not match» → `actionRejected`). У запланированного switchover Patroni сверяет записанного лидера
+и в назначенное время.
+
+**Готовность кандидата.** После `check` Rust считает вердикт готовности (§5.8) на той же топологии — `evaluate(candidate_facts,
+/config, paused)`, `/config` не прочитался — пределы Patroni по умолчанию, как в предпросмотре — и названный кандидат должен
+быть `ready`: доступен, получает WAL, лаг известен и не выше `maximum_lag_on_failover`, без `nofailover` и
+`failover_priority: 0`, синхронный в синхронном режиме. Иначе — `errors.actions.candidateNotReady` (`INVALID_INPUT`,
+`params.member`; причины и лаг — в `details`); кандидата нет в вердикте — тот же отказ. Решает чистая функция
+`ensure_candidate_ready(candidates, name)`. Это главное для failover: к кандидату, названному явно, Patroni предел лага не
+применяет, а вердикт диалога мог устареть до подтверждения. Проверяется и switchover с кандидатом (интерфейс и так не даёт
+выбрать неготового); «Patroni выберет сам» — нет: кандидата выбирает Patroni по своим правилам.
 
 Время расписания вводится в локальном часовом поясе и уходит в RFC 3339 со смещением (`toRfc3339`); Rust разбирает его
 `time::OffsetDateTime::parse(…, &Rfc3339)` и сравнивает с часами приложения. `restart_pending: true` отправляется при флажке
@@ -704,7 +721,9 @@ failover, число сессий пакета на prod), имя подключ
 и любой сбой чтения тела — `errors.patroni.connectionLost`; в обоих случаях исход неизвестен и запрос **не повторяется**
 (повтор мог бы выполнить действие дважды или дать ложный отказ). Неверный адрес отсекается до сети (`errors.patroni.badUrl`,
 `INVALID_INPUT`). Действия не следуют HTTP-перенаправлениям: у `ReqwestHttp` второй клиент (`Policy::none()`), и `3xx` —
-отказ (`actionRejected`); чтение перенаправления по-прежнему выполняет.
+отказ (`actionRejected`); чтение перенаправления по-прежнему выполняет. Этот клиент не держит простаивающих соединений
+(`pool_max_idle_per_host(0)`): соединение из пула, уже закрытое узлом или промежуточным звеном, оборвалось бы после отправки —
+ложный неизвестный исход вместо отказа соединения. У чтения пул прежний.
 
 **Сроки.** Запрос — `HTTP_TIMEOUT` (5 с); switchover «сейчас», failover и restart «сейчас» — `LONG_ACTION_TIMEOUT` (60 с):
 Patroni отвечает после выполнения. Срок передаётся в `PatroniHttp::send_json(method, url, body, timeout)` (метод трейта с
@@ -732,7 +751,13 @@ Patroni отвечает после выполнения. Срок переда�
   `pendingRestart`, `scheduledRestart` (restart лидера — предупреждение: запись недоступна до конца перезапуска; флажок «только
   если нужен перезапуск» включён, когда `pendingRestart`). Предусловия в предпросмотре не проверяются, но интерфейс повторяет
   главные (`running_leader`: доступен и `running`): failover при работающем лидере и switchover без него показывают
-  `leaderHealthy` / `noLeader` и только «Закрыть», а кнопки обзора неактивны с тем же текстом; решает Rust.
+  `leaderHealthy` / `noLeader` и только «Закрыть», а кнопки обзора неактивны с тем же текстом; решает Rust. Действие,
+  которое уходит из диалога, несёт лидера из предпросмотра (`leader`), неготовые кандидаты недоступны. На паузе
+  (`paused`) Patroni переключает только на названного кандидата: «Patroni выберет сам» недоступно с причиной
+  (`actions.patroni.candidateAutoPaused`), по умолчанию выбран первый готовый, нет готовых — «Нет реплики, готовой стать
+  лидером». Failover при лидере, которого Patroni видит `running`, но приложение не достаёт (`leaderState: running`,
+  `leaderReachable: false`), разрешён, и диалог прямо говорит, что failover снимет с этого лидера роль
+  (`actions.patroni.failoverDemotes`); подтверждение failover всегда опасное.
 - Кнопки обзора неактивны с причиной в подсказке, приоритет: подключение не открыто (`notLive`) → нет логина API
   (`authRequired`) → действие уже идёт (`inFlight`); restart недоступного участника неактивен. Отмена switchover — у баннера
   запланированного switchover, отмена restart — в строке участника.
@@ -772,7 +797,9 @@ restart «сейчас» и pause / resume открывает сессию `watc
 `detail` — `errors.topology.notConnected`, наблюдение заканчивается сразу. Закрытие панели наблюдения, как и вкладки обзора
 (`stop_session`), прекращает наблюдение и ускоренный опрос; закрытие подключения останавливает все его сессии. Панель
 наблюдения останавливает свою сессию при «Закрыть» и при размонтировании (микрозадачей, безопасно для двойного монтирования
-StrictMode); если диалог убран, пока команда ещё шла, наблюдение останавливает обработчик успеха мутации.
+StrictMode); если диалог убран, пока команда ещё шла, наблюдение останавливает обработчик успеха мутации. Ход панель объявляет
+одной вежливой областью `role="status"`: пока идёт — последний пройденный шаг, в конце — «Готово», срок вышел или причина
+сбоя (последние два видны и глазами).
 
 ### 8.7 Предпроверка прав
 
@@ -829,7 +856,8 @@ database, retainedBytes, walStatus }`; у Patroni — `patroni { method, path, b
 | P2a | `run_diagnostic(id, request) -> DiagReport`; `start_sampler(id, member: Option<String>, channel: Channel<SamplerEvent>) -> SessionId`; `stop_session(sessionId) -> bool` |
 | P2b | `preview_session_action(id, request: SessionActionRequest) -> SessionActionPreview { member, rows }`; `execute_session_action(id, request: SessionActionExecute, confirmation) -> SessionActionResult { member, results, outcome, journalWritten }`; `preview_drop_slot(id, request: SlotDropRequest) -> SlotDropPreview { member, slot }`; `drop_slot(id, request, confirmation) -> ActionResult { journalWritten }`; `preview_patroni_action(id, action) -> PatroniActionPreview`; `execute_patroni_action(id, action, confirmation, channel: Channel<WatchEvent>) -> PatroniActionResult { response, watch: Option<SessionId>, journalWritten, outcomeUnknown, error: Option<AppError> }`; `list_actions(connectionId: Option<String>, limit) -> [ActionRecord]` |
 
-`PatroniAction` (тег `kind`) — `switchover { candidate?, scheduledAt? }` | `cancelSwitchover` | `failover { candidate }` |
+`PatroniAction` (тег `kind`) — `switchover { leader, candidate?, scheduledAt? }` (`leader` обязателен — лидер предпросмотра,
+§8.5) | `cancelSwitchover` | `failover { candidate }` |
 `restart { member, onlyPending, scheduledAt? }` | `cancelRestart { member }` | `pause { paused }`; `scheduledAt` — RFC 3339 со
 смещением. `SessionActionRequest { member, kind: cancel | terminate, target }`; `SessionActionExecute` — то же и `sessions: [{ pid,
 backendStartUs }]`. `WatchEvent` и `PatroniActionResult` — §8.6, `ActionRecord` — §8.8. Данные фронтенда, которые Rust отдаёт
@@ -853,7 +881,7 @@ backendStartUs }]`. `WatchEvent` и `PatroniActionResult` — §8.6, `ActionReco
 | `AUTH_FAILED` | Patroni отклонил учётные данные (401, 403) | `errors.patroni.unauthorized` или `credentialsWithheld` — те же ключи, что у чтения |
 | `PATRONI_ERROR` | Отказ Patroni и сбои запроса | `errors.patroni.actionRejected` (`params.status`, 500 символов ответа в `details`), `authRequired`, `noUrls`; неизвестный исход — `timeout`, `connectionLost`, `statusUnknown` (§8.5); `unreachable` — запрос не дошёл |
 | `TLS_ERROR` | Ошибка сертификата при запросе к API Patroni: `errors.patroni.tls` (запрос не дошёл, пробуется следующий адрес) | Тот же ключ, что у чтения |
-| `INVALID_INPUT` | Нарушено предусловие или неверный ввод | `errors.actions.leaderHealthy`, `noLeader`, `badCandidate`, `badSchedule`, `pastSchedule`, `nothingScheduled`, `pauseUnchanged`, `patroniOnly`, `badThreshold`, `noSessions`, `badTarget`, `batchTooLarge`, `slotActiveOrGone`; `errors.patroni.badUrl` |
+| `INVALID_INPUT` | Нарушено предусловие или неверный ввод | `errors.actions.leaderHealthy`, `noLeader`, `leaderChanged`, `badCandidate`, `candidateNotReady` (причины в `details`), `badSchedule`, `pastSchedule`, `nothingScheduled`, `pauseUnchanged`, `patroniOnly`, `badThreshold`, `noSessions`, `badTarget`, `batchTooLarge`, `slotActiveOrGone`; `errors.patroni.badUrl` |
 | `NOT_FOUND` | Слота нет на узле | `errors.actions.slotNotFound` |
 | `TIMEOUT` | Пакет не уложился в 60 с | Итог сессии `failed` с `errors.actions.batchTimeout` |
 | `NODE_UNAVAILABLE` | Узел действия недоступен | `errors.actions.nodeUnavailable` |
