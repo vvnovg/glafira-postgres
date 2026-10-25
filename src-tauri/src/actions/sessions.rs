@@ -503,7 +503,8 @@ fn ensure_valid_target(target: &SessionTarget) -> AppResult<()> {
     }
 }
 
-/// Сессии запроса: не пусто, а для `rootBlocker` — ровно пара самой цели (иначе сигнал ушёл бы чужим сессиям).
+/// Сессии запроса: не пусто; для `rootBlocker` — ровно пара самой цели, для `selected` — только пары из цели (иначе
+/// сигнал ушёл бы чужим сессиям).
 fn ensure_sessions_match(target: &SessionTarget, sessions: &[SessionRef]) -> AppResult<()> {
     if sessions.is_empty() {
         return Err(app_err!(
@@ -512,24 +513,29 @@ fn ensure_sessions_match(target: &SessionTarget, sessions: &[SessionRef]) -> App
             "No sessions to act on"
         ));
     }
-    if let SessionTarget::RootBlocker {
-        pid,
-        backend_start_us,
-    } = target
-    {
-        let root = SessionRef {
-            pid: *pid,
-            backend_start_us: *backend_start_us,
-        };
-        if sessions != [root] {
-            return Err(app_err!(
-                ErrorCode::InvalidInput,
-                "errors.actions.badTarget",
-                "The sessions do not match the action target"
-            ));
+    let matches = match target {
+        SessionTarget::RootBlocker {
+            pid,
+            backend_start_us,
+        } => {
+            sessions
+                == [SessionRef {
+                    pid: *pid,
+                    backend_start_us: *backend_start_us,
+                }]
         }
+        SessionTarget::Selected { sessions: chosen } => sessions.iter().all(|s| chosen.contains(s)),
+        SessionTarget::IdleInTransaction { .. } => true,
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(app_err!(
+            ErrorCode::InvalidInput,
+            "errors.actions.badTarget",
+            "The sessions do not match the action target"
+        ))
     }
-    Ok(())
 }
 
 /// Убирает повторы пары `(pid, backend_start)`; порядок первых вхождений сохраняется.
@@ -860,17 +866,25 @@ mod tests {
         (dir, st)
     }
 
+    /// Запрос на `sessions` сессий; у цели `selected` выбор — сами эти сессии (как присылает интерфейс).
     fn execute_req(target: SessionTarget, sessions: usize) -> SessionActionExecute {
+        let sessions: Vec<SessionRef> = (0..sessions as i32)
+            .map(|pid| SessionRef {
+                pid,
+                backend_start_us: 1,
+            })
+            .collect();
+        let target = match target {
+            SessionTarget::Selected { .. } => SessionTarget::Selected {
+                sessions: sessions.clone(),
+            },
+            other => other,
+        };
         SessionActionExecute {
             member: "m".into(),
             kind: SignalKind::Terminate,
             target,
-            sessions: (0..sessions as i32)
-                .map(|pid| SessionRef {
-                    pid,
-                    backend_start_us: 1,
-                })
-                .collect(),
+            sessions,
         }
     }
 
@@ -1026,6 +1040,42 @@ mod tests {
         }
     }
 
+    /// `selected`: выполняются только пары из цели — пара не из выбора, даже вместе с выбранными, отклоняется до
+    /// подключения; подмножество выбора и повтор пары проходят.
+    #[tokio::test]
+    async fn selected_sessions_must_come_from_the_target() {
+        let (_dir, st) = state_with(crate::conn::profile::sample_profile("a"));
+        let target = || SessionTarget::Selected {
+            sessions: vec![pair(5, 7), pair(6, 8)],
+        };
+        for sessions in [
+            vec![pair(9, 9)],
+            vec![pair(5, 8)],
+            vec![pair(5, 7), pair(9, 9)],
+            vec![pair(6, 8), pair(6, 7)],
+        ] {
+            let req = execute_with(target(), sessions.clone());
+            let e = rejection(&st, &req, &Confirmation::default()).await;
+            assert_eq!(
+                (e.code, e.key.as_str()),
+                (
+                    crate::error::ErrorCode::InvalidInput,
+                    "errors.actions.badTarget"
+                ),
+                "{sessions:?}"
+            );
+        }
+        for sessions in [
+            vec![pair(5, 7)],
+            vec![pair(6, 8), pair(5, 7)],
+            vec![pair(5, 7), pair(5, 7)],
+        ] {
+            let req = execute_with(target(), sessions.clone());
+            let e = rejection(&st, &req, &Confirmation::default()).await;
+            assert_eq!(e.key, "errors.topology.notConnected", "{sessions:?}");
+        }
+    }
+
     #[test]
     fn dedup_keeps_the_first_occurrences_in_order() {
         assert_eq!(
@@ -1045,7 +1095,9 @@ mod tests {
             confirm: Some(name.clone()),
             typed_name: typed.map(str::to_string),
         };
-        let selected = || SessionTarget::Selected { sessions: vec![] };
+        let selected = || SessionTarget::Selected {
+            sessions: vec![pair(1, 1), pair(2, 1)],
+        };
         let batch = execute_with(selected(), vec![pair(1, 1), pair(1, 1), pair(2, 1)]);
         let e = rejection(&st, &batch, &confirm(Some("3"))).await;
         assert_eq!(e.key, "errors.guard.typeToConfirm");

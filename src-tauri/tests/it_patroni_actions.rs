@@ -49,7 +49,14 @@ async fn scheduled_switchover_is_shown_and_cancelled() {
     let at = in_an_hour
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap();
+    let leader = st
+        .runtimes
+        .view("it")
+        .topology
+        .and_then(|t| t.leader().map(|m| m.name.clone()))
+        .expect("у стенда есть лидер");
     let action = PatroniAction::Switchover {
+        leader,
         candidate: None,
         scheduled_at: Some(at),
     };
@@ -170,6 +177,7 @@ async fn preview_shows_candidates_leader_sessions_and_the_member() {
     };
     let topology = st.runtimes.view("it").topology.expect("топология открыта");
     let switchover = PatroniAction::Switchover {
+        leader: topology.leader().expect("у стенда есть лидер").name.clone(),
         candidate: None,
         scheduled_at: None,
     };
@@ -395,8 +403,25 @@ async fn switchover_now_is_watched_until_done() {
     let _restore = common::restore_on_drop(common::wait_stand);
     let t = st.runtimes.view("it").topology.unwrap();
     let candidate = replica_of(&t);
+    let leader = t.leader().unwrap().name.clone();
+    // Лидер, которого не показывал предпросмотр, — отказ до отправки: стенд не меняется, журнал пуст.
+    let stale = PatroniAction::Switchover {
+        leader: candidate.clone(),
+        candidate: Some(candidate.clone()),
+        scheduled_at: None,
+    };
+    let e = pa::perform(&st, "it", &stale, &Confirmation::default())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (e.code, e.key.as_str()),
+        (ErrorCode::InvalidInput, "errors.actions.leaderChanged"),
+        "{e:?}"
+    );
+    assert!(st.actions.list(Some("it"), 10).is_empty());
     let events = Arc::new(Events::default());
     let action = PatroniAction::Switchover {
+        leader,
         candidate: Some(candidate.clone()),
         scheduled_at: None,
     };
@@ -529,22 +554,27 @@ async fn failover_after_the_leader_stops() {
         },
     )
     .await;
+    // Настоящий случай упавшего лидера: Rust пускает failover только на готовую реплику (тот же вердикт, что у
+    // предпросмотра), поэтому выбранный кандидат должен быть готов и здесь.
+    let failover = PatroniAction::Failover {
+        candidate: candidate.clone(),
+    };
+    let p = pa::preview(&st, "it", &failover).await.unwrap();
+    let verdict = p.candidates.iter().find(|c| c.member == candidate);
+    assert!(
+        verdict.is_some_and(|c| c.ready),
+        "кандидат {candidate} не готов при упавшем лидере: {verdict:?}; paused: {}; все: {:?}",
+        p.paused,
+        p.candidates
+    );
     let events = Arc::new(Events::default());
     let confirm = Confirmation {
         confirm: None,
         typed_name: Some(candidate.clone()),
     };
-    let r = pa::execute(
-        &st,
-        "it",
-        &PatroniAction::Failover {
-            candidate: candidate.clone(),
-        },
-        &confirm,
-        events.clone(),
-    )
-    .await
-    .unwrap();
+    let r = pa::execute(&st, "it", &failover, &confirm, events.clone())
+        .await
+        .unwrap();
     // Ответ Patroni приходит после смены лидера (дольше обычных 5 с): исход известен, наблюдение открыто.
     assert!(r.watch.is_some() && !r.outcome_unknown, "{r:?}");
     let last = events.until_finished(Duration::from_secs(130)).await;

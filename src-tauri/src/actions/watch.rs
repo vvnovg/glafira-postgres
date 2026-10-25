@@ -91,6 +91,7 @@ impl WatchPlan {
             PatroniAction::Switchover {
                 candidate,
                 scheduled_at: None,
+                ..
             } => Some(WatchPlan::Switch {
                 old_leader: before.leader()?.name.clone(),
                 candidate: candidate.clone(),
@@ -568,12 +569,14 @@ mod tests {
     fn scheduled_actions_and_cancels_are_not_watched() {
         let t = topo(vec![m("pg-1", Role::Primary, "running", 2)]);
         let sched = PatroniAction::Switchover {
+            leader: "pg-1".into(),
             candidate: None,
             scheduled_at: Some("2030-01-01T00:00:00Z".into()),
         };
         assert!(WatchPlan::for_action(&sched, &t, None, 0).is_none());
         assert!(WatchPlan::for_action(&PatroniAction::CancelSwitchover, &t, None, 0).is_none());
         let now = PatroniAction::Switchover {
+            leader: "pg-1".into(),
             candidate: None,
             scheduled_at: None,
         };

@@ -171,7 +171,12 @@ fn build_client(
         .timeout(HTTP_TIMEOUT)
         .connect_timeout(HTTP_CONNECT_TIMEOUT);
     if !follow_redirects {
-        b = b.redirect(reqwest::redirect::Policy::none());
+        // Клиент действий не держит простаивающих соединений: действия редки, а соединение из пула, которое узел или
+        // промежуточное звено уже закрыли, оборвалось бы после отправки — ложный «исход неизвестен» вместо отказа
+        // соединения, после которого можно идти к следующему адресу. Чтения свой пул сохраняют.
+        b = b
+            .redirect(reqwest::redirect::Policy::none())
+            .pool_max_idle_per_host(0);
     }
     if let Some(p) = proxy {
         b = b.proxy(reqwest::Proxy::all(format!("socks5h://{p}")).map_err(http_setup)?);

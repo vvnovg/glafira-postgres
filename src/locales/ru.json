@@ -216,6 +216,8 @@
       "noLeader": "Нет работающего лидера, с которого можно переключиться",
       "leaderHealthy": "Лидер здоров — используйте switchover",
       "badCandidate": "{{member}} не может стать лидером: это не реплика этого кластера",
+      "candidateNotReady": "{{member}} не готов стать лидером",
+      "leaderChanged": "Лидер сменился: в предпросмотре был {{expected}}, сейчас — {{current}}",
       "badSchedule": "Время расписания {{value}} задано неверно",
       "pastSchedule": "Время расписания уже прошло",
       "nothingScheduled": "Ничего не запланировано",

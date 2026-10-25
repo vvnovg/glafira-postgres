@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use pg_advisor::failover::{Candidate, DynConfig};
+use pg_advisor::failover::{Candidate, DynConfig, Reason};
 use pg_advisor::rules::horizon::quote_literal;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -22,13 +22,17 @@ use crate::sync::MutexExt;
 use crate::topology::BoxFuture;
 use crate::topology::model::{Member, Role, ScheduledRestart, ScheduledSwitchover, Topology};
 use crate::topology::patroni::{HTTP_TIMEOUT, HttpMethod, HttpReply, PatroniHttp};
+use crate::topology::runtime::DiagTarget;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum PatroniAction {
+    /// `leader` — лидер, которого показал предпросмотр: сменился — отказ (`errors.actions.leaderChanged`), а в теле
+    /// запроса он же, и окно до запроса закрывает проверка самого Patroni (412 «leader name does not match»).
     /// `scheduled_at` — RFC 3339 со смещением.
     #[serde(rename_all = "camelCase")]
     Switchover {
+        leader: String,
         candidate: Option<String>,
         scheduled_at: Option<String>,
     },
@@ -137,6 +141,7 @@ pub fn check(a: &PatroniAction, t: &Topology, now_ms: i64) -> AppResult<()> {
     let is_member = |n: &str| t.member(n).is_some();
     match a {
         PatroniAction::Switchover {
+            leader: expected,
             candidate,
             scheduled_at,
         } => {
@@ -147,6 +152,17 @@ pub fn check(a: &PatroniAction, t: &Topology, now_ms: i64) -> AppResult<()> {
                     "There is no running leader to switch over from"
                 )
             })?;
+            // Лидер сменился после предпросмотра (например, автоматический failover, пока открыт диалог): переключать
+            // с лидера, которого пользователь не видел, нельзя.
+            if expected != &leader.name {
+                return Err(app_err!(
+                    ErrorCode::InvalidInput,
+                    "errors.actions.leaderChanged",
+                    "The leader changed: the preview showed {{expected}}, now it is {{current}}",
+                    expected = expected,
+                    current = leader.name
+                ));
+            }
             if let Some(c) = candidate
                 && (!is_member(c) || c == &leader.name)
             {
@@ -206,18 +222,17 @@ pub fn check(a: &PatroniAction, t: &Topology, now_ms: i64) -> AppResult<()> {
     }
 }
 
-/// Запрос Patroni для действия (тела — как у `patronictl`).
-pub fn request(a: &PatroniAction, t: &Topology) -> PatroniRequest {
-    let leader = t.leader().map(|m| m.name.clone());
+/// Запрос Patroni для действия (тела — как у `patronictl`). Лидер switchover — из действия (его показал
+/// предпросмотр, `check` сверил с топологией): если он сменится до запроса, Patroni откажет сам (412).
+pub fn request(a: &PatroniAction) -> PatroniRequest {
     match a {
         PatroniAction::Switchover {
+            leader,
             candidate,
             scheduled_at,
         } => {
             let mut body = serde_json::Map::new();
-            if let Some(l) = leader {
-                body.insert("leader".into(), json!(l));
-            }
+            body.insert("leader".into(), json!(leader));
             if let Some(c) = candidate {
                 body.insert("candidate".into(), json!(c));
             }
@@ -548,6 +563,72 @@ async fn leader_sessions(st: &AppState, id: &str, leader: &str) -> Option<i64> {
     .ok()
 }
 
+/// Готовность реплик на топологии `t` — тот же вердикт, что во вкладке «Готовность к failover».
+fn verdict(t: &Topology, config: &DynConfig) -> Vec<Candidate> {
+    let facts = crate::diag::patroni::candidate_facts(t);
+    pg_advisor::failover::evaluate(&facts, config, t.paused.unwrap_or(false))
+        .0
+        .candidates
+}
+
+/// Готовность реплик подключения (предпросмотр и проверка перед отправкой). Конфигурация не прочиталась — пределы
+/// Patroni по умолчанию (как во вкладке готовности).
+async fn candidates_verdict(st: &AppState, target: &DiagTarget) -> Vec<Candidate> {
+    let config = crate::diag::patroni::dyn_config(st, target)
+        .await
+        .unwrap_or_else(|_| DynConfig::default());
+    verdict(&target.topology, &config)
+}
+
+/// Кандидат, которого Rust проверяет на готовность перед отправкой: у failover и у switchover с названным кандидатом.
+/// «Patroni выберет сам» не проверяется: кандидата выбирает Patroni по своим правилам.
+fn named_candidate(a: &PatroniAction) -> Option<&str> {
+    match a {
+        PatroniAction::Failover { candidate } => Some(candidate),
+        PatroniAction::Switchover {
+            candidate: Some(c), ..
+        } => Some(c),
+        _ => None,
+    }
+}
+
+/// Названный кандидат — готовая реплика по вердикту `candidates`: доступна, получает WAL, лаг известен и не выше
+/// `maximum_lag_on_failover`, без `nofailover` и `failover_priority: 0`, синхронная в синхронном режиме. Patroni
+/// сам предел лага к кандидату failover, названному явно, не применяет: без этой проверки отстающая реплика стала
+/// бы лидером с потерей данных. Причины и лаг — в `details`. Кандидата нет в вердикте — тоже отказ.
+pub fn ensure_candidate_ready(candidates: &[Candidate], name: &str) -> AppResult<()> {
+    let found = candidates.iter().find(|c| c.member == name);
+    if found.is_some_and(|c| c.ready) {
+        return Ok(());
+    }
+    let err = app_err!(
+        ErrorCode::InvalidInput,
+        "errors.actions.candidateNotReady",
+        "{{member}} is not ready to become the leader",
+        member = name
+    );
+    Err(match found {
+        Some(c) => err.with_details(format!(
+            "reasons: {}; lagBytes: {}",
+            c.reasons
+                .iter()
+                .map(reason_code)
+                .collect::<Vec<_>>()
+                .join(", "),
+            c.lag_bytes.map_or("unknown".into(), |l| l.to_string())
+        )),
+        None => err,
+    })
+}
+
+/// Имя причины, как в JSON вердикта (`lagTooHigh`…).
+fn reason_code(r: &Reason) -> String {
+    serde_json::to_value(r)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
 /// Предпросмотр действия (ничего не меняет): готовность кандидатов и сессии лидера для switchover и failover,
 /// участник для restart и его отмены.
 pub async fn preview(
@@ -564,20 +645,11 @@ pub async fn preview(
     let paused = t.paused.unwrap_or(false);
     let (candidates, leader_client_sessions) = match action {
         PatroniAction::Switchover { .. } | PatroniAction::Failover { .. } => {
-            // Конфигурация не прочиталась — пределы Patroni по умолчанию (как во вкладке готовности).
-            let config = crate::diag::patroni::dyn_config(st, &target)
-                .await
-                .unwrap_or_else(|_| DynConfig::default());
-            let (data, _) = pg_advisor::failover::evaluate(
-                &crate::diag::patroni::candidate_facts(t),
-                &config,
-                paused,
-            );
             let sessions = match &leader {
                 Some(l) => leader_sessions(st, id, l).await,
                 None => None,
             };
-            (data.candidates, sessions)
+            (candidates_verdict(st, &target).await, sessions)
         }
         _ => (vec![], None),
     };
@@ -778,8 +850,14 @@ async fn dispatch(
             "Set the Patroni API login in the connection to run actions"
         ));
     }
-    let before = st.runtimes.diag_target(id, None, true)?.topology;
-    check(action, &before, journal::now_ms())?;
+    let target = st.runtimes.diag_target(id, None, true)?;
+    check(action, &target.topology, journal::now_ms())?;
+    // Кандидат — готовая реплика по тому же вердикту, что у предпросмотра, но на текущей топологии: вердикт диалога
+    // мог устареть за минуты до подтверждения, а прямой вызов команды его не видел вовсе. Это предусловие, как `check`:
+    // отказ в журнал не пишется.
+    if let Some(name) = named_candidate(action) {
+        ensure_candidate_ready(&candidates_verdict(st, &target).await, name)?;
+    }
     let http = st.live.http_for(&profile).await?;
     Ok(send_and_record(
         http.as_ref(),
@@ -787,7 +865,7 @@ async fn dispatch(
         &profile,
         &settings.urls,
         action,
-        before,
+        target.topology,
     )
     .await)
 }
@@ -802,7 +880,7 @@ async fn send_and_record(
     action: &PatroniAction,
     before: Topology,
 ) -> Dispatched {
-    let req = request(action, &before);
+    let req = request(action);
     let bases = bases(&before, &req.route, profile_urls);
     let restart_start = match action {
         PatroniAction::Restart {
@@ -949,11 +1027,13 @@ mod tests {
     fn switchover_needs_a_running_leader_and_a_real_candidate() {
         let t = cluster();
         let ok = PatroniAction::Switchover {
+            leader: "pg-1".into(),
             candidate: Some("pg-2".into()),
             scheduled_at: None,
         };
         assert!(check(&ok, &t, NOW).is_ok());
         let to_leader = PatroniAction::Switchover {
+            leader: "pg-1".into(),
             candidate: Some("pg-1".into()),
             scheduled_at: None,
         };
@@ -967,7 +1047,41 @@ mod tests {
             check(&ok, &down, NOW).unwrap_err().key,
             "errors.actions.noLeader"
         );
+        // Лидер сменился после предпросмотра: отказ с обоими именами — и при «Patroni выберет сам», и по расписанию.
+        let mut moved = cluster();
+        moved.members[0].role = Role::Replica;
+        moved.members[1].role = Role::Primary;
+        moved.members[1].state = Some("running".into());
+        for candidate in [None, Some("pg-3".to_string())] {
+            for scheduled_at in [None, Some("2025-10-24T11:00:00Z".to_string())] {
+                let stale = PatroniAction::Switchover {
+                    leader: "pg-1".into(),
+                    candidate: candidate.clone(),
+                    scheduled_at,
+                };
+                let e = check(&stale, &moved, NOW).unwrap_err();
+                assert_eq!(
+                    (e.code, e.key.as_str()),
+                    (ErrorCode::InvalidInput, "errors.actions.leaderChanged")
+                );
+                assert_eq!(
+                    (e.params["expected"].as_str(), e.params["current"].as_str()),
+                    ("pg-1", "pg-2")
+                );
+                assert_eq!(
+                    e.message,
+                    "The leader changed: the preview showed pg-1, now it is pg-2"
+                );
+            }
+        }
+        let fresh = PatroniAction::Switchover {
+            leader: "pg-2".into(),
+            candidate: Some("pg-3".into()),
+            scheduled_at: None,
+        };
+        assert!(check(&fresh, &moved, NOW).is_ok());
         let past = PatroniAction::Switchover {
+            leader: "pg-1".into(),
             candidate: None,
             scheduled_at: Some("2025-10-24T09:00:00Z".into()),
         };
@@ -976,6 +1090,7 @@ mod tests {
             "errors.actions.pastSchedule"
         );
         let bad = PatroniAction::Switchover {
+            leader: "pg-1".into(),
             candidate: None,
             scheduled_at: Some("tomorrow".into()),
         };
@@ -984,6 +1099,7 @@ mod tests {
             "errors.actions.badSchedule"
         );
         let later = PatroniAction::Switchover {
+            leader: "pg-1".into(),
             candidate: None,
             scheduled_at: Some("2025-10-24T13:00:00+03:00".into()),
         };
@@ -993,6 +1109,7 @@ mod tests {
             "смещение учитывается"
         );
         let future = PatroniAction::Switchover {
+            leader: "pg-1".into(),
             candidate: None,
             scheduled_at: Some("2025-10-24T14:00:00+03:00".into()),
         };
@@ -1017,6 +1134,140 @@ mod tests {
         assert_eq!(
             check(&unknown, &t, NOW).unwrap_err().key,
             "errors.actions.badCandidate"
+        );
+    }
+
+    /// Кластер с упавшим лидером: реплики получают WAL, лаг известен и мал.
+    fn leader_down() -> Topology {
+        let mut t = cluster();
+        t.members[0].reachable = false;
+        t.members[0].state = Some("stopped".into());
+        for m in &mut t.members[1..] {
+            m.lag_bytes = Some(0);
+        }
+        t
+    }
+
+    #[test]
+    fn a_ready_candidate_passes() {
+        let t = leader_down();
+        let v = verdict(&t, &DynConfig::default());
+        assert!(ensure_candidate_ready(&v, "pg-2").is_ok(), "{v:?}");
+        // Пауза вердикт не меняет: failover при паузе — обычный сценарий ручного переключения.
+        let mut paused = leader_down();
+        paused.paused = Some(true);
+        assert!(ensure_candidate_ready(&verdict(&paused, &DynConfig::default()), "pg-2").is_ok());
+        assert_eq!(
+            named_candidate(&PatroniAction::Failover {
+                candidate: "pg-2".into()
+            }),
+            Some("pg-2")
+        );
+        assert_eq!(
+            named_candidate(&PatroniAction::Switchover {
+                leader: "pg-1".into(),
+                candidate: Some("pg-3".into()),
+                scheduled_at: None
+            }),
+            Some("pg-3")
+        );
+        assert_eq!(
+            named_candidate(&PatroniAction::Switchover {
+                leader: "pg-1".into(),
+                candidate: None,
+                scheduled_at: None
+            }),
+            None,
+            "«Patroni выберет сам» не проверяется"
+        );
+    }
+
+    #[test]
+    fn every_kind_of_unready_candidate_is_refused() {
+        let sync = DynConfig {
+            synchronous_mode: pg_advisor::failover::SyncMode::On,
+            ..DynConfig::default()
+        };
+        // Что испортить у кандидата pg-2, при какой конфигурации и какая причина ожидается.
+        type Spoil = fn(&mut Member);
+        let cases: Vec<(&str, Spoil, DynConfig, &str)> = vec![
+            (
+                "unreachable",
+                |m| m.reachable = false,
+                DynConfig::default(),
+                "unreachable",
+            ),
+            (
+                "notStreaming",
+                |m| m.state = Some("starting".into()),
+                DynConfig::default(),
+                "notStreaming",
+            ),
+            (
+                "lagTooHigh",
+                |m| m.lag_bytes = Some(2 * pg_advisor::failover::DEFAULT_MAXIMUM_LAG_ON_FAILOVER),
+                DynConfig::default(),
+                "lagTooHigh",
+            ),
+            (
+                "lagUnknown",
+                |m| m.lag_bytes = None,
+                DynConfig::default(),
+                "lagUnknown",
+            ),
+            (
+                "nofailover",
+                |m| {
+                    m.tags.insert("nofailover".into(), serde_json::json!(true));
+                },
+                DynConfig::default(),
+                "noFailoverTag",
+            ),
+            (
+                "failover_priority 0",
+                |m| {
+                    m.tags
+                        .insert("failover_priority".into(), serde_json::json!(0));
+                },
+                DynConfig::default(),
+                "zeroPriority",
+            ),
+            ("not sync", |_| {}, sync, "notSynchronous"),
+        ];
+        for (what, spoil, config, reason) in cases {
+            let mut t = leader_down();
+            spoil(&mut t.members[1]);
+            let e = ensure_candidate_ready(&verdict(&t, &config), "pg-2").unwrap_err();
+            assert_eq!(
+                (e.code, e.key.as_str()),
+                (ErrorCode::InvalidInput, "errors.actions.candidateNotReady"),
+                "{what}"
+            );
+            assert_eq!(e.params["member"], "pg-2", "{what}");
+            assert_eq!(e.message, "pg-2 is not ready to become the leader");
+            let details = e.details.unwrap_or_default();
+            assert!(details.contains(reason), "{what}: {details}");
+            // Соседняя готовая реплика проходит: проверяется именно названный кандидат.
+            if what != "not sync" {
+                assert!(
+                    ensure_candidate_ready(&verdict(&t, &config), "pg-3").is_ok(),
+                    "{what}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_candidate_missing_from_the_verdict_is_refused() {
+        let v = verdict(&leader_down(), &DynConfig::default());
+        for name in ["pg-9", "pg-1", ""] {
+            let e = ensure_candidate_ready(&v, name).unwrap_err();
+            assert_eq!(e.key, "errors.actions.candidateNotReady", "{name}");
+            assert_eq!(e.details, None, "{name}");
+        }
+        assert_eq!(
+            ensure_candidate_ready(&[], "pg-2").unwrap_err().key,
+            "errors.actions.candidateNotReady"
         );
     }
 
@@ -1065,14 +1316,11 @@ mod tests {
 
     #[test]
     fn requests_follow_the_patroni_api() {
-        let t = cluster();
-        let r = request(
-            &PatroniAction::Switchover {
-                candidate: Some("pg-2".into()),
-                scheduled_at: None,
-            },
-            &t,
-        );
+        let r = request(&PatroniAction::Switchover {
+            leader: "pg-1".into(),
+            candidate: Some("pg-2".into()),
+            scheduled_at: None,
+        });
         assert_eq!(
             (r.method, r.path, r.route.clone()),
             (HttpMethod::Post, "/switchover", Route::Leader)
@@ -1081,45 +1329,45 @@ mod tests {
             r.body,
             Some(serde_json::json!({"leader": "pg-1", "candidate": "pg-2"}))
         );
-        let s = request(
-            &PatroniAction::Switchover {
-                candidate: None,
-                scheduled_at: Some("2025-10-24T11:00:00Z".into()),
-            },
-            &t,
-        );
+        let s = request(&PatroniAction::Switchover {
+            leader: "pg-1".into(),
+            candidate: None,
+            scheduled_at: Some("2025-10-24T11:00:00Z".into()),
+        });
         assert_eq!(
             s.body,
             Some(serde_json::json!({"leader": "pg-1", "scheduled_at": "2025-10-24T11:00:00Z"}))
         );
+        // Лидер тела — из действия (его показал предпросмотр), а не из топологии на момент отправки: если лидер
+        // сменится до запроса, Patroni откажет сам (412 «leader name does not match»).
+        let previewed = request(&PatroniAction::Switchover {
+            leader: "pg-3".into(),
+            candidate: None,
+            scheduled_at: None,
+        });
+        assert_eq!(previewed.body, Some(serde_json::json!({"leader": "pg-3"})));
         assert_eq!(
-            request(&PatroniAction::CancelSwitchover, &t).method,
+            request(&PatroniAction::CancelSwitchover).method,
             HttpMethod::Delete
         );
-        let f = request(
-            &PatroniAction::Failover {
-                candidate: "pg-2".into(),
-            },
-            &t,
-        );
+        let f = request(&PatroniAction::Failover {
+            candidate: "pg-2".into(),
+        });
         assert_eq!(
             (f.path, f.body),
             ("/failover", Some(serde_json::json!({"candidate": "pg-2"})))
         );
-        let rs = request(
-            &PatroniAction::Restart {
-                member: "pg-2".into(),
-                only_pending: true,
-                scheduled_at: None,
-            },
-            &t,
-        );
+        let rs = request(&PatroniAction::Restart {
+            member: "pg-2".into(),
+            only_pending: true,
+            scheduled_at: None,
+        });
         assert_eq!(
             (rs.path, rs.route.clone()),
             ("/restart", Route::Member("pg-2".into()))
         );
         assert_eq!(rs.body, Some(serde_json::json!({"restart_pending": true})));
-        let p = request(&PatroniAction::Pause { paused: true }, &t);
+        let p = request(&PatroniAction::Pause { paused: true });
         assert_eq!(
             (p.method, p.path, p.body),
             (
@@ -1128,7 +1376,7 @@ mod tests {
                 Some(serde_json::json!({"pause": true}))
             )
         );
-        let resume = request(&PatroniAction::Pause { paused: false }, &t);
+        let resume = request(&PatroniAction::Pause { paused: false });
         assert_eq!(
             resume.body,
             Some(serde_json::json!({"pause": null})),
@@ -1240,13 +1488,11 @@ mod tests {
 
     #[tokio::test]
     async fn send_skips_unreachable_addresses_but_not_answers() {
-        let req = request(
-            &PatroniAction::Switchover {
-                candidate: None,
-                scheduled_at: None,
-            },
-            &cluster(),
-        );
+        let req = request(&PatroniAction::Switchover {
+            leader: "pg-1".into(),
+            candidate: None,
+            scheduled_at: None,
+        });
         let bases = vec![
             "http://pg-1:8008".to_string(),
             "http://pg-2:8008".to_string(),
@@ -1288,13 +1534,20 @@ mod tests {
     #[test]
     fn action_reads_camel_case_json_from_the_frontend() {
         let a: PatroniAction =
-            serde_json::from_str(r#"{"kind":"switchover","candidate":"pg-2"}"#).unwrap();
+            serde_json::from_str(r#"{"kind":"switchover","leader":"pg-1","candidate":"pg-2"}"#)
+                .unwrap();
         assert_eq!(
             a,
             PatroniAction::Switchover {
+                leader: "pg-1".into(),
                 candidate: Some("pg-2".into()),
                 scheduled_at: None
             }
+        );
+        assert!(
+            serde_json::from_str::<PatroniAction>(r#"{"kind":"switchover","candidate":"pg-2"}"#)
+                .is_err(),
+            "switchover без лидера предпросмотра не принимается"
         );
         let r: PatroniAction = serde_json::from_str(
             r#"{"kind":"restart","member":"pg-2","onlyPending":true,"scheduledAt":"2025-10-24T11:00:00Z"}"#,
@@ -1323,25 +1576,18 @@ mod tests {
 
     #[test]
     fn restart_request_carries_the_schedule_and_cancel_goes_to_the_member() {
-        let t = cluster();
-        let r = request(
-            &PatroniAction::Restart {
-                member: "pg-3".into(),
-                only_pending: false,
-                scheduled_at: Some("2025-10-24T11:00:00Z".into()),
-            },
-            &t,
-        );
+        let r = request(&PatroniAction::Restart {
+            member: "pg-3".into(),
+            only_pending: false,
+            scheduled_at: Some("2025-10-24T11:00:00Z".into()),
+        });
         assert_eq!(
             r.body,
             Some(serde_json::json!({"schedule": "2025-10-24T11:00:00Z"}))
         );
-        let c = request(
-            &PatroniAction::CancelRestart {
-                member: "pg-3".into(),
-            },
-            &t,
-        );
+        let c = request(&PatroniAction::CancelRestart {
+            member: "pg-3".into(),
+        });
         assert_eq!(
             (c.method, c.path, c.body, c.route),
             (
@@ -1389,7 +1635,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_reports_the_last_connection_failure_or_missing_addresses() {
-        let req = request(&PatroniAction::CancelSwitchover, &cluster());
+        let req = request(&PatroniAction::CancelSwitchover);
         let all_dead = Fake {
             dead: vec!["http://".into()],
             status: 200,
@@ -1438,7 +1684,7 @@ mod tests {
                 })
             }
         }
-        let req = request(&PatroniAction::CancelSwitchover, &cluster());
+        let req = request(&PatroniAction::CancelSwitchover);
         let e = send(&Verbose, &req, &["http://pg-1:8008".to_string()])
             .await
             .unwrap_err();
@@ -1552,13 +1798,11 @@ mod tests {
 
     #[tokio::test]
     async fn send_does_not_repeat_a_request_after_a_timeout() {
-        let req = request(
-            &PatroniAction::Switchover {
-                candidate: None,
-                scheduled_at: None,
-            },
-            &cluster(),
-        );
+        let req = request(&PatroniAction::Switchover {
+            leader: "pg-1".into(),
+            candidate: None,
+            scheduled_at: None,
+        });
         let bases = vec![
             "http://pg-1:8008".to_string(),
             "http://pg-2:8008".to_string(),
@@ -1616,13 +1860,11 @@ mod tests {
             host_overrides: vec![],
         };
         let http = ReqwestHttp::new(&settings, None, None, None, None).unwrap();
-        let req = request(
-            &PatroniAction::Switchover {
-                candidate: None,
-                scheduled_at: None,
-            },
-            &cluster(),
-        );
+        let req = request(&PatroniAction::Switchover {
+            leader: "pg-1".into(),
+            candidate: None,
+            scheduled_at: None,
+        });
         // Отказ соединения: запрос не дошёл, идём дальше; второй адрес принял запрос и оборвал связь — стоп.
         let bases = [refused, lost.base.clone(), untouched.base.clone()];
         let e = send(&http, &req, &bases).await.unwrap_err();
@@ -1659,12 +1901,9 @@ mod tests {
         };
         let http =
             ReqwestHttp::new(&settings, None, None, Some(proxy), Some("bastion".into())).unwrap();
-        let req = request(
-            &PatroniAction::Failover {
-                candidate: "pg-2".into(),
-            },
-            &cluster(),
-        );
+        let req = request(&PatroniAction::Failover {
+            candidate: "pg-2".into(),
+        });
         let bases = [
             "http://dead-leader:8008".to_string(),
             "http://live:8008".to_string(),
@@ -1699,14 +1938,12 @@ mod tests {
             host_overrides: vec![],
         };
         let http = ReqwestHttp::new(&settings, None, None, None, None).unwrap();
-        let cancel = request(&PatroniAction::CancelSwitchover, &cluster());
-        let switchover = request(
-            &PatroniAction::Switchover {
-                candidate: None,
-                scheduled_at: None,
-            },
-            &cluster(),
-        );
+        let cancel = request(&PatroniAction::CancelSwitchover);
+        let switchover = request(&PatroniAction::Switchover {
+            leader: "pg-1".into(),
+            candidate: None,
+            scheduled_at: None,
+        });
         for (status, req) in [(303u16, &cancel), (307, &switchover), (308, &cancel)] {
             let redirecting =
                 testutil::redirecting_http_server(status, &format!("{}{}", target.base, req.path));
@@ -1795,9 +2032,9 @@ mod tests {
     #[test]
     fn long_actions_get_a_long_timeout_and_the_rest_the_usual_one() {
         use crate::topology::patroni::HTTP_TIMEOUT;
-        let t = cluster();
         let long = [
             PatroniAction::Switchover {
+                leader: "pg-1".into(),
                 candidate: Some("pg-2".into()),
                 scheduled_at: None,
             },
@@ -1816,11 +2053,12 @@ mod tests {
             },
         ];
         for a in &long {
-            assert_eq!(request(a, &t).timeout, LONG_ACTION_TIMEOUT, "{a:?}");
+            assert_eq!(request(a).timeout, LONG_ACTION_TIMEOUT, "{a:?}");
         }
         assert_eq!(LONG_ACTION_TIMEOUT, Duration::from_secs(60));
         let usual = [
             PatroniAction::Switchover {
+                leader: "pg-1".into(),
                 candidate: None,
                 scheduled_at: Some("2030-01-01T00:00:00Z".into()),
             },
@@ -1836,7 +2074,7 @@ mod tests {
             PatroniAction::Pause { paused: true },
         ];
         for a in &usual {
-            assert_eq!(request(a, &t).timeout, HTTP_TIMEOUT, "{a:?}");
+            assert_eq!(request(a).timeout, HTTP_TIMEOUT, "{a:?}");
         }
     }
 
@@ -1871,16 +2109,13 @@ mod tests {
             }
         }
         let http = Timeouts(Mutex::new(vec![]));
-        let failover = request(
-            &PatroniAction::Failover {
-                candidate: "pg-2".into(),
-            },
-            &cluster(),
-        );
+        let failover = request(&PatroniAction::Failover {
+            candidate: "pg-2".into(),
+        });
         send(&http, &failover, &["http://pg-1:8008".into()])
             .await
             .unwrap();
-        let pause = request(&PatroniAction::Pause { paused: true }, &cluster());
+        let pause = request(&PatroniAction::Pause { paused: true });
         send(&http, &pause, &["http://pg-1:8008".into()])
             .await
             .unwrap();
@@ -2007,6 +2242,7 @@ mod tests {
     async fn patronis_own_status_unknown_is_an_unknown_outcome() {
         let (_dir, st, profile) = app();
         let switchover = PatroniAction::Switchover {
+            leader: "pg-1".into(),
             candidate: Some("pg-2".into()),
             scheduled_at: None,
         };
@@ -2225,13 +2461,11 @@ mod tests {
     /// отказ Patroni записывается за вторым; таймаут и обрыв связи — `error` без статуса (действие могло выполниться).
     #[tokio::test]
     async fn journal_gets_the_outcome_and_the_address_that_was_reached() {
-        let req = request(
-            &PatroniAction::Switchover {
-                candidate: Some("pg-2".into()),
-                scheduled_at: None,
-            },
-            &cluster(),
-        );
+        let req = request(&PatroniAction::Switchover {
+            leader: "pg-1".into(),
+            candidate: Some("pg-2".into()),
+            scheduled_at: None,
+        });
         let bases = vec![
             "http://pg-1:8008".to_string(),
             "http://pg-2:8008".to_string(),
@@ -2315,7 +2549,7 @@ mod tests {
             host_overrides: vec![],
         };
         let http = ReqwestHttp::new(&settings, None, None, None, None).unwrap();
-        let req = request(&PatroniAction::CancelSwitchover, &cluster());
+        let req = request(&PatroniAction::CancelSwitchover);
         let bases = ["not a url".to_string(), untouched.base.clone()];
         let e = send(&http, &req, &bases).await.unwrap_err();
         assert_eq!(

@@ -410,12 +410,15 @@ async fn stale_backend_start_is_gone_and_woken_session_no_longer_matches() {
         .unwrap()
     };
     // Чужой backend_start — сессии «нет», живая сессия не тронута.
+    let other_start = SessionRef {
+        pid,
+        backend_start_us: start - 1,
+    };
     let r = execute(
-        vec![SessionRef {
-            pid,
-            backend_start_us: start - 1,
-        }],
-        SessionTarget::Selected { sessions: vec![] },
+        vec![other_start],
+        SessionTarget::Selected {
+            sessions: vec![other_start],
+        },
     )
     .await;
     assert_eq!(r.results[0].outcome, SessionOutcome::Gone);
@@ -489,7 +492,10 @@ async fn lone_idle_session_is_not_a_root_blocker() {
     );
     assert_eq!(r.outcome, Outcome::Ok);
     assert!(session_exists(&probe, pid).await, "сессия жива");
-    let r = run(SessionTarget::Selected { sessions: vec![] }).await;
+    let r = run(SessionTarget::Selected {
+        sessions: vec![pair],
+    })
+    .await;
     assert_eq!(r.results[0].outcome, SessionOutcome::Terminated, "{r:?}");
     assert!(!session_exists(&probe, pid).await, "сессия завершена");
     let lines = journal_lines(dir.path());
@@ -518,28 +524,31 @@ async fn mixed_batch_is_partial_and_every_session_is_journaled() {
     let member = st.runtimes.view("it").topology.unwrap().members[0]
         .name
         .clone();
+    let pairs = vec![
+        SessionRef {
+            pid: pid_a,
+            backend_start_us: start_a,
+        },
+        SessionRef {
+            pid: pid_su,
+            backend_start_us: start_su,
+        },
+        // Другой запуск того же pid: сессии с таким временем запуска нет, живая сессия не тронута.
+        SessionRef {
+            pid: pid_b,
+            backend_start_us: start_b - 1,
+        },
+    ];
     let r = sa::execute(
         &st,
         "it",
         &exec(
             &member,
             SignalKind::Terminate,
-            SessionTarget::Selected { sessions: vec![] },
-            vec![
-                SessionRef {
-                    pid: pid_a,
-                    backend_start_us: start_a,
-                },
-                SessionRef {
-                    pid: pid_su,
-                    backend_start_us: start_su,
-                },
-                // Другой запуск того же pid: сессии с таким временем запуска нет, живая сессия не тронута.
-                SessionRef {
-                    pid: pid_b,
-                    backend_start_us: start_b - 1,
-                },
-            ],
+            SessionTarget::Selected {
+                sessions: pairs.clone(),
+            },
+            pairs,
         ),
         &Confirmation::default(),
     )
@@ -606,17 +615,20 @@ async fn cancel_interrupts_a_running_query() {
     let member = st.runtimes.view("it").topology.unwrap().members[0]
         .name
         .clone();
+    let one = SessionRef {
+        pid,
+        backend_start_us: start,
+    };
     let r = sa::execute(
         &st,
         "it",
         &exec(
             &member,
             SignalKind::Cancel,
-            SessionTarget::Selected { sessions: vec![] },
-            vec![SessionRef {
-                pid,
-                backend_start_us: start,
-            }],
+            SessionTarget::Selected {
+                sessions: vec![one],
+            },
+            vec![one],
         ),
         &Confirmation::default(),
     )
@@ -716,17 +728,20 @@ async fn signal_to_a_superuser_session_is_not_allowed() {
     let member = st.runtimes.view("it").topology.unwrap().members[0]
         .name
         .clone();
+    let one = SessionRef {
+        pid,
+        backend_start_us: start,
+    };
     let r = sa::execute(
         &st,
         "it",
         &exec(
             &member,
             SignalKind::Terminate,
-            SessionTarget::Selected { sessions: vec![] },
-            vec![SessionRef {
-                pid,
-                backend_start_us: start,
-            }],
+            SessionTarget::Selected {
+                sessions: vec![one],
+            },
+            vec![one],
         ),
         &Confirmation::default(),
     )

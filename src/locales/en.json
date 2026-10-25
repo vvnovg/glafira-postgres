@@ -214,6 +214,8 @@
       "noLeader": "There is no running leader to switch over from",
       "leaderHealthy": "The leader is healthy: use switchover",
       "badCandidate": "{{member}} cannot become the leader: it is not a replica of this cluster",
+      "candidateNotReady": "{{member}} is not ready to become the leader",
+      "leaderChanged": "The leader changed: the preview showed {{expected}}, now it is {{current}}",
       "badSchedule": "The schedule time {{value}} is not valid",
       "pastSchedule": "The schedule time is in the past",
       "nothingScheduled": "Nothing is scheduled",
