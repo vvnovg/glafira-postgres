@@ -1131,41 +1131,65 @@ mod tests {
         );
     }
 
-    /// Ответ-перенаправление на адрес, который клиент не открывает (`ftp://`), — ошибка уже ПОСЛЕ приёма запроса
-    /// сервером: исход неизвестен, `send` не повторяет запрос на втором адресе. Неверный адрес в списке — ошибка
-    /// настройки: `send` останавливается, ничего не отправляя.
+    /// Перенаправление — ответ, а не повод идти по `Location`: действие не превращается в `GET` и не уходит на
+    /// адрес, которого никто не задавал. `send` отвечает отказом с кодом перенаправления и ничего не повторяет.
     #[tokio::test]
-    async fn send_stops_after_a_bad_redirect_and_on_a_bad_address() {
+    async fn send_reports_a_redirect_as_a_rejection_and_never_follows_it() {
         use crate::conn::profile::PatroniSettings;
         use crate::conn::testutil;
         use crate::topology::patroni::ReqwestHttp;
-        let redirecting = testutil::redirecting_http_server("ftp://x/");
-        let untouched = testutil::answering_http_server(200);
+        let target = testutil::answering_http_server(200);
         let settings = PatroniSettings {
-            urls: vec![redirecting.base.clone()],
+            urls: vec![target.base.clone()],
             username: None,
             tls: None,
             host_overrides: vec![],
         };
         let http = ReqwestHttp::new(&settings, None, None, None, None).unwrap();
-        let req = request(
+        let cancel = request(&PatroniAction::CancelSwitchover, &cluster());
+        let switchover = request(
             &PatroniAction::Switchover {
                 candidate: None,
                 scheduled_at: None,
             },
             &cluster(),
         );
-        let bases = [redirecting.base.clone(), untouched.base.clone()];
-        let e = send(&http, &req, &bases).await.unwrap_err();
-        assert_eq!(
-            (e.code, e.key.as_str()),
-            (ErrorCode::PatroniError, "errors.patroni.connectionLost"),
-            "{e:?}"
-        );
-        assert_eq!(redirecting.accepted(), 1);
+        for (status, req) in [(303u16, &cancel), (307, &switchover), (308, &cancel)] {
+            let redirecting =
+                testutil::redirecting_http_server(status, &format!("{}{}", target.base, req.path));
+            let bases = [redirecting.base.clone(), target.base.clone()];
+            let e = send(&http, req, &bases).await.unwrap_err();
+            assert_eq!(
+                (e.code, e.key.as_str()),
+                (ErrorCode::PatroniError, "errors.patroni.actionRejected"),
+                "{status}: {e:?}"
+            );
+            assert_eq!(e.params["status"], status.to_string());
+            assert_eq!(redirecting.accepted(), 1);
+        }
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        assert_eq!(untouched.accepted(), 0);
+        assert_eq!(
+            target.accepted(),
+            0,
+            "ни перенаправление, ни следующий адрес не тронуты"
+        );
+    }
 
+    /// Неверный адрес в списке — ошибка настройки: `send` останавливается, ничего не отправляя.
+    #[tokio::test]
+    async fn send_stops_on_a_bad_address() {
+        use crate::conn::profile::PatroniSettings;
+        use crate::conn::testutil;
+        use crate::topology::patroni::ReqwestHttp;
+        let untouched = testutil::answering_http_server(200);
+        let settings = PatroniSettings {
+            urls: vec![untouched.base.clone()],
+            username: None,
+            tls: None,
+            host_overrides: vec![],
+        };
+        let http = ReqwestHttp::new(&settings, None, None, None, None).unwrap();
+        let req = request(&PatroniAction::CancelSwitchover, &cluster());
         let bases = ["not a url".to_string(), untouched.base.clone()];
         let e = send(&http, &req, &bases).await.unwrap_err();
         assert_eq!(

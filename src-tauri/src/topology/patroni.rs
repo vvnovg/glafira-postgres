@@ -80,6 +80,10 @@ pub trait PatroniHttp: Send + Sync {
 
 pub struct ReqwestHttp {
     client: reqwest::Client,
+    /// Клиент изменяющих запросов (`send_json`): те же настройки, но без перенаправлений. Иначе посредник,
+    /// ответивший `3xx`, превратил бы `POST` / `DELETE` в `GET` (301–303) или отправил действие на адрес, которого
+    /// пользователь не задавал (307, 308), и ответ `2xx` выглядел бы как выполненное действие.
+    send_client: reqwest::Client,
     auth: Option<(String, String)>,
     /// Все адреса API в профиле — https. Тогда пароль не уходит по адресу слабее (`http://` участника, который
     /// прислал `/cluster`): это было бы понижение защиты для учётных данных.
@@ -107,6 +111,80 @@ fn http_setup(e: impl std::fmt::Display) -> AppError {
     .with_details(e.to_string())
 }
 
+/// Материалы TLS клиента Patroni: читаются один раз (файлы сертификатов) и годятся для обоих клиентов.
+struct TlsParts {
+    roots: Vec<reqwest::Certificate>,
+    accept_invalid_hostnames: bool,
+    identity: Option<reqwest::Identity>,
+}
+
+impl TlsParts {
+    fn read(
+        tls: Option<&crate::conn::profile::ApiTls>,
+        key_password: Option<&str>,
+    ) -> AppResult<Self> {
+        let Some(t) = tls else {
+            return Ok(Self {
+                roots: Vec::new(),
+                accept_invalid_hostnames: false,
+                identity: None,
+            });
+        };
+        // CA-файл заменяет системные корни (как для PostgreSQL). Без проверки имени reqwest/rustls
+        // принимает только явный набор корней, поэтому системные в этом случае подставляем сами.
+        let roots = if let Some(ca) = &t.ca_path {
+            let pem = tls::ca_pem_bundle(ca)?;
+            reqwest::Certificate::from_pem_bundle(&pem).map_err(http_setup)?
+        } else if !t.verify_hostname {
+            tls::system_roots_der()
+                .iter()
+                .filter_map(|der| reqwest::Certificate::from_der(der).ok())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let identity = match &t.client_cert {
+            Some(cc) => {
+                let pem = tls::identity_pem(cc, key_password)?;
+                Some(reqwest::Identity::from_pem(&pem).map_err(http_setup)?)
+            }
+            None => None,
+        };
+        Ok(Self {
+            roots,
+            accept_invalid_hostnames: !t.verify_hostname,
+            identity,
+        })
+    }
+}
+
+/// Клиент reqwest с сроками, туннелем и TLS профиля; `follow_redirects == false` — для изменяющих запросов.
+fn build_client(
+    proxy: Option<SocketAddr>,
+    tls: &TlsParts,
+    follow_redirects: bool,
+) -> AppResult<reqwest::Client> {
+    let mut b = reqwest::Client::builder()
+        .timeout(HTTP_TIMEOUT)
+        .connect_timeout(HTTP_CONNECT_TIMEOUT);
+    if !follow_redirects {
+        b = b.redirect(reqwest::redirect::Policy::none());
+    }
+    if let Some(p) = proxy {
+        b = b.proxy(reqwest::Proxy::all(format!("socks5h://{p}")).map_err(http_setup)?);
+    }
+    if !tls.roots.is_empty() {
+        b = b.tls_certs_only(tls.roots.clone());
+    }
+    if tls.accept_invalid_hostnames {
+        b = b.tls_danger_accept_invalid_hostnames(true);
+    }
+    if let Some(identity) = &tls.identity {
+        b = b.identity(identity.clone());
+    }
+    b.build().map_err(http_setup)
+}
+
 impl ReqwestHttp {
     /// Блокирующий вызов (файлы сертификатов). `password` — секрет `patroniPassword`; `proxy` — порт SOCKS5
     /// туннеля подключения (адреса API разрешает бастион, TLS проверяется по ним же); `ssh_target` — цель ssh этого
@@ -118,37 +196,7 @@ impl ReqwestHttp {
         proxy: Option<SocketAddr>,
         ssh_target: Option<String>,
     ) -> AppResult<Self> {
-        let mut b = reqwest::Client::builder()
-            .timeout(HTTP_TIMEOUT)
-            .connect_timeout(HTTP_CONNECT_TIMEOUT);
-        if let Some(p) = proxy {
-            b = b.proxy(reqwest::Proxy::all(format!("socks5h://{p}")).map_err(http_setup)?);
-        }
-        if let Some(t) = &settings.tls {
-            // CA-файл заменяет системные корни (как для PostgreSQL). Без проверки имени reqwest/rustls
-            // принимает только явный набор корней, поэтому системные в этом случае подставляем сами.
-            let roots = if let Some(ca) = &t.ca_path {
-                let pem = tls::ca_pem_bundle(ca)?;
-                reqwest::Certificate::from_pem_bundle(&pem).map_err(http_setup)?
-            } else if !t.verify_hostname {
-                tls::system_roots_der()
-                    .iter()
-                    .filter_map(|der| reqwest::Certificate::from_der(der).ok())
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            if !roots.is_empty() {
-                b = b.tls_certs_only(roots);
-            }
-            if !t.verify_hostname {
-                b = b.tls_danger_accept_invalid_hostnames(true);
-            }
-            if let Some(cc) = &t.client_cert {
-                let pem = tls::identity_pem(cc, key_password)?;
-                b = b.identity(reqwest::Identity::from_pem(&pem).map_err(http_setup)?);
-            }
-        }
+        let parts = TlsParts::read(settings.tls.as_ref(), key_password)?;
         let mut profile_urls = settings.urls.iter().chain(
             settings
                 .host_overrides
@@ -156,7 +204,8 @@ impl ReqwestHttp {
                 .filter_map(|o| o.api_url.as_ref()),
         );
         Ok(Self {
-            client: b.build().map_err(http_setup)?,
+            client: build_client(proxy, &parts, true)?,
+            send_client: build_client(proxy, &parts, false)?,
             auth: settings
                 .username
                 .clone()
@@ -286,14 +335,27 @@ fn connect_timed_out(url: &str, e: &reqwest::Error) -> AppError {
 }
 
 /// Связь оборвалась после отправки изменяющего запроса: он мог дойти и выполниться, повторять его нельзя.
+/// Адрес в параметрах и в тексте причин — без учётных данных из userinfo.
 fn connection_lost(url: &str, e: &reqwest::Error) -> AppError {
+    use crate::conn::profile::strip_url_credentials;
+    let mut details = chain(e);
+    // reqwest печатает в сообщении адрес запроса как есть (с userinfo) — вычищаем его и заданный нами вид.
+    for known in [Some(url), e.url().map(reqwest::Url::as_str)]
+        .into_iter()
+        .flatten()
+    {
+        let clean = strip_url_credentials(known);
+        if clean != known {
+            details = details.replace(known, &clean);
+        }
+    }
     app_err!(
         ErrorCode::PatroniError,
         "errors.patroni.connectionLost",
         "The connection to the Patroni API at {{url}} was lost after the request was sent: the outcome is unknown, check the overview",
-        url = url
+        url = strip_url_credentials(url)
     )
-    .with_details(chain(e))
+    .with_details(details)
 }
 
 fn bad_json(url: &str, e: impl std::fmt::Display) -> AppError {
@@ -395,7 +457,7 @@ impl PatroniHttp for ReqwestHttp {
                     ErrorCode::InvalidInput,
                     "errors.patroni.badUrl",
                     "The Patroni API address {{url}} is not a valid http(s) URL",
-                    url = url
+                    url = crate::conn::profile::strip_url_credentials(url)
                 ));
             }
             let m = match method {
@@ -403,7 +465,7 @@ impl PatroniHttp for ReqwestHttp {
                 HttpMethod::Patch => reqwest::Method::PATCH,
                 HttpMethod::Delete => reqwest::Method::DELETE,
             };
-            let mut req = self.client.request(m, url);
+            let mut req = self.send_client.request(m, url);
             if let Some(b) = body {
                 req = req.json(b);
             }
@@ -2070,26 +2132,75 @@ mod tests {
         );
     }
 
-    /// Перенаправление на адрес, который клиент не открывает: reqwest сообщает об этом ошибкой `Builder`, но уже
-    /// после того, как сервер принял запрос и ответил, — это не «запрос не собрался», исход неизвестен.
+    /// Изменяющий запрос не следует перенаправлениям: `3xx` — это ответ как есть. Иначе `301`–`303` превратили бы
+    /// `POST` / `PATCH` / `DELETE` в `GET`, а `307` / `308` отправили бы действие на адрес, которого никто не
+    /// задавал. Чтение, наоборот, перенаправления выполняет, как раньше.
     #[tokio::test]
-    async fn send_json_after_a_redirect_to_a_bad_scheme_is_connection_lost() {
-        let server = testutil::redirecting_http_server("ftp://x/");
+    async fn send_json_does_not_follow_redirects_but_reads_do() {
+        for status in [301u16, 302, 303, 307, 308] {
+            let target = testutil::answering_http_server(200);
+            let server =
+                testutil::redirecting_http_server(status, &format!("{}/switchover", target.base));
+            let http =
+                ReqwestHttp::new(&settings(&[&server.base]), None, None, None, None).unwrap();
+            for method in [HttpMethod::Post, HttpMethod::Patch, HttpMethod::Delete] {
+                let reply = http
+                    .send_json(method, &format!("{}/switchover", server.base), None)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    (reply.status, reply.body.as_str()),
+                    (status, ""),
+                    "{method:?}"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            assert_eq!(
+                target.accepted(),
+                0,
+                "{status}: цель перенаправления не тронута"
+            );
+            assert_eq!(server.accepted(), 3);
+            // Чтение идёт на цель перенаправления (тело `Done` не JSON — ошибка разбора, но запрос ушёл).
+            let e = http
+                .get_json(&format!("{}/cluster", server.base))
+                .await
+                .unwrap_err();
+            assert_eq!(e.key, "errors.patroni.badJson", "{status}: {e:?}");
+            assert_eq!(
+                target.accepted(),
+                1,
+                "{status}: чтение следует перенаправлению"
+            );
+        }
+    }
+
+    /// Учётные данные из адреса не попадают ни в параметры, ни в подробности ошибок изменяющего запроса.
+    #[tokio::test]
+    async fn send_json_errors_do_not_carry_credentials_from_the_address() {
+        let server = testutil::dropping_http_server(false);
         let http = ReqwestHttp::new(&settings(&[&server.base]), None, None, None, None).unwrap();
         let e = http
             .send_json(
                 HttpMethod::Post,
-                &format!("{}/switchover", server.base),
+                &format!("http://user:secret@127.0.0.1:{}/switchover", server.port),
                 None,
             )
             .await
             .unwrap_err();
+        assert_eq!(e.key, "errors.patroni.connectionLost", "{e:?}");
         assert_eq!(
-            (e.code, e.key.as_str()),
-            (ErrorCode::PatroniError, "errors.patroni.connectionLost"),
-            "{e:?}"
+            e.params["url"],
+            format!("http://127.0.0.1:{}/switchover", server.port)
         );
-        assert_eq!(server.accepted(), 1);
+        assert!(!format!("{e:?}").contains("secret"), "{e:?}");
+        let bad = http
+            .send_json(HttpMethod::Post, "ftp://user:secret@host/switchover", None)
+            .await
+            .unwrap_err();
+        assert_eq!(bad.key, "errors.patroni.badUrl", "{bad:?}");
+        assert_eq!(bad.params["url"], "ftp://host/switchover");
+        assert!(!format!("{bad:?}").contains("secret"), "{bad:?}");
     }
 
     /// Неверный адрес (не http(s), без схемы, без узла) — ошибка настройки: сеть не трогается.

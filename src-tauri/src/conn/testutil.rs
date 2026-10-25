@@ -196,7 +196,7 @@ fn read_http_request(sock: &mut TcpStream) {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum HttpBehavior {
     /// Закрыть соединение без ответа.
     Drop,
@@ -204,8 +204,8 @@ enum HttpBehavior {
     DropMidAnswer,
     /// Ответить кодом.
     Answer(u16),
-    /// Ответить перенаправлением `302` на адрес.
-    Redirect(&'static str),
+    /// Ответить перенаправлением `status` на адрес.
+    Redirect(u16, String),
 }
 
 fn http_stub(behavior: HttpBehavior) -> HttpStub {
@@ -215,6 +215,7 @@ fn http_stub(behavior: HttpBehavior) -> HttpStub {
     std::thread::spawn(move || {
         while let Ok((mut sock, _)) = listener.accept() {
             count.fetch_add(1, Ordering::SeqCst);
+            let behavior = behavior.clone();
             std::thread::spawn(move || {
                 read_http_request(&mut sock);
                 let reply: Option<Vec<u8>> = match behavior {
@@ -223,9 +224,9 @@ fn http_stub(behavior: HttpBehavior) -> HttpStub {
                         b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\npartial"
                             .to_vec(),
                     ),
-                    HttpBehavior::Redirect(location) => Some(
+                    HttpBehavior::Redirect(status, location) => Some(
                         format!(
-                            "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            "HTTP/1.1 {status} Redirect\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                         )
                         .into_bytes(),
                     ),
@@ -259,9 +260,9 @@ pub fn dropping_http_server(partial_answer: bool) -> HttpStub {
     })
 }
 
-/// Читает запрос целиком и отвечает перенаправлением `302` на `location`.
-pub fn redirecting_http_server(location: &'static str) -> HttpStub {
-    http_stub(HttpBehavior::Redirect(location))
+/// Читает запрос целиком и отвечает перенаправлением `status` на `location`.
+pub fn redirecting_http_server(status: u16, location: &str) -> HttpStub {
+    http_stub(HttpBehavior::Redirect(status, location.to_string()))
 }
 
 /// Читает запрос целиком и отвечает `status` с телом `Done`.
