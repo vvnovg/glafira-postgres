@@ -194,7 +194,10 @@
       "batchTimeout": "The batch did not finish within {{secs}} s",
       "badThreshold": "The age threshold must be a non-negative number of seconds",
       "noSessions": "No sessions to act on",
-      "badTarget": "The sessions do not match the action target"
+      "badTarget": "The sessions do not match the action target",
+      "slotNotFound": "Slot {{slot}} is not on node {{member}}",
+      "slotActiveOrGone": "The slot became active or is gone",
+      "replicationRequired": "Dropping a slot needs the REPLICATION attribute or superuser"
     }
   },
   "connections": {
@@ -550,6 +553,12 @@
       "ok": "Has pg_signal_backend",
       "missing": "No pg_signal_backend role",
       "affects": "Queries cannot be cancelled and sessions cannot be terminated"
+    },
+    "replicationAttr": {
+      "title": "Dropping replication slots",
+      "ok": "The role has the REPLICATION attribute",
+      "warn": "No REPLICATION attribute",
+      "affects": "Replication slots cannot be dropped. The attribute also lets the role create logical slots and read the changes of every table through them, and with a permitting replication line in pg_hba.conf, copy the cluster: give it to a separate role for actions, or not at all"
     },
     "maintainRole": {
       "title": "Table maintenance",

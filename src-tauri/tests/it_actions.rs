@@ -9,6 +9,7 @@ use glafira_pg_lib::actions::sessions::{
     self as sa, DenyReason, SessionActionExecute, SessionActionRequest, SessionOutcome, SessionRef,
     SessionTarget, SignalKind,
 };
+use glafira_pg_lib::actions::slots::{self as slots_action, SlotDropRequest};
 use glafira_pg_lib::conn::profile::Environment;
 use glafira_pg_lib::diag::sql::BACKEND_START_US;
 
@@ -784,5 +785,278 @@ async fn read_only_and_prod_are_guarded_in_rust() {
         glafira_pg_lib::error::ErrorCode::ConfirmationRequired
     );
     // Отказ guard ничего не пишет в журнал.
+    assert!(st.actions.list(Some("it"), 10).is_empty());
+}
+
+/// Первый узел топологии открытого подключения `it`.
+fn first_member(st: &glafira_pg_lib::state::AppState) -> String {
+    st.runtimes.view("it").topology.unwrap().members[0]
+        .name
+        .clone()
+}
+
+fn confirm_slot(name: &str) -> Confirmation {
+    Confirmation {
+        confirm: None,
+        typed_name: Some(name.into()),
+    }
+}
+
+/// Мёртвый физический слот: без `REPLICATION` удалить его нельзя (отказ правом, слот на месте), суперпользователь
+/// удаляет после ввода имени и оставляет строку журнала; активный слот реплики не удаляется и журнал не пишет.
+#[tokio::test]
+async fn dead_slot_is_dropped_active_slot_is_not() {
+    let Some(addr) = common::env("GPG_IT_PRIMARY") else {
+        return;
+    };
+    let su = common::superuser(&addr, "postgres").await;
+    su.batch_execute(
+        "SELECT pg_drop_replication_slot('it_dead_slot') FROM pg_replication_slots WHERE slot_name = 'it_dead_slot'; \
+         SELECT pg_create_physical_replication_slot('it_dead_slot', true)",
+    )
+    .await
+    .unwrap();
+    let a = addr.clone();
+    let _cleanup = common::restore_on_drop(move || {
+        common::run_sql_blocking(
+            &a,
+            "postgres",
+            "SELECT pg_drop_replication_slot('it_dead_slot') FROM pg_replication_slots WHERE slot_name = 'it_dead_slot'",
+        );
+    });
+    // glafira_diag без REPLICATION: удаление отказано правом, слот на месте, отказ записан в журнал.
+    let (d1, diag) = common::open_server(&addr).await;
+    let member = first_member(&diag);
+    let req = |slot: &str| SlotDropRequest {
+        member: member.clone(),
+        slot: slot.into(),
+    };
+    let p = slots_action::preview(&diag, "it", &req("it_dead_slot"))
+        .await
+        .unwrap();
+    assert_eq!(p.member, member);
+    assert!(!p.slot.active && p.slot.slot_type == "physical");
+    let e = slots_action::drop(
+        &diag,
+        "it",
+        &req("it_dead_slot"),
+        &confirm_slot("it_dead_slot"),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.key, "errors.actions.replicationRequired");
+    assert_eq!(e.code, glafira_pg_lib::error::ErrorCode::NotAuthorized);
+    assert!(
+        su.query_opt(
+            "SELECT 1 FROM pg_replication_slots WHERE slot_name = 'it_dead_slot'",
+            &[]
+        )
+        .await
+        .unwrap()
+        .is_some(),
+        "слот не тронут"
+    );
+    let lines = journal_lines(d1.path());
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(
+        (
+            lines[0]["action"].as_str(),
+            lines[0]["outcome"].as_str(),
+            lines[0]["code"].as_str(),
+            lines[0]["slot"]["name"].as_str()
+        ),
+        (
+            Some("dropSlot"),
+            Some("error"),
+            Some("NOT_AUTHORIZED"),
+            Some("it_dead_slot")
+        )
+    );
+    // Суперпользователь: неверное имя — подтверждение; верное — слот удалён, строка журнала.
+    let (d2, st) = common::open_server_as(
+        &addr,
+        "postgres",
+        common::SUPERUSER,
+        common::SUPERUSER_PASSWORD,
+    )
+    .await;
+    let e = slots_action::drop(&st, "it", &req("it_dead_slot"), &confirm_slot("it_dead"))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        e.code,
+        glafira_pg_lib::error::ErrorCode::ConfirmationRequired
+    );
+    assert!(
+        su.query_opt(
+            "SELECT 1 FROM pg_replication_slots WHERE slot_name = 'it_dead_slot'",
+            &[]
+        )
+        .await
+        .unwrap()
+        .is_some(),
+        "неверное имя слот не удаляет"
+    );
+    let r = slots_action::drop(
+        &st,
+        "it",
+        &req("it_dead_slot"),
+        &confirm_slot("it_dead_slot"),
+    )
+    .await
+    .unwrap();
+    assert!(r.journal_written);
+    assert!(
+        su.query_opt(
+            "SELECT 1 FROM pg_replication_slots WHERE slot_name = 'it_dead_slot'",
+            &[]
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    // Повторное удаление: слота уже нет на узле — ошибка предпросмотра, журнал не пишется.
+    let e = slots_action::drop(
+        &st,
+        "it",
+        &req("it_dead_slot"),
+        &confirm_slot("it_dead_slot"),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.key, "errors.actions.slotNotFound");
+    // Активный слот реплики не удаляется.
+    let e = slots_action::drop(&st, "it", &req("replica1"), &confirm_slot("replica1"))
+        .await
+        .unwrap_err();
+    assert_eq!(e.key, "errors.actions.slotActiveOrGone");
+    assert!(
+        su.query_one(
+            "SELECT active FROM pg_replication_slots WHERE slot_name = 'replica1'",
+            &[]
+        )
+        .await
+        .unwrap()
+        .get::<_, bool>(0),
+        "слот реплики жив"
+    );
+    assert_eq!(
+        st.actions.list(Some("it"), 10).len(),
+        1,
+        "отказ «активен» и «нет слота» журнал не пишут"
+    );
+    let lines = journal_lines(d2.path());
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(
+        (
+            lines[0]["action"].as_str(),
+            lines[0]["outcome"].as_str(),
+            lines[0]["slot"]["name"].as_str(),
+            lines[0]["slot"]["slotType"].as_str(),
+            lines[0]["prodConfirmed"].as_bool()
+        ),
+        (
+            Some("dropSlot"),
+            Some("ok"),
+            Some("it_dead_slot"),
+            Some("physical"),
+            Some(false)
+        )
+    );
+    assert!(lines[0]["code"].is_null(), "{}", lines[0]);
+}
+
+/// Логический слот удаляется из соединения с его БД: подключение смотрит в `postgres`, слот — в `orders`.
+#[tokio::test]
+async fn logical_slot_is_dropped_through_its_own_database() {
+    let Some(addr) = common::lab_addr() else {
+        return;
+    };
+    let orders = common::superuser(&addr, "orders").await;
+    orders
+        .batch_execute(
+            "SELECT pg_drop_replication_slot('it_logical_slot') FROM pg_replication_slots WHERE slot_name = 'it_logical_slot'; \
+             SELECT pg_create_logical_replication_slot('it_logical_slot', 'pgoutput')",
+        )
+        .await
+        .unwrap();
+    let a = addr.clone();
+    let _cleanup = common::restore_on_drop(move || {
+        common::run_sql_blocking(
+            &a,
+            "orders",
+            "SELECT pg_drop_replication_slot('it_logical_slot') FROM pg_replication_slots WHERE slot_name = 'it_logical_slot'",
+        );
+    });
+    let (dir, st) = common::open_server_as(
+        &addr,
+        "postgres",
+        common::SUPERUSER,
+        common::SUPERUSER_PASSWORD,
+    )
+    .await;
+    let req = SlotDropRequest {
+        member: first_member(&st),
+        slot: "it_logical_slot".into(),
+    };
+    let p = slots_action::preview(&st, "it", &req).await.unwrap();
+    assert_eq!(
+        (p.slot.slot_type.as_str(), p.slot.database.as_deref()),
+        ("logical", Some("orders"))
+    );
+    let r = slots_action::drop(&st, "it", &req, &confirm_slot("it_logical_slot"))
+        .await
+        .unwrap();
+    assert!(r.journal_written);
+    assert!(
+        orders
+            .query_opt(
+                "SELECT 1 FROM pg_replication_slots WHERE slot_name = 'it_logical_slot'",
+                &[]
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let lines = journal_lines(dir.path());
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0]["slot"]["database"], "orders");
+    assert_eq!(lines[0]["slot"]["plugin"], "pgoutput");
+}
+
+/// read-only и prod проверяются в Rust до обращения к серверу; отказ ничего не пишет в журнал.
+#[tokio::test]
+async fn slot_drop_is_guarded_in_rust() {
+    let Some(addr) = common::env("GPG_IT_SINGLE") else {
+        return;
+    };
+    let (_dir, st) = common::open_server(&addr).await;
+    let req = SlotDropRequest {
+        member: first_member(&st),
+        slot: "no_such_slot".into(),
+    };
+    let mut p = st.profile("it").unwrap();
+    p.read_only = true;
+    st.connections.upsert(p.clone()).unwrap();
+    let e = slots_action::drop(&st, "it", &req, &confirm_slot("no_such_slot"))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, glafira_pg_lib::error::ErrorCode::ReadOnly);
+    p.read_only = false;
+    p.environment = Environment::Prod;
+    st.connections.upsert(p.clone()).unwrap();
+    let e = slots_action::drop(&st, "it", &req, &confirm_slot("no_such_slot"))
+        .await
+        .unwrap_err();
+    assert_eq!(e.key, "errors.guard.prodConfirm");
+    // Имя подключения введено, имя слота — нет: до сервера дело не доходит (слота «no_such_slot» там и нет).
+    let named = Confirmation {
+        confirm: Some(p.name.clone()),
+        typed_name: None,
+    };
+    let e = slots_action::drop(&st, "it", &req, &named)
+        .await
+        .unwrap_err();
+    assert_eq!(e.key, "errors.guard.typeToConfirm");
     assert!(st.actions.list(Some("it"), 10).is_empty());
 }

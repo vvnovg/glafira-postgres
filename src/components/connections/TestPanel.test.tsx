@@ -150,6 +150,7 @@ describe("TestPanel", () => {
     const variants: Record<string, string[]> = {
       monitorRole: ["ok", "missing"],
       signalRole: ["ok", "missing"],
+      replicationAttr: ["ok", "warn"],
       maintainRole: ["ok", "grant", "ownerOnly"],
       pgssPreloaded: ["ok", "missing", "warn", "unknown"],
       pgssInstalled: ["ok", "missing"],

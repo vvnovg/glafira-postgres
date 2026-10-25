@@ -47,7 +47,8 @@ async fn ensure_plain_role(addr: &str) {
              CREATE ROLE {PLAIN_USER} LOGIN PASSWORD '{PLAIN_PASSWORD}'; \
            END IF; \
          END $$; \
-         REVOKE pg_monitor, pg_signal_backend FROM {PLAIN_USER};"
+         REVOKE pg_monitor, pg_signal_backend FROM {PLAIN_USER}; \
+         ALTER ROLE {PLAIN_USER} NOREPLICATION;"
     ))
     .await
     .unwrap();
@@ -70,6 +71,18 @@ async fn single_server_without_pg_stat_statements() {
     assert!(report.ok);
     assert_eq!(status_of(&report, "monitorRole"), Status::Ok);
     assert_eq!(status_of(&report, "signalRole"), Status::Ok);
+    // glafira_diag без атрибута REPLICATION: удалять слоты он не сможет — предупреждение с готовым исправлением.
+    assert_eq!(status_of(&report, "replicationAttr"), Status::Warn);
+    assert_eq!(
+        report
+            .readiness
+            .iter()
+            .find(|i| i.id == "replicationAttr")
+            .unwrap()
+            .fix
+            .as_deref(),
+        Some("ALTER ROLE \"glafira_diag\" REPLICATION;")
+    );
     assert_eq!(status_of(&report, "pgssPreloaded"), Status::Missing);
     assert_eq!(status_of(&report, "pgssInstalled"), Status::Missing);
     let ev = events.lock().unwrap();
@@ -123,10 +136,60 @@ async fn role_without_pg_monitor_gets_a_checklist() {
         item("signalRole").fix.as_deref(),
         Some("GRANT pg_signal_backend TO \"glafira_plain\";")
     );
+    assert_eq!(status_of(&report, "replicationAttr"), Status::Warn);
+    assert_eq!(
+        item("replicationAttr").fix.as_deref(),
+        Some("ALTER ROLE \"glafira_plain\" REPLICATION;")
+    );
     // Значение shared_preload_libraries роли не видно: «неизвестно», а не ошибка.
     assert_eq!(status_of(&report, "pgssPreloaded"), Status::Warn);
     assert_eq!(item("pgssPreloaded").params["reason"], "unknown");
     assert_eq!(status_of(&report, "pgssInstalled"), Status::Missing);
+}
+
+/// Чек-лист под произвольной ролью стенда (id профиля `rp`), пароль — в памяти.
+async fn checklist_as(
+    addr: &str,
+    user: &str,
+    password: &str,
+) -> glafira_pg_lib::readiness::check::TestReport {
+    let mut profile = common::server_profile("rp", addr);
+    profile.pg.username = user.into();
+    let secrets = MemoryStore::default();
+    secrets
+        .set(&secret_key("rp", PG_PASSWORD), password)
+        .unwrap();
+    let report = run(profile, Arc::new(secrets), no_tunnels(), &|_| {})
+        .await
+        .unwrap();
+    assert!(report.ok);
+    report
+}
+
+/// Суперпользователю отдельный атрибут не нужен; обычная роль с атрибутом `REPLICATION` — тоже готова.
+#[tokio::test]
+async fn replication_attribute_item_follows_the_role() {
+    let Some(addr) = common::env("GPG_IT_SINGLE") else {
+        return;
+    };
+    let report = checklist_as(&addr, common::SUPERUSER, common::SUPERUSER_PASSWORD).await;
+    assert_eq!(status_of(&report, "replicationAttr"), Status::Ok);
+    ensure_plain_role(&addr).await;
+    let a = addr.clone();
+    let _restore = common::restore_on_drop(move || {
+        common::run_sql_blocking(
+            &a,
+            "postgres",
+            &format!("ALTER ROLE {PLAIN_USER} NOREPLICATION"),
+        );
+    });
+    common::run_sql_blocking(
+        &addr,
+        "postgres",
+        &format!("ALTER ROLE {PLAIN_USER} REPLICATION"),
+    );
+    let report = checklist_as(&addr, PLAIN_USER, PLAIN_PASSWORD).await;
+    assert_eq!(status_of(&report, "replicationAttr"), Status::Ok);
 }
 
 #[tokio::test]

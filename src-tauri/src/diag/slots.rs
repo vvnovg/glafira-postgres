@@ -98,7 +98,7 @@ pub fn mark_patroni(d: &mut SlotsData, member_names: &[String], permanent: &[Str
 
 /// Отметки по результату чтения `/config`: слоты участников узнаются по топологии и без него, постоянные — только по
 /// нему. Не прочитался — отметки лишь у слотов участников и причина для `unavailable`.
-fn mark_by_config(
+pub(crate) fn mark_by_config(
     d: &mut SlotsData,
     id: &str,
     members: &[String],

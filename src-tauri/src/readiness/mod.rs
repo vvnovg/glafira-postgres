@@ -52,14 +52,14 @@ pub async fn collect_facts(
     let pg = |e: tokio_postgres::Error| from_pg(&e);
     let r = c
         .query_one(
-            "SELECT current_setting('server_version_num')::int, current_user::text, r.rolsuper \
+            "SELECT current_setting('server_version_num')::int, current_user::text, r.rolsuper, r.rolreplication \
              FROM pg_roles r WHERE r.rolname = current_user",
             &[],
         )
         .await
         .map_err(pg)?;
-    let (server_version_num, user, is_superuser): (i32, String, bool) =
-        (r.get(0), r.get(1), r.get(2));
+    let (server_version_num, user, is_superuser, has_replication): (i32, String, bool, bool) =
+        (r.get(0), r.get(1), r.get(2), r.get(3));
     let member_of = c
         .query(
             "SELECT b.rolname::text FROM pg_roles b \
@@ -124,6 +124,7 @@ pub async fn collect_facts(
         user,
         database: database.to_string(),
         is_superuser,
+        has_replication,
         member_of,
         preload_by_member,
         pgss_installed,

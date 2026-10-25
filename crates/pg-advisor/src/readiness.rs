@@ -29,6 +29,9 @@ pub struct ReadinessFacts {
     pub user: String,
     pub database: String,
     pub is_superuser: bool,
+    /// Атрибут `REPLICATION` (`pg_roles.rolreplication`): удаление слотов (P2b).
+    #[serde(default)]
+    pub has_replication: bool,
     /// Встроенные роли, в которые пользователь входит (транзитивно).
     pub member_of: Vec<String>,
     /// Участник → есть ли `pg_stat_statements` в `shared_preload_libraries` (только доступные).
@@ -102,6 +105,18 @@ pub fn evaluate(f: &ReadinessFacts) -> Vec<ReadinessItem> {
             Status::Missing,
             &[],
             grant("pg_signal_backend"),
+        )
+    });
+    // Атрибут даёт больше, чем удаление слотов (логические слоты читают изменения всех таблиц), поэтому пункт —
+    // предупреждение, а не «нет обязательного»; docs/admin.md советует отдельную роль для действий.
+    out.push(if f.is_superuser || f.has_replication {
+        item("replicationAttr", Status::Ok, &[], None)
+    } else {
+        item(
+            "replicationAttr",
+            Status::Warn,
+            &[],
+            Some(format!("ALTER ROLE {user} REPLICATION;")),
         )
     });
     out.push(
@@ -238,6 +253,7 @@ mod tests {
             user: "glafira_diag".into(),
             database: "postgres".into(),
             is_superuser: false,
+            has_replication: true,
             member_of: vec![
                 "pg_monitor".into(),
                 "pg_signal_backend".into(),
@@ -277,12 +293,13 @@ mod tests {
     #[test]
     fn healthy_setup_is_ok() {
         let items = evaluate(&facts());
-        let ids: Vec<&str> = items.iter().map(|i| i.id).take(8).collect();
+        let ids: Vec<&str> = items.iter().map(|i| i.id).take(9).collect();
         assert_eq!(
             ids,
             [
                 "monitorRole",
                 "signalRole",
+                "replicationAttr",
                 "maintainRole",
                 "pgssPreloaded",
                 "pgssInstalled",
@@ -292,10 +309,10 @@ mod tests {
             ]
         );
         assert!(
-            items[..8].iter().all(|i| i.status == Status::Ok),
+            items[..9].iter().all(|i| i.status == Status::Ok),
             "{items:?}"
         );
-        assert_eq!(items.len(), 8 + OPTIONAL_EXTENSIONS.len());
+        assert_eq!(items.len(), 9 + OPTIONAL_EXTENSIONS.len());
         assert_eq!(ext(&items, "hypopg").status, Status::Ok);
         assert_eq!(ext(&items, "hypopg").params["version"], "1.4.1");
         let pst = ext(&items, "pgstattuple");
@@ -358,7 +375,12 @@ mod tests {
         f.member_of.clear();
         f.is_superuser = true;
         let items = evaluate(&f);
-        for id in ["monitorRole", "signalRole", "maintainRole"] {
+        for id in [
+            "monitorRole",
+            "signalRole",
+            "replicationAttr",
+            "maintainRole",
+        ] {
             assert_eq!(get(&items, id).status, Status::Ok, "{id}");
         }
     }
@@ -419,6 +441,32 @@ mod tests {
         let q = get(&items, "trackActivityQuerySize");
         assert_eq!(q.status, Status::Warn);
         assert_eq!(q.params["value"], "1024");
+    }
+
+    #[test]
+    fn replication_attribute_is_a_warning_with_its_fix() {
+        let mut f = ReadinessFacts {
+            user: "glafira_diag".into(),
+            server_version_num: 170000,
+            ..Default::default()
+        };
+        let item = |f: &ReadinessFacts| {
+            evaluate(f)
+                .into_iter()
+                .find(|i| i.id == "replicationAttr")
+                .unwrap()
+        };
+        let i = item(&f);
+        assert_eq!(i.status, Status::Warn);
+        assert_eq!(
+            i.fix.as_deref(),
+            Some("ALTER ROLE \"glafira_diag\" REPLICATION;")
+        );
+        f.has_replication = true;
+        assert_eq!(item(&f).status, Status::Ok);
+        f.has_replication = false;
+        f.is_superuser = true;
+        assert_eq!(item(&f).status, Status::Ok);
     }
 
     #[test]

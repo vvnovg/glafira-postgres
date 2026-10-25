@@ -38,3 +38,24 @@ pub async fn execute_session_action(
 ) -> AppResult<crate::actions::sessions::SessionActionResult> {
     crate::actions::sessions::execute(&state, &id, &request, &confirmation).await
 }
+
+/// Предпросмотр удаления слота: свежие данные слота узла с отметкой Patroni (ничего не меняет).
+#[tauri::command]
+pub async fn preview_drop_slot(
+    state: State<'_, AppState>,
+    id: String,
+    request: crate::actions::slots::SlotDropRequest,
+) -> AppResult<crate::actions::slots::SlotDropPreview> {
+    crate::actions::slots::preview(&state, &id, &request).await
+}
+
+/// Удаление неактивного слота; защита read-only и prod и ввод имени слота — в Rust.
+#[tauri::command]
+pub async fn drop_slot(
+    state: State<'_, AppState>,
+    id: String,
+    request: crate::actions::slots::SlotDropRequest,
+    confirmation: crate::actions::Confirmation,
+) -> AppResult<crate::actions::slots::ActionResult> {
+    crate::actions::slots::drop(&state, &id, &request, &confirmation).await
+}
