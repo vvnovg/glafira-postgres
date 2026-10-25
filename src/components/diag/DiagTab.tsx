@@ -156,7 +156,9 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
           windowS: tool === "waits" ? windowS : null,
           onWindow: setWindowS,
           onRefresh: () => void q.refetch(),
-          observedAtMs: report?.observedAtMs ?? null,
+          // Момент получения отчёта приложением (часы приложения): время сервера в отчёте у разных инструментов — то
+          // `now()` узла, то часы приложения, и шапка вкладок разнилась бы при расхождении часов.
+          updatedAtMs: q.dataUpdatedAt > 0 ? q.dataUpdatedAt : null,
           stale: q.isError && report !== undefined,
         }}
       />

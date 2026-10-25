@@ -56,15 +56,12 @@ describe("HorizonView", () => {
       />,
     );
     const rows = screen.getAllByRole("row").slice(1);
-    expect(rows[0]).toHaveTextContent("pg_2");
-    expect(rows[0]).toHaveTextContent("physical");
-    expect(rows[0]).toHaveTextContent("активен");
-    expect(rows[0]).toHaveTextContent("pg-2");
-    expect(rows[0]).toHaveTextContent("10.0.0.2");
+    // Строки свойств сверяются целиком: «активен» — часть «неактивен», подстрока не отличила бы слот от неактивного.
+    expect(within(rows[0]).getByText("pg_2")).toBeInTheDocument();
+    expect(within(rows[0]).getByText("physical · активен · pg-2 · 10.0.0.2")).toBeInTheDocument();
     expect(within(rows[0]).getByRole("button", { name: "Открыть горизонт на pg-2" })).toBeInTheDocument();
-    expect(rows[1]).toHaveTextContent("forgotten");
-    expect(rows[1]).toHaveTextContent("logical");
-    expect(rows[1]).toHaveTextContent("неактивен");
+    expect(within(rows[1]).getByText("forgotten")).toBeInTheDocument();
+    expect(within(rows[1]).getByText("logical · неактивен")).toBeInTheDocument();
     expect(within(rows[1]).queryByRole("button")).not.toBeInTheDocument();
   });
 

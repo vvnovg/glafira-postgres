@@ -1,7 +1,7 @@
 import { screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import type { SlotsData } from "../../api/types";
-import { formatTimestamp } from "../../lib/format";
+import { formatCount, formatTimestamp } from "../../lib/format";
 import { diagReport, slot, subscription } from "../../test/fixtures";
 import { renderWithClient } from "../../test/render";
 import { SlotsView } from "./SlotsView";
@@ -36,7 +36,16 @@ describe("SlotsView", () => {
       />,
     );
     const row = screen.getByRole("row", { name: /lab_sub/ });
-    for (const text of ["logical", "pgoutput", "lab", "активен", "4242", "1 500", "2 500"]) expect(row).toHaveTextContent(new RegExp(text.replace(" ", "\\s")));
+    // Ячейки сверяются целиком: «lab» — часть «lab_sub», «активен» — часть «неактивен».
+    expect(
+      within(row)
+        .getAllByRole("cell")
+        .slice(0, 2)
+        .map((c) => c.textContent),
+    ).toEqual(["logical · pgoutput", "lab"]);
+    expect(within(row).getByRole("cell", { name: "активен, pid 4242" })).toBeInTheDocument();
+    expect(within(row).getByRole("cell", { name: formatCount(1500) })).toBeInTheDocument();
+    expect(within(row).getByRole("cell", { name: formatCount(2500) })).toBeInTheDocument();
   });
 
   it("неактивный слот PostgreSQL 17+: с какого момента; причина инвалидации; потерянный WAL выделен словом", () => {

@@ -1,5 +1,5 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppError, SamplerEvent } from "../api/types";
 
 vi.mock("../api/client", async (importOriginal) => {
@@ -8,7 +8,7 @@ vi.mock("../api/client", async (importOriginal) => {
 });
 
 import { api } from "../api/client";
-import { useSampler } from "./useSampler";
+import { RESUBSCRIBE_DELAY_MS, useSampler } from "./useSampler";
 
 const authFailed: AppError = { code: "AUTH_FAILED", message: "password authentication failed", retryable: false };
 
@@ -121,5 +121,125 @@ describe("useSampler", () => {
     second.unmount();
     unmount();
     await waitFor(() => expect(api.stopSession).toHaveBeenCalledWith("s-2"));
+  });
+});
+
+describe("useSampler: повторная подписка после stopped", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.useFakeTimers();
+  });
+  afterEach(() => vi.useRealTimers());
+
+  /** Выполняет отложенное: ответы промисов и таймеры, пока не пройдёт `ms` виртуальных миллисекунд. */
+  const advance = (ms: number) =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+
+  /** Каналы подписок по порядку; id сессии — `s-<номер>`. */
+  function channels() {
+    const emits: ((e: SamplerEvent) => void)[] = [];
+    vi.mocked(api.startSampler).mockImplementation(async (_id, _m, onEvent) => {
+      emits.push(onEvent);
+      return `s-${emits.length}`;
+    });
+    vi.mocked(api.stopSession).mockResolvedValue(true);
+    return emits;
+  }
+
+  it("stopped не из-за входа: через паузу подписка заново, старая отписана, активна ровно одна", async () => {
+    const emits = channels();
+    const { result, unmount } = renderHook(() => useSampler("c", "pg-1", true));
+    await advance(0);
+    expect(emits).toHaveLength(1);
+    act(() => emits[0]({ kind: "tick", atMs: 1, active: 2, waiting: 0 }));
+    act(() => emits[0]({ kind: "stopped" }));
+    expect(result.current.live).toBeNull();
+
+    // Не сразу: пауза не даёт зациклиться, если узел раз за разом останавливает сэмплер.
+    await advance(RESUBSCRIBE_DELAY_MS - 1);
+    expect(api.startSampler).toHaveBeenCalledTimes(1);
+    await advance(1);
+    expect(api.startSampler).toHaveBeenCalledTimes(2);
+    expect(api.startSampler).toHaveBeenLastCalledWith("c", "pg-1", expect.any(Function));
+    expect(api.stopSession).toHaveBeenCalledWith("s-1");
+
+    // Канал прежней подписки молчит, живой — новый.
+    act(() => emits[0]({ kind: "tick", atMs: 2, active: 9, waiting: 9 }));
+    expect(result.current.live).toBeNull();
+    act(() => emits[1]({ kind: "tick", atMs: 3, active: 1, waiting: 0 }));
+    expect(result.current.live).toEqual({ atMs: 3, active: 1, waiting: 0 });
+
+    await advance(10 * RESUBSCRIBE_DELAY_MS);
+    expect(api.startSampler).toHaveBeenCalledTimes(2);
+    unmount();
+    await advance(0);
+    expect(api.stopSession).toHaveBeenLastCalledWith("s-2");
+    expect(api.stopSession).toHaveBeenCalledTimes(2);
+  });
+
+  it("stopped снова и снова: подписки не чаще одной за паузу", async () => {
+    const emits = channels();
+    renderHook(() => useSampler("c", "pg-1", true));
+    await advance(0);
+    for (let i = 0; i < 3; i++) {
+      act(() => emits[i]({ kind: "stopped" }));
+      await advance(RESUBSCRIBE_DELAY_MS);
+    }
+    expect(api.startSampler).toHaveBeenCalledTimes(4);
+  });
+
+  it("stopped после отказа во входе (AUTH_FAILED): подписки заново нет, ошибка остаётся", async () => {
+    const emits = channels();
+    const { result } = renderHook(() => useSampler("c", "pg-1", true));
+    await advance(0);
+    act(() => emits[0]({ kind: "error", error: authFailed }));
+    act(() => emits[0]({ kind: "stopped" }));
+    await advance(10 * RESUBSCRIBE_DELAY_MS);
+    expect(api.startSampler).toHaveBeenCalledTimes(1);
+    expect(result.current.error).toEqual(authFailed);
+    expect(result.current.live).toBeNull();
+  });
+
+  it("ошибка не из-за входа перед stopped подписку не запрещает; тик после ошибки AUTH_FAILED — тоже", async () => {
+    const emits = channels();
+    renderHook(() => useSampler("c", "pg-1", true));
+    await advance(0);
+    // Отказ во входе был, но сэмплер оправился (тик) — последующая остановка по другой причине.
+    act(() => emits[0]({ kind: "error", error: authFailed }));
+    act(() => emits[0]({ kind: "tick", atMs: 1, active: 0, waiting: 0 }));
+    act(() => emits[0]({ kind: "error", error: { code: "CONNECTION_FAILED", message: "x", retryable: true } }));
+    act(() => emits[0]({ kind: "stopped" }));
+    await advance(RESUBSCRIBE_DELAY_MS);
+    expect(api.startSampler).toHaveBeenCalledTimes(2);
+  });
+
+  it("размонтирование и смена узла до паузы отменяют повторную подписку", async () => {
+    const emits = channels();
+    const { rerender, unmount } = renderHook(({ member }) => useSampler("c", member, true), { initialProps: { member: "pg-1" } });
+    await advance(0);
+    act(() => emits[0]({ kind: "stopped" }));
+    rerender({ member: "pg-2" });
+    await advance(0);
+    expect(api.startSampler).toHaveBeenLastCalledWith("c", "pg-2", expect.any(Function));
+    expect(api.startSampler).toHaveBeenCalledTimes(2);
+    await advance(10 * RESUBSCRIBE_DELAY_MS);
+    expect(api.startSampler).toHaveBeenCalledTimes(2);
+
+    act(() => emits[1]({ kind: "stopped" }));
+    unmount();
+    await advance(10 * RESUBSCRIBE_DELAY_MS);
+    expect(api.startSampler).toHaveBeenCalledTimes(2);
+  });
+
+  it("выключение до паузы тоже отменяет повторную подписку", async () => {
+    const emits = channels();
+    const { rerender } = renderHook(({ enabled }) => useSampler("c", "pg-1", enabled), { initialProps: { enabled: true } });
+    await advance(0);
+    act(() => emits[0]({ kind: "stopped" }));
+    rerender({ enabled: false });
+    await advance(10 * RESUBSCRIBE_DELAY_MS);
+    expect(api.startSampler).toHaveBeenCalledTimes(1);
   });
 });

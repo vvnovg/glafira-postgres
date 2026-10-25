@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useRef, useState } from "react";
+import { memo, useId, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { WaitBucket, WaitClass, WaitsData } from "../../api/types";
 import { formatAas, formatCount, formatTimestamp } from "../../lib/format";
@@ -86,8 +86,10 @@ const totalOf = (b: WaitBucket) => segments(b).reduce((sum, s) => sum + s.v, 0);
  * Профиль ожиданий (спец. P2 §7.4): столбцы с накоплением — среднее число активных сессий (AAS) по классам ожиданий в
  * каждом интервале окна. Свой SVG без библиотек. Промежутки, когда сэмплер не работал, затенены штриховкой. Для экранного
  * диктора — таблица тех же чисел; подсказка столбца (`<title>`) — время, всего и классы.
+ * `memo`: вид перерисовывается каждую секунду (тик сэмплера), а данные графика берутся из отчёта и меняются только
+ * с ним — до 90 столбцов на каждый тик перерисовывать незачем.
  */
-export function WaitsChart({ data }: { data: WaitsData }) {
+export const WaitsChart = memo(function WaitsChart({ data }: { data: WaitsData }) {
   const { t } = useTranslation();
   const [wrap, width] = useWidth();
   const patternId = `waits-hatch-${useId().replace(/[^A-Za-z0-9_-]/g, "")}`;
@@ -226,4 +228,4 @@ export function WaitsChart({ data }: { data: WaitsData }) {
       </table>
     </div>
   );
-}
+});

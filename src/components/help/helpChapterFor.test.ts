@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
+import type { DiagTool } from "../../api/types";
+import { loadGuide } from "../../guide/chapters";
+import { parseChapter } from "../../guide/parse";
 import { helpAnchorFor, helpChapterFor } from "./helpChapterFor";
+
+/** Все инструменты диагностики: тип `Record` не даст добавить инструмент, не внеся его сюда (а значит, и в проверку якорей). */
+const DIAG_TOOLS: Record<DiagTool, true> = { pulse: true, sessions: true, idleTx: true, waits: true, locks: true, horizon: true, replication: true, slots: true, failover: true, health: true };
 
 describe("helpChapterFor", () => {
   it("для null, настроек и обзора — «Начало работы»", () => {
@@ -32,5 +38,17 @@ describe("helpChapterFor", () => {
     expect(helpAnchorFor({ kind: "diag", connectionId: "c", tool: "idleTx" })).toBe("sessions");
     expect(helpAnchorFor({ kind: "overview", connectionId: "c" })).toBeUndefined();
     expect(helpAnchorFor(null)).toBeUndefined();
+  });
+
+  it("якорь F1 каждого инструмента — раздел {#id} главы «Диагностика» на обоих языках (справка при отсутствии якоря молча прокручивает наверх)", async () => {
+    for (const lang of ["en", "ru"]) {
+      const chapter = (await loadGuide(lang)).diagnostics;
+      const anchors = parseChapter("diagnostics", chapter, (key) => key).sections.map((s) => s.id);
+      for (const tool of Object.keys(DIAG_TOOLS) as DiagTool[]) {
+        const anchor = helpAnchorFor({ kind: "diag", connectionId: "c", tool });
+        expect(anchor, `${lang}: ${tool}`).toBeDefined();
+        expect(anchors, `${lang}: якорь ${anchor} инструмента ${tool}`).toContain(anchor);
+      }
+    }
   });
 });

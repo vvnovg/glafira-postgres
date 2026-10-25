@@ -798,7 +798,7 @@
       "followLeader": "За лидером ({{member}})",
       "followLeaderPending": "За лидером",
       "memberOption": "{{member}} — {{role}}",
-      "interval": "Обновление",
+      "interval": "Интервал",
       "seconds": "{{n}} с",
       "pause": "Пауза",
       "refresh": "Обновить",

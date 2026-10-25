@@ -138,7 +138,28 @@ describe("тексты находок", () => {
     expect(findingTitle(f({ id: "healthPrimary", params: { count: 2 } }))).toBe("Адрес лидера отвечает 200 у участников: 2");
     expect(findingFix(f({ id: "replicaOutOfPool" }))).toContain("noloadbalance");
     await i18n.changeLanguage("en");
-    expect(findingTitle(f({ id: "healthPrimary", params: { count: 0 } }))).toBe("The leader address answers 200 on 0 members");
+    expect(findingTitle(f({ id: "healthPrimary", params: { count: 0 } }))).toBe("The leader address answers 200 on members: 0");
+    await i18n.changeLanguage("ru");
+  });
+
+  it("английские заголовки с числом объектов не согласуют существительное: при count = 1 нет «1 sessions» и «1 members»", async () => {
+    await i18n.changeLanguage("en");
+    const session1 = { kind: "session", pid: 7, backendStartUs: 1 } as const;
+    expect([
+      findingTitle(f({ id: "lockWait", params: { count: 1, maxS: 75 } })),
+      findingTitle(f({ id: "rootBlocker", target: session1, params: { count: 1, maxS: 75 } })),
+      findingTitle(f({ id: "ddlQueue", target: session1, params: { relation: "shop.orders", count: 1, maxS: 12 } })),
+      findingTitle(f({ id: "healthPrimary", params: { count: 1 } })),
+      findingTitle(f({ id: "hiddenQueries", params: { count: 1 } })),
+      findingTitle(f({ id: "lockCycle", params: { count: 1 } })),
+    ]).toEqual([
+      "Sessions waiting for locks: 1, the longest 1 min 15 s",
+      "Session 7 blocks sessions: 1, the longest wait 1 min 15 s",
+      "DDL on shop.orders is queued and blocks sessions: 1",
+      "The leader address answers 200 on members: 1",
+      "Texts of sessions are hidden: 1",
+      "Sessions waiting for each other: 1",
+    ]);
     await i18n.changeLanguage("ru");
   });
 

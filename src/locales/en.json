@@ -776,7 +776,7 @@
       "followLeader": "Follow the leader ({{member}})",
       "followLeaderPending": "Follow the leader",
       "memberOption": "{{member}} — {{role}}",
-      "interval": "Refresh",
+      "interval": "Interval",
       "seconds": "{{n}} s",
       "pause": "Pause",
       "refresh": "Refresh",
@@ -1133,7 +1133,7 @@
       "fix": "Find what holds vacuum (xmin horizon) and let autovacuum freeze the oldest tables."
     },
     "lockWait": {
-      "title": "{{count}} sessions wait for locks, the longest {{maxS}}",
+      "title": "Sessions waiting for locks: {{count}}, the longest {{maxS}}",
       "fix": "Open Locks to find the root blocker."
     },
     "walDirSize": {
@@ -1149,11 +1149,11 @@
       "fix": "Open Locks to find who blocks."
     },
     "rootBlocker": {
-      "title": "Session {{pid}} blocks {{count}} sessions, the longest wait {{maxS}}",
+      "title": "Session {{pid}} blocks sessions: {{count}}, the longest wait {{maxS}}",
       "fix": "Look at its transaction; cancelling or ending it releases the chain."
     },
     "ddlQueue": {
-      "title": "DDL on {{relation}} is queued and blocks {{count}} sessions",
+      "title": "DDL on {{relation}} is queued and blocks sessions: {{count}}",
       "fix": "Cancel the DDL to release the queue, or the query it waits for; run migrations with lock_timeout."
     },
     "xminHorizon": {
@@ -1221,7 +1221,7 @@
       "fix": "The leader key may expire during a DCS hiccup: raise ttl (patronictl edit-config)."
     },
     "healthPrimary": {
-      "title": "The leader address answers 200 on {{count}} members",
+      "title": "The leader address answers 200 on members: {{count}}",
       "fix": "A load balancer would send writes to the wrong place or nowhere: check the topology."
     },
     "healthUnhealthy": {
@@ -1245,11 +1245,11 @@
       "fix": "Set it for the application role: {{command}}"
     },
     "hiddenQueries": {
-      "title": "Texts of {{count}} sessions are hidden",
+      "title": "Texts of sessions are hidden: {{count}}",
       "fix": "Grant pg_monitor to the diagnostics role."
     },
     "lockCycle": {
-      "title": "{{count}} sessions wait for each other",
+      "title": "Sessions waiting for each other: {{count}}",
       "fix": "The deadlock detector will resolve it within deadlock_timeout; details are in the server log."
     }
   },

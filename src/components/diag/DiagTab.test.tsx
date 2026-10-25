@@ -2,6 +2,7 @@ import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DiagTool } from "../../api/types";
+import { formatTimestamp } from "../../lib/format";
 import { useWorkspace } from "../../state/workspace";
 import { connection, diagReport, holder, member, pulseFacts, pulseRates, replication, sender, slot, topology, topologyView, waitsData } from "../../test/fixtures";
 import { renderWithClient } from "../../test/render";
@@ -94,6 +95,21 @@ describe("DiagTab", () => {
     expect(await screen.findByText("устарело")).toBeInTheDocument();
     expect(screen.getByRole("alert")).toBeInTheDocument();
     expect(screen.getByText("Проблем не найдено")).toBeInTheDocument();
+  });
+
+  it("«Обновлено» — время получения отчёта приложением, а не часы сервера из отчёта", async () => {
+    const received = 1_700_000_500_000;
+    const serverClock = 1_700_000_000_000;
+    const now = vi.spyOn(Date, "now").mockReturnValue(received);
+    try {
+      vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport({ kind: "locks", roots: [], cycles: [], ddlQueue: [] }, { observedAtMs: serverClock }));
+      renderWithClient(<DiagTab connectionId="c" tool="locks" member={null} active tabId="diag:c:locks" />);
+      await screen.findByText("Проблем не найдено");
+      expect(screen.getByText(`Обновлено ${formatTimestamp(received)}`)).toBeInTheDocument();
+      expect(screen.queryByText(`Обновлено ${formatTimestamp(serverClock)}`)).not.toBeInTheDocument();
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it("недоступное по версии показано серой строкой", async () => {
@@ -263,7 +279,7 @@ describe("DiagTab", () => {
     const user = userEvent.setup();
     renderWithClient(<DiagTab connectionId="c" tool="health" member={null} active tabId="diag:c:health" />);
     await screen.findByRole("heading", { name: "Матрица health" });
-    const interval = screen.getByRole("combobox", { name: "Обновление" });
+    const interval = screen.getByRole("combobox", { name: "Интервал" });
     expect(interval).toHaveDisplayValue("10 с");
     await user.selectOptions(interval, "Пауза");
     expect(interval).toHaveDisplayValue("Пауза");

@@ -23,15 +23,15 @@ export interface DiagControls {
   windowS: number | null;
   onWindow: (seconds: number) => void;
   onRefresh: () => void;
-  /** Время ответа последнего отчёта (мс эпохи). */
-  observedAtMs: number | null;
+  /** Когда приложение получило последний отчёт (мс эпохи, часы приложения); `null` — отчёта ещё нет. */
+  updatedAtMs: number | null;
   /** Обновление не удалось, на экране прошлые данные. */
   stale: boolean;
 }
 
 /**
  * Общая шапка вкладки инструмента (спец. P2 §7.2): название, выбор узла, интервал обновления, окно (у профиля
- * ожиданий), «Обновить», время последнего ответа. Без `controls` (подключение закрыто) — только название.
+ * ожиданий), «Обновить», время получения последнего отчёта. Без `controls` (подключение закрыто) — только название.
  */
 export function DiagHeader({ tool, controls }: { tool: DiagTool; controls?: DiagControls }) {
   const { t } = useTranslation();
@@ -84,7 +84,7 @@ export function DiagHeader({ tool, controls }: { tool: DiagTool; controls?: Diag
           <button type="button" onClick={c.onRefresh}>
             {t("diag.header.refresh")}
           </button>
-          {c.observedAtMs !== null && <span className="muted">{t("diag.header.updated", { time: formatTimestamp(c.observedAtMs) })}</span>}
+          {c.updatedAtMs !== null && <span className="muted">{t("diag.header.updated", { time: formatTimestamp(c.updatedAtMs) })}</span>}
           {c.stale && (
             <span className="warn" role="status">
               {t("diag.header.stale")}

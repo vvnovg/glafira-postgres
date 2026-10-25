@@ -90,9 +90,21 @@ describe("ReplicationView", () => {
       />,
     );
     const card = screen.getByRole("region", { name: "Приёмник WAL" });
-    for (const text of ["streaming", "pg-1:5432", "pg_2", "3", "4 с", "1 мин 5 с", "2,0 MB", "12 с", "запрошена пауза", "hot_standby_feedback = on", "max_standby_streaming_delay: 30 с"]) {
-      expect(card).toHaveTextContent(text);
-    }
+    // Подпись и значение сверяются целиком: подстрока «3» нашлась бы и в «30 с».
+    const fields = Object.fromEntries([...card.querySelectorAll("dl > div")].map((d) => [d.querySelector("dt")?.textContent, d.querySelector("dd")?.textContent]));
+    expect(fields).toMatchObject({
+      Статус: "streaming",
+      Источник: "pg-1:5432",
+      Слот: "pg_2",
+      Таймлайн: "3",
+      "Последнее сообщение": "4 с",
+      "Последний отчёт о позиции": "1 мин 5 с",
+      "Разрыв receive и replay": "2,0 MB",
+      "Задержка replay": "12 с",
+      "Применение WAL": "запрошена пауза",
+    });
+    expect(within(card).getByText("hot_standby_feedback = on")).toBeInTheDocument();
+    expect(within(card).getByText("max_standby_streaming_delay: 30 с")).toBeInTheDocument();
   });
 
   it("max_standby_streaming_delay: -1 — без ограничения, доли секунды — в миллисекундах", () => {
