@@ -1,9 +1,11 @@
 import { useId, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { DiagTool, Finding, FindingTarget, Severity } from "../../api/types";
+import type { DiagTool, Finding, FindingLink, FindingTarget, Severity } from "../../api/types";
 import { useWorkspace } from "../../state/workspace";
 import { CopyButton } from "../common/CopyButton";
 import { findingFix, findingTitle } from "./findingText";
+
+type OpenToolLink = Extract<FindingLink, { kind: "openTool" }>;
 
 /** Порядок показа: сначала более строгие; внутри одной строгости остаётся порядок сервера (сортировка устойчива). */
 const SEVERITY_ORDER: Record<Severity, number> = { critical: 0, warning: 1, info: 2 };
@@ -67,7 +69,8 @@ export function FindingsPanel({
           {sorted.map((f, i) => {
             const command = typeof f.params.command === "string" ? f.params.command : null;
             // Ссылка без узла ведёт туда же, что и узел отчёта: вкладка инструмента одна на подключение.
-            const links = f.links.filter((l) => !(l.tool === tool && (l.member == null || l.member === member)));
+            // Ссылки-действия (`kind: "action"`) кнопками станут в задаче 11 — пока пропускаются.
+            const links = f.links.filter((l): l is OpenToolLink => l.kind === "openTool" && !(l.tool === tool && (l.member == null || l.member === member)));
             return (
               <li key={keys[i]} className={`finding sev-${f.severity}`}>
                 <div className="finding-main">

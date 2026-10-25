@@ -36,7 +36,8 @@ pub enum FindingTarget {
     },
 }
 
-/// Куда ведёт кнопка находки. `tool` — id вкладки инструмента во фронтенде (`sessions`, `idleTx`, `locks`…).
+/// Куда ведёт кнопка находки. `tool` — id вкладки инструмента во фронтенде (`sessions`, `idleTx`, `locks`…);
+/// `Action` — форма действия P2b (на read-only подключении интерфейс её не показывает).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum FindingLink {
@@ -44,6 +45,20 @@ pub enum FindingLink {
         tool: String,
         member: Option<String>,
     },
+    Action {
+        action: SessionActionLink,
+        member: Option<String>,
+    },
+}
+
+/// Действие с сессиями, которое предлагает находка (спец. P2 §8.3: цель `idleInTransaction` или `rootBlocker`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum SessionActionLink {
+    #[serde(rename_all = "camelCase")]
+    TerminateIdleInTransaction { older_than_s: f64 },
+    #[serde(rename_all = "camelCase")]
+    TerminateRootBlocker { pid: i32, backend_start_us: i64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -87,6 +102,14 @@ impl Finding {
     pub fn link_tool(mut self, tool: &str, member: Option<&str>) -> Self {
         self.links.push(FindingLink::OpenTool {
             tool: tool.to_string(),
+            member: member.map(str::to_string),
+        });
+        self
+    }
+
+    pub fn link_action(mut self, action: SessionActionLink, member: Option<&str>) -> Self {
+        self.links.push(FindingLink::Action {
+            action,
             member: member.map(str::to_string),
         });
         self
@@ -201,6 +224,34 @@ mod tests {
             json!({"kind": "slot", "name": "s"})
         );
         assert_eq!(serde_json::to_value(&slot).unwrap()["member"], json!(null));
+    }
+
+    #[test]
+    fn action_link_json_is_tagged_and_camel_case() {
+        let f = Finding::new("rootBlocker", Severity::Critical).link_action(
+            SessionActionLink::TerminateRootBlocker {
+                pid: 42,
+                backend_start_us: 1_761_299_000_000_000,
+            },
+            Some("pg-1"),
+        );
+        let v = serde_json::to_value(&f.links[0]).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"kind": "action", "member": "pg-1",
+                "action": {"type": "terminateRootBlocker", "pid": 42, "backendStartUs": 1_761_299_000_000_000_i64}})
+        );
+        let idle = serde_json::to_value(SessionActionLink::TerminateIdleInTransaction {
+            older_than_s: 300.0,
+        })
+        .unwrap();
+        assert_eq!(
+            idle,
+            serde_json::json!({"type": "terminateIdleInTransaction", "olderThanS": 300.0})
+        );
+        // Обратное чтение: ссылка переживает JSON без потерь.
+        let back: FindingLink = serde_json::from_value(v).unwrap();
+        assert_eq!(back, f.links[0]);
     }
 
     #[test]

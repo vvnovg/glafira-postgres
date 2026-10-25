@@ -120,6 +120,7 @@ pub fn run() {
             commands::diag::start_sampler,
             commands::diag::stop_session,
             commands::actions::list_actions,
+            commands::actions::preview_session_action,
             commands::folders::list_folders,
             commands::folders::create_folder,
             commands::folders::rename_folder,

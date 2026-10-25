@@ -19,6 +19,19 @@ describe("FindingsPanel", () => {
     expect(screen.getByRole("button", { name: "Открыть «Idle in transaction»" })).toBeInTheDocument();
   });
 
+  it("ссылка-действие кнопки не рисует (до задачи 11) и не мешает ссылке на инструмент", () => {
+    const only: Finding = { id: "idleInTransaction", severity: "critical", member: "pg-1", target: null, params: { maxS: 2000, count: 1 }, links: [{ kind: "action", action: { type: "terminateIdleInTransaction", olderThanS: 300 }, member: "pg-1" }] };
+    const both: Finding = { id: "rootBlocker", severity: "warning", member: "pg-1", target: { kind: "session", pid: 7, backendStartUs: 1 }, params: { count: 1, maxS: 20 }, links: [{ kind: "openTool", tool: "sessions", member: "pg-1" }, { kind: "action", action: { type: "terminateRootBlocker", pid: 7, backendStartUs: 1 }, member: "pg-1" }] };
+    const { rerender } = renderWithClient(<FindingsPanel connectionId="c" findings={[only]} tool="idleTx" member="pg-1" />);
+    // Находка показана, но у единственной ссылки-действия нет кнопки (ни пустой, ни с undefined в имени).
+    expect(screen.getAllByRole("listitem")).toHaveLength(1);
+    expect(within(screen.getByRole("listitem")).queryAllByRole("button")).toHaveLength(0);
+    // Рядом со ссылкой на инструмент рисуется только она.
+    rerender(<FindingsPanel connectionId="c" findings={[both]} />);
+    const buttons = within(screen.getByRole("listitem")).getAllByRole("button");
+    expect(buttons.map((b) => b.textContent)).toEqual(["Открыть «Сессии»"]);
+  });
+
   it("находки по строгости с текстом, «что сделать», командой и переходом в инструмент", async () => {
     const user = userEvent.setup();
     useWorkspace.setState({ tabs: [], activeId: null });

@@ -2,7 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::findings::{Finding, FindingTarget, Severity, grade, thresholds as th};
+use crate::findings::{
+    Finding, FindingTarget, SessionActionLink, Severity, grade, thresholds as th,
+};
 
 /// Сессия `pg_stat_activity`. Длительности — от `now()` сервера, в секундах.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -129,15 +131,25 @@ pub fn evaluate(member: Option<&str>, d: &SessionsData) -> Vec<Finding> {
         th::IDLE_IN_TRANSACTION_S.0,
     );
     if let Some((r, v, n)) = idle {
-        out.extend(session_finding(
-            "idleInTransaction",
-            member,
-            r,
-            v,
-            n,
-            th::IDLE_IN_TRANSACTION_S,
-            "idleTx",
-        ));
+        out.extend(
+            session_finding(
+                "idleInTransaction",
+                member,
+                r,
+                v,
+                n,
+                th::IDLE_IN_TRANSACTION_S,
+                "idleTx",
+            )
+            .map(|f| {
+                f.link_action(
+                    SessionActionLink::TerminateIdleInTransaction {
+                        older_than_s: th::IDLE_IN_TRANSACTION_S.0,
+                    },
+                    member,
+                )
+            }),
+        );
         if v >= th::IDLE_IN_TRANSACTION_S.0
             && d.settings.idle_in_transaction_session_timeout_ms == Some(0)
         {
@@ -208,7 +220,7 @@ pub fn evaluate(member: Option<&str>, d: &SessionsData) -> Vec<Finding> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::findings::{FindingTarget, Severity};
+    use crate::findings::{FindingLink, FindingTarget, SessionActionLink, Severity};
 
     pub(crate) fn row(pid: i32, state: &str) -> SessionRow {
         SessionRow {
@@ -272,6 +284,41 @@ mod tests {
         assert_eq!(f[0].params["count"], 2);
         assert_eq!(f[0].params["maxS"], 2000.0);
         assert_eq!(f[0].member.as_deref(), Some("pg-1"));
+        // Ссылка на инструмент остаётся первой, действие идёт вслед за ней.
+        let idle = f.iter().find(|x| x.id == "idleInTransaction").unwrap();
+        assert_eq!(
+            idle.links,
+            [
+                FindingLink::OpenTool {
+                    tool: "idleTx".into(),
+                    member: Some("pg-1".into())
+                },
+                FindingLink::Action {
+                    action: SessionActionLink::TerminateIdleInTransaction {
+                        older_than_s: th::IDLE_IN_TRANSACTION_S.0
+                    },
+                    member: Some("pg-1".into()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn only_the_idle_in_transaction_finding_offers_an_action() {
+        let mut q = row(1, "active");
+        q.query_age_s = Some(1000.0);
+        q.xact_age_s = Some(4000.0);
+        let mut idle = row(2, "idle in transaction");
+        idle.state_age_s = Some(400.0);
+        let f = evaluate(Some("pg-1"), &data(vec![q, idle], 0));
+        assert!(f.len() >= 4, "{f:?}");
+        for x in &f {
+            let has_action = x
+                .links
+                .iter()
+                .any(|l| matches!(l, FindingLink::Action { .. }));
+            assert_eq!(has_action, x.id == "idleInTransaction", "{}", x.id);
+        }
     }
 
     #[test]

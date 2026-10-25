@@ -2,6 +2,7 @@
 
 pub mod conn;
 pub mod journal;
+pub mod sessions;
 
 use serde::Deserialize;
 

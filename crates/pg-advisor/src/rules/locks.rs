@@ -1,6 +1,8 @@
 //! Блокировки и DDL в очереди (спец. P2 §5.4): находки по лесу `locktree`.
 
-use crate::findings::{Finding, FindingTarget, Severity, grade, thresholds as th};
+use crate::findings::{
+    Finding, FindingTarget, SessionActionLink, Severity, grade, thresholds as th,
+};
 use crate::locktree::{LockNode, LockSession, LocksData};
 
 fn session_target(s: &LockSession) -> Option<FindingTarget> {
@@ -50,6 +52,20 @@ pub fn evaluate(member: Option<&str>, d: &LocksData) -> Vec<Finding> {
                 .param("maxS", wait)
                 .link_tool("sessions", member);
             if let Some(t) = session_target(&root.session) {
+                // Завершать можно только сессию с известным временем запуска: иначе PID мог достаться другой.
+                if let FindingTarget::Session {
+                    pid,
+                    backend_start_us,
+                } = &t
+                {
+                    f = f.link_action(
+                        SessionActionLink::TerminateRootBlocker {
+                            pid: *pid,
+                            backend_start_us: *backend_start_us,
+                        },
+                        member,
+                    );
+                }
                 f = f.target(t);
             }
             out.push(f);
@@ -104,6 +120,7 @@ pub fn evaluate(member: Option<&str>, d: &LocksData) -> Vec<Finding> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::findings::{FindingLink, SessionActionLink};
     use crate::locktree::build;
 
     #[test]
@@ -174,6 +191,51 @@ mod tests {
         );
         let ddl = f.iter().find(|x| x.id == "ddlQueue").unwrap();
         assert_eq!(ddl.params["relation"], "shop.orders");
+        // Корень с известным временем запуска предлагает завершение; ссылка на инструмент остаётся.
+        assert!(root.links.iter().any(|l| matches!(
+            l,
+            FindingLink::Action {
+                action: SessionActionLink::TerminateRootBlocker { .. },
+                ..
+            }
+        )));
+        assert!(root.links.contains(&FindingLink::Action {
+            action: SessionActionLink::TerminateRootBlocker {
+                pid: 1,
+                backend_start_us: 1
+            },
+            member: Some("pg-1".into()),
+        }));
+        assert!(root.links.contains(&FindingLink::OpenTool {
+            tool: "sessions".into(),
+            member: Some("pg-1".into())
+        }));
+        // Остальные находки действий не предлагают.
+        assert!(f.iter().filter(|x| x.id != "rootBlocker").all(|x| {
+            x.links
+                .iter()
+                .all(|l| !matches!(l, FindingLink::Action { .. }))
+        }));
+    }
+
+    #[test]
+    fn a_root_without_backend_start_gets_no_action_link() {
+        // Без времени запуска PID может принадлежать уже другой сессии: завершать нельзя.
+        let mut h = holder(1);
+        h.session.backend_start_us = None;
+        let f = evaluate(
+            Some("pg-1"),
+            &build(&[h, waiter(2, &[1], "AccessShareLock", Some(400.0))]),
+        );
+        let root = f.iter().find(|x| x.id == "rootBlocker").unwrap();
+        assert!(root.target.is_none());
+        assert_eq!(
+            root.links,
+            [FindingLink::OpenTool {
+                tool: "sessions".into(),
+                member: Some("pg-1".into())
+            }]
+        );
     }
 
     use crate::locktree::{LockRow, WaitingLock};

@@ -553,8 +553,14 @@ export type FindingTarget =
   | { kind: "member"; name: string }
   | { kind: "relation"; name: string }
   | { kind: "database"; name: string };
-/** Куда ведёт кнопка находки; `tool` — id вкладки (`idleTx` допустим). */
-export type FindingLink = { kind: "openTool"; tool: DiagTool; member: string | null };
+/** Действие с сессиями, которое предлагает находка: `idleInTransaction` и `rootBlocker`. */
+export type SessionActionLink =
+  | { type: "terminateIdleInTransaction"; olderThanS: number }
+  | { type: "terminateRootBlocker"; pid: number; backendStartUs: number };
+/** Куда ведёт кнопка находки; `tool` — id вкладки (`idleTx` допустим), `action` — действие P2b (кнопки — задача 11). */
+export type FindingLink =
+  | { kind: "openTool"; tool: DiagTool; member: string | null }
+  | { kind: "action"; action: SessionActionLink; member: string | null };
 export interface Finding {
   /** Ключ текста: `findings.<id>.title` и `findings.<id>.fix`. */
   id: string;
