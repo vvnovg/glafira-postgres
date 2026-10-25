@@ -1,6 +1,7 @@
 //! Действия дежурного (спец. P2 §8): отмена и завершение сессий, удаление слота, действия Patroni, наблюдение и журнал.
 
 pub mod conn;
+pub mod journal;
 
 use serde::Deserialize;
 

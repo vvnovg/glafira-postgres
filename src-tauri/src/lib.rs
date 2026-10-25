@@ -119,6 +119,7 @@ pub fn run() {
             commands::diag::run_diagnostic,
             commands::diag::start_sampler,
             commands::diag::stop_session,
+            commands::actions::list_actions,
             commands::folders::list_folders,
             commands::folders::create_folder,
             commands::folders::rename_folder,

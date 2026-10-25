@@ -39,6 +39,8 @@ pub struct AppState {
     /// положило в keychain новый пароль. Берётся в блокирующем потоке и держится вокруг обращений к keychain
     /// и хранилищу; блокировка хранилища берётся внутри неё (порядок один везде — взаимной блокировки нет).
     pub secrets_lock: Arc<std::sync::Mutex<()>>,
+    /// Журнал выполненных действий (`actions.jsonl` в каталоге данных).
+    pub actions: Arc<crate::actions::journal::ActionJournal>,
 }
 
 impl AppState {
@@ -88,6 +90,7 @@ impl AppState {
             samplers,
             tunnels,
             secrets_lock: Arc::new(std::sync::Mutex::new(())),
+            actions: Arc::new(crate::actions::journal::ActionJournal::new(data_dir)),
         })
     }
 

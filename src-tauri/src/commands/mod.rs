@@ -1,3 +1,4 @@
+pub mod actions;
 pub mod app;
 pub mod catalog;
 pub mod connections;
