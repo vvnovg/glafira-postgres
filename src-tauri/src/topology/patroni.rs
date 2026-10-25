@@ -17,6 +17,10 @@ use crate::topology::model::{
 };
 
 pub const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Срок установки соединения (TCP, а через туннель и рукопожатие SOCKS, и TLS). Короче `HTTP_TIMEOUT`: адрес,
+/// который молчит на SYN (хост умер), не должен съедать весь срок запроса — действие, которое не отправилось,
+/// можно сразу пробовать на следующем адресе (например, failover, когда первым в списке мёртвый лидер).
+pub const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// Общий предел обхода адресов `/cluster`: адресов API может быть много (профиль плюс прежние участники),
 /// и каждый ждёт до `HTTP_TIMEOUT` — без общего срока один опрос мог бы длиться дольше минуты. Запросы
 /// `/patroni` к участникам после обхода идут параллельно, и каждый ограничен своим `HTTP_TIMEOUT`.
@@ -116,7 +120,7 @@ impl ReqwestHttp {
     ) -> AppResult<Self> {
         let mut b = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
-            .connect_timeout(HTTP_TIMEOUT);
+            .connect_timeout(HTTP_CONNECT_TIMEOUT);
         if let Some(p) = proxy {
             b = b.proxy(reqwest::Proxy::all(format!("socks5h://{p}")).map_err(http_setup)?);
         }
@@ -269,6 +273,18 @@ fn request_error(url: &str, e: &reqwest::Error) -> AppError {
     .with_details(text)
 }
 
+/// Соединение не установилось за `HTTP_CONNECT_TIMEOUT`: адрес молчит, запрос не отправлялся (для вызывающего
+/// это то же, что недоступный адрес).
+fn connect_timed_out(url: &str, e: &reqwest::Error) -> AppError {
+    app_err!(
+        ErrorCode::PatroniError,
+        "errors.patroni.unreachable",
+        "Patroni API at {{url}} is unreachable",
+        url = url
+    )
+    .with_details(chain(e))
+}
+
 /// Связь оборвалась после отправки изменяющего запроса: он мог дойти и выполниться, повторять его нельзя.
 fn connection_lost(url: &str, e: &reqwest::Error) -> AppError {
     app_err!(
@@ -386,11 +402,17 @@ impl PatroniHttp for ReqwestHttp {
                 req = req.basic_auth(u, Some(p));
             }
             // Изменяющий запрос нельзя повторять вслепую: «не дошёл» решается здесь, где известна фаза сбоя.
-            // Соединение не установлено (TCP, SOCKS, TLS), срок вышел или запрос не собрался — обычная
-            // классификация, как у чтения; любой другой сбой (обрыв после отправки) и любой сбой при чтении
-            // ответа — запрос мог дойти до Patroni и выполниться: исход неизвестен.
+            // Соединение не установилось за `HTTP_CONNECT_TIMEOUT` (фаза соединителя: у такого сбоя `is_connect()`
+            // тоже истинно, поэтому проверяется первым) — запрос наверняка не отправлен: адрес недоступен. Прочий
+            // сбой соединения (TCP, SOCKS, TLS) либо невозможность собрать запрос — обычная классификация, как у
+            // чтения. Срок вышел уже после соединения — `errors.patroni.timeout`, исход неизвестен. Любой другой
+            // сбой (обрыв после отправки) и любой сбой при чтении ответа — запрос мог дойти до Patroni и
+            // выполниться: исход неизвестен.
             let resp = match req.send().await {
                 Ok(r) => r,
+                Err(e) if e.is_connect() && e.is_timeout() => {
+                    return Err(connect_timed_out(url, &e));
+                }
                 Err(e) if e.is_connect() || e.is_timeout() || e.is_builder() => {
                     return Err(self.request_error(url, &e));
                 }
@@ -1980,6 +2002,61 @@ mod tests {
             assert!(e.details.as_deref().is_some_and(|d| !d.is_empty()));
             assert_eq!(server.accepted(), 1, "partial={partial}");
         }
+    }
+
+    /// Адрес, который не устанавливает соединение (хост за бастионом молчит: ответа SOCKS нет), даёт срок соединения
+    /// `HTTP_CONNECT_TIMEOUT`, а не общий срок запроса, и для изменяющего запроса это «адрес недоступен» (запрос не
+    /// отправлялся — вызывающий идёт к следующему адресу), а не `timeout` (исход неизвестен). Чтение ведёт себя как
+    /// раньше: тот же сбой — `errors.patroni.timeout`.
+    #[tokio::test]
+    async fn send_json_treats_a_connect_timeout_as_an_unreachable_address() {
+        let proxy = testutil::socks_proxy_with_silent_host("dead", ("127.0.0.1", 9)).await;
+        let s = settings(&["http://dead:8008"]);
+        let http = ReqwestHttp::new(&s, None, None, Some(proxy), Some("bastion".into())).unwrap();
+        let started = std::time::Instant::now();
+        let (sent, read) = tokio::join!(
+            http.send_json(HttpMethod::Post, "http://dead:8008/switchover", None),
+            http.get_json("http://dead:8008/cluster"),
+        );
+        let took = started.elapsed();
+        let sent = sent.unwrap_err();
+        assert_eq!(
+            (sent.code, sent.key.as_str()),
+            (ErrorCode::PatroniError, "errors.patroni.unreachable"),
+            "{sent:?}"
+        );
+        assert!(sent.details.as_deref().is_some_and(|d| !d.is_empty()));
+        assert_eq!(read.unwrap_err().key, "errors.patroni.timeout");
+        assert!(
+            took >= HTTP_CONNECT_TIMEOUT - Duration::from_millis(500) && took < HTTP_TIMEOUT,
+            "срок соединения ≈ 3 с, получилось {took:?}"
+        );
+    }
+
+    /// Срок вышел уже после установки соединения: запрос ушёл, исход неизвестен — это `timeout`, не «недоступен».
+    #[tokio::test]
+    async fn send_json_keeps_a_timeout_after_the_connection_was_established() {
+        let server = testutil::silent_server();
+        let http = ReqwestHttp::new(&settings(&["http://x"]), None, None, None, None).unwrap();
+        let started = std::time::Instant::now();
+        let e = http
+            .send_json(
+                HttpMethod::Post,
+                &format!("http://127.0.0.1:{}/switchover", server.port),
+                None,
+            )
+            .await
+            .unwrap_err();
+        let took = started.elapsed();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (ErrorCode::PatroniError, "errors.patroni.timeout"),
+            "{e:?}"
+        );
+        assert!(
+            took >= Duration::from_secs(4) && took < Duration::from_secs(7),
+            "общий срок ≈ 5 с, получилось {took:?}"
+        );
     }
 
     #[tokio::test]

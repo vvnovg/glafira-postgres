@@ -154,14 +154,15 @@ pub fn silent_server() -> FakeServer {
     }
 }
 
-/// HTTP-сервер, который обрывает связь после приёма запроса; считает принятые соединения.
-pub struct DroppingHttp {
+/// HTTP-заглушка Patroni на loopback; считает принятые соединения.
+pub struct HttpStub {
     /// Базовый адрес вида `http://127.0.0.1:порт`.
     pub base: String,
+    pub port: u16,
     accepted: Arc<AtomicUsize>,
 }
 
-impl DroppingHttp {
+impl HttpStub {
     pub fn accepted(&self) -> usize {
         self.accepted.load(Ordering::SeqCst)
     }
@@ -195,9 +196,17 @@ fn read_http_request(sock: &mut TcpStream) {
     }
 }
 
-/// Читает запрос целиком и закрывает соединение без ответа; с `partial_answer` — сначала отправляет начало
-/// ответа с обещанным, но не отправленным телом. Так ведёт себя балансировщик, оборвавший связь после запроса.
-pub fn dropping_http_server(partial_answer: bool) -> DroppingHttp {
+#[derive(Clone, Copy)]
+enum HttpBehavior {
+    /// Закрыть соединение без ответа.
+    Drop,
+    /// Начать ответ с обещанным, но не отправленным телом и закрыть соединение.
+    DropMidAnswer,
+    /// Ответить кодом.
+    Answer(u16),
+}
+
+fn http_stub(behavior: HttpBehavior) -> HttpStub {
     let (listener, port) = listen();
     let accepted = Arc::new(AtomicUsize::new(0));
     let count = accepted.clone();
@@ -206,18 +215,45 @@ pub fn dropping_http_server(partial_answer: bool) -> DroppingHttp {
             count.fetch_add(1, Ordering::SeqCst);
             std::thread::spawn(move || {
                 read_http_request(&mut sock);
-                if partial_answer {
-                    let _ = sock.write_all(
-                        b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\npartial",
-                    );
+                let reply: Option<Vec<u8>> = match behavior {
+                    HttpBehavior::Drop => None,
+                    HttpBehavior::DropMidAnswer => Some(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\npartial"
+                            .to_vec(),
+                    ),
+                    HttpBehavior::Answer(status) => Some(
+                        format!(
+                            "HTTP/1.1 {status} X\r\nContent-Length: 4\r\nConnection: close\r\n\r\nDone"
+                        )
+                        .into_bytes(),
+                    ),
+                };
+                if let Some(reply) = reply {
+                    let _ = sock.write_all(&reply);
                 }
             });
         }
     });
-    DroppingHttp {
+    HttpStub {
         base: format!("http://127.0.0.1:{port}"),
+        port,
         accepted,
     }
+}
+
+/// Читает запрос целиком и закрывает соединение без ответа; с `partial_answer` — сначала отправляет начало
+/// ответа с обещанным, но не отправленным телом. Так ведёт себя балансировщик, оборвавший связь после запроса.
+pub fn dropping_http_server(partial_answer: bool) -> HttpStub {
+    http_stub(if partial_answer {
+        HttpBehavior::DropMidAnswer
+    } else {
+        HttpBehavior::Drop
+    })
+}
+
+/// Читает запрос целиком и отвечает `status` с телом `Done`.
+pub fn answering_http_server(status: u16) -> HttpStub {
+    http_stub(HttpBehavior::Answer(status))
 }
 
 /// Сообщение `ErrorResponse` протокола PostgreSQL: FATAL, SQLSTATE 28000.
@@ -465,6 +501,22 @@ pub type SocksRequests = Arc<std::sync::Mutex<Vec<(u8, String, u16)>>>;
 /// Поддельный SOCKS5-прокси без аутентификации: любой CONNECT (к имени или IPv4) → TCP к `upstream`, затем
 /// прокачка байтов. Запросы запоминаются: по ним видно, что имя узла разрешает прокси, а не клиент.
 pub async fn socks_proxy_recording(upstream: (&str, u16)) -> (std::net::SocketAddr, SocksRequests) {
+    socks_proxy(upstream, None).await
+}
+
+/// Как `socks_proxy_recording`, но CONNECT к узлу `silent_host` принимается и остаётся без ответа (хост за
+/// бастионом молчит на SYN): клиент ждёт ответа SOCKS до своего срока соединения.
+pub async fn socks_proxy_with_silent_host(
+    silent_host: &str,
+    upstream: (&str, u16),
+) -> std::net::SocketAddr {
+    socks_proxy(upstream, Some(silent_host.to_string())).await.0
+}
+
+async fn socks_proxy(
+    upstream: (&str, u16),
+    silent_host: Option<String>,
+) -> (std::net::SocketAddr, SocksRequests) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
@@ -473,7 +525,8 @@ pub async fn socks_proxy_recording(upstream: (&str, u16)) -> (std::net::SocketAd
     let seen = requests.clone();
     tokio::spawn(async move {
         while let Ok((mut s, _)) = l.accept().await {
-            let (upstream, seen) = (upstream.clone(), seen.clone());
+            let (upstream, seen, silent_host) =
+                (upstream.clone(), seen.clone(), silent_host.clone());
             tokio::spawn(async move {
                 let mut buf = [0u8; 262];
                 let request = async {
@@ -500,7 +553,13 @@ pub async fn socks_proxy_recording(upstream: (&str, u16)) -> (std::net::SocketAd
                     Ok::<_, std::io::Error>((atyp, host, port))
                 };
                 let Ok(req) = request.await else { return };
+                let silent = silent_host.as_deref() == Some(req.1.as_str());
                 seen.lock().unwrap().push(req);
+                if silent {
+                    // Соединение держится без ответа дольше любого срока клиента.
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    return;
+                }
                 let Ok(mut up) = tokio::net::TcpStream::connect(upstream.as_str()).await else {
                     return;
                 };

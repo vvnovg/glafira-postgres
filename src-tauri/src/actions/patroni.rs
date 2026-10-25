@@ -262,7 +262,9 @@ pub fn request(a: &PatroniAction, t: &Topology) -> PatroniRequest {
     }
 }
 
-/// Базовые адреса API по порядку: лидер, остальные участники, адреса профиля (без повторов); у участника — только он.
+/// Базовые адреса API по порядку: доступные участники (лидер первым, если он доступен), затем недоступные, затем
+/// адреса профиля (без повторов); у участника — только он. Недоступные идут после доступных: при failover лидер
+/// как раз не отвечает, и запрос должен сразу уйти к живой реплике, а не ждать срока соединения у мёртвого узла.
 pub fn bases(t: &Topology, route: &Route, profile_urls: &[String]) -> Vec<String> {
     let trim = |u: &str| u.trim_end_matches('/').to_string();
     match route {
@@ -275,12 +277,19 @@ pub fn bases(t: &Topology, route: &Route, profile_urls: &[String]) -> Vec<String
         Route::Leader => {
             let mut out: Vec<String> = Vec::new();
             let leader = t.leader();
-            let ordered = leader.into_iter().chain(
-                t.members
-                    .iter()
-                    .filter(|m| leader.is_none_or(|l| l.name != m.name)),
-            );
-            for u in ordered
+            // Лидер, затем остальные участники в порядке топологии; разбиение на доступных и недоступных
+            // устойчивое: порядок внутри групп сохраняется.
+            let (up, down): (Vec<&Member>, Vec<&Member>) = leader
+                .into_iter()
+                .chain(
+                    t.members
+                        .iter()
+                        .filter(|m| leader.is_none_or(|l| l.name != m.name)),
+                )
+                .partition(|m| m.reachable);
+            for u in up
+                .into_iter()
+                .chain(down)
                 .filter_map(|m| m.api_url.as_deref())
                 .map(trim)
                 .chain(profile_urls.iter().map(|u| trim(u)))
@@ -595,6 +604,41 @@ mod tests {
         assert_eq!(
             bases(&t, &Route::Member("pg-3".into()), &profile),
             ["http://pg-3:8008"]
+        );
+    }
+
+    #[test]
+    fn reachable_members_go_before_unreachable_ones() {
+        let profile = vec!["http://lb:8008".to_string()];
+        // Failover: лидер не отвечает — первым идёт доступная реплика, мёртвый лидер ждёт после доступных.
+        let mut t = cluster();
+        t.members[0].reachable = false;
+        t.members[2].reachable = false;
+        assert_eq!(
+            bases(&t, &Route::Leader, &profile),
+            [
+                "http://pg-2:8008",
+                "http://pg-1:8008",
+                "http://pg-3:8008",
+                "http://lb:8008"
+            ]
+        );
+        // Доступный лидер остаётся первым, недоступная реплика уходит в конец группы участников.
+        let mut t = cluster();
+        t.members[1].reachable = false;
+        assert_eq!(
+            bases(&t, &Route::Leader, &profile),
+            [
+                "http://pg-1:8008",
+                "http://pg-3:8008",
+                "http://pg-2:8008",
+                "http://lb:8008"
+            ]
+        );
+        // Адрес участника (restart) порядок не затрагивает.
+        assert_eq!(
+            bases(&t, &Route::Member("pg-2".into()), &profile),
+            ["http://pg-2:8008"]
         );
     }
 
@@ -1030,6 +1074,49 @@ mod tests {
             untouched.accepted(),
             0,
             "после обрыва следующий адрес не трогаем"
+        );
+    }
+    /// Failover при мёртвом лидере: его адрес молчит на соединение, запрос наверняка не отправлялся — `send` идёт
+    /// к следующему адресу, не дожидаясь общего срока запроса. Настоящий клиент, прокси SOCKS «молчит» для узла
+    /// `dead-leader` и отвечает за `live`.
+    #[tokio::test]
+    async fn send_moves_on_from_an_address_that_never_accepts_the_connection() {
+        use crate::conn::profile::PatroniSettings;
+        use crate::conn::testutil;
+        use crate::topology::patroni::{HTTP_CONNECT_TIMEOUT, HTTP_TIMEOUT, ReqwestHttp};
+        let live = testutil::answering_http_server(200);
+        let proxy =
+            testutil::socks_proxy_with_silent_host("dead-leader", ("127.0.0.1", live.port)).await;
+        let settings = PatroniSettings {
+            urls: vec!["http://live:8008".into()],
+            username: None,
+            tls: None,
+            host_overrides: vec![],
+        };
+        let http =
+            ReqwestHttp::new(&settings, None, None, Some(proxy), Some("bastion".into())).unwrap();
+        let req = request(
+            &PatroniAction::Failover {
+                candidate: "pg-2".into(),
+            },
+            &cluster(),
+        );
+        let bases = [
+            "http://dead-leader:8008".to_string(),
+            "http://live:8008".to_string(),
+        ];
+        let started = std::time::Instant::now();
+        let (url, reply) = send(&http, &req, &bases).await.unwrap();
+        let took = started.elapsed();
+        assert_eq!(
+            (url.as_str(), reply.status),
+            ("http://live:8008/failover", 200)
+        );
+        assert_eq!(live.accepted(), 1);
+        assert!(
+            took >= HTTP_CONNECT_TIMEOUT - std::time::Duration::from_millis(500)
+                && took < HTTP_TIMEOUT,
+            "ожидание у мёртвого адреса ≈ срок соединения, получилось {took:?}"
         );
     }
 }
