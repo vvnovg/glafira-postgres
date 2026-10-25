@@ -9,7 +9,8 @@ use glafira_pg_lib::actions::Confirmation;
 use glafira_pg_lib::actions::journal::Outcome;
 use glafira_pg_lib::actions::patroni::{self as pa, PatroniAction};
 use glafira_pg_lib::error::ErrorCode;
-use glafira_pg_lib::topology::model::Role;
+use glafira_pg_lib::topology::model::{Role, now_ms};
+use glafira_pg_lib::topology::patroni::{ReqwestHttp, discover};
 
 fn docker_enabled() -> bool {
     common::env("GPG_IT_DOCKER").as_deref() == Some("1")
@@ -36,7 +37,7 @@ async fn scheduled_switchover_is_shown_and_cancelled() {
     let Some((_dir, st)) = common::open_patroni().await else {
         return;
     };
-    let _restore = common::restore_on_drop(|| {
+    let restore = common::restore_on_drop(|| {
         let _ = common::try_patronictl(&["flush", "demo", "switchover", "--force"]);
         common::wait_stand();
     });
@@ -83,6 +84,21 @@ async fn scheduled_switchover_is_shown_and_cancelled() {
         .map(|r| r.action)
         .collect();
     assert_eq!(actions, ["cancelSwitchover", "switchover"]);
+    // После восстановления расписания на стенде нет: свежее чтение /cluster, а не кэш опроса топологии.
+    drop(restore);
+    let settings = common::patroni_settings().unwrap();
+    let http = ReqwestHttp::new(
+        &settings,
+        Some(common::PATRONI_PASSWORD_VALUE.into()),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let after = discover(&http, &settings, "it", None, now_ms())
+        .await
+        .unwrap();
+    assert!(after.scheduled_switchover.is_none(), "{after:?}");
 }
 
 #[tokio::test]
@@ -90,6 +106,13 @@ async fn read_only_and_missing_login_are_refused() {
     let Some((_dir, st)) = common::open_patroni().await else {
         return;
     };
+    // Если защита когда-нибудь пропустит действие, пауза не должна остаться на стенде (нужен Docker).
+    let _restore = docker_enabled().then(|| {
+        common::restore_on_drop(|| {
+            let _ = common::try_patronictl(&["resume", "--wait"]);
+            common::wait_stand();
+        })
+    });
     let mut p = st.profile("it").unwrap();
     p.read_only = true;
     st.connections.upsert(p.clone()).unwrap();
@@ -141,6 +164,7 @@ async fn preview_shows_candidates_leader_sessions_and_the_member() {
     let Some((_dir, st)) = common::open_patroni().await else {
         return;
     };
+    let topology = st.runtimes.view("it").topology.expect("топология открыта");
     let switchover = PatroniAction::Switchover {
         candidate: None,
         scheduled_at: None,
@@ -148,6 +172,8 @@ async fn preview_shows_candidates_leader_sessions_and_the_member() {
     let p = pa::preview(&st, "it", &switchover).await.unwrap();
     let leader = p.leader.clone().expect("у стенда есть лидер");
     assert!(p.can_send && !p.paused);
+    assert_eq!(p.leader_state.as_deref(), Some("running"));
+    assert_eq!(p.leader_reachable, Some(true));
     let mut names: Vec<&str> = p.candidates.iter().map(|c| c.member.as_str()).collect();
     names.sort();
     assert_eq!(names.len(), 2, "две реплики: {:?}", p.candidates);
@@ -157,12 +183,33 @@ async fn preview_shows_candidates_leader_sessions_and_the_member() {
         "на здоровом стенде обе реплики готовы: {:?}",
         p.candidates
     );
-    assert!(
-        p.leader_client_sessions.is_some_and(|n| n >= 0),
-        "сессии лидера прочитаны: {:?}",
-        p.leader_client_sessions
-    );
     assert!(p.member.is_none() && p.scheduled_switchover.is_none());
+
+    // Число сессий лидера: клиент сверх начального счёта добавляет ровно одну, сессия самого Glafira
+    // (`application_name` продукта) не считается.
+    let base = p.leader_client_sessions.expect("сессии лидера прочитаны");
+    let port = topology.member(&leader).expect("лидер в топологии").port;
+    let addr = format!("localhost:{port}");
+    let _own = common::connect_as(
+        &addr,
+        "postgres",
+        common::SUPERUSER,
+        common::SUPERUSER_PASSWORD,
+    )
+    .await;
+    let _client = common::superuser(&addr, "postgres").await;
+    common::wait_until(
+        "сессия клиента видна, сессия Glafira — нет",
+        Duration::from_secs(10),
+        async || {
+            pa::preview(&st, "it", &switchover)
+                .await
+                .unwrap()
+                .leader_client_sessions
+                == Some(base + 1)
+        },
+    )
+    .await;
 
     let replica = p.candidates[0].member.clone();
     let restart = PatroniAction::Restart {
@@ -210,13 +257,16 @@ async fn rejected_action_is_journaled_as_an_error() {
     };
     let _restore = common::restore_on_drop(common::wait_stand);
     let topology = st.runtimes.view("it").topology.expect("топология открыта");
-    let Some(replica) = topology
+    let replica = topology
         .members
         .iter()
         .find(|m| m.role != Role::Primary && m.reachable && !m.pending_restart)
-    else {
-        return;
-    };
+        .unwrap_or_else(|| {
+            panic!(
+                "нужна доступная реплика без отложенного перезапуска: {:?}",
+                topology.members
+            )
+        });
     let action = PatroniAction::Restart {
         member: replica.name.clone(),
         only_pending: true,

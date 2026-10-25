@@ -4,6 +4,7 @@
 use std::time::Instant;
 
 use pg_advisor::failover::{Candidate, DynConfig};
+use pg_advisor::rules::horizon::quote_literal;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use time::OffsetDateTime;
@@ -15,6 +16,7 @@ use crate::conn::errors::from_pg;
 use crate::conn::profile::{ConnectionKind, Environment, strip_url_credentials};
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::guard::{ensure_mutation_allowed, ensure_name_confirmed};
+use crate::product::PG_APPLICATION_NAME;
 use crate::state::AppState;
 use crate::sync::MutexExt;
 use crate::topology::BoxFuture;
@@ -392,6 +394,10 @@ pub struct MemberPreview {
 #[serde(rename_all = "camelCase")]
 pub struct PatroniActionPreview {
     pub leader: Option<String>,
+    /// Состояние лидера, как его прислал Patroni (`running`, `stopped`…): switchover и failover зависят от него.
+    pub leader_state: Option<String>,
+    /// Лидер отвечает при опросе; `None` — лидера в топологии нет.
+    pub leader_reachable: Option<bool>,
     pub paused: bool,
     /// Switchover и failover: готовность реплик (как во вкладке «Готовность к failover»).
     pub candidates: Vec<Candidate>,
@@ -426,8 +432,30 @@ pub fn patroni_record(
         path: strip_url_credentials(url),
         body: body.cloned(),
         status,
-        response: response.map(|r| journal::cut(r, journal::RESPONSE_CHARS)),
+        response: response
+            .map(|r| journal::cut(&strip_credentials_in_text(r), journal::RESPONSE_CHARS)),
     }
+}
+
+/// Вырезает `user:password@` из каждого адреса вида `схема://…@хост` в произвольном тексте: ответ Patroni и причины
+/// сбоев содержат адреса, которые Patroni сообщает сам (`api_url` не проверяется). Адрес кончается на пробеле, кавычке,
+/// `<`, `>`, `\` или `)`; `@` берётся последний в пределах адреса, поэтому «лишний» `@` в пути съедает часть адреса, но
+/// пароль не остаётся. Обрезка по длине — после очистки, чтобы пароль не пережил разрез.
+fn strip_credentials_in_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("://") {
+        let (head, tail) = rest.split_at(i + 3);
+        out.push_str(head);
+        let end = tail
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '\\' | ')'))
+            .unwrap_or(tail.len());
+        let (address, after) = tail.split_at(end);
+        out.push_str(address.rsplit_once('@').map_or(address, |(_, host)| host));
+        rest = after;
+    }
+    out.push_str(rest);
+    out
 }
 
 fn patroni_only(kind: ConnectionKind) -> AppResult<()> {
@@ -442,22 +470,27 @@ fn patroni_only(kind: ConnectionKind) -> AppResult<()> {
     }
 }
 
-/// Клиентские сессии лидера (кроме своей): сколько оборвётся при переключении. Лидер не отвечает (failover) или
-/// запрос не удался — `None`: предпросмотр не ждёт недоступный узел.
+/// Клиентские сессии лидера, кроме сессий самого Glafira (пулы каталога, опроса и сэмплера, `application_name`
+/// продукта) и своей: столько чужих клиентов оборвётся при переключении.
+fn leader_sessions_sql() -> String {
+    format!(
+        "SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'client backend' AND pid <> pg_backend_pid() \
+         AND application_name IS DISTINCT FROM {}",
+        quote_literal(PG_APPLICATION_NAME)
+    )
+}
+
+/// Клиентские сессии лидера (см. `leader_sessions_sql`). Лидер не отвечает (failover) или запрос не удался —
+/// `None`: предпросмотр не ждёт недоступный узел.
 async fn leader_sessions(st: &AppState, id: &str, leader: &str) -> Option<i64> {
     let target = st.runtimes.diag_target(id, Some(leader), false).ok()?;
     if !target.member.as_ref().is_some_and(|m| m.reachable) {
         return None;
     }
+    let sql = leader_sessions_sql();
     crate::diag::on_member(st, id, &target, |c| {
         Box::pin(async move {
-            let r = c
-                .query_one(
-                    "SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'client backend' AND pid <> pg_backend_pid()",
-                    &[],
-                )
-                .await
-                .map_err(|e| from_pg(&e))?;
+            let r = c.query_one(&sql, &[]).await.map_err(|e| from_pg(&e))?;
             Ok(r.get::<_, i64>(0))
         })
     })
@@ -476,6 +509,8 @@ pub async fn preview(
     patroni_only(target.profile.kind)?;
     let t = &target.topology;
     let leader = t.leader().map(|m| m.name.clone());
+    let leader_state = t.leader().and_then(|m| m.state.clone());
+    let leader_reachable = t.leader().map(|m| m.reachable);
     let paused = t.paused.unwrap_or(false);
     let (candidates, leader_client_sessions) = match action {
         PatroniAction::Switchover { .. } | PatroniAction::Failover { .. } => {
@@ -510,6 +545,8 @@ pub async fn preview(
     };
     Ok(PatroniActionPreview {
         leader,
+        leader_state,
+        leader_reachable,
         paused,
         candidates,
         leader_client_sessions,
@@ -709,9 +746,6 @@ pub async fn perform(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync::MutexExt;
-    use crate::topology::BoxFuture;
-    use crate::topology::model::{Member, Role, ScheduledSwitchover, Topology};
     use std::sync::Mutex;
 
     fn member(name: &str, role: Role, state: &str) -> Member {
@@ -1527,6 +1561,83 @@ mod tests {
         assert_eq!(r.path, "http://pg-1:8008/switchover");
         assert_eq!(r.response.as_deref().map(|s| s.chars().count()), Some(500));
         assert_eq!(r.status, Some(200));
+    }
+
+    /// Адреса в ответе Patroni и в причинах сбоя (`api_url` участника не проверяется) пишутся без `user:password@`,
+    /// и пароль не переживает обрезку до 500 символов.
+    #[test]
+    fn journal_response_has_no_credentials_in_addresses() {
+        let rec = |r: &str| {
+            patroni_record(
+                HttpMethod::Post,
+                "http://pg-1:8008/restart",
+                None,
+                None,
+                Some(r),
+            )
+            .response
+            .unwrap()
+        };
+        assert_eq!(
+            rec(r#"{"api_url": "http://patroni:secret@pg-2:8008/patroni", "x": 1}"#),
+            r#"{"api_url": "http://pg-2:8008/patroni", "x": 1}"#
+        );
+        assert_eq!(
+            rec(
+                "error sending request for url (https://u:p%40ss@pg-1:8008/restart): connection closed"
+            ),
+            "error sending request for url (https://pg-1:8008/restart): connection closed"
+        );
+        assert_eq!(
+            rec("a http://u:one@h1/x and http://v:two@h2/y done"),
+            "a http://h1/x and http://h2/y done"
+        );
+        assert_eq!(
+            rec("no addresses, e-mail a@b.c"),
+            "no addresses, e-mail a@b.c"
+        );
+        assert_eq!(rec("http://plain:8008/x"), "http://plain:8008/x");
+        // Разрез на середине пароля до очистки оставил бы `http://u:t`.
+        let long = format!(
+            "{}http://u:topsecret@h/x{}",
+            "x".repeat(490),
+            "y".repeat(50)
+        );
+        let cut = rec(&long);
+        assert!(!cut.contains("u:") && !cut.contains("secret"), "{cut}");
+        assert!(cut.ends_with("http://h/x"), "{cut}");
+        assert_eq!(cut.chars().count(), 500);
+    }
+
+    /// Сессии самого Glafira не считаются: оборвутся и они, но это не клиенты, о которых предупреждает диалог.
+    #[test]
+    fn leader_sessions_skip_the_apps_own_sessions() {
+        let sql = leader_sessions_sql();
+        assert!(sql.contains("pid <> pg_backend_pid()"), "{sql}");
+        assert!(
+            sql.ends_with("application_name IS DISTINCT FROM 'glafira-pg'"),
+            "{sql}"
+        );
+        assert!(sql.contains("backend_type = 'client backend'"), "{sql}");
+    }
+
+    #[test]
+    fn preview_carries_the_leader_state_in_camel_case() {
+        let p = PatroniActionPreview {
+            leader: Some("pg-1".into()),
+            leader_state: Some("running".into()),
+            leader_reachable: Some(true),
+            paused: false,
+            candidates: vec![],
+            leader_client_sessions: Some(3),
+            member: None,
+            scheduled_switchover: None,
+            can_send: true,
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["leaderState"], "running");
+        assert_eq!(v["leaderReachable"], true);
+        assert_eq!(v["leaderClientSessions"], 3);
     }
 
     /// Запись журнала берёт адрес, статус и ответ у самой отправки: после пропуска недоступного первого адреса
