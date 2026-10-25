@@ -1094,7 +1094,7 @@ describe("Overview: действия Patroni", () => {
     vi.mocked(api.getTopology).mockResolvedValue(topologyView({ topology: topology(scheduled) }));
     renderWithClient(<Overview connectionId="c" />);
     await user.click(await screen.findByRole("button", { name: "Switchover…" }));
-    expect(api.previewPatroniAction).toHaveBeenLastCalledWith("c", { kind: "switchover", candidate: null, scheduledAt: null });
+    expect(api.previewPatroniAction).toHaveBeenLastCalledWith("c", { kind: "switchover", leader: "pg-1", candidate: null, scheduledAt: null });
     expect(await screen.findByRole("region", { name: "Switchover" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Пауза" }));
     expect(api.previewPatroniAction).toHaveBeenLastCalledWith("c", { kind: "pause", paused: true });

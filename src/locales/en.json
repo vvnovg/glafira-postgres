@@ -1427,6 +1427,7 @@
       "cancelRestartNamed": "Cancel restart on {{member}}…",
       "candidate": "Candidate",
       "candidateAuto": "Let Patroni choose",
+      "candidateAutoPaused": "the cluster is paused: Patroni switches over only to a named candidate",
       "candidateLabel": "candidate name",
       "candidateLag": "lag {{lag}}",
       "noReadyCandidate": "No replica is ready to become the leader",
@@ -1438,6 +1439,7 @@
       "onlyPending": "Only if a restart is pending",
       "leader": "Leader: {{name}}",
       "leaderUnreachable": "The leader is not answering the poll: the action may fail or take longer",
+      "failoverDemotes": "Patroni sees the leader as running — only the app cannot reach it. Failover will demote this leader.",
       "sessions": "Client sessions on the leader that will break: {{count}}",
       "sessionsUnknown": "Client sessions on the leader that will break: could not be read",
       "writeDown": "Writes will be unavailable for a few seconds",
@@ -1461,8 +1463,7 @@
       },
       "response": "Patroni answered: {{text}}",
       "accepted": "Patroni accepted the request",
-      "outcomeUnknown": "Patroni did not answer: whether the action ran will show in the progress below",
-      "outcomeUnknownNoWatch": "Patroni did not answer: check the overview to see whether the action ran"
+      "outcomeUnknown": "Patroni did not answer: whether the action ran will show in the progress below"
     },
     "watch": {
       "title": "Progress",
@@ -1479,6 +1480,7 @@
         "done": "Done"
       },
       "reached": "reached",
+      "current": "Reached: {{step}}",
       "timedOut": "The watch timed out: check the overview",
       "failed": "The action failed"
     }

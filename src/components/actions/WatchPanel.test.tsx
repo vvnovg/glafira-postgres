@@ -86,6 +86,25 @@ describe("WatchPanel", () => {
     expect(screen.queryByText("Действие не удалось")).toBeNull();
   });
 
+  it("живая область хода: последний пройденный шаг, в конце — «Готово»; срок и сбой — в ней же и видны глазами", () => {
+    const { rerender } = render(<WatchPanel action="switchover" events={[]} watchId="w" onClose={() => {}} />);
+    const status = screen.getByRole("status");
+    expect(status).toHaveAttribute("aria-live", "polite");
+    expect(status).toHaveTextContent(/^$/);
+    rerender(<WatchPanel action="switchover" events={[ev("accepted"), ev("leaderStepped")]} watchId="w" onClose={() => {}} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Выполнено: Старый лидер сложил полномочия");
+    // Шаг виден отметкой в списке: глазам область не повторяет его, а говорит только скринридеру.
+    expect(screen.getByRole("status")).toHaveClass("sr-only");
+    rerender(<WatchPanel action="switchover" events={[ev("accepted"), ev("done", "done")]} watchId="w" onClose={() => {}} />);
+    expect(screen.getByRole("status")).toHaveTextContent(/^Готово$/);
+    rerender(<WatchPanel action="switchover" events={[ev("accepted", "timedOut")]} watchId="w" onClose={() => {}} />);
+    expect(screen.getAllByRole("status")).toHaveLength(1);
+    expect(screen.getByRole("status")).toHaveTextContent("Срок наблюдения вышел — смотрите обзор");
+    expect(screen.getByRole("status")).toHaveClass("diag-warn");
+    rerender(<WatchPanel action="switchover" events={[ev("accepted", "failed")]} watchId="w" onClose={() => {}} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Действие не удалось");
+  });
+
   it("событий ещё нет: список без отметок", () => {
     render(<WatchPanel action="pause" events={[]} watchId="w" onClose={() => {}} />);
     for (const item of screen.getAllByRole("listitem")) expect(item).not.toHaveTextContent("✓");

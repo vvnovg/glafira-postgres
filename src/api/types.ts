@@ -1091,9 +1091,13 @@ export interface ActionResult {
   journalWritten: boolean;
 }
 
-/** Действие Patroni; `scheduledAt` — время RFC 3339 со смещением (см. `toRfc3339`), `null` — выполнить сейчас. */
+/**
+ * Действие Patroni; `scheduledAt` — время RFC 3339 со смещением (см. `toRfc3339`), `null` — выполнить сейчас. `leader` у
+ * switchover — лидер, которого показал предпросмотр: Rust откажет, если он сменился (`errors.actions.leaderChanged`), и
+ * отправит его в теле запроса, чтобы оставшееся окно закрыл отказ самого Patroni.
+ */
 export type PatroniAction =
-  | { kind: "switchover"; candidate: string | null; scheduledAt: string | null }
+  | { kind: "switchover"; leader: string; candidate: string | null; scheduledAt: string | null }
   | { kind: "cancelSwitchover" }
   | { kind: "failover"; candidate: string }
   | { kind: "restart"; member: string; onlyPending: boolean; scheduledAt: string | null }

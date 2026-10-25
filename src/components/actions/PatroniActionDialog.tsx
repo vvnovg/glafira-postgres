@@ -138,8 +138,10 @@ export function PatroniActionDialog({ connectionId, profile, action, scope = "",
   const isRestart = kind === "restart";
   const candidates = p?.candidates ?? [];
   const firstReady = candidates.find((c) => c.ready)?.member ?? null;
-  // Switchover: `null` — «Patroni выберет сам». Failover без кандидата невозможен: берётся первый готовый.
-  const candidate = isFailover ? (chosen ?? firstReady) : chosen;
+  // На паузе Patroni переключает только на названного кандидата: «Patroni выберет сам» недоступно.
+  const autoDenied = isSwitchover && p?.paused === true;
+  // Switchover: `null` — «Patroni выберет сам». Failover (и switchover на паузе) без кандидата невозможен: берётся первый готовый.
+  const candidate = isFailover || autoDenied ? (chosen ?? firstReady) : chosen;
   const scheduling = isSwitchover || isRestart;
   const scheduledAt = scheduling && when === "scheduled" ? scheduleOf(local) : null;
   const scheduleMissing = scheduling && when === "scheduled" && scheduledAt === null;
@@ -150,8 +152,9 @@ export function PatroniActionDialog({ connectionId, profile, action, scope = "",
   /** Итоговое действие по форме; `null` — выполнять пока нечего (время расписания не задано). */
   const actionToSend = (): PatroniAction | null => {
     switch (action.kind) {
+      // Лидер — тот, что показал предпросмотр: сменится — Rust откажет (`leaderChanged`), а не переключит с другого.
       case "switchover":
-        return scheduleMissing ? null : { kind: "switchover", candidate, scheduledAt };
+        return scheduleMissing || !p?.leader ? null : { kind: "switchover", leader: p.leader, candidate, scheduledAt };
       case "failover":
         return candidate === null ? null : { kind: "failover", candidate };
       case "restart":
@@ -213,7 +216,10 @@ export function PatroniActionDialog({ connectionId, profile, action, scope = "",
             {data.leaderState && <span className="muted"> ({data.leaderState})</span>}
           </p>
           {/* «Действие может не пройти» рядом с отказом — лишнее: причина отказа названа ниже. */}
-          {!refused && data.leaderReachable === false && <p className="diag-warn">{t("actions.patroni.leaderUnreachable")}</p>}
+          {/* Failover при лидере, которого Patroni видит работающим (не отвечает он только приложению), снимет с него роль: это сказано прямо. */}
+          {!refused && data.leaderReachable === false && (
+            <p className="diag-warn">{isFailover && data.leaderState === "running" ? t("actions.patroni.failoverDemotes") : t("actions.patroni.leaderUnreachable")}</p>
+          )}
         </>
       )}
       {data.member && (
@@ -246,8 +252,9 @@ export function PatroniActionDialog({ connectionId, profile, action, scope = "",
       <legend>{t("actions.patroni.candidate")}</legend>
       {isSwitchover && (
         <label>
-          <input type="radio" name={`${groupId}-candidate`} checked={candidate === null} onChange={() => setChosen(null)} />
+          <input type="radio" name={`${groupId}-candidate`} checked={candidate === null} disabled={autoDenied} onChange={() => setChosen(null)} />
           {t("actions.patroni.candidateAuto")}
+          {autoDenied && <span className="diag-warn"> — {t("actions.patroni.candidateAutoPaused")}</span>}
         </label>
       )}
       {candidates.map((c) => (
@@ -303,7 +310,7 @@ export function PatroniActionDialog({ connectionId, profile, action, scope = "",
     const leaderRunning = data.leader !== null && isRunningLeader(data.leaderReachable, data.leaderState);
     if (isFailover && leaderRunning) return <p className="diag-warn">{t("errors.actions.leaderHealthy")}</p>;
     if (isSwitchover && !leaderRunning) return <p className="diag-warn">{t("errors.actions.noLeader")}</p>;
-    if (isFailover && firstReady === null) {
+    if ((isFailover || autoDenied) && firstReady === null) {
       return (
         <>
           <p className="diag-warn">{t("actions.patroni.noReadyCandidate")}</p>
@@ -369,8 +376,9 @@ export function PatroniActionDialog({ connectionId, profile, action, scope = "",
         <>
           {run.data.outcomeUnknown ? (
             <>
+              {/* Неизвестный исход бывает только у действия с наблюдением (`finish` в Rust): итог покажет панель хода. */}
               <p className="diag-warn" role="status">
-                {t(run.data.watch ? "actions.patroni.outcomeUnknown" : "actions.patroni.outcomeUnknownNoWatch")}
+                {t("actions.patroni.outcomeUnknown")}
               </p>
               {run.data.error && <ErrorBanner error={run.data.error} />}
             </>

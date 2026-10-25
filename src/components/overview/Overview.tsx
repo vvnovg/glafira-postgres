@@ -6,7 +6,7 @@ import type { AppError, ConnectionKind, Member, PatroniAction, Topology, Topolog
 import { i18n, currentLocale } from "../../i18n";
 import { tr } from "../../i18n/text";
 import { formatBytes, formatCount, formatScheduled, formatTimestamp } from "../../lib/format";
-import { hasRunningLeader, roleLabel } from "../../lib/topology";
+import { hasRunningLeader, roleLabel, topologyLeader } from "../../lib/topology";
 import { canAct, useConnectionProfile } from "../../lib/useConnectionProfile";
 import { refreshAfterConnect, useTopology, useTopologyEvents } from "../../lib/useConnectionEvents";
 import { PatroniActionDialog } from "../actions/PatroniActionDialog";
@@ -485,7 +485,7 @@ export function Overview({ connectionId, member, active = true }: { connectionId
         )}
         {patroniActions && (
           <>
-            <button type="button" disabled={switchoverTitle !== undefined} title={switchoverTitle} onClick={() => openPatroni({ kind: "switchover", candidate: null, scheduledAt: null })}>
+            <button type="button" disabled={switchoverTitle !== undefined} title={switchoverTitle} onClick={() => openPatroni({ kind: "switchover", leader: topologyLeader(topo.members)?.name ?? "", candidate: null, scheduledAt: null })}>
               {t("actions.patroni.switchover")}
             </button>
             <button type="button" disabled={failoverTitle !== undefined} title={failoverTitle} onClick={() => openPatroni({ kind: "failover", candidate: "" })}>

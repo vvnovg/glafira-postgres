@@ -76,6 +76,24 @@ export function WatchPanel({ action, onlyPending = false, events, watchId, onClo
     onClose();
   };
 
+  // Ход для скринридера — одна вежливая область `role="status"`: пока идёт — последний пройденный шаг, в конце — «Готово»,
+  // срок вышел или причина сбоя. Список шагов меняется молча, без области конец наблюдения не был бы объявлен. Срок и сбой
+  // видны и глазами (как раньше), остальное область говорит только скринридеру: на экране это уже показывают отметки.
+  const ending = last?.status === "timedOut" || last?.status === "failed";
+  const statusText = (): string => {
+    if (!last) return "";
+    switch (last.status) {
+      case "done":
+        return t(STEP_KEYS.done);
+      case "timedOut":
+        return t("actions.watch.timedOut");
+      case "failed":
+        return last.detail ? tr(last.detail) : t("actions.watch.failed");
+      default:
+        return t("actions.watch.current", { step: t(STEP_KEYS[last.step]) });
+    }
+  };
+
   return (
     <section className="panel" aria-label={t("actions.watch.title")}>
       <h3>{t("actions.watch.title")}</h3>
@@ -91,16 +109,9 @@ export function WatchPanel({ action, onlyPending = false, events, watchId, onClo
           );
         })}
       </ol>
-      {last?.status === "timedOut" && (
-        <p className="diag-warn" role="status">
-          {t("actions.watch.timedOut")}
-        </p>
-      )}
-      {last?.status === "failed" && (
-        <p className="diag-warn" role="status">
-          {last.detail ? tr(last.detail) : t("actions.watch.failed")}
-        </p>
-      )}
+      <p className={ending ? "diag-warn" : "sr-only"} role="status" aria-live="polite">
+        {statusText()}
+      </p>
       <button type="button" onClick={close}>
         {t("common.close")}
       </button>

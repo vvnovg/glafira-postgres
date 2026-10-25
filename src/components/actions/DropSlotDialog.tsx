@@ -64,6 +64,9 @@ export function DropSlotDialog({ connectionId, profile, member, slot, scope, onC
       void qc.invalidateQueries({ queryKey: ["diag", connectionId] });
       void qc.invalidateQueries({ queryKey: ["actions", connectionId] });
     },
+    // Ошибка сервера (например, 42501 — нет прав) тоже записана в журнал; отказы до обращения к серверу (защита,
+    // предусловия) — нет, лишнее чтение безвредно.
+    onError: () => void qc.invalidateQueries({ queryKey: ["actions", connectionId] }),
   });
 
   // Escape закрывает диалог, где бы ни стоял фокус внутри него, — не только внутри группы подтверждения. Перехват в фазе

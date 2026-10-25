@@ -149,6 +149,18 @@ describe("DropSlotDialog", () => {
     expect(spy).toHaveBeenCalledWith({ queryKey: ["actions", "c"] });
   });
 
+  it("ошибка сервера (нет прав, 42501) тоже записана в журнал: журнал подключения устаревает, отчёты — нет", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.dropSlot).mockRejectedValue(appError({ code: "NOT_AUTHORIZED", key: "errors.actions.replicationRequired" }));
+    const { client } = renderWithClient(dialog());
+    const spy = vi.spyOn(client, "invalidateQueries");
+    await user.type(await screen.findByLabelText("Подтверждение: имя слота"), "it_dead_slot");
+    await user.click(screen.getByRole("button", { name: "Удалить слот" }));
+    await screen.findByRole("alert");
+    await waitFor(() => expect(spy).toHaveBeenCalledWith({ queryKey: ["actions", "c"] }));
+    expect(spy).not.toHaveBeenCalledWith({ queryKey: ["diag", "c"] });
+  });
+
   it("слот стал активным: ошибка переведена, подтверждение остаётся", async () => {
     const user = userEvent.setup();
     vi.mocked(api.dropSlot).mockRejectedValue(appError({ key: "errors.actions.slotActiveOrGone" }));
