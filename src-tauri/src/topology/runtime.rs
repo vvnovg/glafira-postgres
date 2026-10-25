@@ -525,12 +525,10 @@ impl Runtimes {
         let weak: Weak<Self> = Arc::downgrade(self);
         let key = id.to_string();
         tokio::spawn(async move {
-            loop {
-                let Some((wait, wake)) =
-                    weak.upgrade().and_then(|rt| rt.next_wait(&key, generation))
-                else {
-                    break;
-                };
+            // `upgrade()` поглощается `and_then`: на время сна среда опроса не удерживается.
+            while let Some((wait, wake)) =
+                weak.upgrade().and_then(|rt| rt.next_wait(&key, generation))
+            {
                 tokio::select! {
                     _ = tokio::time::sleep(wait) => {}
                     _ = wake.notified() => {}
