@@ -1,6 +1,7 @@
 import { useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { DiagTool, Finding, FindingLink, FindingTarget, Severity } from "../../api/types";
+import { formatDuration } from "../../lib/format";
 import { useWorkspace } from "../../state/workspace";
 import { CopyButton } from "../common/CopyButton";
 import { findingFix, findingTitle } from "./findingText";
@@ -77,8 +78,11 @@ export function FindingsPanel({
           {sorted.map((f, i) => {
             const command = typeof f.params.command === "string" ? f.params.command : null;
             // Ссылка без узла ведёт туда же, что и узел отчёта: вкладка инструмента одна на подключение.
-            // Ссылки-действия (`kind: "action"`) — кнопки только при `onAction`; переход «в себя» не предлагается.
-            const links = f.links.filter((l) => (l.kind === "action" ? onAction !== undefined : !(l.tool === tool && (l.member == null || l.member === member))));
+            // Ссылки-действия (`kind: "action"`) — кнопки только при `onAction` и известном узле (свой у ссылки или узел отчёта):
+            // без узла выполнять негде. Переход «в себя» не предлагается.
+            const links = f.links.filter((l) =>
+              l.kind === "action" ? onAction !== undefined && (l.member ?? member ?? null) !== null : !(l.tool === tool && (l.member == null || l.member === member)),
+            );
             return (
               <li key={keys[i]} className={`finding sev-${f.severity}`}>
                 <div className="finding-main">
@@ -97,7 +101,7 @@ export function FindingsPanel({
                       link.kind === "action" ? (
                         <button key={actionKey(link)} type="button" onClick={() => onAction?.(link)}>
                           {link.action.type === "terminateIdleInTransaction"
-                            ? t("actions.findings.terminateIdle", { min: Math.round(link.action.olderThanS / 60) })
+                            ? t("actions.findings.terminateIdle", { duration: formatDuration(link.action.olderThanS) })
                             : t("actions.findings.terminateRoot", { pid: link.action.pid })}
                         </button>
                       ) : (

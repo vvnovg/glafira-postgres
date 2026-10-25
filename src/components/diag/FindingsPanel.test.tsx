@@ -51,6 +51,42 @@ describe("FindingsPanel", () => {
     expect(onAction).toHaveBeenCalledTimes(2);
   });
 
+  it("ссылка-действие без узла (ни у ссылки, ни у отчёта) кнопки не получает; узел у ссылки или у отчёта — получает", () => {
+    const withLink = (member: string | null): Finding => ({
+      id: "idleInTransaction",
+      severity: "critical",
+      member: null,
+      target: null,
+      params: { maxS: 2000, count: 1 },
+      links: [{ kind: "action", action: { type: "terminateIdleInTransaction", olderThanS: 300 }, member }],
+    });
+    const button = { name: "Завершить idle in transaction старше 5 мин" };
+    const { rerender } = renderWithClient(<FindingsPanel connectionId="c" findings={[withLink(null)]} tool="idleTx" member={null} onAction={() => {}} />);
+    expect(screen.queryByRole("button", button)).toBeNull();
+    // Узел отчёта не передан вовсе — то же самое.
+    rerender(<FindingsPanel connectionId="c" findings={[withLink(null)]} onAction={() => {}} />);
+    expect(screen.queryByRole("button", button)).toBeNull();
+    rerender(<FindingsPanel connectionId="c" findings={[withLink("pg-2")]} tool="idleTx" member={null} onAction={() => {}} />);
+    expect(screen.getByRole("button", button)).toBeInTheDocument();
+    rerender(<FindingsPanel connectionId="c" findings={[withLink(null)]} tool="idleTx" member="pg-1" onAction={() => {}} />);
+    expect(screen.getByRole("button", button)).toBeInTheDocument();
+  });
+
+  it("порог на кнопке — та же длительность, что уходит в действие: не кратное минуте не округляется", () => {
+    const idle = (olderThanS: number): Finding => ({
+      id: "idleInTransaction",
+      severity: "critical",
+      member: "pg-1",
+      target: null,
+      params: { maxS: 2000, count: 1 },
+      links: [{ kind: "action", action: { type: "terminateIdleInTransaction", olderThanS }, member: "pg-1" }],
+    });
+    const { rerender } = renderWithClient(<FindingsPanel connectionId="c" findings={[idle(100)]} tool="sessions" member="pg-1" onAction={() => {}} />);
+    expect(screen.getByRole("button", { name: "Завершить idle in transaction старше 1 мин 40 с" })).toBeInTheDocument();
+    rerender(<FindingsPanel connectionId="c" findings={[idle(5400)]} tool="sessions" member="pg-1" onAction={() => {}} />);
+    expect(screen.getByRole("button", { name: "Завершить idle in transaction старше 1 ч 30 мин" })).toBeInTheDocument();
+  });
+
   it("находки по строгости с текстом, «что сделать», командой и переходом в инструмент", async () => {
     const user = userEvent.setup();
     useWorkspace.setState({ tabs: [], activeId: null });

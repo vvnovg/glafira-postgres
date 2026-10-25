@@ -322,10 +322,10 @@ function SessionPanel({
         <h3 tabIndex={-1}>{t("diag.sessions.panel", { pid: row.pid })}</h3>
         {onSessionAction && startUs !== null && row.backendType === "client backend" && (
           <>
-            <button type="button" disabled={ended} onClick={() => signal("cancel")}>
+            <button type="button" disabled={ended} title={ended ? t("diag.sessions.ended") : undefined} onClick={() => signal("cancel")}>
               {t("actions.buttons.cancel")}
             </button>
-            <button type="button" disabled={ended} onClick={() => signal("terminate")}>
+            <button type="button" disabled={ended} title={ended ? t("diag.sessions.ended") : undefined} onClick={() => signal("terminate")}>
               {t("actions.buttons.terminate")}
             </button>
           </>
@@ -386,7 +386,7 @@ function IdleTerminate({ onSessionAction }: { onSessionAction: (choice: SessionA
         disabled={min === null}
         onClick={() => min !== null && onSessionAction({ kind: "terminate", target: { kind: "idleInTransaction", olderThanS: min * 60 } })}
       >
-        {t("actions.buttons.terminateIdle", { min: min ?? "N" })}
+        {min === null ? t("actions.buttons.terminateIdleAny") : t("actions.buttons.terminateIdle", { min })}
       </button>
     </div>
   );

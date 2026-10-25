@@ -29,8 +29,11 @@ function linkAction(a: SessionActionLink): SessionActionChoice {
     : { kind: "terminate", target: { kind: "rootBlocker", pid: a.pid, backendStartUs: a.backendStartUs } };
 }
 
-/** Открытое действие: выбор и узел, на котором оно выполняется (узел фиксируется при открытии и не уходит вслед за отчётом). */
-type OpenAction = SessionActionChoice & { member: string };
+/**
+ * Открытое действие: выбор и узел, на котором оно выполняется (узел фиксируется при открытии и не уходит вслед за отчётом).
+ * `id` растёт с каждым открытием: повторный выбор того же самого заново открывает диалог с новым предпросмотром.
+ */
+type OpenAction = SessionActionChoice & { member: string; id: number };
 
 /**
  * Тело инструмента: вид данных выбирается по `report.data.kind`.
@@ -92,6 +95,7 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
   const profile = useConnectionProfile(connectionId);
   const actor = profile !== undefined && canAct(profile) ? profile : undefined;
   const [action, setAction] = useState<OpenAction | null>(null);
+  const actionSeq = useRef(0);
 
   const cluster = isClusterTool(tool);
   const state = view.data?.state;
@@ -108,9 +112,10 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
   useEffect(() => {
     if (!live) setAction(null);
   }, [live]);
-  const startAction = (member: string | null, choice: SessionActionChoice) => {
-    if (member !== null) setAction({ ...choice, member });
-  };
+  // `node` — узел действия; параметр назван не `member`, чтобы не затенять проп вкладки.
+  const startAction = (node: string, choice: SessionActionChoice) => setAction({ ...choice, member: node, id: ++actionSeq.current });
+  // Узел отчёта: без него (отчёт кластера «пульс», сервер не назвал узел) кнопки инструментов не показываются — выполнять негде.
+  const reportNode = report?.member ?? null;
 
   // Выбор узла в шапке — то же открытие вкладки, что и из ссылки находки: спека (и узел вместе с ней) обновляется.
   const pick = (m: string | null) => useWorkspace.getState().open({ kind: "diag", connectionId, tool, member: m });
@@ -204,7 +209,7 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
       {q.error && <ErrorBanner error={q.error} />}
       {action && actor && (
         <SessionActionDialog
-          key={JSON.stringify(action)}
+          key={action.id}
           connectionId={connectionId}
           profile={actor}
           member={action.member}
@@ -221,7 +226,15 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
             showMember={cluster}
             tool={tool}
             member={report.member}
-            onAction={actor ? (l) => startAction(l.member ?? report.member, linkAction(l.action)) : undefined}
+            onAction={
+              actor
+                ? (l) => {
+                    // Панель рисует кнопку только при известном узле ссылки или отчёта; проверка нужна и типам.
+                    const node = l.member ?? reportNode;
+                    if (node !== null) startAction(node, linkAction(l.action));
+                  }
+                : undefined
+            }
           />
           {report.unavailable.length > 0 && (
             <div className="diag-unavailable">
@@ -232,7 +245,7 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
               ))}
             </div>
           )}
-          <ToolBody tool={tool} report={report} connectionId={connectionId} onSessionAction={actor ? (choice) => startAction(report.member, choice) : undefined} />
+          <ToolBody tool={tool} report={report} connectionId={connectionId} onSessionAction={actor && reportNode !== null ? (choice) => startAction(reportNode, choice) : undefined} />
         </div>
       ) : (
         !q.error && <p className="empty">{t("common.loading")}</p>

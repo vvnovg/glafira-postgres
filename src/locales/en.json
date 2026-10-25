@@ -1362,6 +1362,7 @@
       "tableTerminate": "Sessions to terminate",
       "criterionIdle": "Sessions idle in a transaction for longer than {{duration}}",
       "node": "Node: {{member}}",
+      "noMatching": "No matching sessions",
       "nothing": "No session can be signalled",
       "countLabel": "number of sessions",
       "glafiraNote": "Glafira connection",
@@ -1389,11 +1390,12 @@
       "cancel": "Cancel query…",
       "terminate": "Terminate session…",
       "terminateIdle": "Terminate idle in transaction older than {{min}} min…",
+      "terminateIdleAny": "Terminate idle in transaction older than the threshold…",
       "idleOlderThan": "Older than, min",
       "terminateRoot": "Terminate the root blocker…"
     },
     "findings": {
-      "terminateIdle": "Terminate idle in transaction older than {{min}} min",
+      "terminateIdle": "Terminate idle in transaction older than {{duration}}",
       "terminateRoot": "Terminate session {{pid}}"
     }
   },

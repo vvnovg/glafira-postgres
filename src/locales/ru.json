@@ -1390,6 +1390,7 @@
       "tableTerminate": "Сессии для завершения",
       "criterionIdle": "Сессии в состоянии idle in transaction дольше {{duration}}",
       "node": "Узел: {{member}}",
+      "noMatching": "Нет подходящих сессий",
       "nothing": "Ни одну сессию нельзя отменить или завершить",
       "countLabel": "число сессий",
       "glafiraNote": "Соединение Glafira",
@@ -1417,11 +1418,12 @@
       "cancel": "Отменить запрос…",
       "terminate": "Завершить сессию…",
       "terminateIdle": "Завершить idle in transaction старше {{min}} мин…",
+      "terminateIdleAny": "Завершить idle in transaction старше порога…",
       "idleOlderThan": "Старше, мин",
       "terminateRoot": "Завершить корневой блокирующий…"
     },
     "findings": {
-      "terminateIdle": "Завершить idle in transaction старше {{min}} мин",
+      "terminateIdle": "Завершить idle in transaction старше {{duration}}",
       "terminateRoot": "Завершить сессию {{pid}}"
     }
   },

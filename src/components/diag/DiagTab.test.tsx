@@ -380,6 +380,59 @@ describe("DiagTab", () => {
       expect(api.previewSessionAction).toHaveBeenCalledWith("c", { member: "pg-1", kind: "terminate", target: { kind: "rootBlocker", pid: 7, backendStartUs: 70 } });
     });
 
+    it("отчёт без узла (member: null): кнопок сессий, порога и корня блокировок нет; кнопка находки — только если узел назван в ссылке", async () => {
+      const link = (member: string | null) => ({ kind: "action" as const, action: { type: "terminateIdleInTransaction" as const, olderThanS: 300 }, member });
+      const idle = (member: string | null): Finding => ({ id: "idleInTransaction", severity: "critical", member, target: null, params: { maxS: 2000, count: 1 }, links: [link(member)] });
+      vi.mocked(api.runDiagnostic).mockResolvedValue({ ...sessionsReport([idle(null)]), member: null });
+      const user = userEvent.setup();
+      const { unmount } = renderWithClient(<DiagTab connectionId="c" tool="idleTx" member={null} active tabId="diag:c:idleTx" />);
+      await user.click(await screen.findByRole("row", { name: /5/ }));
+      expect(screen.getByRole("region", { name: "Сессия 5" })).toBeInTheDocument();
+      // Ни у отчёта, ни у ссылки узла нет: выполнять негде, кнопок нет (а не кнопка, которая молча ничего не делает).
+      expect(screen.queryByRole("button", { name: /Завершить|Отменить запрос/ })).toBeNull();
+      expect(screen.queryByRole("spinbutton")).toBeNull();
+      unmount();
+      // Отчёт кластера: узла нет у отчёта, но ссылка находки называет его — кнопка есть и действует на узле ссылки.
+      vi.mocked(api.runDiagnostic).mockResolvedValue({ ...sessionsReport([idle("pg-2")]), member: null });
+      vi.mocked(api.previewSessionAction).mockResolvedValue({ member: "pg-2", rows: [previewRow(5, 50)] });
+      renderWithClient(<DiagTab connectionId="c" tool="idleTx" member={null} active tabId="diag:c:idleTx" />);
+      await user.click(await screen.findByRole("button", { name: "Завершить idle in transaction старше 5 мин" }));
+      expect(api.previewSessionAction).toHaveBeenCalledWith("c", { member: "pg-2", kind: "terminate", target: { kind: "idleInTransaction", olderThanS: 300 } });
+    });
+
+    it("отчёт без узла: у корня дерева блокировок кнопки нет", async () => {
+      const lockSession = { pid: 1, backendStartUs: 10, user: "app", application: "api", database: "orders", state: "active", query: "update", xactAgeS: 100, queryAgeS: 10 };
+      vi.mocked(api.runDiagnostic).mockResolvedValue(
+        diagReport({ kind: "locks", roots: [{ session: lockSession, lock: null, alsoBlockedBy: [], victims: 1, children: [] }], cycles: [], ddlQueue: [] }, { member: null }),
+      );
+      renderWithClient(<DiagTab connectionId="c" tool="locks" member={null} active tabId="diag:c:locks" />);
+      await screen.findByText("Дерево блокировок");
+      expect(screen.queryByRole("button", { name: "Завершить корневой блокирующий…" })).toBeNull();
+    });
+
+    it("повторный выбор того же действия открывает диалог заново: предпросмотр читается снова, результат прошлого не остаётся", async () => {
+      vi.mocked(api.runDiagnostic).mockResolvedValue(sessionsReport());
+      vi.mocked(api.previewSessionAction).mockResolvedValue({ member: "pg-1", rows: [previewRow(5, 50)] });
+      vi.mocked(api.executeSessionAction).mockResolvedValue({ member: "pg-1", results: [{ pid: 5, backendStartUs: 50, result: "terminated" }], outcome: "ok", journalWritten: true });
+      const user = userEvent.setup();
+      renderWithClient(<DiagTab connectionId="c" tool="sessions" member={null} active tabId="diag:c:sessions" />);
+      await user.click(await screen.findByRole("row", { name: /5/ }));
+      const open = () => user.click(screen.getByRole("button", { name: "Завершить сессию…" }));
+      await open();
+      await user.click(await screen.findByRole("button", { name: "Завершить сессию" }));
+      expect(await screen.findByRole("table", { name: "Результат" })).toBeInTheDocument();
+      expect(api.previewSessionAction).toHaveBeenCalledTimes(1);
+      // То же самое действие по той же кнопке: старая таблица результата уходит, предпросмотр читается заново.
+      await open();
+      expect(await screen.findByRole("table", { name: "Сессии для завершения" })).toBeInTheDocument();
+      expect(screen.queryByRole("table", { name: "Результат" })).toBeNull();
+      await waitFor(() => expect(api.previewSessionAction).toHaveBeenCalledTimes(2));
+      // И повторное нажатие при открытом предпросмотре — тоже новое чтение (список не берётся из кэша прошлого диалога).
+      await open();
+      await waitFor(() => expect(api.previewSessionAction).toHaveBeenCalledTimes(3));
+      expect(await screen.findByRole("table", { name: "Сессии для завершения" })).toBeInTheDocument();
+    });
+
     it("подключение только для чтения: ни кнопок сессий, ни порога, ни кнопок находок", async () => {
       vi.mocked(api.listConnections).mockResolvedValue([connection({ id: "c", kind: "patroni", readOnly: true })]);
       const finding: Finding = {

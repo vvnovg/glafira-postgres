@@ -1,5 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppError, ConnectionProfile, PreviewRow, SessionActionPreview } from "../../api/types";
 import { renderWithClient } from "../../test/render";
@@ -233,6 +234,97 @@ describe("SessionActionDialog", () => {
     await user.click(await screen.findByRole("button", { name: "Завершить 2 сессии" }));
     await user.click(await screen.findByRole("button", { name: "Закрыть" }));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("предпросмотр пуст: «Нет подходящих сессий», а не «нельзя отменить или завершить»; таблицы нет, закрыть можно", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    vi.mocked(api.previewSessionAction).mockResolvedValue({ member: "pg-1", rows: [] });
+    renderWithClient(<SessionActionDialog connectionId="c" profile={dev} member="pg-1" kind="terminate" target={target} onClose={onClose} />);
+    expect(await screen.findByText("Нет подходящих сессий")).toBeInTheDocument();
+    expect(screen.queryByText("Ни одну сессию нельзя отменить или завершить")).toBeNull();
+    expect(screen.queryByRole("table")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Завершить/ })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Закрыть" }));
+    expect(onClose).toHaveBeenCalled();
+    expect(api.executeSessionAction).not.toHaveBeenCalled();
+  });
+
+  describe("клавиатура и фокус", () => {
+    it("Escape закрывает диалог на не-prod подключении: фокус на секции, вне группы подтверждения", async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      renderWithClient(<SessionActionDialog connectionId="c" profile={dev} member="pg-1" kind="terminate" target={target} onClose={onClose} />);
+      await screen.findByRole("button", { name: "Завершить 2 сессии" });
+      // Фокус — на секции диалога, а не в ConfirmDialog (на dev у него нет поля ввода).
+      expect(screen.getByRole("region", { name: "Завершение сессий" })).toHaveFocus();
+      await user.keyboard("{Escape}");
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it("Escape из поля имени на prod закрывает один раз (ConfirmDialog и секция не дублируют вызов)", async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      renderWithClient(<SessionActionDialog connectionId="c" profile={prod} member="pg-1" kind="terminate" target={target} onClose={onClose} />);
+      await user.click(await screen.findByLabelText("Имя подключения"));
+      await user.keyboard("{Escape}");
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it("Escape закрывает и экран результата, и сообщение об ошибке предпросмотра", async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      const { unmount } = renderWithClient(<SessionActionDialog connectionId="c" profile={dev} member="pg-1" kind="terminate" target={target} onClose={onClose} />);
+      await user.click(await screen.findByRole("button", { name: "Завершить 2 сессии" }));
+      await screen.findByRole("table", { name: "Результат" });
+      await user.click(screen.getByRole("button", { name: "Закрыть" }));
+      onClose.mockClear();
+      await user.keyboard("{Escape}");
+      expect(onClose).toHaveBeenCalledTimes(1);
+      unmount();
+      vi.mocked(api.previewSessionAction).mockRejectedValue(appError({ code: "NODE_UNAVAILABLE", key: "errors.actions.nodeUnavailable", params: { member: "pg-9" } }));
+      renderWithClient(<SessionActionDialog connectionId="c" profile={dev} member="pg-9" kind="terminate" target={one} onClose={onClose} />);
+      await screen.findByRole("alert");
+      onClose.mockClear();
+      await user.keyboard("{Escape}");
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it("пока действие выполняется, Escape диалог не закрывает", async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      vi.mocked(api.executeSessionAction).mockReturnValue(new Promise(() => {}));
+      renderWithClient(<SessionActionDialog connectionId="c" profile={dev} member="pg-1" kind="terminate" target={target} onClose={onClose} />);
+      await user.click(await screen.findByRole("button", { name: "Завершить 2 сессии" }));
+      await waitFor(() => expect(api.executeSessionAction).toHaveBeenCalled());
+      await user.keyboard("{Escape}");
+      expect(onClose).not.toHaveBeenCalled();
+    });
+
+    it("у секции и группы подтверждения разные имена; после закрытия фокус возвращается на кнопку, открывшую диалог", async () => {
+      const user = userEvent.setup();
+      function Host() {
+        const [open, setOpen] = useState(false);
+        return (
+          <>
+            <button type="button" onClick={() => setOpen(true)}>
+              Открыть
+            </button>
+            {open && <SessionActionDialog connectionId="c" profile={dev} member="pg-1" kind="terminate" target={target} onClose={() => setOpen(false)} />}
+          </>
+        );
+      }
+      renderWithClient(<Host />);
+      const opener = screen.getByRole("button", { name: "Открыть" });
+      await user.click(opener);
+      await screen.findByRole("group", { name: "Завершить сессии?" });
+      expect(screen.getByRole("region", { name: "Завершение сессий" })).toBeInTheDocument();
+      // Имя «Завершить сессии?» одно — у группы подтверждения.
+      expect(screen.getAllByLabelText("Завершить сессии?")).toHaveLength(1);
+      await user.keyboard("{Escape}");
+      expect(screen.queryByRole("region", { name: "Завершение сессий" })).toBeNull();
+      expect(opener).toHaveFocus();
+    });
   });
 
   it("выполняется узел из предпросмотра, а не из пропса", async () => {

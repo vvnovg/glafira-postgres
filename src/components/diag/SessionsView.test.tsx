@@ -332,9 +332,13 @@ describe("SessionsView", () => {
       const { rerender } = renderWithClient(<SessionsView report={report([a])} preset="all" onSessionAction={() => {}} />);
       await user.click(rowOf(30));
       expect(screen.getByRole("button", terminate)).toBeEnabled();
+      expect(screen.getByRole("button", terminate)).not.toHaveAttribute("title");
       rerender(<SessionsView report={report([])} preset="all" onSessionAction={() => {}} />);
       expect(screen.getByRole("button", cancel)).toBeDisabled();
       expect(screen.getByRole("button", terminate)).toBeDisabled();
+      // Причина недоступности названа и в подсказке кнопок; у доступных кнопок подсказки нет.
+      expect(screen.getByRole("button", cancel)).toHaveAttribute("title", "Сессии больше нет в списке");
+      expect(screen.getByRole("button", terminate)).toHaveAttribute("title", "Сессии больше нет в списке");
     });
 
     it("набор idle in transaction: порог по умолчанию 5 мин, клик передаёт критерий в секундах", async () => {
@@ -363,6 +367,8 @@ describe("SessionsView", () => {
         if (bad !== "") await user.type(input, bad);
         expect(button(), `«${bad}»`).toBeDisabled();
         expect(input, `«${bad}»`).toBeInvalid();
+        // Без числа в подписи нет подстановки-заглушки: кнопка называет порог словами.
+        expect(button(), `«${bad}»`).toHaveTextContent("Завершить idle in transaction старше порога…");
       }
       await user.clear(input);
       await user.type(input, "1");
