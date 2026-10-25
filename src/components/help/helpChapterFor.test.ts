@@ -40,6 +40,11 @@ describe("helpChapterFor", () => {
     expect(helpAnchorFor(null)).toBeUndefined();
   });
 
+  it("вкладка «Журнал действий» — глава «Диагностика», якорь journal (раздел в руководстве — задача 14)", () => {
+    expect(helpChapterFor({ kind: "actions", connectionId: "c" })).toBe("diagnostics");
+    expect(helpAnchorFor({ kind: "actions", connectionId: "c" })).toBe("journal");
+  });
+
   it("якорь F1 каждого инструмента — раздел {#id} главы «Диагностика» на обоих языках (справка при отсутствии якоря молча прокручивает наверх)", async () => {
     for (const lang of ["en", "ru"]) {
       const chapter = (await loadGuide(lang)).diagnostics;

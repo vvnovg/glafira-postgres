@@ -17,7 +17,9 @@ export type TabSpec =
   | { kind: "function"; connectionId: string; database: string; oid: number; name: string }
   | { kind: "sequence"; connectionId: string; database: string; schema: string; name: string }
   /** Инструмент диагностики; member — закреплённый узел, нет — за лидером (одна вкладка на подключение и инструмент). */
-  | { kind: "diag"; connectionId: string; tool: DiagTool; member?: string | null };
+  | { kind: "diag"; connectionId: string; tool: DiagTool; member?: string | null }
+  /** Журнал действий подключения (одна вкладка на подключение). */
+  | { kind: "actions"; connectionId: string };
 
 export type Tab = TabSpec & { id: string };
 
@@ -42,6 +44,8 @@ export function tabId(spec: TabSpec): string {
       return `function:${spec.connectionId}:${spec.database}:${spec.oid}`;
     case "diag":
       return `diag:${spec.connectionId}:${spec.tool}`;
+    case "actions":
+      return `actions:${spec.connectionId}`;
   }
 }
 

@@ -1,5 +1,8 @@
 {
   "ru": [
+    "actions.kind.failover",
+    "actions.kind.restart",
+    "actions.kind.switchover",
     "connections.form.scoped",
     "connections.form.ssh.section",
     "connections.form.targets.primary",

@@ -90,6 +90,18 @@ describe("Layout tabs", () => {
     expect(within(list).getAllByText("PROD")).toHaveLength(2);
   });
 
+  it("вкладка журнала действий: заголовок «Журнал действий — подключение», значок окружения; F1 открывает якорь journal главы «Диагностика»", async () => {
+    useWorkspace.setState({ tabs: [{ kind: "actions", connectionId: "c1", id: "actions:c1" }], activeId: "actions:c1" });
+    renderWithClient(<Layout />);
+    const list = screen.getByRole("tablist");
+    expect(await within(list).findByRole("tab", { name: "Журнал действий — prod-1" })).toBeInTheDocument();
+    expect(within(list).getAllByText("PROD")).toHaveLength(1);
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "F1", bubbles: true, cancelable: true }));
+    });
+    expect(useWorkspace.getState().tabs.find((t) => t.id === "help")).toMatchObject({ kind: "help", chapter: "diagnostics", anchor: "journal" });
+  });
+
   it("форма подключения: в заголовке имя, а не id; без подключения — прочерк-заглушка", async () => {
     useWorkspace.setState({
       tabs: [

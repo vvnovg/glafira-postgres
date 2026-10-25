@@ -418,7 +418,8 @@
     "copyConnection": "Копия: {{name}}",
     "overview": "Обзор: {{conn}}",
     "unknownConnection": "?",
-    "diag": "{{tool}} — {{conn}}"
+    "diag": "{{tool}} — {{conn}}",
+    "actions": "Журнал действий — {{conn}}"
   },
   "settings": {
     "title": "Настройки",
@@ -1336,6 +1337,40 @@
     "lockCycle": {
       "title": "Сессий ждут друг друга: {{count}}",
       "fix": "Deadlock detector разрешит это за deadlock_timeout; подробности — в логе сервера."
+    }
+  },
+  "actions": {
+    "journal": {
+      "title": "Журнал действий",
+      "empty": "Действий ещё не было",
+      "sessions_one": "{{count}} сессия",
+      "sessions_few": "{{count}} сессии",
+      "sessions_many": "{{count}} сессий",
+      "sessions_other": "{{count}} сессии",
+      "columns": {
+        "time": "Время",
+        "action": "Действие",
+        "member": "Узел",
+        "object": "Объект",
+        "outcome": "Итог"
+      }
+    },
+    "kind": {
+      "cancel": "Отмена запроса",
+      "terminate": "Завершение сессий",
+      "dropSlot": "Удаление слота",
+      "switchover": "Switchover",
+      "cancelSwitchover": "Отмена switchover",
+      "failover": "Failover",
+      "restart": "Restart",
+      "cancelRestart": "Отмена restart",
+      "pause": "Пауза",
+      "resume": "Снятие паузы"
+    },
+    "outcome": {
+      "ok": "выполнено",
+      "partial": "частично",
+      "error": "ошибка"
     }
   },
   "hints": {

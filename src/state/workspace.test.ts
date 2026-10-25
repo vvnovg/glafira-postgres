@@ -45,6 +45,8 @@ describe("workspace", () => {
     // Инструмент диагностики — одна вкладка на подключение и инструмент; узел в id не входит.
     expect(tabId({ kind: "diag", connectionId: "c", tool: "pulse" })).toBe("diag:c:pulse");
     expect(tabId({ kind: "diag", connectionId: "c", tool: "idleTx", member: "pg-2" })).toBe("diag:c:idleTx");
+    // Журнал действий — одна вкладка на подключение.
+    expect(tabId({ kind: "actions", connectionId: "c" })).toBe("actions:c");
   });
 
   it("closeForConnection закрывает все вкладки подключения", () => {

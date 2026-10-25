@@ -414,7 +414,8 @@
     "copyConnection": "Copy: {{name}}",
     "overview": "Overview: {{conn}}",
     "unknownConnection": "?",
-    "diag": "{{tool}} — {{conn}}"
+    "diag": "{{tool}} — {{conn}}",
+    "actions": "Actions — {{conn}}"
   },
   "settings": {
     "title": "Settings",
@@ -1314,6 +1315,38 @@
     "lockCycle": {
       "title": "Sessions waiting for each other: {{count}}",
       "fix": "The deadlock detector will resolve it within deadlock_timeout; details are in the server log."
+    }
+  },
+  "actions": {
+    "journal": {
+      "title": "Actions journal",
+      "empty": "No actions yet",
+      "sessions_one": "{{count}} session",
+      "sessions_other": "{{count}} sessions",
+      "columns": {
+        "time": "Time",
+        "action": "Action",
+        "member": "Node",
+        "object": "Object",
+        "outcome": "Outcome"
+      }
+    },
+    "kind": {
+      "cancel": "Query cancel",
+      "terminate": "Session termination",
+      "dropSlot": "Slot drop",
+      "switchover": "Switchover",
+      "cancelSwitchover": "Switchover cancelled",
+      "failover": "Failover",
+      "restart": "Restart",
+      "cancelRestart": "Restart cancelled",
+      "pause": "Pause",
+      "resume": "Resume"
+    },
+    "outcome": {
+      "ok": "done",
+      "partial": "partly",
+      "error": "error"
     }
   },
   "hints": {

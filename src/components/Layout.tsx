@@ -35,6 +35,8 @@ function tabTitle(tab: Tab, byId: Map<string, ConnectionProfile>): string {
       return tab.name;
     case "diag":
       return i18n.t("tabs.diag", { tool: i18n.t(`diag.tools.${tab.tool}`), conn });
+    case "actions":
+      return i18n.t("tabs.actions", { conn });
   }
 }
 

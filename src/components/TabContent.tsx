@@ -2,6 +2,7 @@ import { Component, lazy, type ReactNode, Suspense } from "react";
 import { useTranslation } from "react-i18next";
 import type { Tab } from "../state/workspace";
 import { AboutPanel } from "./about/AboutPanel";
+import { ActionsJournal } from "./actions/ActionsJournal";
 import { FunctionTab } from "./catalog/FunctionTab";
 import { SequenceTab } from "./catalog/SequenceTab";
 import { TableTab } from "./catalog/TableTab";
@@ -59,5 +60,7 @@ export function TabContent({ tab, active = true }: { tab: Tab; active?: boolean 
       return <SequenceTab connectionId={tab.connectionId} database={tab.database} schema={tab.schema} name={tab.name} />;
     case "diag":
       return <DiagTab connectionId={tab.connectionId} tool={tab.tool} member={tab.member ?? null} active={active} tabId={tab.id} />;
+    case "actions":
+      return <ActionsJournal connectionId={tab.connectionId} active={active} />;
   }
 }
