@@ -161,6 +161,7 @@
       "noUrls": "Нет адресов API Patroni",
       "actionRejected": "Patroni отклонил действие ({{status}})",
       "sendUnsupported": "Этот клиент Patroni не отправляет изменения на {{url}}",
+      "connectionLost": "Связь с API Patroni {{url}} оборвалась после отправки запроса: результат неизвестен — проверьте обзор",
       "authRequired": "Чтобы выполнять действия, укажите в подключении логин API Patroni"
     },
     "topology": {

@@ -687,6 +687,7 @@ mod tests {
             ErrorCode::AuthFailed
         );
     }
+
     #[test]
     fn action_reads_camel_case_json_from_the_frontend() {
         let a: PatroniAction =
@@ -845,9 +846,10 @@ mod tests {
             .unwrap_err();
         assert_eq!(e.details.as_deref().map(|d| d.chars().count()), Some(500));
     }
-    /// Подделка со сценарием: `fail(url)` решает, чем отвечает адрес — ошибкой или `200`; вызовы записываются.
+
     type Script = Box<dyn Fn(&str) -> Option<AppError> + Send + Sync>;
 
+    /// Подделка со сценарием: `fail(url)` решает, чем отвечает адрес — ошибкой или `200`; вызовы записываются.
     struct Scripted {
         fail: Script,
         calls: Mutex<Vec<String>>,
@@ -931,7 +933,13 @@ mod tests {
             "This Patroni client cannot send changes to {{url}}",
             url = url
         );
-        for e in [&timeout, &withheld, &unsupported] {
+        let lost = app_err!(
+            ErrorCode::PatroniError,
+            "errors.patroni.connectionLost",
+            "The connection to the Patroni API at {{url}} was lost after the request was sent: the outcome is unknown, check the overview",
+            url = url
+        );
+        for e in [&timeout, &withheld, &unsupported, &lost] {
             assert!(!not_delivered(e), "{}", e.key);
         }
     }
@@ -980,5 +988,48 @@ mod tests {
             ("http://pg-2:8008/switchover", 200)
         );
         assert_eq!(forward.calls.lock_safe().len(), 2);
+    }
+    /// Настоящий клиент и настоящие сокеты: соединение оборвалось после того, как сервер принял запрос целиком, —
+    /// исход неизвестен, и второй адрес не трогаем; а вот адрес, где соединение не установилось, пропускается.
+    #[tokio::test]
+    async fn send_does_not_resend_after_the_connection_was_lost() {
+        use crate::conn::profile::PatroniSettings;
+        use crate::conn::testutil;
+        use crate::topology::patroni::ReqwestHttp;
+        let refused = {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            format!("http://{}", l.local_addr().unwrap())
+        };
+        let lost = testutil::dropping_http_server(false);
+        let untouched = testutil::dropping_http_server(false);
+        let settings = PatroniSettings {
+            urls: vec![lost.base.clone()],
+            username: None,
+            tls: None,
+            host_overrides: vec![],
+        };
+        let http = ReqwestHttp::new(&settings, None, None, None, None).unwrap();
+        let req = request(
+            &PatroniAction::Switchover {
+                candidate: None,
+                scheduled_at: None,
+            },
+            &cluster(),
+        );
+        // Отказ соединения: запрос не дошёл, идём дальше; второй адрес принял запрос и оборвал связь — стоп.
+        let bases = [refused, lost.base.clone(), untouched.base.clone()];
+        let e = send(&http, &req, &bases).await.unwrap_err();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (ErrorCode::PatroniError, "errors.patroni.connectionLost"),
+            "{e:?}"
+        );
+        assert_eq!(lost.accepted(), 1, "запрос отправлен один раз");
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert_eq!(
+            untouched.accepted(),
+            0,
+            "после обрыва следующий адрес не трогаем"
+        );
     }
 }

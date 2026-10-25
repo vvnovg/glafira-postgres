@@ -154,6 +154,72 @@ pub fn silent_server() -> FakeServer {
     }
 }
 
+/// HTTP-сервер, который обрывает связь после приёма запроса; считает принятые соединения.
+pub struct DroppingHttp {
+    /// Базовый адрес вида `http://127.0.0.1:порт`.
+    pub base: String,
+    accepted: Arc<AtomicUsize>,
+}
+
+impl DroppingHttp {
+    pub fn accepted(&self) -> usize {
+        self.accepted.load(Ordering::SeqCst)
+    }
+}
+
+/// Читает HTTP-запрос целиком: заголовки и тело по `Content-Length`.
+fn read_http_request(sock: &mut TcpStream) {
+    let _ = sock.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut raw = Vec::<u8>::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = sock.read(&mut buf).unwrap_or(0);
+        raw.extend_from_slice(&buf[..n]);
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        if let Some((head, body)) = text.split_once("\r\n\r\n") {
+            let want = head
+                .lines()
+                .find_map(|l| {
+                    l.to_ascii_lowercase()
+                        .strip_prefix("content-length: ")
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                })
+                .unwrap_or(0);
+            if body.len() >= want {
+                return;
+            }
+        }
+        if n == 0 {
+            return;
+        }
+    }
+}
+
+/// Читает запрос целиком и закрывает соединение без ответа; с `partial_answer` — сначала отправляет начало
+/// ответа с обещанным, но не отправленным телом. Так ведёт себя балансировщик, оборвавший связь после запроса.
+pub fn dropping_http_server(partial_answer: bool) -> DroppingHttp {
+    let (listener, port) = listen();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let count = accepted.clone();
+    std::thread::spawn(move || {
+        while let Ok((mut sock, _)) = listener.accept() {
+            count.fetch_add(1, Ordering::SeqCst);
+            std::thread::spawn(move || {
+                read_http_request(&mut sock);
+                if partial_answer {
+                    let _ = sock.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\npartial",
+                    );
+                }
+            });
+        }
+    });
+    DroppingHttp {
+        base: format!("http://127.0.0.1:{port}"),
+        accepted,
+    }
+}
+
 /// Сообщение `ErrorResponse` протокола PostgreSQL: FATAL, SQLSTATE 28000.
 fn error_response() -> Vec<u8> {
     fatal("28000", "harness: TLS handshake completed")

@@ -269,6 +269,17 @@ fn request_error(url: &str, e: &reqwest::Error) -> AppError {
     .with_details(text)
 }
 
+/// Связь оборвалась после отправки изменяющего запроса: он мог дойти и выполниться, повторять его нельзя.
+fn connection_lost(url: &str, e: &reqwest::Error) -> AppError {
+    app_err!(
+        ErrorCode::PatroniError,
+        "errors.patroni.connectionLost",
+        "The connection to the Patroni API at {{url}} was lost after the request was sent: the outcome is unknown, check the overview",
+        url = url
+    )
+    .with_details(chain(e))
+}
+
 fn bad_json(url: &str, e: impl std::fmt::Display) -> AppError {
     app_err!(
         ErrorCode::PatroniError,
@@ -374,9 +385,19 @@ impl PatroniHttp for ReqwestHttp {
             if !withheld && let Some((u, p)) = &self.auth {
                 req = req.basic_auth(u, Some(p));
             }
-            let resp = req.send().await.map_err(|e| self.request_error(url, &e))?;
+            // Изменяющий запрос нельзя повторять вслепую: «не дошёл» решается здесь, где известна фаза сбоя.
+            // Соединение не установлено (TCP, SOCKS, TLS), срок вышел или запрос не собрался — обычная
+            // классификация, как у чтения; любой другой сбой (обрыв после отправки) и любой сбой при чтении
+            // ответа — запрос мог дойти до Patroni и выполниться: исход неизвестен.
+            let resp = match req.send().await {
+                Ok(r) => r,
+                Err(e) if e.is_connect() || e.is_timeout() || e.is_builder() => {
+                    return Err(self.request_error(url, &e));
+                }
+                Err(e) => return Err(connection_lost(url, &e)),
+            };
             let status = resp.status().as_u16();
-            let text = resp.text().await.map_err(|e| self.request_error(url, &e))?;
+            let text = resp.text().await.map_err(|e| connection_lost(url, &e))?;
             if withheld && matches!(status, 401 | 403) {
                 return Err(app_err!(
                     ErrorCode::AuthFailed,
@@ -1932,6 +1953,35 @@ mod tests {
         );
     }
 
+    /// Связь оборвалась после того, как сервер принял запрос целиком (в том числе посреди ответа): запрос мог
+    /// выполниться, поэтому это не «Patroni недоступен» (после него вызывающий идёт к следующему адресу), а
+    /// `connectionLost` с неизвестным исходом. Сервер видит ровно одно соединение: клиент ничего не повторяет.
+    #[tokio::test]
+    async fn send_json_reports_connection_lost_when_the_link_drops_after_the_request() {
+        for partial in [false, true] {
+            let server = testutil::dropping_http_server(partial);
+            let http =
+                ReqwestHttp::new(&settings(&[&server.base]), None, None, None, None).unwrap();
+            let body = serde_json::json!({"leader": "pg-1"});
+            let e = http
+                .send_json(
+                    HttpMethod::Post,
+                    &format!("{}/switchover", server.base),
+                    Some(&body),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(
+                (e.code, e.key.as_str()),
+                (ErrorCode::PatroniError, "errors.patroni.connectionLost"),
+                "partial={partial}: {e:?}"
+            );
+            assert!(!e.retryable);
+            assert!(e.details.as_deref().is_some_and(|d| !d.is_empty()));
+            assert_eq!(server.accepted(), 1, "partial={partial}");
+        }
+    }
+
     #[tokio::test]
     async fn send_json_withholds_the_password_from_http_when_the_profile_is_https() {
         let (base, seen) = capture_server().await;
@@ -2099,6 +2149,69 @@ mod tests {
             "{e:?}"
         );
         assert!(e.retryable);
+    }
+
+    /// Изменяющий запрос через туннель: сбой проброса на этапе рукопожатия SOCKS — по-прежнему `forwardFailed` (запрос
+    /// не отправлялся); порт туннеля закрыт — `tunnelDown`.
+    #[tokio::test]
+    async fn send_json_through_the_tunnel_keeps_connect_phase_errors() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut tcp, _)) = listener.accept().await {
+                let mut buf = [0u8; 512];
+                let _ = tcp.read(&mut buf).await;
+                let _ = tcp.write_all(&[5, 0]).await;
+                let _ = tcp.read(&mut buf).await;
+            }
+        });
+        let s = settings(&["http://patroni1:8008"]);
+        let http = ReqwestHttp::new(&s, None, None, Some(proxy), Some("bastion".into())).unwrap();
+        let e = http
+            .send_json(HttpMethod::Post, "http://patroni1:8008/switchover", None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (ErrorCode::SshError, "errors.ssh.forwardFailed"),
+            "{e:?}"
+        );
+        let closed = {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            l.local_addr().unwrap()
+        };
+        let down = ReqwestHttp::new(&s, None, None, Some(closed), Some("bastion".into())).unwrap();
+        let e = down
+            .send_json(HttpMethod::Post, "http://patroni1:8008/switchover", None)
+            .await
+            .unwrap_err();
+        assert_eq!(e.key, "errors.ssh.tunnelDown", "{e:?}");
+    }
+
+    /// Старый `ssh -D` отвечает успехом на SOCKS и лишь потом пробует открыть канал: обрыв после этого клиент не
+    /// отличает от обрыва связи после отправки запроса. Для изменяющего запроса это `connectionLost` (исход
+    /// неизвестен, повтора нет), а не `forwardFailed`, как у чтения.
+    #[tokio::test]
+    async fn send_json_through_the_tunnel_treats_a_late_forward_failure_as_lost() {
+        use crate::conn::profile::SshAuth;
+        use crate::net::ssh::tunnel::tests::{UNREACHABLE, profile as ssh_profile, registry};
+        let dir = tempfile::tempdir().unwrap();
+        let (tunnels, _) = registry(dir.path(), vec![("FAKE_SSH_UPSTREAM", UNREACHABLE.into())]);
+        let p = ssh_profile(SshAuth::Agent);
+        let socks = tunnels.open(&p, Duration::from_secs(5)).await.unwrap();
+        let s = settings(&["http://patroni1:8008"]);
+        let http = ReqwestHttp::new(&s, None, None, Some(socks), Some("bastion".into())).unwrap();
+        let e = http
+            .send_json(HttpMethod::Post, "http://patroni1:8008/switchover", None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (ErrorCode::PatroniError, "errors.patroni.connectionLost"),
+            "{e:?}"
+        );
+        tunnels.close("c1");
     }
 
     /// OpenSSH 10.x отвечает SOCKS5 только после открытия канала к узлу, а когда бастион до узла не достучался,

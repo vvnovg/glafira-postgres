@@ -159,6 +159,7 @@
       "noUrls": "No Patroni API addresses",
       "actionRejected": "Patroni rejected the action ({{status}})",
       "sendUnsupported": "This Patroni client cannot send changes to {{url}}",
+      "connectionLost": "The connection to the Patroni API at {{url}} was lost after the request was sent: the outcome is unknown, check the overview",
       "authRequired": "Set the Patroni API login in the connection to run actions"
     },
     "topology": {
