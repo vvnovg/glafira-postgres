@@ -59,9 +59,10 @@ pub trait PatroniHttp: Send + Sync {
     fn get_json<'a>(&'a self, url: &'a str) -> BoxFuture<'a, AppResult<serde_json::Value>>;
     /// HTTP-код ответа на GET (матрица health: тело не читается, авторизация не нужна).
     fn get_status<'a>(&'a self, url: &'a str) -> BoxFuture<'a, AppResult<u16>>;
-    /// Изменяющий запрос (действия P2b) с basic auth профиля; `timeout` — общий срок этого запроса (у switchover
-    /// и failover он длиннее обычного: Patroni отвечает после смены лидера), срок соединения —
-    /// `HTTP_CONNECT_TIMEOUT`. По умолчанию не поддерживается: подделки чтения в тестах P1/P2a его не реализуют.
+    /// Изменяющий запрос (действия P2b) с basic auth профиля; `timeout` — общий срок этого запроса (у switchover,
+    /// failover и restart «сейчас» он длиннее обычного — `actions::patroni::LONG_ACTION_TIMEOUT`: Patroni отвечает
+    /// после смены лидера или запуска PostgreSQL), срок соединения — `HTTP_CONNECT_TIMEOUT`. По умолчанию не
+    /// поддерживается: подделки чтения в тестах P1/P2a его не реализуют.
     fn send_json<'a>(
         &'a self,
         _method: HttpMethod,

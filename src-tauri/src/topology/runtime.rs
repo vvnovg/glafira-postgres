@@ -873,7 +873,7 @@ impl Runtimes {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
@@ -1047,6 +1047,56 @@ mod tests {
             "errors.patroni.noUrls",
             "No Patroni API addresses"
         )
+    }
+
+    /// Состояние приложения, чьи открытые подключения — `manual` (опрос раз в 60 с, топология из подделки), с
+    /// открытым подключением `c` (лидер `a`, потоковая реплика `b`): наблюдение на живом подключении без сети.
+    /// Реестр сессий слушает закрытия этих подключений, как в приложении.
+    pub(crate) async fn live_app() -> (tempfile::TempDir, crate::state::AppState, Arc<Runtimes>) {
+        let (rt, _src, _rec, _pools) = manual(vec![Ok(two("a"))]);
+        let dir = tempfile::tempdir().unwrap();
+        let mut st = crate::state::AppState::new(
+            dir.path(),
+            Arc::new(crate::secrets::MemoryStore::default()),
+        )
+        .unwrap();
+        rt.add_close_listener(st.sessions.clone());
+        st.runtimes = rt.clone();
+        rt.connect(patroni_profile()).await.unwrap();
+        (dir, st, rt)
+    }
+
+    struct Quiet;
+    impl crate::actions::watch::WatchSink for Quiet {
+        fn send(&self, _: crate::actions::watch::WatchEvent) -> bool {
+            true
+        }
+    }
+
+    /// Наблюдение на открытом подключении: каждое ускоряет опрос своим ускорением, `stop_session` снимает только
+    /// его — пока идёт другое наблюдение, опрос частый, а без наблюдений — снова обычный интервал.
+    #[tokio::test]
+    async fn stopping_a_live_watch_returns_polling_to_the_normal_interval() {
+        use crate::actions::watch::{BOOST_INTERVAL, WatchPlan, start};
+        let (_dir, st, rt) = live_app().await;
+        let generation = rt.diag_target("c", None, true).unwrap().generation;
+        let wait = || rt.next_wait("c", generation).unwrap().0;
+        assert_eq!(wait(), Duration::from_secs(60));
+        let first = start(&st, "c", WatchPlan::Pause { paused: true }, Arc::new(Quiet));
+        let second = start(&st, "c", WatchPlan::Pause { paused: true }, Arc::new(Quiet));
+        assert_eq!(wait(), BOOST_INTERVAL);
+        assert!(st.sessions.stop(&first));
+        assert_eq!(
+            wait(),
+            BOOST_INTERVAL,
+            "второе наблюдение держит частый опрос"
+        );
+        assert!(st.sessions.stop(&second));
+        assert_eq!(
+            wait(),
+            Duration::from_secs(60),
+            "наблюдений нет — обычный интервал"
+        );
     }
 
     /// Опрос идёт в фоне: ждём условия до 5 с, а не фиксированную паузу, — тест не зависит от нагрузки машины.

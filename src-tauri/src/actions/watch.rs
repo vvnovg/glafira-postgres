@@ -69,8 +69,8 @@ pub enum WatchPlan {
         only_pending: bool,
         /// Когда ушёл запрос (мс эпохи): без `start_before` перезапуск подтверждает время запуска позже него.
         sent_at_ms: i64,
-        /// Наблюдение видело участника остановленным или недоступным (`observe`): без `start_before` перезапуск
-        /// подтверждается только так.
+        /// Наблюдение видело участника остановленным или недоступным (`observe`) либо Patroni подтвердил restart
+        /// ответом 2xx (`confirm_restart`): без `start_before` перезапуск подтверждается только так.
         seen_down: bool,
     },
     Pause {
@@ -133,6 +133,15 @@ impl WatchPlan {
             } => vec![Accepted, Restarted, MemberRunning, PendingCleared, Done],
             WatchPlan::Restart { .. } => vec![Accepted, Restarted, MemberRunning, Done],
             WatchPlan::Pause { .. } => vec![Accepted, PauseApplied, Done],
+        }
+    }
+
+    /// Patroni ответил 2xx на restart «сейчас»: он отвечает уже после запуска PostgreSQL, и простой, который
+    /// наблюдение увидело бы, остался до ответа. Ответ сам подтверждает простой (`seen_down`). При неизвестном исходе
+    /// (таймаут, обрыв) это не вызывается: там простой ещё может быть виден, и правило остаётся строгим.
+    pub fn confirm_restart(&mut self) {
+        if let WatchPlan::Restart { seen_down, .. } = self {
+            *seen_down = true;
         }
     }
 
@@ -263,8 +272,10 @@ fn now_ms() -> i64 {
 ///
 /// Первое событие («принято») уходит отсюда, до задачи: её события идут не раньше, чем через интервал опроса.
 /// Сессия вносится в реестр до ускорения: подключение, закрытое после этого, остановит её своим слушателем, а
-/// закрытое раньше (или не открытое) `boost` покажет — тогда наблюдение кончается сразу событием `failed`, сессия
-/// снимается, а id остаётся id закончившегося наблюдения.
+/// закрытое раньше (или не открытое) `boost` покажет. Закрытое и открытое заново между вставкой и ускорением
+/// `boost` не покажет, но слушатель закрытия уже снял сессию — это видно по реестру, и ускорение, легшее на новое
+/// открытие, снимается. В обоих случаях наблюдение кончается сразу событием `failed`, а id остаётся id
+/// закончившегося наблюдения.
 pub fn start(st: &AppState, id: &str, plan: WatchPlan, sink: Arc<dyn WatchSink>) -> String {
     let session_id = uuid::Uuid::new_v4().to_string();
     let runtimes = st.runtimes.clone();
@@ -341,10 +352,12 @@ pub fn start(st: &AppState, id: &str, plan: WatchPlan, sink: Arc<dyn WatchSink>)
         SessionKind::Watch,
         stop_watch(task.abort_handle(), &st.runtimes, id, &session_id),
     );
-    if !st.runtimes.boost(id, &session_id, BOOST_INTERVAL, deadline) {
-        // Задача прервана до первого события (оно — не раньше интервала опроса); сессии могло уже не быть, если
-        // её снял слушатель закрытия.
+    let boosted = st.runtimes.boost(id, &session_id, BOOST_INTERVAL, deadline);
+    if !boosted || !st.sessions.contains(&session_id) {
+        // Задача прервана до первого своего события (оно — не раньше интервала опроса); сессии могло уже не быть,
+        // если её снял слушатель закрытия, — тогда ускорение снимается здесь.
         st.sessions.stop(&session_id);
+        st.runtimes.unboost(id, &session_id);
         sink.send(WatchEvent {
             step: WatchStep::Accepted,
             status: WatchStatus::Failed,

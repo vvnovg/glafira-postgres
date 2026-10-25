@@ -881,11 +881,12 @@ fn outcome_unknown(e: &AppError) -> bool {
     )
 }
 
-/// Итог выполнения и наблюдение. Ответ Patroni — наблюдение по плану действия (если план есть). Неизвестный
-/// исход (`outcome_unknown`) у действия с планом — тоже наблюдение, с отметкой `outcome_unknown` и причиной в
-/// `error`: оно и покажет,
-/// выполнилось ли действие (switchover и failover отвечают только после смены лидера). Любая иная ошибка — и
-/// неизвестный исход действия без плана (отмены, запланированные действия) — возвращается как есть, без наблюдения.
+/// Итог выполнения и наблюдение. Ответ Patroni — наблюдение по плану действия (если план есть); ответ на restart
+/// «сейчас» сам подтверждает простой участника (`WatchPlan::confirm_restart`). Неизвестный исход
+/// (`outcome_unknown`) у действия с планом — тоже наблюдение, с отметкой `outcome_unknown` и причиной в `error`:
+/// оно и покажет, выполнилось ли действие (switchover, failover и restart «сейчас» Patroni выполняет до ответа).
+/// Любая иная ошибка — и неизвестный исход действия без плана (отмены, запланированные действия) — возвращается
+/// как есть, без наблюдения.
 fn finish(
     st: &AppState,
     id: &str,
@@ -893,14 +894,19 @@ fn finish(
     d: Dispatched,
     sink: std::sync::Arc<dyn crate::actions::watch::WatchSink>,
 ) -> AppResult<PatroniActionResult> {
-    let plan = crate::actions::watch::WatchPlan::for_action(
+    let mut plan = crate::actions::watch::WatchPlan::for_action(
         action,
         &d.before,
         d.restart_start,
         d.sent_at_ms,
     );
     let (response, error) = match d.sent {
-        Ok(reply) => (reply.body, None),
+        Ok(reply) => {
+            if let Some(p) = plan.as_mut() {
+                p.confirm_restart();
+            }
+            (reply.body, None)
+        }
         Err(e) if outcome_unknown(&e) && plan.is_some() => (String::new(), Some(e)),
         Err(e) => return Err(e),
     };
@@ -2062,6 +2068,67 @@ mod tests {
             e.key, "errors.patroni.actionRejected",
             "только switchover и failover"
         );
+    }
+
+    /// Restart «сейчас» Patroni выполняет до ответа: 2xx приходит уже после запуска PostgreSQL, и простой
+    /// наблюдение не увидит. Поэтому ответ 2xx сам подтверждает перезапуск (время запуска до действия не прочиталось)
+    /// — наблюдение доходит до «готово» по топологии. При неизвестном исходе подтверждения нет: без увиденного
+    /// простоя шаг «перезапущен» не наступает. Подключение — живое (`live_app`), опрос наблюдения — раз в 2 с.
+    #[tokio::test]
+    async fn a_confirmed_restart_is_done_without_seeing_the_downtime() {
+        use crate::actions::watch::{BOOST_INTERVAL, WatchStatus, WatchStep};
+        let (_dir, st, _rt) = crate::topology::runtime::tests::live_app().await;
+        let restart = PatroniAction::Restart {
+            member: "b".into(),
+            only_pending: false,
+            scheduled_at: None,
+        };
+        let dispatched = |sent| Dispatched {
+            sent,
+            journal_written: true,
+            before: st.runtimes.view("c").topology.unwrap(),
+            restart_start: None,
+            sent_at_ms: journal::now_ms(),
+        };
+        let events = std::sync::Arc::new(Events::default());
+        let ok = HttpReply {
+            status: 200,
+            body: "restarted".into(),
+        };
+        let r = finish(&st, "c", &restart, dispatched(Ok(ok)), events.clone()).unwrap();
+        assert!(!r.outcome_unknown);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while events
+            .0
+            .lock_safe()
+            .last()
+            .is_none_or(|e| e.status == WatchStatus::Running)
+        {
+            assert!(Instant::now() < deadline, "{:?}", events.0.lock_safe());
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let last = events.0.lock_safe().last().cloned().unwrap();
+        assert_eq!(
+            (last.step, last.status),
+            (WatchStep::Done, WatchStatus::Done)
+        );
+
+        let unknown = std::sync::Arc::new(Events::default());
+        let lost = Err(timeout_err("http://b:5432/restart"));
+        let r = finish(&st, "c", &restart, dispatched(lost), unknown.clone()).unwrap();
+        assert!(r.outcome_unknown);
+        // Два опроса наблюдения: участник всё время работает — простоя нет, дальше «принято» не идём.
+        tokio::time::sleep(BOOST_INTERVAL * 2 + Duration::from_millis(500)).await;
+        assert_eq!(
+            unknown
+                .0
+                .lock_safe()
+                .iter()
+                .map(|e| (e.step, e.status))
+                .collect::<Vec<_>>(),
+            [(WatchStep::Accepted, WatchStatus::Running)]
+        );
+        assert!(st.sessions.stop(&r.watch.unwrap()), "наблюдение ещё идёт");
     }
 
     /// Остальное — как раньше: отказ Patroni — ошибка без наблюдения; неизвестный исход у действия без плана

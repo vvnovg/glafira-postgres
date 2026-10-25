@@ -54,6 +54,11 @@ impl SessionRegistry {
         e.map(|e| (e.stop)()).is_some()
     }
 
+    /// Сессия ещё в реестре: не остановлена, не закончилась и не снята закрытием подключения.
+    pub fn contains(&self, id: &str) -> bool {
+        self.inner.lock_safe().contains_key(id)
+    }
+
     /// Сессия закончилась сама (закрытый канал): убрать без вызова остановки.
     pub fn forget(&self, id: &str) {
         self.inner.lock_safe().remove(id);
@@ -113,7 +118,9 @@ mod tests {
         add("a", "c1");
         add("b", "c1");
         add("x", "c2");
+        assert!(r.contains("a") && !r.contains("zz"));
         assert!(r.stop("a"));
+        assert!(!r.contains("a"), "остановленной сессии нет");
         assert!(!r.stop("a"), "второй раз — сессии нет");
         r.connection_closed("c1");
         assert_eq!(n.load(Ordering::SeqCst), 2);
