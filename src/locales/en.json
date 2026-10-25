@@ -209,7 +209,8 @@
       "badSchedule": "The schedule time {{value}} is not valid",
       "pastSchedule": "The schedule time is in the past",
       "nothingScheduled": "Nothing is scheduled",
-      "pauseUnchanged": "The cluster is already in this state"
+      "pauseUnchanged": "The cluster is already in this state",
+      "patroniOnly": "Patroni actions need a Patroni cluster connection"
     }
   },
   "connections": {

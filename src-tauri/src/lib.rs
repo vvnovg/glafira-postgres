@@ -124,6 +124,7 @@ pub fn run() {
             commands::actions::execute_session_action,
             commands::actions::preview_drop_slot,
             commands::actions::drop_slot,
+            commands::actions::preview_patroni_action,
             commands::folders::list_folders,
             commands::folders::create_folder,
             commands::folders::rename_folder,

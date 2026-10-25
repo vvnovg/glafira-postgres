@@ -59,3 +59,13 @@ pub async fn drop_slot(
 ) -> AppResult<crate::actions::slots::ActionResult> {
     crate::actions::slots::drop(&state, &id, &request, &confirmation).await
 }
+
+/// Предпросмотр действия Patroni: кандидаты с готовностью, сессии лидера, участник restart.
+#[tauri::command]
+pub async fn preview_patroni_action(
+    state: State<'_, AppState>,
+    id: String,
+    action: crate::actions::patroni::PatroniAction,
+) -> AppResult<crate::actions::patroni::PatroniActionPreview> {
+    crate::actions::patroni::preview(&state, &id, &action).await
+}

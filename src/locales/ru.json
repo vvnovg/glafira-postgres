@@ -211,7 +211,8 @@
       "badSchedule": "Время расписания {{value}} задано неверно",
       "pastSchedule": "Время расписания уже прошло",
       "nothingScheduled": "Ничего не запланировано",
-      "pauseUnchanged": "Кластер уже в этом состоянии"
+      "pauseUnchanged": "Кластер уже в этом состоянии",
+      "patroniOnly": "Действия Patroni доступны только у подключения к кластеру Patroni"
     }
   },
   "connections": {

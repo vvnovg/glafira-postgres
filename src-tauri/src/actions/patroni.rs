@@ -1,13 +1,24 @@
-//! Действия Patroni (спец. P2 §8.5): модель действия, предусловия на топологии, запрос и адреса, отправка.
-//! Предпросмотр и выполнение с журналом и наблюдением — задачи 7 и 8.
+//! Действия Patroni (спец. P2 §8.5): модель действия, предусловия на топологии, запрос и адреса, отправка,
+//! предпросмотр и выполнение с журналом. Наблюдение за исходом — задача 8.
 
+use std::time::Instant;
+
+use pg_advisor::failover::{Candidate, DynConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use crate::actions::Confirmation;
+use crate::actions::journal::{self, ActionRecord, Outcome, PatroniRecord, RecordConnection};
+use crate::conn::errors::from_pg;
+use crate::conn::profile::{ConnectionKind, Environment, strip_url_credentials};
 use crate::error::{AppError, AppResult, ErrorCode};
-use crate::topology::model::{Member, Topology};
+use crate::guard::{ensure_mutation_allowed, ensure_name_confirmed};
+use crate::state::AppState;
+use crate::sync::MutexExt;
+use crate::topology::BoxFuture;
+use crate::topology::model::{Member, Role, ScheduledRestart, ScheduledSwitchover, Topology};
 use crate::topology::patroni::{HttpMethod, HttpReply, PatroniHttp};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -365,6 +376,334 @@ pub async fn send(
             "No Patroni API addresses"
         )
     }))
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberPreview {
+    pub name: String,
+    pub role: Role,
+    pub state: Option<String>,
+    pub pending_restart: bool,
+    pub scheduled_restart: Option<ScheduledRestart>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatroniActionPreview {
+    pub leader: Option<String>,
+    pub paused: bool,
+    /// Switchover и failover: готовность реплик (как во вкладке «Готовность к failover»).
+    pub candidates: Vec<Candidate>,
+    /// Switchover и failover: клиентские сессии лидера — оборвутся при переключении. `None` — не удалось прочитать.
+    pub leader_client_sessions: Option<i64>,
+    /// Restart и его отмена.
+    pub member: Option<MemberPreview>,
+    pub scheduled_switchover: Option<ScheduledSwitchover>,
+    /// В профиле есть логин API: без него выполнение откажет (`errors.patroni.authRequired`).
+    pub can_send: bool,
+}
+
+/// Итог отправки: ответ Patroni, запись журнала, топология до действия и `postmaster_start_time` участника до
+/// restart «сейчас» (для наблюдения).
+#[derive(Debug, Clone)]
+pub struct Performed {
+    pub response: String,
+    pub journal_written: bool,
+    pub before: Topology,
+    pub restart_start: Option<String>,
+}
+
+pub fn patroni_record(
+    method: HttpMethod,
+    url: &str,
+    body: Option<&Value>,
+    status: Option<u16>,
+    response: Option<&str>,
+) -> PatroniRecord {
+    PatroniRecord {
+        method: method.as_str().into(),
+        path: strip_url_credentials(url),
+        body: body.cloned(),
+        status,
+        response: response.map(|r| journal::cut(r, journal::RESPONSE_CHARS)),
+    }
+}
+
+fn patroni_only(kind: ConnectionKind) -> AppResult<()> {
+    if kind == ConnectionKind::Patroni {
+        Ok(())
+    } else {
+        Err(app_err!(
+            ErrorCode::InvalidInput,
+            "errors.actions.patroniOnly",
+            "Patroni actions need a Patroni cluster connection"
+        ))
+    }
+}
+
+/// Клиентские сессии лидера (кроме своей): сколько оборвётся при переключении. Лидер не отвечает (failover) или
+/// запрос не удался — `None`: предпросмотр не ждёт недоступный узел.
+async fn leader_sessions(st: &AppState, id: &str, leader: &str) -> Option<i64> {
+    let target = st.runtimes.diag_target(id, Some(leader), false).ok()?;
+    if !target.member.as_ref().is_some_and(|m| m.reachable) {
+        return None;
+    }
+    crate::diag::on_member(st, id, &target, |c| {
+        Box::pin(async move {
+            let r = c
+                .query_one(
+                    "SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'client backend' AND pid <> pg_backend_pid()",
+                    &[],
+                )
+                .await
+                .map_err(|e| from_pg(&e))?;
+            Ok(r.get::<_, i64>(0))
+        })
+    })
+    .await
+    .ok()
+}
+
+/// Предпросмотр действия (ничего не меняет): готовность кандидатов и сессии лидера для switchover и failover,
+/// участник для restart и его отмены.
+pub async fn preview(
+    st: &AppState,
+    id: &str,
+    action: &PatroniAction,
+) -> AppResult<PatroniActionPreview> {
+    let target = st.runtimes.diag_target(id, None, true)?;
+    patroni_only(target.profile.kind)?;
+    let t = &target.topology;
+    let leader = t.leader().map(|m| m.name.clone());
+    let paused = t.paused.unwrap_or(false);
+    let (candidates, leader_client_sessions) = match action {
+        PatroniAction::Switchover { .. } | PatroniAction::Failover { .. } => {
+            // Конфигурация не прочиталась — пределы Patroni по умолчанию (как во вкладке готовности).
+            let config = crate::diag::patroni::dyn_config(st, &target)
+                .await
+                .unwrap_or_else(|_| DynConfig::default());
+            let (data, _) = pg_advisor::failover::evaluate(
+                &crate::diag::patroni::candidate_facts(t),
+                &config,
+                paused,
+            );
+            let sessions = match &leader {
+                Some(l) => leader_sessions(st, id, l).await,
+                None => None,
+            };
+            (data.candidates, sessions)
+        }
+        _ => (vec![], None),
+    };
+    let member = match action {
+        PatroniAction::Restart { member, .. } | PatroniAction::CancelRestart { member } => {
+            t.member(member).map(|m| MemberPreview {
+                name: m.name.clone(),
+                role: m.role,
+                state: m.state.clone(),
+                pending_restart: m.pending_restart,
+                scheduled_restart: m.scheduled_restart.clone(),
+            })
+        }
+        _ => None,
+    };
+    Ok(PatroniActionPreview {
+        leader,
+        paused,
+        candidates,
+        leader_client_sessions,
+        member,
+        scheduled_switchover: t.scheduled_switchover.clone(),
+        can_send: target
+            .profile
+            .patroni
+            .as_ref()
+            .is_some_and(|p| p.username.is_some()),
+    })
+}
+
+/// `postmaster_start_time` участника из `GET <API участника>/patroni` (шаг «перезапущен» наблюдения restart).
+pub async fn postmaster_start(
+    http: &dyn PatroniHttp,
+    t: &Topology,
+    member: &str,
+) -> Option<String> {
+    let base = t
+        .member(member)?
+        .api_url
+        .as_deref()?
+        .trim_end_matches('/')
+        .to_string();
+    let v = http.get_json(&format!("{base}/patroni")).await.ok()?;
+    v.get("postmaster_start_time")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// Запоминает адрес последнего изменяющего запроса. Журналу нужен адрес, давший итог: ошибка отправки несёт его
+/// не всегда (отказ Patroni, например), а обход адресов мог пропустить недоступные.
+struct LastSent<'h> {
+    inner: &'h dyn PatroniHttp,
+    url: std::sync::Mutex<Option<String>>,
+}
+
+impl<'h> LastSent<'h> {
+    fn new(inner: &'h dyn PatroniHttp) -> Self {
+        Self {
+            inner,
+            url: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn url(&self) -> Option<String> {
+        self.url.lock_safe().clone()
+    }
+}
+
+impl PatroniHttp for LastSent<'_> {
+    fn get_json<'a>(&'a self, url: &'a str) -> BoxFuture<'a, AppResult<Value>> {
+        self.inner.get_json(url)
+    }
+
+    fn get_status<'a>(&'a self, url: &'a str) -> BoxFuture<'a, AppResult<u16>> {
+        self.inner.get_status(url)
+    }
+
+    fn send_json<'a>(
+        &'a self,
+        method: HttpMethod,
+        url: &'a str,
+        body: Option<&'a Value>,
+    ) -> BoxFuture<'a, AppResult<HttpReply>> {
+        *self.url.lock_safe() = Some(url.to_string());
+        self.inner.send_json(method, url, body)
+    }
+}
+
+/// Итог отправки и его запись для журнала.
+struct Sent {
+    result: AppResult<(String, HttpReply)>,
+    outcome: Outcome,
+    /// `AppError.code` при `outcome: error`.
+    code: Option<String>,
+    record: PatroniRecord,
+}
+
+/// Отправляет запрос (`send`) и готовит запись журнала. При ошибке адрес записи — последний, на который ушёл
+/// запрос (на нём случился сбой или отказ), а код ответа — из `status` отказа. Таймаут и обрыв связи после
+/// отправки тоже `error`: действие могло выполниться, это выясняет обзор кластера. Ни один запрос не ушёл
+/// (адресов нет) — в записи остаётся путь запроса.
+async fn send_recorded(http: &dyn PatroniHttp, req: &PatroniRequest, bases: &[String]) -> Sent {
+    let tracked = LastSent::new(http);
+    let result = send(&tracked, req, bases).await;
+    let (outcome, code, record) = match &result {
+        Ok((url, reply)) => (
+            Outcome::Ok,
+            None,
+            patroni_record(
+                req.method,
+                url,
+                req.body.as_ref(),
+                Some(reply.status),
+                Some(&reply.body),
+            ),
+        ),
+        Err(e) => {
+            let attempted = tracked.url().unwrap_or_else(|| req.path.to_string());
+            let status = e.params.get("status").and_then(|s| s.parse().ok());
+            (
+                Outcome::Error,
+                Some(journal::code_name(e.code)),
+                patroni_record(
+                    req.method,
+                    &attempted,
+                    req.body.as_ref(),
+                    status,
+                    e.details.as_deref(),
+                ),
+            )
+        }
+    };
+    Sent {
+        result,
+        outcome,
+        code,
+        record,
+    }
+}
+
+/// Проверяет защиту и предусловия, отправляет запрос Patroni и пишет журнал (ошибку Patroni — тоже). Отказы
+/// защиты и предусловий в журнал не попадают: запрос не отправлялся.
+pub async fn perform(
+    st: &AppState,
+    id: &str,
+    action: &PatroniAction,
+    confirmation: &Confirmation,
+) -> AppResult<Performed> {
+    let profile = st.profile(id)?;
+    ensure_mutation_allowed(&profile, confirmation.confirm.as_deref())?;
+    if let PatroniAction::Failover { candidate } = action {
+        ensure_name_confirmed(candidate, confirmation.typed_name.as_deref())?;
+    }
+    patroni_only(profile.kind)?;
+    let settings = profile.patroni.clone().ok_or_else(|| {
+        app_err!(
+            ErrorCode::PatroniError,
+            "errors.patroni.noUrls",
+            "No Patroni API addresses"
+        )
+    })?;
+    if settings.username.is_none() {
+        return Err(app_err!(
+            ErrorCode::PatroniError,
+            "errors.patroni.authRequired",
+            "Set the Patroni API login in the connection to run actions"
+        ));
+    }
+    let before = st.runtimes.diag_target(id, None, true)?.topology;
+    check(action, &before, journal::now_ms())?;
+    let req = request(action, &before);
+    let bases = bases(&before, &req.route, &settings.urls);
+    let http = st.live.http_for(&profile).await?;
+    let restart_start = match action {
+        PatroniAction::Restart {
+            member,
+            scheduled_at: None,
+            ..
+        } => postmaster_start(http.as_ref(), &before, member).await,
+        _ => None,
+    };
+    let started = Instant::now();
+    let sent = send_recorded(http.as_ref(), &req, &bases).await;
+    let member = match &req.route {
+        Route::Member(m) => Some(m.clone()),
+        Route::Leader => before.leader().map(|m| m.name.clone()),
+    };
+    let entry = ActionRecord {
+        ts: journal::now_ms(),
+        action: action_name(action).into(),
+        connection: RecordConnection::of(&profile),
+        member,
+        prod_confirmed: profile.environment == Environment::Prod,
+        outcome: sent.outcome,
+        code: sent.code,
+        ms: started.elapsed().as_millis() as u64,
+        sessions: vec![],
+        slot: None,
+        patroni: Some(sent.record),
+    };
+    let log = st.actions.clone();
+    let journal_written = crate::conn::run_blocking(move || Ok(log.append(&entry)))
+        .await
+        .unwrap_or(false);
+    let (_, reply) = sent.result?;
+    Ok(Performed {
+        response: reply.body,
+        journal_written,
+        before,
+        restart_start,
+    })
 }
 
 #[cfg(test)]
@@ -1173,6 +1512,101 @@ mod tests {
             0,
             "ни перенаправление, ни следующий адрес не тронуты"
         );
+    }
+
+    #[test]
+    fn journal_record_has_no_credentials_and_a_short_response() {
+        let r = patroni_record(
+            HttpMethod::Post,
+            "http://patroni:secret@pg-1:8008/switchover",
+            Some(&serde_json::json!({"leader": "pg-1"})),
+            Some(200),
+            Some(&"x".repeat(2000)),
+        );
+        assert_eq!(r.method, "POST");
+        assert_eq!(r.path, "http://pg-1:8008/switchover");
+        assert_eq!(r.response.as_deref().map(|s| s.chars().count()), Some(500));
+        assert_eq!(r.status, Some(200));
+    }
+
+    /// Запись журнала берёт адрес, статус и ответ у самой отправки: после пропуска недоступного первого адреса
+    /// отказ Patroni записывается за вторым; таймаут и обрыв связи — `error` без статуса (действие могло выполниться).
+    #[tokio::test]
+    async fn journal_gets_the_outcome_and_the_address_that_was_reached() {
+        let req = request(
+            &PatroniAction::Switchover {
+                candidate: Some("pg-2".into()),
+                scheduled_at: None,
+            },
+            &cluster(),
+        );
+        let bases = vec![
+            "http://pg-1:8008".to_string(),
+            "http://pg-2:8008".to_string(),
+        ];
+        let second = "http://pg-2:8008/switchover";
+        let fake = |status| Fake {
+            dead: vec!["http://pg-1".into()],
+            status,
+            calls: Mutex::new(vec![]),
+        };
+
+        let s = send_recorded(&fake(200), &req, &bases).await;
+        assert!(s.result.is_ok());
+        assert_eq!((s.outcome, s.code), (Outcome::Ok, None));
+        assert_eq!(s.record.path, second);
+        assert_eq!(s.record.status, Some(200));
+        assert_eq!(
+            s.record.response.as_deref(),
+            Some("Successfully switched over")
+        );
+        assert_eq!(s.record.body, req.body);
+
+        let s = send_recorded(&fake(412), &req, &bases).await;
+        assert_eq!(
+            (s.outcome, s.code.as_deref()),
+            (Outcome::Error, Some("PATRONI_ERROR"))
+        );
+        assert_eq!(s.record.path, second, "отказал второй адрес");
+        assert_eq!(s.record.status, Some(412));
+        assert_eq!(
+            s.record.response.as_deref(),
+            Some("Successfully switched over")
+        );
+
+        let s = send_recorded(&fake(403), &req, &bases).await;
+        assert_eq!(
+            (s.outcome, s.code.as_deref()),
+            (Outcome::Error, Some("AUTH_FAILED"))
+        );
+        assert_eq!(s.record.path, second);
+        assert_eq!((s.record.status, s.record.response), (None, None));
+
+        // Все адреса недоступны: в записи последний из них.
+        let all_dead = Fake {
+            dead: vec!["http://pg-".into()],
+            status: 200,
+            calls: Mutex::new(vec![]),
+        };
+        let s = send_recorded(&all_dead, &req, &bases).await;
+        assert_eq!(s.code.as_deref(), Some("PATRONI_ERROR"));
+        assert_eq!(s.record.path, second);
+
+        // Таймаут после соединения: исход неизвестен, запись — об этом адресе и без кода ответа.
+        let hang = Scripted::new(|url| url.starts_with("http://pg-1").then(|| timeout_err(url)));
+        let s = send_recorded(&hang, &req, &bases).await;
+        assert_eq!(
+            (s.outcome, s.code.as_deref()),
+            (Outcome::Error, Some("PATRONI_ERROR"))
+        );
+        assert_eq!(s.record.path, "http://pg-1:8008/switchover");
+        assert_eq!(s.record.status, None);
+        assert_eq!(hang.calls.lock_safe().len(), 1, "повтора нет");
+
+        // Адресов нет: запрос не уходил, в записи путь запроса.
+        let s = send_recorded(&fake(200), &req, &[]).await;
+        assert_eq!(s.code.as_deref(), Some("PATRONI_ERROR"));
+        assert_eq!(s.record.path, "/switchover");
     }
 
     /// Неверный адрес в списке — ошибка настройки: `send` останавливается, ничего не отправляя.
