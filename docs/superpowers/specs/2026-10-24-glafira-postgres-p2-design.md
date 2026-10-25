@@ -25,10 +25,13 @@ P2 превращает навигатор P1 в инструмент дежур
    к failover, матрица health.
 3. Сэмплер активности (раз в секунду на узел, в памяти, пока открыта вкладка).
 4. Patroni: чтение `GET /config`, запланированные switchover и restart из `/cluster` в модели топологии.
-5. Действия §7 концепции, кроме VACUUM / ANALYZE и reload: отмена запроса, завершение сессий поштучно и пакетом, удаление
-   слота, switchover (сейчас и по расписанию, отмена), failover, restart (сейчас и по расписанию, отмена), pause / resume.
-6. Защита §7.1–7.2: read-only, подтверждение именем на prod, предпросмотр, защита от переиспользования PID, наблюдение после
-   переключения, предпроверка прав; журнал действий `actions.jsonl` и его вкладка.
+5. Действия §7 концепции, кроме VACUUM / ANALYZE и reload: отмена запроса, завершение сессий поштучно и пакетом (в интерфейсе
+   пакет выбирается по критерию «idle in transaction старше N минут», а не флажками строк; находки `idleInTransaction` и
+   `rootBlocker` ведут к действиям, §4), удаление слота, switchover (сейчас и по расписанию, отмена), failover, restart (сейчас
+   и по расписанию, отмена), pause / resume.
+6. Защита §7.1–7.2: read-only, подтверждение именем на prod, предпросмотр, защита от переиспользования PID (сессия — пара PID
+   и время запуска) и перепроверка критерия пакета, наблюдение после действий Patroni, предпроверка прав; журнал действий
+   `actions.jsonl` и его вкладка.
 7. Стенд: роль приложения `glafira_app`, сервис `pg-lab`; интеграционные тесты сценариев; матрица PG 13–18 для каждого SQL-набора.
 8. Руководство: глава «Диагностика» (инструменты, находки, действия); `docs/admin.md` — права и нагрузка.
 
@@ -51,17 +54,17 @@ P2 превращает навигатор P1 в инструмент дежур
 | Откуда | Что | Изменения в P2 |
 |---|---|---|
 | P1 `topology/model.rs` | `Topology`, `Member` | `Topology.scheduledSwitchover`, `Member.scheduledRestart` (§5.10); `same_except_time` учитывает новые поля |
-| P1 `topology/patroni.rs` | `PatroniHttp`, `ReqwestHttp`, разбор `/cluster` | `get_status(url)` (матрица health), `fetch_config(http, bases)` — `GET /config` по `get_json` с обходом адресов (§5.8); P2b — `send_json(method, url, body)` |
-| P1 `topology/runtime.rs` | `Runtimes`, `TopologyView`, `target(id, member)` | `diag_target(id, member, cluster)` и `topology::observe::leader_member` — узел инструмента (§3.2); подписчики закрытия подключения (§3.4); `LiveSource::http_for` публичен (клиент HTTP подключения для Patroni-инструментов); `boost(id, interval, until)` — ускоренный опрос для наблюдения (§8.6) |
+| P1 `topology/patroni.rs` | `PatroniHttp`, `ReqwestHttp`, разбор `/cluster` | `get_status(url)` (матрица health), `fetch_config(http, bases)` — `GET /config` по `get_json` с обходом адресов (§5.8); P2b — `send_json(method, url, body, timeout)` (метод трейта с реализацией по умолчанию «не поддерживается»), `HttpMethod`, `HttpReply`; изменяющие запросы идут вторым клиентом `reqwest` без перенаправлений (§8.5) |
+| P1 `topology/runtime.rs` | `Runtimes`, `TopologyView`, `target(id, member)` | `diag_target(id, member, cluster)` и `topology::observe::leader_member` — узел инструмента (§3.2); подписчики закрытия подключения (§3.4); `LiveSource::http_for` публичен (клиент HTTP подключения для Patroni-инструментов); `boost(id, owner, interval, until) -> bool` и `unboost(id, owner)` — ускоренный опрос для наблюдения, по ускорению на наблюдение (§8.6) |
 | P1 `conn/pool.rs` | `PoolPurpose`, `PoolRegistry` | `PoolPurpose::Sampler` (одно соединение на узел) |
-| P1 `conn/pg.rs` | `ConnectSpec`, `SESSION_OPTIONS` | P2b: `ACTION_SESSION_OPTIONS` — без `default_transaction_read_only` (§8.2) |
+| P1 `conn/pg.rs` | `ConnectSpec`, `SESSION_OPTIONS` | P2b: поле `ConnectSpec.options` (по умолчанию `SESSION_OPTIONS`), `ConnectSpec::for_action()`, `ACTION_SESSION_OPTIONS` — без `default_transaction_read_only` (§8.2) |
 | P1 `commands/catalog.rs` | `on_catalog_node_within`, предел `catalog_limit` | Те же пределы и закрытие соединения при таймауте для запросов диагностики |
 | P1 `error.rs`, `conn/errors.rs` | `AppError`, `classify_sqlstate` | Коды `RECOVERY_CONFLICT`; P2b — `READ_ONLY`, `CONFIRMATION_REQUIRED` (§10) |
 | P1 `readiness`, `pg-advisor::readiness` | Чек-лист | P2b: пункт `replicationAttr`, факт `has_replication` |
 | P1 `src/state/workspace.ts` | `TabSpec` | Виды `diag` и `actions` (§7.2) |
 | P1 `src/lib/useConnectionEvents.ts` | `PG_QUERY_KEYS` | Ключ `diag` |
 | Glafira Kafka `guard.rs` | `ensure_mutation_allowed`, `ensure_name_confirmed` | P2b: без изменений интерфейса |
-| Glafira Kafka `common/ConfirmDialog.tsx` | Подтверждение внутри страницы, тип `Confirmation` | P2b: без изменений интерфейса, тексты — свои ключи |
+| Glafira Kafka `common/ConfirmDialog.tsx` | Подтверждение внутри страницы, тип `Confirmation` | P2b: интерфейс прежний плюс необязательное `disabled` (форма над подтверждением не заполнена), тексты — свои ключи |
 | Glafira Kafka `browse/registry.rs` | Реестр длительных сессий по id | Сессии — tokio-задачи с `AbortHandle` вместо потоков с флагом (§3.5) |
 | Glafira Kafka `glafira-mcp/src/audit.rs` | Журнал JSONL с ротацией и правами 0600 | P2b: копия логики в `actions/journal.rs` (не зависимость) |
 
@@ -81,7 +84,7 @@ src-tauri/src/
                pulse.rs sessions.rs waits.rs locks.rs horizon.rs replication.rs slots.rs patroni.rs
   sampler/     registry.rs (сэмплер на узел, подписчики), buffer.rs (кольцевой буфер), query.rs
   session.rs   реестр длительных сессий (сэмплер, наблюдение), stop_session
-  actions/     (P2b) sessions.rs slots.rs patroni.rs watch.rs journal.rs
+  actions/     (P2b) mod.rs (Confirmation) conn.rs sessions.rs slots.rs patroni.rs watch.rs journal.rs
   guard.rs     (P2b) из Glafira Kafka
   commands/    diag.rs, actions.rs (P2b)
 crates/pg-advisor/src/
@@ -201,16 +204,23 @@ Finding {
   id: String,                           // глобальный id правила, например "idleInTransaction"
   severity: info | warning | critical,
   member: Option<String>,               // узел, где найдено (у инструментов кластера)
-  target: Option<FindingTarget>,        // session { pid, backendStart } | slot { name } | member { name }
+  target: Option<FindingTarget>,        // session { pid, backendStartUs } | slot { name } | member { name }
                                         // | relation { name } | database { name }
   params: Map<String, Json>,            // цифры для текста: длительность, байты, число жертв…
-  links: [FindingLink],                 // openTool { tool, member } ; P2b: action { kind, … } — открыть форму действия
+  links: [FindingLink],                 // openTool { tool, member } | action { action: SessionActionLink, member } (P2b)
 }
 ```
 
 - Тексты — в словарях по `id`: `findings.<id>.title` (с параметрами) и `findings.<id>.fix` («что сделать»), как пункты чек-листа.
   Готовые команды для копирования (`ROLLBACK PREPARED '…'`, `ALTER ROLE … SET idle_in_transaction_session_timeout`) — в `params.command`,
   не переводятся и приложением не выполняются.
+- **Ссылки-действия (P2b).** `FindingLink::Action { action, member }`, где `SessionActionLink` (тег `type`) —
+  `terminateIdleInTransaction { olderThanS }` (правило `idleInTransaction`; порог — порог предупреждения, 300 с) или
+  `terminateRootBlocker { pid, backendStartUs }` (правило `rootBlocker`, только если у корня известно время запуска; иначе
+  остаётся одна ссылка на инструмент). Ссылка на инструмент идёт первой, действие — вслед за ней; другие правила действий
+  не предлагают. Кнопка открывает тот же предпросмотр (§8.3) с целью `idleInTransaction` / `rootBlocker`; её нет на read-only
+  подключении и без известного узла (`member` ссылки или узел отчёта). JSON ссылки:
+  `{"kind":"action","member":"pg-1","action":{"type":"terminateRootBlocker","pid":42,"backendStartUs":1761299000000000}}`.
 - Пороги — константы `pg_advisor::findings::thresholds`; строгость от окружения подключения не зависит (P2).
 - Одно правило может срабатывать в нескольких инструментах (например, `longTransaction` — в пульсе и в сессиях): id общий.
 - **Одна находка на правило и узел** у правил по множеству объектов (`idleInTransaction`, `longQuery`, `longTransaction`,
@@ -545,116 +555,226 @@ type DiagTool = "pulse" | "sessions" | "idleTx" | "waits" | "locks" | "horizon" 
 
 ### 8.1 Guard и подтверждения
 
-`guard.rs` из Glafira Kafka: `ensure_mutation_allowed(profile, confirm)` — read-only → `READ_ONLY`; prod без верного имени
-подключения → `CONFIRMATION_REQUIRED`; `ensure_name_confirmed(expected, typed)`. Каждая команда действия принимает
-`confirmation { confirm: Option<String>, typedName: Option<String> }` и проверяет его в Rust до любого обращения к серверу.
+`guard.rs` из Glafira Kafka: `ensure_mutation_allowed(profile, confirm)` — read-only → `READ_ONLY` (`errors.guard.readOnly`); prod без верного имени
+подключения → `CONFIRMATION_REQUIRED` (`errors.guard.prodConfirm`); `ensure_name_confirmed(expected, typed)` →
+`CONFIRMATION_REQUIRED` (`errors.guard.typeToConfirm`). Имена сравниваются после обрезки пробелов по краям, регистр значим.
+Каждая команда выполнения принимает `confirmation { confirm: Option<String>, typedName: Option<String> }` (`actions::Confirmation`;
+`null` и отсутствующее поле равны) и проверяет его в Rust до любого обращения к серверу: первой идёт `ensure_mutation_allowed`,
+затем проверки самого действия.
 
 | Действие | Всегда | На prod ещё |
 |---|---|---|
-| Отменить запрос, завершить сессию | Предпросмотр и кнопка | Имя подключения |
+| Отменить запрос, завершить сессию (одну) | Предпросмотр и кнопка | Имя подключения |
 | Завершить пакетом | Предпросмотр списка | Имя подключения и число сессий (`typedName`) |
 | Удалить слот | Ввод имени слота | Имя подключения |
 | Switchover, отмена расписания, restart, отмена расписания, pause / resume | Предпросмотр | Имя подключения |
 | Failover | Ввод имени кандидата | Имя подключения |
 
-На read-only подключении кнопок действий нет; кнопка, на которую нет права, неактивна, причина — в подсказке (§8.7).
+Пакет — несколько сессий или любой выбор по критерию `idleInTransaction` (даже если подошла одна сессия); число для
+подтверждения — число сессий без повторов пары `(pid, backendStartUs)`.
+
+На read-only подключении кнопок действий нет (`canAct`); команда всё равно отказывает. Кнопка, на которую нет права или условия,
+неактивна, причина — в подсказке (§8.7). Кнопки находок показываются, только если известен узел (у ссылки или у отчёта).
 Действия всегда адресуются узлу по имени: предпросмотр возвращает разрешённый узел, выполнение принимает именно его.
+
+Подтверждение — `ConfirmDialog` внутри страницы: имя объекта (`objectName`) вводится всегда, когда оно задано (слот, кандидат
+failover, число сессий пакета на prod), имя подключения — на prod; необязательное `disabled` не даёт подтвердить, пока не
+заполнена форма над ним (время расписания). Диалог действия один на вкладку (`DiagTab` — сессии и слоты, `Overview` — Patroni):
+новое открытие вытесняет прежнее, но не то, чья команда ещё выполняется (`useIsMutating` с областью вкладки); кнопки слотов и
+Patroni на это время неактивны. Узел диалога фиксируется при открытии. Предпросмотр читается один раз на открытие (`staleTime: Infinity`, новый
+экземпляр диалога — новый предпросмотр) и не обновляется под рукой у пользователя. Escape закрывает диалог, пока команда не
+выполняется; закрытие подключения закрывает диалоги. После выполнения диалог перечитывает отчёты
+(`["diag", id]` или `["topology", id]`) и журнал (`["actions", id]`).
 
 ### 8.2 Соединение для действия
 
-Отдельное соединение вне пулов: `ConnectSpec` с `ACTION_SESSION_OPTIONS = -c statement_timeout=5000 -c lock_timeout=1000
--c search_path=pg_catalog -c DateStyle=ISO` (без `default_transaction_read_only`), `application_name = glafira-pg`, через
-туннель подключения (`route_for`), БД — `pg.database` (у логического слота — его БД). Открывается на одно действие или
-пакет и закрывается после. Если пул `Catalog` узла запомнил отказ во входе (`auth_failure`), действие возвращает эту ошибку
-без новой попытки входа. Узел недоступен — `NODE_UNAVAILABLE`.
+Отдельное соединение вне пулов: `actions::conn::open(st, id, member, database) -> ActionClient`. `ConnectSpec` получает поле
+`options` (по умолчанию `SESSION_OPTIONS`); `ConnectSpec::for_action()` подставляет `ACTION_SESSION_OPTIONS =
+-c statement_timeout=5000 -c lock_timeout=1000 -c search_path=pg_catalog -c DateStyle=ISO` (без `default_transaction_read_only`;
+константа — в `conn/pg.rs` рядом с `SESSION_OPTIONS`). `application_name = glafira-pg`, соединение идёт через туннель подключения
+(`TunnelRegistry::route_for`), БД — `pg.database` (у логического слота — его БД). Открывается на одно действие или пакет
+и закрывается при `Drop` (прерывается задача соединения, без ожидания Terminate). Если пул `Catalog` узла (БД профиля) запомнил
+отказ во входе (`auth_failure`), действие возвращает эту ошибку без новой попытки входа. Узел, отмеченный недоступным, —
+`NODE_UNAVAILABLE` (`errors.actions.nodeUnavailable`); участник, которого нет в топологии, — ошибка разрешения узла; сбой TCP
+у узла, ещё не отмеченного недоступным, — обычная ошибка соединения. Предпросмотры ничего не меняют и читают соединением
+пула `Catalog` (`diag::on_member`).
 
 ### 8.3 Отмена запроса и завершение сессий
 
 - `preview_session_action(id, { member, kind: cancel | terminate, target })`, где `target`:
   `selected { sessions: [{ pid, backendStartUs }] }` | `idleInTransaction { olderThanS }` | `rootBlocker { pid, backendStartUs }`.
-  Заново читает сессии и возвращает `rows: [{ session, allowed, reason? }]`, где `reason`: `superuserSession` (нужна роль
-  суперпользователя), `otherRole` (нет `pg_signal_backend` и роль чужая), `notClientBackend`, `ownConnection`.
-  Разрешено, если текущая роль — суперпользователь, или сессия не суперпользователя и роль — член `pg_signal_backend`,
-  или роль сессии — та же (`pg_has_role(current_user, usesysid, 'MEMBER')`).
-- `execute_session_action(id, { member, kind, target, sessions }, confirmation)` — до 500 сессий
-  (`errors.actions.batchTooLarge`), по одной, на одном соединении, общий предел 60 с:
+  `olderThanS` — конечное неотрицательное число секунд (иначе `errors.actions.badThreshold` и в предпросмотре, и при выполнении);
+  интерфейс вводит целое число минут не меньше 1. В интерфейсе пакет выбирается только по критерию `idleInTransaction`
+  (панель набора «Idle in transaction» и кнопка находки); поштучно — из панели сессии (`selected` с одной сессией, клиентская
+  сессия с известным временем запуска) и из корня дерева блокировок (`rootBlocker`). API принимает `selected` до 500 сессий, но
+  множественного выбора строк в таблице нет.
+  Заново читает сессии и возвращает `{ member, rows: [{ session, allowed, reason }] }`; `session` — `pid`, `backendStartUs`,
+  `user`, `database`, `application`, `client`, `state`, `backendType`, `xactAgeS`, `stateAgeS`, `query` (первые 500 символов);
+  `reason` — `null` у разрешённой строки, иначе `notClientBackend`, `ownConnection`, `superuserSession` (нужна роль
+  суперпользователя), `otherRole` (нет `pg_signal_backend` и роль чужая). Разрешено, если текущая роль — суперпользователь,
+  или роль сессии — та же (`pg_has_role(current_user, usesysid, 'MEMBER')`), или сессия не суперпользователя и роль — член
+  `pg_signal_backend`. Чужую сессию без права её видеть (нет `pg_read_all_stats`) сервер отдаёт с пустым `backend_start`:
+  адресовать её парой нельзя, в предпросмотр она не попадает. `ownConnection` — только соединение самого предпросмотра;
+  остальные соединения приложения (`application_name = glafira-pg`) разрешены, и интерфейс помечает их примечанием
+  «Соединение Glafira» (имя приложения дублирует `PG_APPLICATION_NAME`), чтобы приложение случайно не завершило само себя.
+  Пустой набор — «Нет подходящих сессий», набор без разрешённых строк — «Ни одну сессию нельзя отменить или завершить»;
+  в обоих случаях только «Закрыть».
+- `execute_session_action(id, { member, kind, target, sessions }, confirmation)`. Порядок проверок после guard: пары сессий
+  без повторов; `badThreshold`; `errors.actions.noSessions` (пусто); для `rootBlocker` сессии должны быть ровно парой цели
+  (`errors.actions.badTarget`); пакет на prod — число сессий в `typedName`; больше 500 — `errors.actions.batchTooLarge`.
+  Сессии идут по одной, на одном соединении, общий предел 60 с (`BATCH_LIMIT`): оставшиеся после него получают
+  `failed { errors.actions.batchTimeout }`. Одна сессия — один запрос:
   ```sql
-  SELECT a.usename, a.datname, a.application_name, a.client_addr, a.state, <query_id>, left(a.query, 500),
+  SELECT a.usename, a.datname, a.application_name, host(a.client_addr), a.state, <query_id>, left(a.query, 500),
          extract(epoch FROM now() - a.xact_start), pg_terminate_backend(a.pid)      -- или pg_cancel_backend
   FROM pg_stat_activity a
-  WHERE a.pid = $1 AND (extract(epoch FROM a.backend_start) * 1e6)::bigint = $2
+  WHERE a.pid = $1 AND <BACKEND_START_US> = $2
     AND a.backend_type = 'client backend' AND a.pid <> pg_backend_pid()
     AND <критерий>
   ```
-  Критерий проверяется заново: `idleInTransaction` — `state IN ('idle in transaction', 'idle in transaction (aborted)') AND
-  state_change <= now() - make_interval(secs => $3)`; `rootBlocker` — сессия всё ещё есть в `pg_blocking_pids` какой-либо
-  ждущей; `selected` — без условия. Сессия, которая успела проснуться или освободить блокировки, не пострадает.
-- Итог по каждой сессии: `terminated` (после terminate pid с тем же `backend_start` исчез за 5 с, опрос раз в 250 мс),
-  `signalSent` (отмена отправлена, или pid ещё жив через 5 с), `gone` (pid с таким `backend_start` уже нет),
-  `noLongerMatches` (сессия есть, критерий не выполняется), `notAllowed` (42501), `failed { error }`.
-  `backend_start` передаётся микросекундами эпохи (`int8`), значение помещается в число JavaScript. Во всех запросах
-  (сессии, блокировки, предпросмотр, выполнение) оно вычисляется одним SQL-фрагментом `diag::sql::BACKEND_START_US`:
-  на PG 13 `extract(epoch …)` возвращает `double precision`, и только одинаковое выражение на одном сервере гарантирует
-  точное равенство (на 14+ `extract` возвращает `numeric` и точен сам по себе).
+  Критерий проверяется заново в том же запросе: `idleInTransaction` — `state IN ('idle in transaction', 'idle in transaction (aborted)')
+  AND state_change <= now() - make_interval(secs => $3)`; `rootBlocker` — сессия всё ещё есть в `pg_blocking_pids` какой-либо
+  ждущей блокировку; `selected` — без условия. Сессия, которая успела проснуться или освободить блокировки, не пострадает.
+  Исключается только соединение самого действия (`pid <> pg_backend_pid()`).
+- Итог по каждой сессии (`results: [{ pid, backendStartUs, result, error? }]`, тег `result` плоский):
+  `terminated` (после terminate pid с тем же `backend_start` исчез за 5 с, опрос раз в 250 мс),
+  `signalSent` (отмена доставлена, или pid ещё жив через 5 с после terminate), `gone` (строки нет и пары уже нет, либо функция
+  сигнала вернула `false` — процесса нет), `noLongerMatches` (строки нет, пара ещё есть: критерий не выполняется),
+  `notAllowed` (42501), `failed { error }` (прочая ошибка сервера; следующие сессии продолжаются).
+  Итог действия (`outcome`): `error`, если все сессии `notAllowed` или `failed`; `ok`, если таких нет; иначе `partial`
+  (`gone` и `noLongerMatches` неудачей не считаются). Ответ — `{ member, results, outcome, journalWritten }`.
+  Ошибка до первой сессии (соединение, чтение версии) — ошибка команды, строки журнала нет. `backend_start` передаётся
+  микросекундами эпохи (`int8`), значение помещается в число JavaScript. Во всех запросах (сессии, блокировки, предпросмотр,
+  выполнение) оно вычисляется одним SQL-фрагментом `diag::sql::BACKEND_START_US`: на PG 13 `extract(epoch …)` возвращает
+  `double precision`, и только одинаковое выражение на одном сервере гарантирует точное равенство (на 14+ `extract` возвращает
+  `numeric` и точен сам по себе).
 
 ### 8.4 Удаление слота
 
-- `preview_drop_slot(id, { member, slot })`: тип, plugin, БД, `active`, удерживаемый WAL, `wal_status`, `inactive_since` (17+),
-  отметка Patroni (§5.7). Слот участника Patroni — предупреждение «Patroni пересоздаст слот, пока участник есть в кластере;
-  удалите участника»; постоянный слот — «уберите слот из `/config` (`patronictl edit-config`)». Кнопка при этом доступна.
-- `drop_slot(id, { member, slot }, confirmation)` с `typedName` = имя слота:
+- `preview_drop_slot(id, { member, slot }) -> { member, slot }`: `slot` — полная строка слота инструмента
+  «Слоты» (§5.7: тип, plugin, БД, `active`, удерживаемый WAL, `wal_status`, `inactive_since` (17+)) с отметкой Patroni
+  (`patroni: member | permanent | null`, отметки по `/config`; не прочитался — только слоты участников). Слота на узле нет —
+  `errors.actions.slotNotFound` (`NOT_FOUND`). Слот участника Patroni — предупреждение «Patroni пересоздаст слот, пока участник
+  есть в кластере; удалите участника»; постоянный слот — «уберите слот из `/config` (`patronictl edit-config`)». Кнопка при
+  этом доступна.
+- Инструмент «Слоты» читает право: `SlotsData.canDropSlots` = `rolsuper OR rolreplication` у `current_user` (запрос в
+  `diag::slots::collect`; сбой запроса отчёт не роняет, право считается отсутствующим). Кнопка «Удалить…» неактивна у
+  активного слота («Слот активен»), без права (`needReplication`: подсказка называет пункт чек-листа) и пока слот удаляется в
+  диалоге этой вкладки; причина в подсказке названа в таком порядке. Диалог читает слот заново: если он ожил, пока
+  пользователь шёл к окну, — «Слот активен — удалить можно только неактивный слот» и только «Закрыть», без подтверждения.
+- `drop_slot(id, { member, slot }, confirmation) -> { journalWritten }`, `typedName` = имя слота (всегда, не только на prod).
+  После guard команда читает предпросмотр заново (его ошибки — ошибки команды), открывает соединение действия (у логического
+  слота — с БД слота) и выполняет
   `SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1 AND NOT active`.
-  Ноль строк — `errors.actions.slotActiveOrGone` («Слот стал активным или исчез»). Логический слот — из соединения с его БД.
-  Ошибка сервера (например, синхронизированный с primary слот на реплике 17+) — как есть в `details`.
+  Ноль строк или 55006 (`object_in_use`: слот ожил между фильтром и удалением) — `errors.actions.slotActiveOrGone`
+  («Слот стал активным или исчез», `INVALID_INPUT`), ничего не произошло, журнал не пишется. 42501 — `NOT_AUTHORIZED`
+  `errors.actions.replicationRequired`; прочая ошибка сервера (например, синхронизированный с primary слот на реплике 17+) —
+  как есть в `details`; обе записываются в журнал с итогом `error`.
 
 ### 8.5 Действия Patroni
 
-Только подключение `patroni`. Basic auth профиля (логин и `patroniPassword`); без логина кнопки неактивны
-(`errors.patroni.authRequired`); правило P1 о неотправке пароля на `http://`-адрес при https-профиле действует и здесь.
-Запросы идут к API лидера, при отказе соединения — к остальным участникам и адресам профиля (как обход `/cluster`);
-restart и его отмена — только к API самого участника.
+Только подключение `patroni` (иначе `errors.actions.patroniOnly`, `INVALID_INPUT`). Basic auth профиля (логин `patroni.username`
+и секрет `patroniPassword`); без логина кнопки неактивны, а команда отказывает `errors.patroni.authRequired`
+(`PATRONI_ERROR`; предпросмотр сообщает `canSend`). Правило P1 о неотправке пароля на `http://`-адрес при https-профиле
+действует и здесь. Порядок в `execute`: guard → ввод имени кандидата failover → тип подключения → логин → предусловия на
+свежей топологии → запрос → журнал.
 
-| Действие | Запрос | Предусловие (проверяется в Rust) |
+| Действие | Запрос | Предусловие (`actions::patroni::check`) |
 |---|---|---|
-| Switchover | `POST /switchover {leader, candidate?, scheduled_at?}` | Есть доступный лидер в состоянии `running`; кандидат — участник и не лидер; время — в будущем |
-| Отмена switchover | `DELETE /switchover` | `scheduledSwitchover` есть |
-| Failover | `POST /failover {candidate}` | Нет доступного лидера в состоянии `running` (иначе `errors.actions.leaderHealthy`: «Лидер здоров — используйте switchover») |
-| Restart | `POST <API участника>/restart {restart_pending, schedule?}` | Участник доступен; время — в будущем |
-| Отмена restart | `DELETE <API участника>/restart` | `scheduledRestart` есть |
-| Pause / resume | `PATCH /config {"pause": true}` / `{"pause": null}` (`null` удаляет ключ из динамической конфигурации) | Текущее `paused` другое |
+| Switchover | `POST /switchover {leader, candidate?, scheduled_at?}` на API лидера | Есть доступный лидер в состоянии `running` (`errors.actions.noLeader`); кандидат — участник и не лидер (`badCandidate`); время — RFC 3339 (`badSchedule`) и в будущем (`pastSchedule`) |
+| Отмена switchover | `DELETE /switchover` | `scheduledSwitchover` есть (`nothingScheduled`) |
+| Failover | `POST /failover {candidate}` | Нет доступного лидера в состоянии `running` (иначе `errors.actions.leaderHealthy`: «Лидер здоров — используйте switchover»); кандидат — участник и не лидер (`badCandidate`) |
+| Restart | `POST /restart {restart_pending?, schedule?}` на API участника | Участник доступен (`NODE_UNAVAILABLE`); время — в будущем |
+| Отмена restart | `DELETE /restart` на API участника | У участника есть `scheduledRestart` (`nothingScheduled`) |
+| Pause / resume | `PATCH /config {"pause": true}` / `{"pause": null}` (`null` удаляет ключ из динамической конфигурации) на API лидера | Текущее `paused` другое (`pauseUnchanged`) |
 
-- `preview_patroni_action(id, action)`: для switchover — кандидаты с вердиктом готовности (§5.8; неготовые — с причиной,
-  вариант «Patroni выберет сам»), число клиентских сессий на лидере (оборвутся), предупреждения «запись недоступна несколько
-  секунд», «старый лидер станет репликой»; для failover — кандидаты и состояние лидера; для restart — роль участника
-  (restart лидера = недоступность записи), `pending_restart`, флажок «только если pending restart» (включён, когда он есть).
-- Время расписания вводится в локальном часовом поясе и уходит в RFC 3339 со смещением.
-- Ответ Patroni 2xx — успех (текст ответа показывается); иначе `PATRONI_ERROR` `errors.patroni.actionRejected` с кодом и текстом
-  ответа (500 символов); 401 — `errors.patroni.authFailed`.
+Время расписания вводится в локальном часовом поясе и уходит в RFC 3339 со смещением (`toRfc3339`); Rust разбирает его
+`time::OffsetDateTime::parse(…, &Rfc3339)` и сравнивает с часами приложения. `restart_pending: true` отправляется при флажке
+«только если нужен перезапуск».
+
+**Адреса и повторы.** Запрос идёт на адреса `bases`: у restart и его отмены — только API самого участника; иначе — доступные
+участники (лидер первым), затем недоступные, затем адреса профиля, без повторов (при failover лидер как раз не отвечает, и
+запрос должен сразу уйти к живой реплике). К следующему адресу переходят **только** когда запрос заведомо не дошёл до Patroni
+(`not_delivered`: `errors.patroni.unreachable`, `tls`, `errors.ssh.forwardFailed`, `tunnelDown`). Это решает
+`ReqwestHttp::send_json` по фазе сбоя (`reqwest::Error::is_connect()`): отказ соединения и срок соединения
+(`HTTP_CONNECT_TIMEOUT` = 3 с) — «не дошёл»; срок после установки соединения — `errors.patroni.timeout`; любой иной сбой отправки
+и любой сбой чтения тела — `errors.patroni.connectionLost`; в обоих случаях исход неизвестен и запрос **не повторяется**
+(повтор мог бы выполнить действие дважды или дать ложный отказ). Неверный адрес отсекается до сети (`errors.patroni.badUrl`,
+`INVALID_INPUT`). Действия не следуют HTTP-перенаправлениям: у `ReqwestHttp` второй клиент (`Policy::none()`), и `3xx` —
+отказ (`actionRejected`); чтение перенаправления по-прежнему выполняет.
+
+**Сроки.** Запрос — `HTTP_TIMEOUT` (5 с); switchover «сейчас», failover и restart «сейчас» — `LONG_ACTION_TIMEOUT` (60 с):
+Patroni отвечает после выполнения. Срок передаётся в `PatroniHttp::send_json(method, url, body, timeout)` (метод трейта с
+реализацией по умолчанию «не поддерживается», `errors.patroni.sendUnsupported`: подделки чтения в тестах не меняются).
+
+**Ответ.** 2xx — успех (текст ответа показывается); 401 и 403 — `AUTH_FAILED` `errors.patroni.unauthorized` (или
+`credentialsWithheld`, если пароль не отправлен на `http://`-адрес), те же ключи, что у чтения; `503` на `POST /switchover` и
+`/failover` с «status unknown» в теле — `errors.patroni.statusUnknown` (Patroni сам не дождался смены лидера: исход
+неизвестен); иначе `PATRONI_ERROR` `errors.patroni.actionRejected` (`params.status`) и первые 500 символов ответа в `details`.
+
+**Неизвестный исход** — `timeout`, `connectionLost`, `statusUnknown`. У действия с наблюдением (§8.6) команда возвращает не
+ошибку, а `Ok` с наблюдением, `outcomeUnknown: true` и причиной в `error`: выполнилось ли действие, покажет наблюдение
+(switchover, failover и restart «сейчас» Patroni выполняет до ответа). У отмен и запланированных действий ошибка возвращается
+как есть.
+
+- `preview_patroni_action(id, action)` → `{ leader, leaderState, leaderReachable, paused, candidates, leaderClientSessions, member,
+  scheduledSwitchover, canSend }`. Для switchover и failover: `candidates` — вердикты готовности (§5.8; `/config` не прочитался —
+  пределы Patroni по умолчанию; неготовые — с причиной, у switchover есть вариант «Patroni выберет сам») и
+  `leaderClientSessions` — клиентские сессии лидера, которые оборвутся, без своей и без `glafira-pg` (`null`, если лидер
+  недоступен или запрос не удался: недоступный узел предпросмотр не ждёт); окно предупреждает «запись недоступна несколько
+  секунд» (только для «сейчас») и «старый лидер станет репликой». Для restart и его отмены `member` — роль, состояние,
+  `pendingRestart`, `scheduledRestart` (restart лидера — предупреждение: запись недоступна до конца перезапуска; флажок «только
+  если нужен перезапуск» включён, когда `pendingRestart`). Предусловия в предпросмотре не проверяются, но интерфейс повторяет
+  главные (`running_leader`: доступен и `running`): failover при работающем лидере и switchover без него показывают
+  `leaderHealthy` / `noLeader` и только «Закрыть», а кнопки обзора неактивны с тем же текстом; решает Rust.
+- Кнопки обзора неактивны с причиной в подсказке, приоритет: подключение не открыто (`notLive`) → нет логина API
+  (`authRequired`) → действие уже идёт (`inFlight`); restart недоступного участника неактивен. Отмена switchover — у баннера
+  запланированного switchover, отмена restart — в строке участника.
 
 ### 8.6 Наблюдение после действия
 
-`execute_patroni_action(id, action, confirmation, channel)` после успешного switchover / failover / restart «сейчас» и
-pause / resume открывает сессию `watch` (§3.5) и возвращает её id. Сессия включает `Runtimes::boost(id, 2 с, срок)` —
-опрос топологии раз в 2 с вместо 10 (события журнала топологии пишутся как обычно) — и после каждого опроса вычисляет шаги
-чистой функцией `actions::watch::progress(action, before, now)`:
+`execute_patroni_action(id, action, confirmation, channel)` после успешного (или неизвестного по исходу) switchover / failover /
+restart «сейчас» и pause / resume открывает сессию `watch` (§3.5, `SessionKind::Watch`) и возвращает её id
+(`PatroniActionResult.watch`). Запланированные действия и отмены не наблюдаются: обзор показывает баннер (§5.10).
+`actions::watch::start(st, id, plan, sink)` сразу посылает первое событие (`accepted`, `running`) и ставит ускорение:
+`Runtimes::boost(id, owner, 2 с, срок) -> bool` (`owner` — id сессии наблюдения). Опрос топологии идёт раз в 2 с вместо 10
+(события журнала топологии пишутся как обычно); после каждого опроса шаги вычисляет чистая функция
+`actions::watch::progress(plan, topology, postmaster_start_now)` — последний шаг, до которого дошло действие (первый
+невыполненный останавливает), — а событие уходит только когда шаг вырос.
+
+Ускорения лежат в отдельном мьютексе `Runtimes.boosts` (последний в порядке блокировок), по одному на наблюдение: конец одного
+не замедляет другое, опрос ждёт самый короткий из живых интервалов, а `Notify` (`Entry.wake`) будит фоновый опрос сразу.
+`unboost(id, owner)` берёт только `boosts`, не `entries`: его вызывает и остановка сессии из слушателя закрытия, который
+работает под `entries`. `boost` возвращает `false` для неоткрытого подключения, а `SessionRegistry::contains` закрывает
+гонку «закрыто и переоткрыто между вставкой сессии и ускорением».
 
 | Действие | Шаги | Срок |
 |---|---|---|
-| Switchover, failover | принят → старый лидер сложил полномочия → новый лидер `running` (кандидат, если задан) → таймлайн вырос → реплики `streaming` / `running` → готово | 120 с |
-| Restart | принят → `postmaster_start_time` из `GET <API участника>/patroni` изменился → состояние `running` / `streaming` → `pending_restart` снят (если «только pending») → готово | 300 с |
+| Switchover, failover | принят → старый лидер сложил полномочия (не лидер или недоступен) → новый лидер `running` (не прежний; кандидат, если задан) → таймлайн вырос → все доступные реплики в `running` / `streaming` → готово | 120 с |
+| Restart | принят → перезапущен → узел `running` / `streaming` → `pending_restart` снят (если «только pending») → готово | 300 с |
 | Pause / resume | принят → `paused` в топологии = заданному → готово | 30 с |
 
-Канал `WatchEvent { step, status: running | done | failed | timedOut, atMs, detail? }`. Срок истёк — `timedOut` с последним
-состоянием. Закрытие панели наблюдения (`stop_session`) прекращает и ускоренный опрос. Запланированные действия наблюдения
-не открывают: обзор показывает баннер (§5.10).
+«Перезапущен» определяется по `postmaster_start_time` из `GET <API участника>/patroni`: значение до действия запоминается при
+выполнении, наблюдение ждёт другого. Если до действия его прочитать не удалось, одного значения мало (часы сервера и
+приложения могут расходиться): нужен простой участника, который наблюдение видело (остановлен, недоступен, пропал из
+топологии) либо ответ 2xx Patroni на restart «сейчас», и разборчивое время запуска позже отправки запроса. Реплика в состоянии,
+отличном от `running` / `streaming`, не даёт дойти до шагов «реплики получают WAL» и «узел работает». Если лидером стал не
+выбранный кандидат, наблюдение остаётся на шаге «старый лидер сложил полномочия» до срока.
+
+Канал `WatchEvent { step, status: running | done | failed | timedOut, atMs, detail: Option<AppError> }`. Срок истёк —
+`timedOut` с последним достигнутым шагом. `failed` бывает только у закрытого (или закрытого за время старта) подключения:
+`detail` — `errors.topology.notConnected`, наблюдение заканчивается сразу. Закрытие панели наблюдения, как и вкладки обзора
+(`stop_session`), прекращает наблюдение и ускоренный опрос; закрытие подключения останавливает все его сессии. Панель
+наблюдения останавливает свою сессию при «Закрыть» и при размонтировании (микрозадачей, безопасно для двойного монтирования
+StrictMode); если диалог убран, пока команда ещё шла, наблюдение останавливает обработчик успеха мутации.
 
 ### 8.7 Предпроверка прав
 
 | Действие | Право | Без него |
 |---|---|---|
-| Отмена, завершение | `pg_signal_backend`, суперпользователь или своя роль | Строка неактивна, причина в подсказке и предпросмотре |
-| Удаление слота | Атрибут `REPLICATION` или суперпользователь | Кнопка неактивна; подсказка — пункт чек-листа |
-| Действия Patroni | Логин API в профиле | Кнопки неактивны |
+| Отмена, завершение | `pg_signal_backend`, суперпользователь или своя роль | Строка предпросмотра неактивна, причина в ней |
+| Удаление слота | Атрибут `REPLICATION` или суперпользователь (`SlotsData.canDropSlots`) | Кнопка неактивна; подсказка — пункт чек-листа |
+| Действия Patroni | Логин API в профиле (`canSend`) | Кнопки неактивны |
 
 Новый пункт чек-листа готовности `replicationAttr` (`warn`, факт `has_replication` из `pg_roles.rolreplication`):
 «Удаление слотов репликации» — `ALTER ROLE "<user>" REPLICATION;` с предупреждением, что атрибут позволяет роли создавать
@@ -663,10 +783,13 @@ pause / resume открывает сессию `watch` (§3.5) и возвращ
 
 ### 8.8 Журнал действий
 
-`actions.jsonl` в каталоге данных, права 0600, при 5 МБ ротируется в `actions.1.jsonl` (логика — копия журнала MCP
-Glafira Kafka). Запись — после выполнения, best effort: сбой записи не откатывает действие, ответ команды несёт
-`journalWritten: false`, интерфейс говорит «Журнал не записан». Отказы guard (read-only, неверное подтверждение) не пишутся —
-ничего не произошло; ошибки сервера и Patroni пишутся с `outcome: "error"`.
+`actions.jsonl` в каталоге данных (`AppState.actions: Arc<ActionJournal>`, там же, где `connections.json`), права 0600 (на Unix;
+на Windows — права каталога профиля), при 5 МБ ротируется в `actions.1.jsonl` (логика — копия журнала MCP Glafira Kafka; прежний
+`actions.1.jsonl` заменяется). Запись — после выполнения, best effort: сбой записи не откатывает действие, ответ команды несёт
+`journalWritten: false`, интерфейс говорит «Журнал не записан». Отказы guard и предусловий (read-only, неверное подтверждение,
+`badThreshold`, `noLeader`, `slotActiveOrGone` …) не пишутся — запрос не уходил или ничего не произошло; ошибки сервера и Patroni,
+в том числе неизвестный исход, пишутся с `outcome: "error"` и `code`. Пакет записывает **каждую** сессию с её итогом (у сессии
+без снимка — только пара и итог).
 
 ```json
 {"ts": 1761300000000, "action": "terminate", "connection": {"id": "6f1c…", "name": "billing-prod", "environment": "prod"},
@@ -676,13 +799,20 @@ Glafira Kafka). Запись — после выполнения, best effort: �
                "query": "UPDATE shop.orders SET …", "result": "terminated"}]}
 ```
 
-`outcome`: `ok` | `partial` (часть пакета не выполнена) | `error`. У слота — `slot { name, type, plugin, database,
-retainedBytes, walStatus }`; у Patroni — `patroni { method, path, body, status, response }` (без учётных данных, ответ —
-500 символов). Текст запроса — первые 500 символов, литералы остаются (решение владельца: на разборе инцидента видно, что
-именно завершили). Журнал не уходит в MCP (концепция §8) и не входит в архив диагностики.
+`action`: `cancel` | `terminate` | `dropSlot` | `switchover` | `cancelSwitchover` | `failover` | `restart` | `cancelRestart` | `pause` |
+`resume`. `outcome`: `ok` | `partial` (часть пакета не выполнена) | `error`; `code` — `AppError.code` при `error` (у пакета —
+первой сессии с отказом или сбоем). `prodConfirmed` — подключение prod (guard пройден). У слота — `slot { name, slotType, plugin,
+database, retainedBytes, walStatus }`; у Patroni — `patroni { method, path, body, status, response }`: `path` — адрес, на
+который запрос ушёл в последний раз (без учётных данных; при ошибке до отправки — путь запроса), `member` — участник restart
+или лидер на момент действия, `response` — первые 500 символов ответа Patroni (или `details` ошибки), очищенные от
+`user:password@` в адресах. Пустые `sessions`, `slot` и `patroni` в строку не пишутся. Текст запроса — первые 500 символов (по символам, не
+по байтам), литералы остаются (решение владельца: на разборе инцидента видно, что именно завершили). Журнал не уходит в MCP
+(концепция §8) и не входит в архив диагностики (`info.json`, `connections.json`, `logs/`).
 
-`list_actions(connectionId: Option<String>, limit ≤ 1000)` читает оба файла, новые сверху, битые строки пропускает. Вкладка
-«Журнал действий» подключения — таблица: время, действие, узел, объект, итог; строка раскрывается в полную запись.
+`list_actions(connectionId: Option<String>, limit ≤ 1000)` читает `actions.1.jsonl` и `actions.jsonl`, новые сверху, отбирает по
+подключению, битые строки пропускает. Вкладка «Журнал действий» подключения (последний пункт группы «Диагностика») — таблица
+последних 1000 записей: время, действие, узел, объект (слот, число сессий или адрес запроса), итог; строка раскрывается в
+полную запись; скрытая вкладка журнал не читает, при показе читает заново; кнопка «Обновить».
 
 ---
 
@@ -691,10 +821,14 @@ retainedBytes, walStatus }`; у Patroni — `patroni { method, path, body, statu
 | Часть | Команды |
 |---|---|
 | P2a | `run_diagnostic(id, request) -> DiagReport`; `start_sampler(id, member: Option<String>, channel: Channel<SamplerEvent>) -> SessionId`; `stop_session(sessionId) -> bool` |
-| P2b | `preview_session_action(id, request) -> SessionActionPreview`; `execute_session_action(id, request, confirmation) -> SessionActionResult`; `preview_drop_slot(id, request) -> SlotDropPreview`; `drop_slot(id, request, confirmation) -> ActionResult`; `preview_patroni_action(id, action) -> PatroniActionPreview`; `execute_patroni_action(id, action, confirmation, channel: Channel<WatchEvent>) -> PatroniActionResult { result, watch: Option<SessionId>, journalWritten }`; `list_actions(connectionId?, limit) -> [ActionRecord]` |
+| P2b | `preview_session_action(id, request: SessionActionRequest) -> SessionActionPreview { member, rows }`; `execute_session_action(id, request: SessionActionExecute, confirmation) -> SessionActionResult { member, results, outcome, journalWritten }`; `preview_drop_slot(id, request: SlotDropRequest) -> SlotDropPreview { member, slot }`; `drop_slot(id, request, confirmation) -> ActionResult { journalWritten }`; `preview_patroni_action(id, action) -> PatroniActionPreview`; `execute_patroni_action(id, action, confirmation, channel: Channel<WatchEvent>) -> PatroniActionResult { response, watch: Option<SessionId>, journalWritten, outcomeUnknown, error: Option<AppError> }`; `list_actions(connectionId: Option<String>, limit) -> [ActionRecord]` |
 
-`PatroniAction` — `switchover { candidate?, scheduledAt? }` | `cancelSwitchover` | `failover { candidate }` |
-`restart { member, onlyPending, scheduledAt? }` | `cancelRestart { member }` | `pause { paused }`.
+`PatroniAction` (тег `kind`) — `switchover { candidate?, scheduledAt? }` | `cancelSwitchover` | `failover { candidate }` |
+`restart { member, onlyPending, scheduledAt? }` | `cancelRestart { member }` | `pause { paused }`; `scheduledAt` — RFC 3339 со
+смещением. `SessionActionRequest { member, kind: cancel | terminate, target }`; `SessionActionExecute` — то же и `sessions: [{ pid,
+backendStartUs }]`. `WatchEvent` и `PatroniActionResult` — §8.6, `ActionRecord` — §8.8. Данные фронтенда, которые Rust отдаёт
+с `Option`, — `| null` (например, `reason` разрешённой строки предпросмотра), типы фронтенда повторяют структуры
+`src-tauri/src/actions/*`.
 Новых событий Tauri нет: данные длительных сессий идут через их каналы, изменения топологии — через `topology://changed`.
 Все команды возвращают `Result<T, AppError>`; JSON — camelCase. `start_sampler` — тонкая обёртка над
 `sampler::start(st, id, member, sink) -> SessionId`: `sink` (`SamplerSink`) оборачивает `Channel`, поэтому сэмплер проверяется
@@ -707,12 +841,15 @@ retainedBytes, walStatus }`; у Patroni — `patroni { method, path, body, statu
 | code | Причина | Поведение UI |
 |---|---|---|
 | `RECOVERY_CONFLICT` (новый, P2a) | Запрос на узле в recovery отменён: SQLSTATE 40001 или 40P01 **и** (английский текст «conflict with recovery» **или** файл сервера `postgres.c`): сообщения сервера локализуются `lc_messages` | «Запрос на реплике отменён конфликтом recovery», `retryable` — следующий опрос повторит |
-| `READ_ONLY` (P2b) | Действие на read-only подключении | Кнопок нет; команда всё равно отказывает |
-| `CONFIRMATION_REQUIRED` (P2b) | Нет или неверно имя подключения, объекта, число сессий | Диалог подтверждения |
-| `NOT_AUTHORIZED` (42501) | Нет права на сигнал или слот | `errors.actions.signalDenied` (нужна `pg_signal_backend`), `errors.actions.replicationRequired` |
-| `PATRONI_ERROR` | Отказ Patroni на действие | `errors.patroni.actionRejected` (код и текст ответа), `authRequired`, `authFailed` |
-| `INVALID_INPUT` | Нарушено предусловие | `errors.actions.leaderHealthy`, `noLeader`, `pastSchedule`, `batchTooLarge`, `slotActiveOrGone` |
-| `NODE_UNAVAILABLE` | Узел действия недоступен | Как в P1 |
+| `READ_ONLY` (P2b) | Действие на read-only подключении (`errors.guard.readOnly`) | Кнопок нет; команда всё равно отказывает |
+| `CONFIRMATION_REQUIRED` (P2b) | Нет или неверно имя подключения (`errors.guard.prodConfirm`), имя объекта или число сессий (`errors.guard.typeToConfirm`) | Диалог подтверждения |
+| `NOT_AUTHORIZED` (42501) | Нет атрибута `REPLICATION` для слота: `errors.actions.replicationRequired`. Сигнал сессии без права — не ошибка команды, а итог сессии `notAllowed` (в журнале `code` — `NOT_AUTHORIZED`) | Подсказка у кнопки (§8.7), строка итога |
+| `AUTH_FAILED` | Patroni отклонил учётные данные (401, 403) | `errors.patroni.unauthorized` или `credentialsWithheld` — те же ключи, что у чтения |
+| `PATRONI_ERROR` | Отказ Patroni и сбои запроса | `errors.patroni.actionRejected` (`params.status`, 500 символов ответа в `details`), `authRequired`, `noUrls`; неизвестный исход — `timeout`, `connectionLost`, `statusUnknown` (§8.5); `unreachable`, `tls` — запрос не дошёл |
+| `INVALID_INPUT` | Нарушено предусловие или неверный ввод | `errors.actions.leaderHealthy`, `noLeader`, `badCandidate`, `badSchedule`, `pastSchedule`, `nothingScheduled`, `pauseUnchanged`, `patroniOnly`, `badThreshold`, `noSessions`, `badTarget`, `batchTooLarge`, `slotActiveOrGone`; `errors.patroni.badUrl` |
+| `NOT_FOUND` | Слота нет на узле | `errors.actions.slotNotFound` |
+| `TIMEOUT` | Пакет не уложился в 60 с | Итог сессии `failed` с `errors.actions.batchTimeout` |
+| `NODE_UNAVAILABLE` | Узел действия недоступен | `errors.actions.nodeUnavailable` |
 
 Частичные результаты — норма: ошибка узла остаётся в его строке пульса или клетке матрицы, ошибка одной сессии пакета — в её итоге.
 Колонка, недоступная по версии, — не ошибка, а `unavailable`.

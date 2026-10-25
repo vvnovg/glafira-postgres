@@ -65,9 +65,9 @@
 
 ## Patroni {#patroni}
 
-Для подключения вида [[ui:connections.form.kinds.patroni]] укажите REST API Patroni в поле [[ui:connections.form.patroniUrls]]: от 1 до 8 адресов, начинающихся с `http://` или `https://`, без `user:password@`. Приложение опрашивает их по порядку, пока один не ответит; список участников берётся из `GET /cluster`. Приложение только читает: кластер оно не меняет.
+Для подключения вида [[ui:connections.form.kinds.patroni]] укажите REST API Patroni в поле [[ui:connections.form.patroniUrls]]: от 1 до 8 адресов, начинающихся с `http://` или `https://`, без `user:password@`. Приложение опрашивает их по порядку, пока один не ответит; список участников берётся из `GET /cluster`. Чтение и диагностика ничего не меняют; кластер приложение меняет только действиями Patroni из обзора (switchover, failover, restart, пауза) — см. [Действия Patroni](diagnostics.md#patroni-actions).
 
-- [[ui:connections.form.patroniUser]] и [[ui:connections.form.patroniPassword]] — basic-аутентификация, если API её требует. Пароль попадает в системное хранилище секретов. Если все адреса API у вас `https://`, приложение не отправляет пароль участнику, который сообщил адрес `http://`.
+- [[ui:connections.form.patroniUser]] и [[ui:connections.form.patroniPassword]] — basic-аутентификация, если API её требует; для действий Patroni логин обязателен. Пароль попадает в системное хранилище секретов. Если все адреса API у вас `https://`, приложение не отправляет пароль участнику, который сообщил адрес `http://`.
 - [[ui:connections.form.apiTls]] — настройки TLS для адресов `https://`: файл CA вместо системных корней, проверка имени хоста и клиентский сертификат (PEM или PKCS#12). Клиентский сертификат нужен, если Patroni его требует (`restapi.verify_client: required`).
 - [[ui:connections.form.overrides]] — для участников, чьи адреса, сообщённые Patroni, недоступны с вашего компьютера (IP пода, NAT). Для имени участника задайте хост и порт PostgreSQL и адрес его API. За SSH-туннелем имена, которые сообщает Patroni, разрешает бастион, поэтому там подмена обычно не нужна.
 
@@ -81,6 +81,7 @@
 
 - [[ui:readiness.monitorRole.title]] — роль суперпользователь или член `pg_monitor`. Без неё не видны запросы других пользователей, `pg_stat_statements` и размер `pg_wal`.
 - [[ui:readiness.signalRole.title]] — членство в `pg_signal_backend`.
+- [[ui:readiness.replicationAttr.title]] — атрибут `REPLICATION`: он нужен для удаления слотов репликации и даёт роли лишние возможности (чтение изменений через логические слоты, копия кластера), поэтому выдавайте его отдельной роли для действий или не выдавайте; см. [Действия](diagnostics.md#actions) и руководство администратора.
 - [[ui:readiness.maintainRole.title]] — `pg_maintain` (PostgreSQL 17 и новее); до 17 `VACUUM` и `ANALYZE` работают только для собственных таблиц пользователя.
 - `pg_stat_statements` — загружен через `shared_preload_libraries` на каждом узле (нужен перезапуск; в Patroni меняйте через `patronictl edit-config`) и создан в базе командой `CREATE EXTENSION`. Создайте его в каждой базе, где нужен анализ запросов.
 - `compute_query_id`, `track_io_timing` и `track_activity_query_size` (не меньше 4096).

@@ -40,7 +40,7 @@ describe("helpChapterFor", () => {
     expect(helpAnchorFor(null)).toBeUndefined();
   });
 
-  it("вкладка «Журнал действий» — глава «Диагностика», якорь journal (раздел в руководстве — задача 14)", () => {
+  it("вкладка «Журнал действий» — глава «Диагностика», якорь journal", () => {
     expect(helpChapterFor({ kind: "actions", connectionId: "c" })).toBe("diagnostics");
     expect(helpAnchorFor({ kind: "actions", connectionId: "c" })).toBe("journal");
   });
@@ -53,6 +53,18 @@ describe("helpChapterFor", () => {
         const anchor = helpAnchorFor({ kind: "diag", connectionId: "c", tool });
         expect(anchor, `${lang}: ${tool}`).toBeDefined();
         expect(anchors, `${lang}: якорь ${anchor} инструмента ${tool}`).toContain(anchor);
+      }
+    }
+  });
+
+  it("разделы действий — {#actions}, {#patroni-actions} и {#journal} — есть в главе «Диагностика» на обоих языках, а F1 журнала ведёт в {#journal}", async () => {
+    const journal = helpAnchorFor({ kind: "actions", connectionId: "c" });
+    expect(journal).toBe("journal");
+    for (const lang of ["en", "ru"]) {
+      const chapter = (await loadGuide(lang)).diagnostics;
+      const anchors = parseChapter("diagnostics", chapter, (key) => key).sections.map((s) => s.id);
+      for (const anchor of ["actions", "patroni-actions", journal]) {
+        expect(anchors, `${lang}: якорь ${anchor}`).toContain(anchor);
       }
     }
   });
