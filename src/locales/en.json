@@ -192,7 +192,9 @@
       "nodeUnavailable": "Node {{member}} is unavailable",
       "batchTooLarge": "At most {{max}} sessions per action",
       "batchTimeout": "The batch did not finish within {{secs}} s",
-      "badThreshold": "The age threshold must be a non-negative number of seconds"
+      "badThreshold": "The age threshold must be a non-negative number of seconds",
+      "noSessions": "No sessions to act on",
+      "badTarget": "The sessions do not match the action target"
     }
   },
   "connections": {

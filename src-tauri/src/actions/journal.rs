@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::conn::profile::{ConnectionProfile, Environment};
+use crate::error::ErrorCode;
 use crate::sync::MutexExt;
 
 pub const FILE_NAME: &str = "actions.jsonl";
@@ -114,6 +115,14 @@ pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64)
+}
+
+/// Код ошибки в том виде, в каком он уходит в JSON (`NOT_AUTHORIZED`): так он записывается в `ActionRecord.code`.
+pub fn code_name(code: ErrorCode) -> String {
+    serde_json::to_value(code)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default()
 }
 
 /// Первые `chars` символов (не байтов: литералы могут быть кириллицей).
@@ -344,5 +353,12 @@ mod tests {
         let missing = dir.path().join("no").join("such");
         let j = ActionJournal::new(&missing);
         assert!(!j.append(&record("c", "cancel")));
+    }
+
+    #[test]
+    fn error_codes_are_written_as_in_json() {
+        assert_eq!(code_name(ErrorCode::NotAuthorized), "NOT_AUTHORIZED");
+        assert_eq!(code_name(ErrorCode::PatroniError), "PATRONI_ERROR");
+        assert_eq!(code_name(ErrorCode::Timeout), "TIMEOUT");
     }
 }

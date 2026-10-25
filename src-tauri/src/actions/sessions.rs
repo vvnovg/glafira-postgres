@@ -1,5 +1,6 @@
 //! Отмена запроса и завершение сессий (спец. P2 §8.3): предпросмотр (задача 3) и выполнение (задача 4).
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -32,7 +33,7 @@ pub enum SignalKind {
 }
 
 /// Сессия адресуется парой `(pid, backend_start)`: PID переиспользуется, время запуска — нет.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionRef {
     pub pid: i32,
@@ -236,6 +237,7 @@ pub async fn preview(
     id: &str,
     req: &SessionActionRequest,
 ) -> AppResult<SessionActionPreview> {
+    ensure_valid_target(&req.target)?;
     let target = st
         .runtimes
         .diag_target(id, Some(req.member.as_str()), false)?;
@@ -377,8 +379,49 @@ fn failed(e: &tokio_postgres::Error) -> SessionOutcome {
     }
 }
 
-/// Одна сессия пакета: сигнал с перепроверкой; итог и строка журнала (если сигнал был отправлен).
-async fn one(
+/// Пустая строка журнала для сессии, по которой не прочитан снимок (сигнала не было): только пара и итог.
+fn blank_record(s: SessionRef) -> SessionRecord {
+    SessionRecord {
+        pid: s.pid,
+        backend_start_us: s.backend_start_us,
+        user: None,
+        database: None,
+        application: None,
+        client: None,
+        state: None,
+        query_id: None,
+        query: None,
+        xact_age_s: None,
+        result: String::new(),
+    }
+}
+
+/// Итог сразу после сигнала. `false` от `pg_cancel_backend` / `pg_terminate_backend` — процесса уже нет, сигнал
+/// не доставлен (`gone`); доставленная отмена — `signalSent`; после доставленного завершения нужно дождаться
+/// исчезновения сессии (`None`).
+fn outcome_after_signal(kind: SignalKind, delivered: bool) -> Option<SessionOutcome> {
+    match (delivered, kind) {
+        (false, _) => Some(SessionOutcome::Gone),
+        (true, SignalKind::Cancel) => Some(SessionOutcome::SignalSent),
+        (true, SignalKind::Terminate) => None,
+    }
+}
+
+/// Ждёт после terminate исчезновения сессии с тем же `backend_start`: до `GONE_WAIT`, опрос раз в `GONE_POLL`.
+async fn wait_gone(c: &Client, s: SessionRef) -> SessionOutcome {
+    let deadline = Instant::now() + GONE_WAIT;
+    loop {
+        match still_there(c, s).await {
+            Ok(false) => break SessionOutcome::Terminated,
+            Ok(true) if Instant::now() >= deadline => break SessionOutcome::SignalSent,
+            Ok(true) => tokio::time::sleep(GONE_POLL).await,
+            Err(_) => break SessionOutcome::SignalSent,
+        }
+    }
+}
+
+/// Сигнал одной сессии с перепроверкой критерия; итог и снимок сессии (если строка была прочитана).
+async fn attempt(
     c: &Client,
     sql: &str,
     kind: SignalKind,
@@ -407,9 +450,7 @@ async fn one(
             Err(e) => (failed(&e), None),
         };
     };
-    let mut record = SessionRecord {
-        pid: s.pid,
-        backend_start_us: s.backend_start_us,
+    let record = SessionRecord {
         user: row.get(0),
         database: row.get(1),
         application: row.get(2),
@@ -420,23 +461,29 @@ async fn one(
             .get::<_, Option<String>>(6)
             .map(|q| journal::cut(&q, journal::QUERY_CHARS)),
         xact_age_s: row.get(7),
-        result: String::new(),
+        ..blank_record(s)
     };
-    let outcome = if kind == SignalKind::Terminate {
-        let deadline = Instant::now() + GONE_WAIT;
-        loop {
-            match still_there(c, s).await {
-                Ok(false) => break SessionOutcome::Terminated,
-                Ok(true) if Instant::now() >= deadline => break SessionOutcome::SignalSent,
-                Ok(true) => tokio::time::sleep(GONE_POLL).await,
-                Err(_) => break SessionOutcome::SignalSent,
-            }
-        }
-    } else {
-        SessionOutcome::SignalSent
+    let delivered = row.get::<_, Option<bool>>(8).unwrap_or(false);
+    let outcome = match outcome_after_signal(kind, delivered) {
+        Some(o) => o,
+        None => wait_gone(c, s).await,
     };
-    record.result = result_name(&outcome).to_string();
     (outcome, Some(record))
+}
+
+/// Одна сессия пакета: итог и строка журнала. Строка есть у каждой сессии; без снимка (сигнала не было, строка
+/// не прочитана) в ней только пара и итог.
+async fn one(
+    c: &Client,
+    sql: &str,
+    kind: SignalKind,
+    target: &SessionTarget,
+    s: SessionRef,
+) -> (SessionOutcome, SessionRecord) {
+    let (outcome, snapshot) = attempt(c, sql, kind, target, s).await;
+    let mut record = snapshot.unwrap_or_else(|| blank_record(s));
+    record.result = result_name(&outcome).to_string();
+    (outcome, record)
 }
 
 /// Порог возраста должен быть конечным неотрицательным числом секунд: отрицательный дал бы «будущее» время,
@@ -456,6 +503,60 @@ fn ensure_valid_target(target: &SessionTarget) -> AppResult<()> {
     }
 }
 
+/// Сессии запроса: не пусто, а для `rootBlocker` — ровно пара самой цели (иначе сигнал ушёл бы чужим сессиям).
+fn ensure_sessions_match(target: &SessionTarget, sessions: &[SessionRef]) -> AppResult<()> {
+    if sessions.is_empty() {
+        return Err(app_err!(
+            ErrorCode::InvalidInput,
+            "errors.actions.noSessions",
+            "No sessions to act on"
+        ));
+    }
+    if let SessionTarget::RootBlocker {
+        pid,
+        backend_start_us,
+    } = target
+    {
+        let root = SessionRef {
+            pid: *pid,
+            backend_start_us: *backend_start_us,
+        };
+        if sessions != [root] {
+            return Err(app_err!(
+                ErrorCode::InvalidInput,
+                "errors.actions.badTarget",
+                "The sessions do not match the action target"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Убирает повторы пары `(pid, backend_start)`; порядок первых вхождений сохраняется.
+pub fn dedup_sessions(sessions: &[SessionRef]) -> Vec<SessionRef> {
+    let mut seen = HashSet::new();
+    sessions
+        .iter()
+        .copied()
+        .filter(|s| seen.insert(*s))
+        .collect()
+}
+
+/// Код ошибки действия для журнала при `outcome: error`: код первой сессии с отказом (`NOT_AUTHORIZED`) или сбоем.
+pub fn batch_code(results: &[SessionResult], outcome: journal::Outcome) -> Option<String> {
+    if outcome != journal::Outcome::Error {
+        return None;
+    }
+    results
+        .iter()
+        .find_map(|r| match &r.outcome {
+            SessionOutcome::NotAllowed => Some(ErrorCode::NotAuthorized),
+            SessionOutcome::Failed { error } => Some(error.code),
+            _ => None,
+        })
+        .map(journal::code_name)
+}
+
 /// Выполняет отмену или завершение сессий, разрешённых в предпросмотре (спец. §8.3). Защита — до обращения к серверу.
 pub async fn execute(
     st: &AppState,
@@ -465,16 +566,19 @@ pub async fn execute(
 ) -> AppResult<SessionActionResult> {
     let profile = st.profile(id)?;
     ensure_mutation_allowed(&profile, confirmation.confirm.as_deref())?;
+    // Повтор пары — одна сессия: число для подтверждения и пакет считаются без повторов.
+    let sessions = dedup_sessions(&req.sessions);
+    ensure_valid_target(&req.target)?;
+    ensure_sessions_match(&req.target, &sessions)?;
     // Пакет — несколько сессий или любой выбор по критерию: на prod нужно ещё ввести число сессий.
-    let batch =
-        req.sessions.len() > 1 || matches!(req.target, SessionTarget::IdleInTransaction { .. });
+    let batch = sessions.len() > 1 || matches!(req.target, SessionTarget::IdleInTransaction { .. });
     if batch && profile.environment == Environment::Prod {
         ensure_name_confirmed(
-            &req.sessions.len().to_string(),
+            &sessions.len().to_string(),
             confirmation.typed_name.as_deref(),
         )?;
     }
-    if req.sessions.len() > MAX_BATCH {
+    if sessions.len() > MAX_BATCH {
         return Err(app_err!(
             ErrorCode::InvalidInput,
             "errors.actions.batchTooLarge",
@@ -482,29 +586,30 @@ pub async fn execute(
             max = MAX_BATCH
         ));
     }
-    ensure_valid_target(&req.target)?;
     let started = Instant::now();
     // Ошибка соединения или чтения версии — ошибка команды: действие не началось, строки журнала нет.
     let c = crate::actions::conn::open(st, id, &req.member, None).await?;
     let caps = Caps::new(crate::diag::head(&c.client).await?.version_num);
     let sql = signal_sql(req.kind, &req.target, caps);
-    let mut results = Vec::with_capacity(req.sessions.len());
-    let mut records = Vec::new();
-    for s in &req.sessions {
-        let outcome = if started.elapsed() >= BATCH_LIMIT {
-            SessionOutcome::Failed {
+    let mut results = Vec::with_capacity(sessions.len());
+    let mut records = Vec::with_capacity(sessions.len());
+    for s in &sessions {
+        let (outcome, record) = if started.elapsed() >= BATCH_LIMIT {
+            let outcome = SessionOutcome::Failed {
                 error: app_err!(
                     ErrorCode::Timeout,
                     "errors.actions.batchTimeout",
                     "The batch did not finish within {{secs}} s",
                     secs = BATCH_LIMIT.as_secs()
                 ),
-            }
+            };
+            let mut record = blank_record(*s);
+            record.result = result_name(&outcome).to_string();
+            (outcome, record)
         } else {
-            let (o, rec) = one(&c.client, &sql, req.kind, &req.target, *s).await;
-            records.extend(rec);
-            o
+            one(&c.client, &sql, req.kind, &req.target, *s).await
         };
+        records.push(record);
         results.push(SessionResult {
             pid: s.pid,
             backend_start_us: s.backend_start_us,
@@ -523,7 +628,7 @@ pub async fn execute(
         member: Some(req.member.clone()),
         prod_confirmed: profile.environment == Environment::Prod,
         outcome,
-        code: None,
+        code: batch_code(&results, outcome),
         ms: started.elapsed().as_millis() as u64,
         sessions: records,
         slot: None,
@@ -650,8 +755,6 @@ mod tests {
             }
         );
     }
-
-    use crate::diag::caps::Caps;
 
     #[test]
     fn signal_sql_rechecks_the_criterion_in_the_same_statement() {
@@ -855,5 +958,179 @@ mod tests {
         let idle = execute_req(SessionTarget::IdleInTransaction { older_than_s: 60.0 }, 1);
         let e = rejection(&st, &idle, &confirm(None)).await;
         assert_eq!(e.key, "errors.guard.typeToConfirm");
+    }
+
+    fn pair(pid: i32, start: i64) -> SessionRef {
+        SessionRef {
+            pid,
+            backend_start_us: start,
+        }
+    }
+
+    fn execute_with(target: SessionTarget, sessions: Vec<SessionRef>) -> SessionActionExecute {
+        SessionActionExecute {
+            member: "m".into(),
+            kind: SignalKind::Terminate,
+            target,
+            sessions,
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_session_list_is_rejected_before_connecting() {
+        let (_dir, st) = state_with(crate::conn::profile::sample_profile("a"));
+        for target in [
+            SessionTarget::Selected { sessions: vec![] },
+            SessionTarget::IdleInTransaction { older_than_s: 60.0 },
+            SessionTarget::RootBlocker {
+                pid: 5,
+                backend_start_us: 7,
+            },
+        ] {
+            let req = execute_with(target, vec![]);
+            let e = rejection(&st, &req, &Confirmation::default()).await;
+            assert_eq!(e.code, crate::error::ErrorCode::InvalidInput);
+            assert_eq!(e.key, "errors.actions.noSessions");
+            assert_eq!(e.message, "No sessions to act on");
+        }
+    }
+
+    #[tokio::test]
+    async fn root_blocker_sessions_must_be_exactly_the_target() {
+        let (_dir, st) = state_with(crate::conn::profile::sample_profile("a"));
+        let target = || SessionTarget::RootBlocker {
+            pid: 5,
+            backend_start_us: 7,
+        };
+        for sessions in [
+            vec![pair(6, 7)],
+            vec![pair(5, 8)],
+            vec![pair(5, 7), pair(6, 7)],
+            vec![pair(6, 7), pair(5, 7)],
+        ] {
+            let req = execute_with(target(), sessions.clone());
+            let e = rejection(&st, &req, &Confirmation::default()).await;
+            assert_eq!(
+                e.code,
+                crate::error::ErrorCode::InvalidInput,
+                "{sessions:?}"
+            );
+            assert_eq!(e.key, "errors.actions.badTarget", "{sessions:?}");
+            assert_eq!(e.message, "The sessions do not match the action target");
+        }
+        // Ровно пара цели проходит проверки; повтор той же пары — та же одна сессия.
+        for sessions in [vec![pair(5, 7)], vec![pair(5, 7), pair(5, 7)]] {
+            let req = execute_with(target(), sessions);
+            let e = rejection(&st, &req, &Confirmation::default()).await;
+            assert_eq!(e.key, "errors.topology.notConnected");
+        }
+    }
+
+    #[test]
+    fn dedup_keeps_the_first_occurrences_in_order() {
+        assert_eq!(
+            dedup_sessions(&[pair(3, 1), pair(1, 1), pair(3, 1), pair(3, 2), pair(1, 1)]),
+            [pair(3, 1), pair(1, 1), pair(3, 2)]
+        );
+        assert!(dedup_sessions(&[]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn prod_batch_counts_sessions_without_duplicates() {
+        let mut p = crate::conn::profile::sample_profile("a");
+        p.environment = crate::conn::profile::Environment::Prod;
+        let name = p.name.clone();
+        let (_dir, st) = state_with(p);
+        let confirm = |typed: Option<&str>| Confirmation {
+            confirm: Some(name.clone()),
+            typed_name: typed.map(str::to_string),
+        };
+        let selected = || SessionTarget::Selected { sessions: vec![] };
+        let batch = execute_with(selected(), vec![pair(1, 1), pair(1, 1), pair(2, 1)]);
+        let e = rejection(&st, &batch, &confirm(Some("3"))).await;
+        assert_eq!(e.key, "errors.guard.typeToConfirm");
+        assert_eq!(e.params["expected"], "2");
+        let e = rejection(&st, &batch, &confirm(Some("2"))).await;
+        assert_eq!(e.key, "errors.topology.notConnected");
+        // Два повтора одной сессии — не пакет: хватает имени подключения.
+        let twice = execute_with(selected(), vec![pair(1, 1), pair(1, 1)]);
+        let e = rejection(&st, &twice, &confirm(None)).await;
+        assert_eq!(e.key, "errors.topology.notConnected");
+    }
+
+    #[test]
+    fn false_from_the_signal_function_means_gone() {
+        for kind in [SignalKind::Cancel, SignalKind::Terminate] {
+            assert_eq!(
+                outcome_after_signal(kind, false),
+                Some(SessionOutcome::Gone)
+            );
+        }
+        assert_eq!(
+            outcome_after_signal(SignalKind::Cancel, true),
+            Some(SessionOutcome::SignalSent)
+        );
+        // После доставленного завершения ещё нужно дождаться исчезновения сессии.
+        assert_eq!(outcome_after_signal(SignalKind::Terminate, true), None);
+    }
+
+    #[test]
+    fn error_batch_carries_the_first_failure_code() {
+        let r = |outcome| SessionResult {
+            pid: 1,
+            backend_start_us: 1,
+            outcome,
+        };
+        let timeout = || SessionOutcome::Failed {
+            error: app_err!(
+                ErrorCode::Timeout,
+                "errors.actions.batchTimeout",
+                "The batch did not finish within {{secs}} s",
+                secs = 60
+            ),
+        };
+        use journal::Outcome::*;
+        let code = |results: &[SessionResult]| batch_code(results, batch_outcome(results));
+        assert_eq!(
+            code(&[r(SessionOutcome::NotAllowed)]).as_deref(),
+            Some("NOT_AUTHORIZED")
+        );
+        assert_eq!(code(&[r(timeout())]).as_deref(), Some("TIMEOUT"));
+        // Первая из неудачных сессий, а не последняя.
+        assert_eq!(
+            code(&[r(SessionOutcome::NotAllowed), r(timeout())]).as_deref(),
+            Some("NOT_AUTHORIZED")
+        );
+        // Код пишется только при итоге `error`.
+        let mixed = [r(SessionOutcome::Terminated), r(timeout())];
+        assert_eq!(batch_outcome(&mixed), Partial);
+        assert_eq!(batch_code(&mixed, Partial), None);
+        let gone = [r(SessionOutcome::Gone)];
+        assert_eq!(batch_code(&gone, batch_outcome(&gone)), None);
+    }
+
+    #[test]
+    fn blank_record_has_only_the_pair() {
+        let r = blank_record(pair(4, 9));
+        assert_eq!((r.pid, r.backend_start_us), (4, 9));
+        assert!(r.user.is_none() && r.query.is_none() && r.xact_age_s.is_none());
+        assert!(r.result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn preview_rejects_a_bad_threshold_before_connecting() {
+        let (_dir, st) = state_with(crate::conn::profile::sample_profile("a"));
+        let preview_of = |older_than_s| SessionActionRequest {
+            member: "m".into(),
+            kind: SignalKind::Terminate,
+            target: SessionTarget::IdleInTransaction { older_than_s },
+        };
+        for bad in [-1.0, f64::NAN, f64::INFINITY] {
+            let e = preview(&st, "a", &preview_of(bad)).await.unwrap_err();
+            assert_eq!(e.key, "errors.actions.badThreshold", "{bad}");
+        }
+        // Ноль допустим: проверка пройдена, дальше нет открытого подключения.
+        let e = preview(&st, "a", &preview_of(0.0)).await.unwrap_err();
+        assert_eq!(e.key, "errors.topology.notConnected");
     }
 }

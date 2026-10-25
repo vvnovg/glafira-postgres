@@ -394,7 +394,7 @@ async fn stale_backend_start_is_gone_and_woken_session_no_longer_matches() {
     let probe = common::superuser(&addr, "postgres").await;
     let start = backend_start_us(&probe, pid).await;
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-    let (_dir, st) = common::open_server(&addr).await;
+    let (dir, st) = common::open_server(&addr).await;
     let member = st.runtimes.view("it").topology.unwrap().members[0]
         .name
         .clone();
@@ -419,7 +419,7 @@ async fn stale_backend_start_is_gone_and_woken_session_no_longer_matches() {
     .await;
     assert_eq!(r.results[0].outcome, SessionOutcome::Gone);
     assert_eq!(r.outcome, Outcome::Ok);
-    assert!(app.query_one("SELECT 1", &[]).await.is_ok(), "сессия жива");
+    assert!(session_exists(&probe, pid).await, "сессия жива");
     // Сессия проснулась (транзакция закончилась) — критерий idle in transaction не выполняется.
     app.batch_execute("COMMIT").await.unwrap();
     let r = execute(
@@ -431,7 +431,144 @@ async fn stale_backend_start_is_gone_and_woken_session_no_longer_matches() {
     )
     .await;
     assert_eq!(r.results[0].outcome, SessionOutcome::NoLongerMatches);
-    assert!(app.query_one("SELECT 1", &[]).await.is_ok(), "сессия жива");
+    assert!(session_exists(&probe, pid).await, "сессия жива");
+    // В журнале есть обе сессии с итогом; снимка сессии нет — сигнал не отправлялся.
+    let lines = journal_lines(dir.path());
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    for (line, result) in lines.iter().zip(["gone", "noLongerMatches"]) {
+        let rec = &line["sessions"][0];
+        assert_eq!(rec["result"], result, "{line}");
+        assert_eq!(rec["pid"], pid);
+        assert!(rec["user"].is_null() && rec["query"].is_null(), "{rec}");
+        assert_eq!(line["outcome"], "ok");
+        assert!(line["code"].is_null(), "{line}");
+    }
+}
+
+/// Одинокая сессия в транзакции никого не блокирует: критерий `rootBlocker` в самом запросе не выполняется, сигнал не
+/// уходит и сессия остаётся жива (проверяется посторонним сеансом: запрос в самой сессии сдвинул бы `state_change`).
+/// Контроль: тот же сигнал без критерия (`selected`) её завершает — значит, отказ дал именно критерий.
+#[tokio::test]
+async fn lone_idle_session_is_not_a_root_blocker() {
+    let Some(addr) = common::env("GPG_IT_SINGLE") else {
+        return;
+    };
+    common::ensure_fixtures(&addr).await;
+    let holder = common::app(&addr).await;
+    let pid = idle_in_transaction(&holder).await;
+    let probe = common::superuser(&addr, "postgres").await;
+    let start = backend_start_us(&probe, pid).await;
+    let (dir, st) = common::open_server(&addr).await;
+    let member = st.runtimes.view("it").topology.unwrap().members[0]
+        .name
+        .clone();
+    let pair = SessionRef {
+        pid,
+        backend_start_us: start,
+    };
+    let run = async |target| {
+        sa::execute(
+            &st,
+            "it",
+            &exec(&member, SignalKind::Terminate, target, vec![pair]),
+            &Confirmation::default(),
+        )
+        .await
+        .unwrap()
+    };
+    let r = run(SessionTarget::RootBlocker {
+        pid,
+        backend_start_us: start,
+    })
+    .await;
+    assert_eq!(
+        r.results[0].outcome,
+        SessionOutcome::NoLongerMatches,
+        "{r:?}"
+    );
+    assert_eq!(r.outcome, Outcome::Ok);
+    assert!(session_exists(&probe, pid).await, "сессия жива");
+    let r = run(SessionTarget::Selected { sessions: vec![] }).await;
+    assert_eq!(r.results[0].outcome, SessionOutcome::Terminated, "{r:?}");
+    assert!(!session_exists(&probe, pid).await, "сессия завершена");
+    let lines = journal_lines(dir.path());
+    assert_eq!(lines[0]["sessions"][0]["result"], "noLongerMatches");
+    assert_eq!(lines[1]["sessions"][0]["result"], "terminated");
+}
+
+/// Смешанный пакет: завершена, отказано в правах, давно нет. Итог `partial`, в журнале все три сессии с итогами,
+/// кода ошибки у записи нет (он пишется только при итоге `error`).
+#[tokio::test]
+async fn mixed_batch_is_partial_and_every_session_is_journaled() {
+    let Some(addr) = common::env("GPG_IT_SINGLE") else {
+        return;
+    };
+    common::ensure_fixtures(&addr).await;
+    let (a, b) = (common::app(&addr).await, common::app(&addr).await);
+    let su = common::superuser(&addr, "postgres").await;
+    let (pid_a, pid_b) = (idle_in_transaction(&a).await, idle_in_transaction(&b).await);
+    let pid_su = idle_in_transaction(&su).await;
+    let (start_a, start_b, start_su) = (
+        backend_start_us(&su, pid_a).await,
+        backend_start_us(&su, pid_b).await,
+        backend_start_us(&su, pid_su).await,
+    );
+    let (dir, st) = common::open_server(&addr).await;
+    let member = st.runtimes.view("it").topology.unwrap().members[0]
+        .name
+        .clone();
+    let r = sa::execute(
+        &st,
+        "it",
+        &exec(
+            &member,
+            SignalKind::Terminate,
+            SessionTarget::Selected { sessions: vec![] },
+            vec![
+                SessionRef {
+                    pid: pid_a,
+                    backend_start_us: start_a,
+                },
+                SessionRef {
+                    pid: pid_su,
+                    backend_start_us: start_su,
+                },
+                // Другой запуск того же pid: сессии с таким временем запуска нет, живая сессия не тронута.
+                SessionRef {
+                    pid: pid_b,
+                    backend_start_us: start_b - 1,
+                },
+            ],
+        ),
+        &Confirmation::default(),
+    )
+    .await
+    .unwrap();
+    let outcomes: Vec<_> = r.results.iter().map(|x| &x.outcome).collect();
+    assert_eq!(
+        outcomes,
+        [
+            &SessionOutcome::Terminated,
+            &SessionOutcome::NotAllowed,
+            &SessionOutcome::Gone
+        ],
+        "{r:?}"
+    );
+    assert_eq!(r.outcome, Outcome::Partial);
+    assert!(session_exists(&su, pid_su).await && session_exists(&su, pid_b).await);
+    let lines = journal_lines(dir.path());
+    assert_eq!(lines[0]["outcome"], "partial");
+    assert!(lines[0]["code"].is_null(), "{}", lines[0]);
+    let results: Vec<_> = lines[0]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["result"].as_str().unwrap())
+        .collect();
+    assert_eq!(results, ["terminated", "notAllowed", "gone"]);
+    // Снимок есть только там, где строка была прочитана до сигнала.
+    assert_eq!(lines[0]["sessions"][0]["user"], "glafira_app");
+    assert!(lines[0]["sessions"][1]["user"].is_null());
 }
 
 #[tokio::test]
@@ -598,12 +735,17 @@ async fn signal_to_a_superuser_session_is_not_allowed() {
     assert_eq!(r.outcome, Outcome::Error);
     assert!(r.journal_written);
     assert!(su.query_one("SELECT 1", &[]).await.is_ok(), "сессия жива");
+    // Запись — ошибка с кодом отказа; сессия в ней есть, снимка нет (сигнал не отправлялся).
     let lines = journal_lines(dir.path());
     assert_eq!(lines[0]["outcome"], "error");
-    assert!(
-        lines[0].get("sessions").is_none(),
-        "сигнала не было: {lines:?}"
+    assert_eq!(lines[0]["code"], "NOT_AUTHORIZED");
+    let rec = &lines[0]["sessions"][0];
+    assert_eq!(rec["result"], "notAllowed");
+    assert_eq!(
+        (rec["pid"].as_i64(), rec["backendStartUs"].as_i64()),
+        (Some(pid as i64), Some(start))
     );
+    assert!(rec["user"].is_null() && rec["query"].is_null(), "{rec}");
 }
 
 #[tokio::test]
