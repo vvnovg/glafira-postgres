@@ -1,5 +1,6 @@
 //! Сессии и idle in transaction (спец. P2 §5.2).
 
+use pg_advisor::rules::horizon::quote_literal;
 use pg_advisor::rules::sessions::{self as rules, SessionRow, SessionSettings, SessionsData};
 use tokio_postgres::Client;
 
@@ -9,6 +10,7 @@ use crate::diag::{
     DiagData, DiagReport, Tool, head, make_report, on_member, sql::BACKEND_START_US,
 };
 use crate::error::AppResult;
+use crate::product::PG_APPLICATION_NAME;
 use crate::state::AppState;
 use crate::topology::runtime::DiagTarget;
 
@@ -17,6 +19,8 @@ pub const QUERY_LIMIT: i32 = 16_384;
 
 pub fn sessions_sql(caps: Caps) -> String {
     let query_id = caps.col(V14, "a.query_id", "bigint");
+    // Признак «сессия Glafira» — имя приложения самого подключения: константа, а не копия литерала.
+    let glafira = quote_literal(PG_APPLICATION_NAME);
     format!(
         "SELECT a.pid, a.leader_pid, a.backend_type, a.datname::text, a.usename::text, a.application_name, \
          host(a.client_addr), a.client_port, {BACKEND_START_US}, \
@@ -25,7 +29,7 @@ pub fn sessions_sql(caps: Caps) -> String {
          a.backend_xid::text, age(a.backend_xmin)::bigint, {query_id}, left(a.query, {QUERY_LIMIT}), \
          length(a.query) > {QUERY_LIMIT}, \
          CASE WHEN a.wait_event_type = 'Lock' THEN pg_blocking_pids(a.pid) ELSE '{{}}'::int[] END, \
-         COALESCE(l.n, 0)::bigint, a.application_name = 'glafira-pg' \
+         COALESCE(l.n, 0)::bigint, a.application_name = {glafira} \
          FROM pg_stat_activity a \
          LEFT JOIN (SELECT pid, count(*) AS n FROM pg_locks WHERE granted GROUP BY pid) l ON l.pid = a.pid \
          WHERE a.pid <> pg_backend_pid() ORDER BY a.pid"
@@ -104,4 +108,23 @@ pub async fn report(st: &AppState, id: &str, target: &DiagTarget) -> AppResult<D
         findings,
         unavailable,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn glafira_flag_compares_with_the_application_name_constant() {
+        for version in [130000, 180000] {
+            let sql = sessions_sql(Caps::new(version));
+            assert!(
+                sql.contains(&format!(
+                    "a.application_name = {}",
+                    quote_literal(PG_APPLICATION_NAME)
+                )),
+                "{sql}"
+            );
+        }
+    }
 }
