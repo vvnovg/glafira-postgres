@@ -69,3 +69,32 @@ pub async fn preview_patroni_action(
 ) -> AppResult<crate::actions::patroni::PatroniActionPreview> {
     crate::actions::patroni::preview(&state, &id, &action).await
 }
+
+/// Канал панели наблюдения: ошибка отправки — канал закрыт, наблюдение заканчивается.
+struct WatchChannel(tauri::ipc::Channel<crate::actions::watch::WatchEvent>);
+
+impl crate::actions::watch::WatchSink for WatchChannel {
+    fn send(&self, e: crate::actions::watch::WatchEvent) -> bool {
+        self.0.send(e).is_ok()
+    }
+}
+
+/// Действие Patroni; после switchover / failover / restart «сейчас» и pause / resume — наблюдение в `channel`
+/// (`watch` итога — id сессии для `stop_session`). Защита read-only и prod и ввод имени кандидата — в Rust.
+#[tauri::command]
+pub async fn execute_patroni_action(
+    state: State<'_, AppState>,
+    id: String,
+    action: crate::actions::patroni::PatroniAction,
+    confirmation: crate::actions::Confirmation,
+    channel: tauri::ipc::Channel<crate::actions::watch::WatchEvent>,
+) -> AppResult<crate::actions::patroni::PatroniActionResult> {
+    crate::actions::patroni::execute(
+        &state,
+        &id,
+        &action,
+        &confirmation,
+        std::sync::Arc::new(WatchChannel(channel)),
+    )
+    .await
+}

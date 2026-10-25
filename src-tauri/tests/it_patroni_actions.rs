@@ -3,11 +3,15 @@
 
 mod common;
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use glafira_pg_lib::actions::Confirmation;
 use glafira_pg_lib::actions::journal::Outcome;
 use glafira_pg_lib::actions::patroni::{self as pa, PatroniAction};
+use glafira_pg_lib::actions::watch::{
+    self, WatchEvent, WatchPlan, WatchSink, WatchStatus, WatchStep,
+};
 use glafira_pg_lib::error::ErrorCode;
 use glafira_pg_lib::topology::model::{Role, now_ms};
 use glafira_pg_lib::topology::patroni::{ReqwestHttp, discover};
@@ -304,4 +308,255 @@ async fn rejected_action_is_journaled_as_an_error() {
         "в журнале тот же ответ Patroni, что и в ошибке"
     );
     assert!(!rec.path.contains('@'), "адрес без учётных данных");
+}
+
+#[derive(Default)]
+struct Events(Mutex<Vec<WatchEvent>>);
+
+impl WatchSink for Events {
+    fn send(&self, e: WatchEvent) -> bool {
+        self.0.lock().unwrap().push(e);
+        true
+    }
+}
+
+impl Events {
+    async fn until_finished(&self, limit: Duration) -> WatchEvent {
+        common::wait_until(
+            "наблюдение закончилось",
+            limit,
+            async || {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .last()
+                    .is_some_and(|e| e.status != WatchStatus::Running)
+            },
+        )
+        .await;
+        self.0.lock().unwrap().last().cloned().unwrap()
+    }
+}
+
+fn replica_of(t: &glafira_pg_lib::topology::model::Topology) -> String {
+    let leader = t.leader().unwrap().name.clone();
+    t.members
+        .iter()
+        .find(|m| m.name != leader && m.reachable)
+        .unwrap()
+        .name
+        .clone()
+}
+
+/// Закрытие подключения во время наблюдения (стенд не меняется: ждём паузы, которой никто не ставит). Слушатель
+/// закрытия останавливает сессию наблюдения под блокировкой `Runtimes`, а её остановка снимает ускорение: закрытие
+/// не зависает, сессии больше нет. `disconnect` — в своём потоке: зависание провалит тест по сроку.
+#[tokio::test]
+async fn closing_the_connection_during_a_watch_stops_it_without_hanging() {
+    let Some((_dir, st)) = common::open_patroni().await else {
+        return;
+    };
+    let events = Arc::new(Events::default());
+    let sid = watch::start(&st, "it", WatchPlan::Pause { paused: true }, events.clone());
+    common::wait_until(
+        "наблюдение началось",
+        Duration::from_secs(5),
+        async || !events.0.lock().unwrap().is_empty(),
+    )
+    .await;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let runtimes = st.runtimes.clone();
+    std::thread::spawn(move || {
+        runtimes.disconnect("it");
+        let _ = tx.send(());
+    });
+    rx.recv_timeout(Duration::from_secs(10))
+        .expect("закрытие подключения во время наблюдения зависло");
+    assert!(
+        !st.sessions.stop(&sid),
+        "закрытие подключения остановило наблюдение"
+    );
+    let seen = events.0.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!(
+        (seen[0].step, seen[0].status),
+        (WatchStep::Accepted, WatchStatus::Running)
+    );
+}
+
+#[tokio::test]
+async fn switchover_now_is_watched_until_done() {
+    if !docker_enabled() {
+        return;
+    }
+    let Some((_dir, st)) = common::open_patroni().await else {
+        return;
+    };
+    let _restore = common::restore_on_drop(common::wait_stand);
+    let t = st.runtimes.view("it").topology.unwrap();
+    let candidate = replica_of(&t);
+    let events = Arc::new(Events::default());
+    let action = PatroniAction::Switchover {
+        candidate: Some(candidate.clone()),
+        scheduled_at: None,
+    };
+    let r = pa::execute(&st, "it", &action, &Confirmation::default(), events.clone())
+        .await
+        .unwrap();
+    assert!(r.watch.is_some() && r.journal_written);
+    let last = events.until_finished(Duration::from_secs(130)).await;
+    assert_eq!(
+        (last.step, last.status),
+        (WatchStep::Done, WatchStatus::Done),
+        "{:?}",
+        events.0.lock().unwrap()
+    );
+    assert_eq!(
+        st.runtimes
+            .view("it")
+            .topology
+            .unwrap()
+            .leader()
+            .unwrap()
+            .name,
+        candidate
+    );
+}
+
+#[tokio::test]
+async fn replica_restart_and_pause_resume_are_watched() {
+    if !docker_enabled() {
+        return;
+    }
+    let Some((_dir, st)) = common::open_patroni().await else {
+        return;
+    };
+    let _restore = common::restore_on_drop(|| {
+        let _ = common::try_patronictl(&["resume", "--wait"]);
+        common::wait_stand();
+    });
+    let t = st.runtimes.view("it").topology.unwrap();
+    let replica = replica_of(&t);
+    let events = Arc::new(Events::default());
+    let restart = PatroniAction::Restart {
+        member: replica,
+        only_pending: false,
+        scheduled_at: None,
+    };
+    pa::execute(
+        &st,
+        "it",
+        &restart,
+        &Confirmation::default(),
+        events.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        events.until_finished(Duration::from_secs(310)).await.step,
+        WatchStep::Done
+    );
+    for paused in [true, false] {
+        let events = Arc::new(Events::default());
+        pa::execute(
+            &st,
+            "it",
+            &PatroniAction::Pause { paused },
+            &Confirmation::default(),
+            events.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            events.until_finished(Duration::from_secs(40)).await.status,
+            WatchStatus::Done
+        );
+    }
+}
+
+/// Failover (`GPG_IT_FAILOVER=1`): пауза → остановка PostgreSQL лидера → failover на реплику → снятие паузы →
+/// старый лидер возвращается репликой.
+#[tokio::test]
+async fn failover_after_the_leader_stops() {
+    if !docker_enabled() || common::env("GPG_IT_FAILOVER").as_deref() != Some("1") {
+        return;
+    }
+    let Some((_dir, st)) = common::open_patroni().await else {
+        return;
+    };
+    let _restore = common::restore_on_drop(|| {
+        let _ = common::try_patronictl(&["resume", "--wait"]);
+        common::wait_stand();
+    });
+    let t = st.runtimes.view("it").topology.unwrap();
+    let leader = t.leader().unwrap().name.clone();
+    let candidate = replica_of(&t);
+    let none = Arc::new(Events::default());
+    pa::execute(
+        &st,
+        "it",
+        &PatroniAction::Pause { paused: true },
+        &Confirmation::default(),
+        none.clone(),
+    )
+    .await
+    .unwrap();
+    none.until_finished(Duration::from_secs(40)).await;
+    // Контейнер участника — gp-<имя участника>; pg_ctl — от postgres.
+    common::docker(&[
+        "exec",
+        "-u",
+        "postgres",
+        &format!("gp-{leader}"),
+        "pg_ctl",
+        "-D",
+        "/var/lib/postgresql/patroni/data",
+        "stop",
+        "-m",
+        "fast",
+    ]);
+    topology_until(
+        &st,
+        "лидер остановлен",
+        Duration::from_secs(60),
+        |t| {
+            t.member(&leader)
+                .is_some_and(|m| m.state.as_deref() != Some("running"))
+        },
+    )
+    .await;
+    let events = Arc::new(Events::default());
+    let confirm = Confirmation {
+        confirm: None,
+        typed_name: Some(candidate.clone()),
+    };
+    pa::execute(
+        &st,
+        "it",
+        &PatroniAction::Failover {
+            candidate: candidate.clone(),
+        },
+        &confirm,
+        events.clone(),
+    )
+    .await
+    .unwrap();
+    let last = events.until_finished(Duration::from_secs(130)).await;
+    assert!(
+        last.step >= WatchStep::NewLeaderRunning,
+        "{:?}",
+        events.0.lock().unwrap()
+    );
+    pa::execute(
+        &st,
+        "it",
+        &PatroniAction::Pause { paused: false },
+        &Confirmation::default(),
+        Arc::new(Events::default()),
+    )
+    .await
+    .unwrap();
+    common::wait_stand();
+    let t = st.runtimes.view("it").topology.unwrap();
+    assert_eq!(t.leader().unwrap().name, candidate);
 }

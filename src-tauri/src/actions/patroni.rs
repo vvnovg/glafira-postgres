@@ -1,5 +1,5 @@
 //! Действия Patroni (спец. P2 §8.5): модель действия, предусловия на топологии, запрос и адреса, отправка,
-//! предпросмотр и выполнение с журналом. Наблюдение за исходом — задача 8.
+//! предпросмотр и выполнение с журналом; `execute` добавляет наблюдение за исходом (`actions::watch`).
 
 use std::time::Instant;
 
@@ -740,6 +740,38 @@ pub async fn perform(
         journal_written,
         before,
         restart_start,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatroniActionResult {
+    pub response: String,
+    /// Сессия наблюдения (switchover / failover / restart «сейчас», pause / resume); `None` — не наблюдается.
+    pub watch: Option<String>,
+    pub journal_written: bool,
+}
+
+/// Выполнение (`perform`) и наблюдение за исходом. Ошибка выполнения — и таймаут или обрыв после отправки, когда
+/// исход неизвестен, — возвращается как есть, без наблюдения: что случилось, показывает обзор кластера.
+pub async fn execute(
+    st: &AppState,
+    id: &str,
+    action: &PatroniAction,
+    confirmation: &Confirmation,
+    sink: std::sync::Arc<dyn crate::actions::watch::WatchSink>,
+) -> AppResult<PatroniActionResult> {
+    let done = perform(st, id, action, confirmation).await?;
+    let watch = crate::actions::watch::WatchPlan::for_action(
+        action,
+        &done.before,
+        done.restart_start.clone(),
+    )
+    .map(|plan| crate::actions::watch::start(st, id, plan, sink));
+    Ok(PatroniActionResult {
+        response: done.response,
+        watch,
+        journal_written: done.journal_written,
     })
 }
 

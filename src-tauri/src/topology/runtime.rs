@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tokio::task::JoinHandle;
@@ -216,6 +216,8 @@ struct Entry {
     /// итог со снимком топологии, взятым в начале, — два опроса одного открытия сразу записали бы одно
     /// переключение в журнал дважды, а опрос, закончившийся позже, вернул бы устаревшее состояние.
     observing: Arc<tokio::sync::Mutex<()>>,
+    /// Будит фоновый опрос: ускорение (`Runtimes::boost`) начинается сразу, а не после текущего ожидания.
+    wake: Arc<tokio::sync::Notify>,
 }
 
 impl Entry {
@@ -277,9 +279,10 @@ fn state_for(t: &Topology) -> ConnState {
 /// Порядок блокировок один, обратного нет — взаимной блокировки нет: замок подключения (`connect_locks`,
 /// tokio) → очередь опросов открытия (`Entry::observing`, tokio) → `entries` (std) → пулы, кэш клиентов
 /// HTTP, реестр туннелей, `connect_locks`, приёмник событий, слушатели закрытия (std; обработчик слушателя
-/// берёт только свои std-мьютексы). `reconnect` берёт оба замка tokio, фоновый опрос — только очередь
-/// опросов, `connect` — только замок подключения, `disconnect`, `discard_stale` и `refresh_profile` — ни
-/// одного. std-мьютекс не держится через `await`.
+/// берёт только свои std-мьютексы и `boosts`) → `boosts` (std, последний: под ним ничего не берётся).
+/// `reconnect` берёт оба замка tokio, фоновый опрос — только очередь опросов, `connect` — только замок
+/// подключения, `disconnect`, `discard_stale` и `refresh_profile` — ни одного. std-мьютекс не держится через
+/// `await`.
 pub struct Runtimes {
     source: Arc<dyn TopologySource>,
     pools: Arc<PoolRegistry>,
@@ -292,6 +295,11 @@ pub struct Runtimes {
     connect_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     sink: Mutex<Option<Arc<dyn RuntimeSink>>>,
     listeners: Mutex<Vec<Arc<dyn CloseListener>>>,
+    /// Ускоренный опрос наблюдений после действий (P2b): подключение → интервал и срок. Не в `Entry`, а под
+    /// своим мьютексом: `unboost` вызывает остановка сессии наблюдения, а её — и слушатель закрытия, который
+    /// работает под `entries` (`disconnect`, переоткрытие). Взятие `entries` там было бы повторным захватом
+    /// std-мьютекса тем же потоком — взаимной блокировкой; `boosts` же последний в порядке блокировок.
+    boosts: Mutex<HashMap<String, (Duration, Instant)>>,
 }
 
 /// Подключение не открыто (или закрыто, пока шла операция).
@@ -333,6 +341,7 @@ impl Runtimes {
             connect_locks: Mutex::new(HashMap::new()),
             sink: Mutex::new(None),
             listeners: Mutex::new(Vec::new()),
+            boosts: Mutex::new(HashMap::new()),
         })
     }
 
@@ -415,6 +424,7 @@ impl Runtimes {
                 }
                 // Прежнее открытие закончилось: его состояние у слушателей к новому не относится.
                 self.notify_closed(&id);
+                self.boosts.lock_safe().remove(&id);
             }
             self.pools.evict_connection(&id);
             self.source.forget(&id);
@@ -431,6 +441,7 @@ impl Runtimes {
                     error: None,
                     poller: None,
                     observing: Arc::default(),
+                    wake: Arc::default(),
                 },
             );
             self.emit_state(&id, ConnState::Connecting, None);
@@ -500,19 +511,62 @@ impl Runtimes {
         not_connected()
     }
 
-    /// Фоновый опрос открытия `generation`: прекращается, как только открытие закрыто или заменено.
+    /// Фоновый опрос открытия `generation`: прекращается, как только открытие закрыто или заменено. Ждёт
+    /// обычный интервал или ускоренный (`boost`); ускорение будит его сразу.
     fn spawn_poller(self: &Arc<Self>, id: &str, generation: u64) -> JoinHandle<()> {
         let weak: Weak<Self> = Arc::downgrade(self);
-        let (key, interval) = (id.to_string(), self.interval);
+        let key = id.to_string();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(interval).await;
+                let Some((wait, wake)) =
+                    weak.upgrade().and_then(|rt| rt.next_wait(&key, generation))
+                else {
+                    break;
+                };
+                tokio::select! {
+                    _ = tokio::time::sleep(wait) => {}
+                    _ = wake.notified() => {}
+                }
                 let Some(rt) = weak.upgrade() else { break };
                 if !rt.poll_once(&key, generation).await {
                     break;
                 }
             }
         })
+    }
+
+    /// Опрос раз в `interval` до `until` (наблюдение после действия). Фоновый опрос просыпается сразу.
+    pub fn boost(&self, id: &str, interval: Duration, until: Instant) {
+        let entries = self.entries.lock_safe();
+        if let Some(e) = entries.get(id) {
+            self.boosts
+                .lock_safe()
+                .insert(id.to_string(), (interval, until));
+            e.wake.notify_one();
+        }
+    }
+
+    /// Снимает ускорение (панель наблюдения закрыта, наблюдение кончилось). Берёт только `boosts`, не `entries`:
+    /// вызывается и из слушателя закрытия, который работает под `entries`.
+    pub fn unboost(&self, id: &str) {
+        self.boosts.lock_safe().remove(id);
+    }
+
+    /// Сколько ждать до следующего опроса открытия `generation` и чем его разбудить; `None` — открытия нет.
+    /// Истёкшее ускорение снимается здесь же.
+    fn next_wait(&self, id: &str, generation: u64) -> Option<(Duration, Arc<tokio::sync::Notify>)> {
+        let entries = self.entries.lock_safe();
+        let e = entries.get(id).filter(|e| e.generation == generation)?;
+        let mut boosts = self.boosts.lock_safe();
+        let wait = match boosts.get(id) {
+            Some(&(interval, until)) if Instant::now() < until => interval.min(self.interval),
+            Some(_) => {
+                boosts.remove(id);
+                self.interval
+            }
+            None => self.interval,
+        };
+        Some((wait, e.wake.clone()))
     }
 
     /// Один опрос открытия `generation`; `false` — оно закрыто или заменено, опрос прекращается.
@@ -600,6 +654,7 @@ impl Runtimes {
             }
             self.notify_closed(id);
         }
+        self.boosts.lock_safe().remove(id);
         self.pools.evict_connection(id);
         self.source.forget(id);
         self.tunnels.close(id);
@@ -788,6 +843,7 @@ impl Runtimes {
                 h.abort();
             }
         }
+        self.boosts.lock_safe().clear();
         self.tunnels.close_all_blocking();
     }
 }
@@ -1010,6 +1066,82 @@ mod tests {
         fn member_removed(&self, id: &str, member: &str) {
             self.0.lock_safe().push(format!("member:{id}:{member}"));
         }
+    }
+
+    /// Наблюдение после действия (P2b): ускорение начинается сразу (фоновый опрос будят, а не ждут его 60 с),
+    /// кончается по сроку или `unboost`, и повторное ускорение снова будит опрос.
+    #[tokio::test]
+    async fn boost_polls_often_until_it_ends() {
+        let (rt, src, _rec, _pools) = manual(vec![Ok(two("a"))]);
+        rt.connect(patroni_profile()).await.unwrap();
+        let base = src.calls();
+        rt.boost(
+            "c",
+            Duration::from_millis(30),
+            Instant::now() + Duration::from_millis(300),
+        );
+        eventually("ускоренный опрос", || {
+            src.calls() >= base + 3
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let after = src.calls();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            src.calls(),
+            after,
+            "срок ускорения вышел — снова раз в 60 с"
+        );
+        rt.boost(
+            "c",
+            Duration::from_millis(30),
+            Instant::now() + Duration::from_secs(60),
+        );
+        eventually("снова ускорен", || src.calls() >= after + 2).await;
+        rt.unboost("c");
+        let stopped = src.calls();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            src.calls() <= stopped + 1,
+            "unboost возвращает обычный интервал"
+        );
+    }
+
+    /// Закрытие подключения во время наблюдения: слушатель закрытия (реестр сессий) останавливает сессию
+    /// наблюдения под `entries`, её остановка снимает ускорение — и не захватывает `entries` повторно, закрытие
+    /// не зависает. `disconnect` — в своём потоке: зависание провалит тест по сроку, а не повесит его.
+    #[tokio::test]
+    async fn closing_the_connection_during_a_watch_does_not_deadlock() {
+        let (rt, _src, _rec, _pools) = manual(vec![Ok(two("a"))]);
+        let sessions = Arc::new(crate::session::SessionRegistry::default());
+        rt.add_close_listener(sessions.clone());
+        rt.connect(patroni_profile()).await.unwrap();
+        rt.boost(
+            "c",
+            Duration::from_millis(30),
+            Instant::now() + Duration::from_secs(60),
+        );
+        let watch = tokio::spawn(std::future::pending::<()>());
+        sessions.insert(
+            "w".into(),
+            "c",
+            crate::session::SessionKind::Watch,
+            crate::actions::watch::stop_watch(watch.abort_handle(), &rt, "c"),
+        );
+        let (tx, rx) = mpsc::channel();
+        let closing = rt.clone();
+        std::thread::spawn(move || {
+            closing.disconnect("c");
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("закрытие подключения во время наблюдения зависло");
+        assert!(
+            watch.await.unwrap_err().is_cancelled(),
+            "задача наблюдения прервана"
+        );
+        assert!(!sessions.stop("w"), "сессии наблюдения больше нет");
+        assert!(rt.boosts.lock_safe().is_empty(), "ускорение снято");
     }
 
     #[tokio::test]
