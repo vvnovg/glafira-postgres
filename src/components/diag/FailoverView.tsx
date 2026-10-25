@@ -1,18 +1,7 @@
 import { useTranslation } from "react-i18next";
-import type { Candidate, DiagReport, DynConfig, FailoverData, FailoverReason } from "../../api/types";
+import type { Candidate, DiagReport, DynConfig, FailoverData } from "../../api/types";
 import { formatBytes, formatCount, formatDuration } from "../../lib/format";
-import { bytesText } from "./viewText";
-
-/** Причина отказа кандидату: ключ подписи выбирается по значению, поэтому — литералами. Общий с диалогом failover и switchover. */
-export const REASON_KEYS: Record<FailoverReason, string> = {
-  unreachable: "diag.failover.reasons.unreachable",
-  notStreaming: "diag.failover.reasons.notStreaming",
-  lagTooHigh: "diag.failover.reasons.lagTooHigh",
-  lagUnknown: "diag.failover.reasons.lagUnknown",
-  noFailoverTag: "diag.failover.reasons.noFailoverTag",
-  zeroPriority: "diag.failover.reasons.zeroPriority",
-  notSynchronous: "diag.failover.reasons.notSynchronous",
-};
+import { REASON_KEYS, bytesText } from "./viewText";
 
 function ConfigSummary({ data, config }: { data: FailoverData; config: DynConfig }) {
   const { t } = useTranslation();

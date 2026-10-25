@@ -1,3 +1,4 @@
+import type { FailoverReason } from "../../api/types";
 import { formatBytes } from "../../lib/format";
 
 /** Размер в байтах; `null` — «—» (значение недоступно). */
@@ -18,3 +19,14 @@ export function uniqueKeys(bases: string[]): string[] {
     return n === 0 ? base : `${base}#${n}`;
   });
 }
+
+/** Причина отказа кандидату: ключ подписи выбирается по значению, поэтому — литералами. Общий с диалогом failover и switchover. */
+export const REASON_KEYS: Record<FailoverReason, string> = {
+  unreachable: "diag.failover.reasons.unreachable",
+  notStreaming: "diag.failover.reasons.notStreaming",
+  lagTooHigh: "diag.failover.reasons.lagTooHigh",
+  lagUnknown: "diag.failover.reasons.lagUnknown",
+  noFailoverTag: "diag.failover.reasons.noFailoverTag",
+  zeroPriority: "diag.failover.reasons.zeroPriority",
+  notSynchronous: "diag.failover.reasons.notSynchronous",
+};

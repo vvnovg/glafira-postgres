@@ -3,7 +3,7 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AppError, TopologyEvent } from "../../api/types";
+import type { AppError, PatroniActionResult, TopologyEvent } from "../../api/types";
 import { renderWithClient } from "../../test/render";
 import { member, topology, topologyView } from "../../test/fixtures";
 import { newProfile } from "../connections/profile";
@@ -932,9 +932,15 @@ describe("Overview: действия Patroni", () => {
     vi.mocked(api.stopSession).mockResolvedValue(true);
   });
 
-  it("в панели — Switchover…, Failover…, Пауза; у каждого участника — Restart…; отмен нет, пока ничего не запланировано", async () => {
+  // Лидер остановлен и не отвечает: switchover не из чего делать, failover — как раз тот случай.
+  const stoppedLeader = () =>
+    topology({ members: [member("pg-1", { role: "primary", state: "stopped", reachable: false, error: null }), member("pg-2", { role: "syncStandby" })] });
+  // Лидера в топологии нет (ключ лидера в DCS истёк): обе реплики.
+  const leaderless = () => topology({ members: [member("pg-1", { role: "replica" }), member("pg-2", { role: "replica" })] });
+
+  it("в панели — Switchover…, Пауза; у каждого участника — Restart…; отмен нет, пока ничего не запланировано", async () => {
     renderWithClient(<Overview connectionId="c" />);
-    for (const name of ["Switchover…", "Failover…", "Пауза", "Restart pg-1…", "Restart pg-2…"]) {
+    for (const name of ["Switchover…", "Пауза", "Restart pg-1…", "Restart pg-2…"]) {
       expect(await screen.findByRole("button", { name })).toBeEnabled();
     }
     expect(screen.getByRole("columnheader", { name: "Действия" })).toBeInTheDocument();
@@ -942,6 +948,53 @@ describe("Overview: действия Patroni", () => {
     expect(screen.queryByRole("button", { name: "Снять паузу" })).toBeNull();
     // Видимый текст кнопки строки — «Restart…», имя с узлом — для скринридера.
     expect(within(screen.getByRole("row", { name: /^pg-2 / })).getByRole("button")).toHaveTextContent("Restart…");
+  });
+
+  it("лидер работает: Failover… неактивен с причиной «лидер здоров», остальные кнопки доступны", async () => {
+    renderWithClient(<Overview connectionId="c" />);
+    const failover = await screen.findByRole("button", { name: "Failover…" });
+    expect(failover).toBeDisabled();
+    expect(failover).toHaveAttribute("title", "Лидер здоров — используйте switchover");
+    expect(screen.getByRole("button", { name: "Switchover…" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Switchover…" })).not.toHaveAttribute("title");
+  });
+
+  it.each([
+    ["лидер остановлен и не отвечает", stoppedLeader],
+    ["лидера нет", leaderless],
+  ])("%s: Switchover… неактивен с причиной «нет работающего лидера», Failover… доступен", async (_name, make) => {
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView({ topology: make() }));
+    renderWithClient(<Overview connectionId="c" />);
+    const switchover = await screen.findByRole("button", { name: "Switchover…" });
+    expect(switchover).toBeDisabled();
+    expect(switchover).toHaveAttribute("title", "Нет работающего лидера, с которого можно переключиться");
+    expect(screen.getByRole("button", { name: "Failover…" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Failover…" })).not.toHaveAttribute("title");
+    expect(screen.getByRole("button", { name: "Пауза" })).toBeEnabled();
+  });
+
+  it("лидер отвечает, но не в состоянии running (starting): switchover закрыт, failover открыт — как running_leader в Rust", async () => {
+    vi.mocked(api.getTopology).mockResolvedValue(
+      topologyView({ topology: topology({ members: [member("pg-1", { role: "primary", state: "starting" }), member("pg-2", { role: "syncStandby" })] }) }),
+    );
+    renderWithClient(<Overview connectionId="c" />);
+    expect(await screen.findByRole("button", { name: "Switchover…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Failover…" })).toBeEnabled();
+  });
+
+  it("лидер standby-кластера считается лидером: работает — failover закрыт", async () => {
+    vi.mocked(api.getTopology).mockResolvedValue(
+      topologyView({ topology: topology({ members: [member("pg-1", { role: "standbyLeader", state: "running" }), member("pg-2", { role: "replica" })] }) }),
+    );
+    renderWithClient(<Overview connectionId="c" />);
+    expect(await screen.findByRole("button", { name: "Switchover…" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Failover…" })).toBeDisabled();
+  });
+
+  it("причина «нет логина API» важнее причины про лидера (закрытое подключение и идущее действие — в своих тестах ниже)", async () => {
+    vi.mocked(api.listConnections).mockResolvedValue([{ ...withLogin, patroni: { urls: ["http://pg-1:8008"], username: null, tls: null, hostOverrides: [] } }]);
+    renderWithClient(<Overview connectionId="c" />);
+    expect(await screen.findByRole("button", { name: "Failover…" })).toHaveAttribute("title", "Укажите в подключении логин API Patroni, чтобы выполнять действия");
   });
 
   it("кластер на паузе — «Снять паузу» вместо «Пауза»", async () => {
@@ -1030,25 +1083,35 @@ describe("Overview: действия Patroni", () => {
     await screen.findByText("Не удалось подключиться");
     const buttons = names(ACTIONS);
     expect(buttons.length).toBeGreaterThanOrEqual(5);
-    for (const b of buttons) expect(b).toBeDisabled();
+    for (const b of buttons) {
+      expect(b).toBeDisabled();
+      expect(b).toHaveAttribute("title", "Подключение не открыто");
+    }
   });
 
-  it("кнопки открывают диалог с нужным действием: Switchover, Failover, Пауза, Restart (onlyPending — по отметке участника)", async () => {
+  it("кнопки открывают диалог с нужным действием: Switchover, Пауза, Restart (onlyPending — по отметке участника)", async () => {
     const user = userEvent.setup();
     vi.mocked(api.getTopology).mockResolvedValue(topologyView({ topology: topology(scheduled) }));
     renderWithClient(<Overview connectionId="c" />);
     await user.click(await screen.findByRole("button", { name: "Switchover…" }));
     expect(api.previewPatroniAction).toHaveBeenLastCalledWith("c", { kind: "switchover", candidate: null, scheduledAt: null });
     expect(await screen.findByRole("region", { name: "Switchover" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Failover…" }));
-    expect(api.previewPatroniAction).toHaveBeenLastCalledWith("c", { kind: "failover", candidate: "" });
     await user.click(screen.getByRole("button", { name: "Пауза" }));
     expect(api.previewPatroniAction).toHaveBeenLastCalledWith("c", { kind: "pause", paused: true });
     await user.click(screen.getByRole("button", { name: "Restart pg-2…" }));
     expect(api.previewPatroniAction).toHaveBeenLastCalledWith("c", { kind: "restart", member: "pg-2", onlyPending: true, scheduledAt: null });
     await user.click(screen.getByRole("button", { name: "Restart pg-1…" }));
     expect(api.previewPatroniAction).toHaveBeenLastCalledWith("c", { kind: "restart", member: "pg-1", onlyPending: false, scheduledAt: null });
-    expect(api.previewPatroniAction).toHaveBeenCalledTimes(5);
+    expect(api.previewPatroniAction).toHaveBeenCalledTimes(4);
+  });
+
+  it("Failover… (лидер остановлен) открывает диалог failover", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView({ topology: stoppedLeader() }));
+    renderWithClient(<Overview connectionId="c" />);
+    await user.click(await screen.findByRole("button", { name: "Failover…" }));
+    expect(api.previewPatroniAction).toHaveBeenLastCalledWith("c", { kind: "failover", candidate: "" });
+    expect(await screen.findByRole("region", { name: "Failover" })).toBeInTheDocument();
   });
 
   it("на паузе «Снять паузу» открывает действие pause с paused: false", async () => {
@@ -1089,8 +1152,58 @@ describe("Overview: действия Patroni", () => {
     await user.click(await screen.findByRole("button", { name: "Switchover…" }));
     await user.click(await screen.findByRole("button", { name: "Выполнить" }));
     await waitFor(() => expect(api.executePatroniAction).toHaveBeenCalled());
-    for (const b of names(ACTIONS)) expect(b).toBeDisabled();
+    for (const b of names(ACTIONS)) {
+      expect(b).toBeDisabled();
+      expect(b).toHaveAttribute("title", "Выполняется действие");
+    }
     expect(screen.getByRole("region", { name: "Switchover" })).toBeInTheDocument();
+    expect(api.previewPatroniAction).toHaveBeenCalledTimes(1);
+  });
+
+  it("действия перестали предлагаться (подключение закрыто — топологии нет; профиль стал только для чтения): открытый диалог не возвращается", async () => {
+    const user = userEvent.setup();
+    const { client } = renderWithClient(<Overview connectionId="c" />);
+    await user.click(await screen.findByRole("button", { name: "Switchover…" }));
+    await screen.findByRole("region", { name: "Switchover" });
+    // Подключение закрыли: топологии нет, диалогу не на чем работать.
+    act(() => applyState(client, { connectionId: "c", state: "disconnected", error: null }));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Switchover" })).toBeNull());
+    // Подключение открыли снова: прежний диалог не воскресает.
+    act(() => client.setQueryData(["topology", "c"], topologyView()));
+    await screen.findByRole("button", { name: "Switchover…" });
+    expect(screen.queryByRole("region", { name: "Switchover" })).toBeNull();
+
+    // То же при смене профиля на «только для чтения».
+    await user.click(screen.getByRole("button", { name: "Пауза" }));
+    await screen.findByRole("region", { name: "Пауза" });
+    act(() => client.setQueryData(["connections"], [{ ...withLogin, readOnly: true }]));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Пауза" })).toBeNull());
+    act(() => client.setQueryData(["connections"], [withLogin]));
+    await screen.findByRole("button", { name: "Пауза" });
+    expect(screen.queryByRole("region", { name: "Пауза" })).toBeNull();
+  });
+
+  it("действие идёт, а предлагать их перестали: оно не прерывается, наблюдение по приходе останавливается, диалог не возвращается", async () => {
+    const user = userEvent.setup();
+    let finish: (r: PatroniActionResult) => void = () => {};
+    vi.mocked(api.executePatroniAction).mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    const { client } = renderWithClient(<Overview connectionId="c" />);
+    await user.click(await screen.findByRole("button", { name: "Switchover…" }));
+    await user.click(await screen.findByRole("button", { name: "Выполнить" }));
+    await waitFor(() => expect(api.executePatroniAction).toHaveBeenCalled());
+    act(() => applyState(client, { connectionId: "c", state: "disconnected", error: null }));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Switchover" })).toBeNull());
+    expect(api.stopSession).not.toHaveBeenCalled();
+    // Подключение вернулось раньше, чем закончилось действие: прежний диалог не воскресает (иначе из него можно было бы
+    // повторить действие поверх идущего), а кнопки неактивны, пока оно идёт.
+    act(() => client.setQueryData(["topology", "c"], topologyView()));
+    expect(await screen.findByRole("button", { name: "Switchover…" })).toBeDisabled();
+    expect(screen.queryByRole("region", { name: "Switchover" })).toBeNull();
+    await act(async () => finish({ response: "", watch: "w-late", journalWritten: true, outcomeUnknown: false, error: null }));
+    await waitFor(() => expect(api.stopSession).toHaveBeenCalledWith("w-late"));
+    expect(api.stopSession).toHaveBeenCalledTimes(1);
+    expect(await screen.findByRole("button", { name: "Switchover…" })).toBeEnabled();
+    expect(screen.queryByRole("region", { name: "Switchover" })).toBeNull();
     expect(api.previewPatroniAction).toHaveBeenCalledTimes(1);
   });
 

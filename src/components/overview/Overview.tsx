@@ -6,7 +6,7 @@ import type { AppError, ConnectionKind, Member, PatroniAction, Topology, Topolog
 import { i18n, currentLocale } from "../../i18n";
 import { tr } from "../../i18n/text";
 import { formatBytes, formatCount, formatScheduled, formatTimestamp } from "../../lib/format";
-import { roleLabel } from "../../lib/topology";
+import { hasRunningLeader, roleLabel } from "../../lib/topology";
 import { canAct, useConnectionProfile } from "../../lib/useConnectionProfile";
 import { refreshAfterConnect, useTopology, useTopologyEvents } from "../../lib/useConnectionEvents";
 import { PatroniActionDialog } from "../actions/PatroniActionDialog";
@@ -328,6 +328,14 @@ export function Overview({ connectionId, member, active = true }: { connectionId
     setPatroniAction({ id: ++patroniSeq.current, action });
   };
   const view = useTopology(connectionId);
+  // Действия Patroni перестали предлагаться (подключение закрыто и топологии нет, профиль стал только для чтения): открытый
+  // диалог сбрасывается, иначе он всплыл бы заново, когда кнопки вернутся. Идущее действие это не прерывает: диалог и так
+  // скрыт условием показа, а мутация живёт в кэше запросов; пришедшее наблюдение она останавливает сама. Сбрасывать нужно
+  // сразу, не дожидаясь конца действия: вернувшись раньше, новый экземпляр диалога предложил бы повторить его поверх идущего.
+  const offersPatroni = view.data?.topology?.kind === "patroni" && actor !== undefined;
+  useEffect(() => {
+    if (!offersPatroni) setPatroniAction(null);
+  }, [offersPatroni]);
   const events = useTopologyEvents(connectionId);
   const journal = events.data ?? [];
   const journalKeys = eventKeys(journal);
@@ -416,13 +424,19 @@ export function Overview({ connectionId, member, active = true }: { connectionId
   const isServer = topo?.kind === "server";
   const head = topo && !isServer ? leaders(topo.members) : [];
   const serverRole = isServer ? topo.members[0]?.role : undefined;
-  // Кнопки действий: только у кластера Patroni и подключения не для чтения. Без логина API Patroni они неактивны с
-  // подсказкой, что указать; при закрытом подключении действовать не на чем (и предпросмотр не прочитается).
+  // Кнопки действий: только у кластера Patroni и подключения не для чтения. Неактивная кнопка всегда говорит почему
+  // (`title`), причина одна: подключение закрыто (действовать не на чем, предпросмотр не прочитается), не указан логин
+  // API Patroni, другое действие ещё идёт.
   const patroniActions = topo?.kind === "patroni" && actor !== undefined;
   const noLogin = !conn?.patroni?.username;
-  const actionTitle = noLogin ? t("actions.patroni.authRequired") : undefined;
-  const actionsOff = !live || acting || noLogin;
+  const actionTitle = !live ? t("actions.patroni.notLive") : noLogin ? t("actions.patroni.authRequired") : acting ? t("actions.patroni.inFlight") : undefined;
+  const actionsOff = actionTitle !== undefined;
   const rowActions: RowActions | undefined = patroniActions ? { open: openPatroni, disabled: actionsOff, title: actionTitle } : undefined;
+  // Те же предусловия, что в Rust: switchover нужен работающий лидер, failover при нём откажет (`leaderHealthy`). Кнопка
+  // не открывает диалог, который заведомо закончится отказом; решает по-прежнему Rust, а вид здесь может отстать на опрос.
+  const leaderRunning = topo !== null && hasRunningLeader(topo.members);
+  const switchoverTitle = actionTitle ?? (leaderRunning ? undefined : t("errors.actions.noLeader"));
+  const failoverTitle = actionTitle ?? (leaderRunning ? t("errors.actions.leaderHealthy") : undefined);
 
   return (
     <div className="page">
@@ -471,10 +485,10 @@ export function Overview({ connectionId, member, active = true }: { connectionId
         )}
         {patroniActions && (
           <>
-            <button type="button" disabled={actionsOff} title={actionTitle} onClick={() => openPatroni({ kind: "switchover", candidate: null, scheduledAt: null })}>
+            <button type="button" disabled={switchoverTitle !== undefined} title={switchoverTitle} onClick={() => openPatroni({ kind: "switchover", candidate: null, scheduledAt: null })}>
               {t("actions.patroni.switchover")}
             </button>
-            <button type="button" disabled={actionsOff} title={actionTitle} onClick={() => openPatroni({ kind: "failover", candidate: "" })}>
+            <button type="button" disabled={failoverTitle !== undefined} title={failoverTitle} onClick={() => openPatroni({ kind: "failover", candidate: "" })}>
               {t("actions.patroni.failover")}
             </button>
             <button type="button" disabled={actionsOff} title={actionTitle} onClick={() => openPatroni({ kind: "pause", paused: topo.paused !== true })}>

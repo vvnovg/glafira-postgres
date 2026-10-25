@@ -1,8 +1,9 @@
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useState } from "react";
+import { StrictMode, useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppError, Candidate, ConnectionProfile, PatroniAction, PatroniActionPreview, PatroniActionResult, WatchEvent } from "../../api/types";
+import { i18n } from "../../i18n";
 import { formatScheduled } from "../../lib/format";
 import { toRfc3339 } from "../../lib/schedule";
 import { renderWithClient } from "../../test/render";
@@ -52,6 +53,10 @@ const noConfirm = { confirm: null, typedName: null };
 const dialog = (action: PatroniAction, profile = dev, onClose: () => void = () => {}) => (
   <PatroniActionDialog connectionId="c" profile={profile} action={action} onClose={onClose} />
 );
+// Failover нужен при упавшем лидере (при здоровом Rust откажет с `leaderHealthy`), поэтому в его сценариях лидер остановлен.
+const stoppedLeader: Partial<PatroniActionPreview> = { leaderState: "stopped", leaderReachable: false, leaderClientSessions: null };
+// Лидера в топологии нет вовсе (ключ лидера в DCS истёк).
+const noLeader: Partial<PatroniActionPreview> = { leader: null, leaderState: null, leaderReachable: null, leaderClientSessions: null };
 
 describe("PatroniActionDialog", () => {
   beforeEach(() => {
@@ -134,27 +139,59 @@ describe("PatroniActionDialog", () => {
       expect(screen.queryByRole("button", { name: "Выполнить" })).toBeNull();
     });
 
-    it("лидер не отвечает — предупреждение; число сессий не прочиталось — так и сказано, а не 0", async () => {
-      vi.mocked(api.previewPatroniAction).mockResolvedValue(preview({ leaderReachable: false, leaderState: "stopped", leaderClientSessions: null }));
-      renderWithClient(dialog(switchover));
-      await screen.findByRole("button", { name: "Выполнить" });
-      expect(screen.getByText(/Лидер не отвечает/)).toBeInTheDocument();
-      expect(screen.getByText("Лидер: pg-1")).toHaveTextContent("(stopped)");
-      expect(screen.getByText("Оборвётся клиентских сессий лидера: не удалось прочитать")).toBeInTheDocument();
-      expect(screen.queryByText(/сессий лидера: 0/)).toBeNull();
-    });
-
     it("лидер отвечает — предупреждения нет", async () => {
       renderWithClient(dialog(switchover));
       await screen.findByRole("button", { name: "Выполнить" });
       expect(screen.queryByText(/Лидер не отвечает/)).toBeNull();
     });
+
+    it.each([
+      ["лидера в топологии нет", noLeader],
+      ["лидер не отвечает на опрос", { leaderReachable: false, leaderState: "running" }],
+      ["лидер остановлен", { leaderReachable: true, leaderState: "stopped" }],
+      ["состояние лидера неизвестно", { leaderReachable: true, leaderState: null }],
+    ])("%s: Rust откажет (noLeader), поэтому сразу сказано — без кандидатов и подтверждения; закрыть можно", async (_name, patch) => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      vi.mocked(api.previewPatroniAction).mockResolvedValue(preview(patch));
+      renderWithClient(dialog(switchover, dev, onClose));
+      expect(await screen.findByText("Нет работающего лидера, с которого можно переключиться")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Выполнить" })).toBeNull();
+      expect(screen.queryByRole("radio")).toBeNull();
+      expect(screen.queryByRole("group")).toBeNull();
+      expect(screen.queryByText("Старый лидер станет репликой")).toBeNull();
+      expect(screen.queryByText(/Оборвётся клиентских сессий/)).toBeNull();
+      // Предупреждение «лидер не отвечает» («действие может не пройти») рядом с отказом было бы противоречием.
+      expect(screen.queryByText(/Лидер не отвечает/)).toBeNull();
+      await user.click(screen.getByRole("button", { name: "Закрыть" }));
+      expect(onClose).toHaveBeenCalledTimes(1);
+      expect(api.executePatroniAction).not.toHaveBeenCalled();
+    });
+
+    it("по расписанию последствия «сейчас» (сессии, запись недоступна) не показываются; «Сейчас» возвращает их", async () => {
+      const user = userEvent.setup();
+      renderWithClient(dialog(switchover));
+      await screen.findByRole("button", { name: "Выполнить" });
+      expect(screen.getByText(/Оборвётся клиентских сессий лидера: 12/)).toBeInTheDocument();
+      await user.click(screen.getByRole("radio", { name: "По расписанию" }));
+      expect(screen.queryByText(/Оборвётся клиентских сессий/)).toBeNull();
+      expect(screen.queryByText("Запись будет недоступна несколько секунд")).toBeNull();
+      // Старый лидер станет репликой и по расписанию.
+      expect(screen.getByText("Старый лидер станет репликой")).toBeInTheDocument();
+      await user.click(screen.getByRole("radio", { name: "Сейчас" }));
+      expect(screen.getByText(/Оборвётся клиентских сессий лидера: 12/)).toBeInTheDocument();
+      expect(screen.getByText("Запись будет недоступна несколько секунд")).toBeInTheDocument();
+    });
   });
 
   describe("failover", () => {
+    beforeEach(() => {
+      vi.mocked(api.previewPatroniAction).mockResolvedValue(preview(stoppedLeader));
+    });
+
     it("по умолчанию выбран первый готовый кандидат; кнопка ждёт ввода его имени; действие опасное", async () => {
       const user = userEvent.setup();
-      vi.mocked(api.previewPatroniAction).mockResolvedValue(preview({ candidates: [notReady("pg-3"), ready("pg-2"), ready("pg-4")] }));
+      vi.mocked(api.previewPatroniAction).mockResolvedValue(preview({ ...stoppedLeader, candidates: [notReady("pg-3"), ready("pg-2"), ready("pg-4")] }));
       renderWithClient(dialog(failover));
       const run = await screen.findByRole("button", { name: "Выполнить" });
       expect(screen.getByRole("radio", { name: /pg-2/ })).toBeChecked();
@@ -173,7 +210,7 @@ describe("PatroniActionDialog", () => {
 
     it("смена кандидата требует ввести имя нового", async () => {
       const user = userEvent.setup();
-      vi.mocked(api.previewPatroniAction).mockResolvedValue(preview({ candidates: [ready("pg-2"), ready("pg-4")] }));
+      vi.mocked(api.previewPatroniAction).mockResolvedValue(preview({ ...stoppedLeader, candidates: [ready("pg-2"), ready("pg-4")] }));
       renderWithClient(dialog(failover));
       const run = await screen.findByRole("button", { name: "Выполнить" });
       await user.type(screen.getByLabelText("Подтверждение: имя кандидата"), "pg-2");
@@ -185,7 +222,7 @@ describe("PatroniActionDialog", () => {
     it("нет готового кандидата: причины названы, подтверждения нет, закрыть можно", async () => {
       const user = userEvent.setup();
       const onClose = vi.fn();
-      vi.mocked(api.previewPatroniAction).mockResolvedValue(preview({ candidates: [notReady("pg-3")] }));
+      vi.mocked(api.previewPatroniAction).mockResolvedValue(preview({ ...stoppedLeader, candidates: [notReady("pg-3")] }));
       renderWithClient(dialog(failover, dev, onClose));
       expect(await screen.findByText("Нет реплики, готовой стать лидером")).toBeInTheDocument();
       expect(screen.getByText(/лаг больше maximum_lag_on_failover/)).toBeInTheDocument();
@@ -194,6 +231,71 @@ describe("PatroniActionDialog", () => {
       await user.click(screen.getByRole("button", { name: "Закрыть" }));
       expect(onClose).toHaveBeenCalledTimes(1);
       expect(api.executePatroniAction).not.toHaveBeenCalled();
+    });
+
+    it("нет готового кандидата и причин нет: имя без висящего « — »; кандидатов нет вовсе — пустого списка нет", async () => {
+      vi.mocked(api.previewPatroniAction).mockResolvedValue(preview({ ...stoppedLeader, candidates: [{ ...notReady("pg-3"), reasons: [] }] }));
+      const { unmount } = renderWithClient(dialog(failover));
+      expect(await screen.findByText("Нет реплики, готовой стать лидером")).toBeInTheDocument();
+      expect(screen.getByRole("listitem")).toHaveTextContent(/^pg-3$/);
+      unmount();
+      vi.mocked(api.previewPatroniAction).mockResolvedValue(preview({ ...stoppedLeader, candidates: [] }));
+      renderWithClient(dialog(failover));
+      expect(await screen.findByText("Нет реплики, готовой стать лидером")).toBeInTheDocument();
+      expect(screen.queryByRole("list")).toBeNull();
+    });
+
+    it("здоровый лидер: Rust откажет, поэтому сразу сказано «используйте switchover» — без кандидатов, подтверждения и последствий; закрыть можно", async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      vi.mocked(api.previewPatroniAction).mockResolvedValue(preview());
+      renderWithClient(dialog(failover, dev, onClose));
+      expect(await screen.findByText("Лидер здоров — используйте switchover")).toBeInTheDocument();
+      expect(screen.getByText("Лидер: pg-1")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Выполнить" })).toBeNull();
+      expect(screen.queryByRole("radio")).toBeNull();
+      expect(screen.queryByLabelText("Подтверждение: имя кандидата")).toBeNull();
+      expect(screen.queryByRole("group")).toBeNull();
+      expect(screen.queryByText("Старый лидер станет репликой")).toBeNull();
+      expect(screen.queryByText(/Оборвётся клиентских сессий/)).toBeNull();
+      await user.click(screen.getByRole("button", { name: "Закрыть" }));
+      expect(onClose).toHaveBeenCalledTimes(1);
+      expect(api.executePatroniAction).not.toHaveBeenCalled();
+    });
+
+    it("лидер не отвечает — предупреждение; число сессий не прочиталось — так и сказано, а не 0", async () => {
+      renderWithClient(dialog(failover));
+      await screen.findByRole("button", { name: "Выполнить" });
+      expect(screen.getByText(/Лидер не отвечает/)).toBeInTheDocument();
+      expect(screen.getByText("Лидер: pg-1")).toHaveTextContent("(stopped)");
+      expect(screen.getByText("Оборвётся клиентских сессий лидера: не удалось прочитать")).toBeInTheDocument();
+      expect(screen.queryByText(/сессий лидера: 0/)).toBeNull();
+    });
+
+    it("лидер есть, но не работает (не отвечает или не в running) — failover разрешён, как в Rust", async () => {
+      for (const patch of [stoppedLeader, { leaderReachable: true, leaderState: "starting" }, { leaderReachable: false, leaderState: "running" }]) {
+        vi.mocked(api.previewPatroniAction).mockResolvedValue(preview(patch));
+        const { unmount } = renderWithClient(dialog(failover));
+        expect(await screen.findByRole("button", { name: "Выполнить" })).toBeInTheDocument();
+        expect(screen.queryByText("Лидер здоров — используйте switchover")).toBeNull();
+        unmount();
+      }
+    });
+
+    it("лидера нет вовсе: ни «старого лидера», ни числа сессий (в том числе «не удалось прочитать»); лидер остановлен — число сессий не прочиталось", async () => {
+      vi.mocked(api.previewPatroniAction).mockResolvedValue(preview(noLeader));
+      const { unmount } = renderWithClient(dialog(failover));
+      await screen.findByRole("button", { name: "Выполнить" });
+      expect(screen.getByText("Лидер: —")).toBeInTheDocument();
+      expect(screen.getByText("Запись будет недоступна несколько секунд")).toBeInTheDocument();
+      expect(screen.queryByText(/сессий лидера/)).toBeNull();
+      expect(screen.queryByText("Старый лидер станет репликой")).toBeNull();
+      unmount();
+      vi.mocked(api.previewPatroniAction).mockResolvedValue(preview(stoppedLeader));
+      renderWithClient(dialog(failover));
+      await screen.findByRole("button", { name: "Выполнить" });
+      expect(screen.getByText("Оборвётся клиентских сессий лидера: не удалось прочитать")).toBeInTheDocument();
+      expect(screen.getByText("Старый лидер станет репликой")).toBeInTheDocument();
     });
 
     it("на prod кроме имени кандидата нужно имя подключения", async () => {
@@ -427,6 +529,59 @@ describe("PatroniActionDialog", () => {
     });
   });
 
+  describe("закрытие диалога, пока команда в полёте", () => {
+    // Ответ с наблюдением приходит, когда диалога уже нет (закрыта вкладка, скрыты действия): панели, которая остановила
+    // бы наблюдение, нет, и ускоренный опрос шёл бы до конца срока. Останавливает его мутация (её onSuccess переживает диалог).
+    const pending = () => {
+      let finish: (r: PatroniActionResult) => void = () => {};
+      vi.mocked(api.executePatroniAction).mockReturnValue(new Promise((resolve) => (finish = resolve)));
+      return (r: PatroniActionResult) => finish(r);
+    };
+
+    it("диалог убран до ответа: пришедшее наблюдение останавливается — один раз", async () => {
+      const user = userEvent.setup();
+      const finish = pending();
+      const { rerender } = renderWithClient(dialog(switchover));
+      await user.click(await screen.findByRole("button", { name: "Выполнить" }));
+      await waitFor(() => expect(api.executePatroniAction).toHaveBeenCalled());
+      rerender(<></>);
+      expect(api.stopSession).not.toHaveBeenCalled();
+      await act(async () => finish(result({ watch: "w-late" })));
+      await waitFor(() => expect(api.stopSession).toHaveBeenCalledWith("w-late"));
+      expect(api.stopSession).toHaveBeenCalledTimes(1);
+    });
+
+    it("диалог убран до ответа без наблюдения или с неудачной остановкой: остановки нет или сбой проглочен", async () => {
+      const user = userEvent.setup();
+      const finish = pending();
+      const { rerender } = renderWithClient(dialog(switchover));
+      await user.click(await screen.findByRole("button", { name: "Выполнить" }));
+      await waitFor(() => expect(api.executePatroniAction).toHaveBeenCalled());
+      rerender(<></>);
+      await act(async () => finish(result({ watch: null })));
+      expect(api.stopSession).not.toHaveBeenCalled();
+
+      vi.mocked(api.stopSession).mockRejectedValue(appError({ key: "errors.topology.notConnected" }));
+      const finish2 = pending();
+      rerender(dialog(switchover));
+      await user.click(await screen.findByRole("button", { name: "Выполнить" }));
+      await waitFor(() => expect(api.executePatroniAction).toHaveBeenCalledTimes(2));
+      rerender(<></>);
+      await act(async () => finish2(result({ watch: "w-2" })));
+      await waitFor(() => expect(api.stopSession).toHaveBeenCalledWith("w-2"));
+    });
+
+    it("диалог на месте: наблюдение остаётся панели (её «Закрыть» и размонтирование), onSuccess его не трогает — и в StrictMode", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.executePatroniAction).mockResolvedValue(result({ watch: "w-1" }));
+      renderWithClient(<StrictMode>{dialog(switchover)}</StrictMode>);
+      await user.click(await screen.findByRole("button", { name: "Выполнить" }));
+      await screen.findByRole("region", { name: "Ход действия" });
+      await act(async () => {});
+      expect(api.stopSession).not.toHaveBeenCalled();
+    });
+  });
+
   describe("ошибки", () => {
     it("выполнение отклонено до начала: ошибка с переводом, подтверждение остаётся для повтора", async () => {
       const user = userEvent.setup();
@@ -472,6 +627,49 @@ describe("PatroniActionDialog", () => {
     });
   });
 
+  describe("заголовки", () => {
+    // Заголовок диалога — приказ («Cancel switchover» + «Run»), а не запись журнала в прошедшем времени («Switchover cancelled»).
+    const kinds: [PatroniAction, string, string][] = [
+      [{ kind: "switchover", candidate: null, scheduledAt: null }, "Switchover", "Switchover"],
+      [{ kind: "cancelSwitchover" }, "Cancel switchover", "Отмена switchover"],
+      [{ kind: "failover", candidate: "" }, "Failover", "Failover"],
+      [restart("pg-1"), "Restart", "Restart"],
+      [{ kind: "cancelRestart", member: "pg-1" }, "Cancel restart", "Отмена restart"],
+      [{ kind: "pause", paused: true }, "Pause", "Пауза"],
+      [{ kind: "pause", paused: false }, "Resume", "Снятие паузы"],
+    ];
+
+    it.each(kinds)("%j: en «%s», ru «%s»", async (action, en, ru) => {
+      const first = renderWithClient(dialog(action));
+      expect(screen.getByRole("region", { name: ru })).toBeInTheDocument();
+      first.unmount();
+      await i18n.changeLanguage("en");
+      let unmount: (() => void) | undefined;
+      try {
+        ({ unmount } = renderWithClient(dialog(action)));
+        expect(screen.getByRole("region", { name: en })).toBeInTheDocument();
+      } finally {
+        // Размонтирование — до смены языка назад: смонтированный вид обновился бы вне act.
+        unmount?.();
+        await i18n.changeLanguage("ru");
+      }
+    });
+
+    it("в группе подтверждения заголовок тот же: «Patroni: Cancel switchover»", async () => {
+      await i18n.changeLanguage("en");
+      let unmount: (() => void) | undefined;
+      try {
+        vi.mocked(api.previewPatroniAction).mockResolvedValue(preview({ candidates: [], scheduledSwitchover: { at: "2030-12-01T10:30:00+03:00", from: "pg-1", to: null } }));
+        ({ unmount } = renderWithClient(dialog({ kind: "cancelSwitchover" })));
+        expect(await screen.findByRole("group", { name: "Patroni: Cancel switchover" })).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Run" })).toBeInTheDocument();
+      } finally {
+        unmount?.();
+        await i18n.changeLanguage("ru");
+      }
+    });
+  });
+
   it("повторное открытие читает предпросмотр заново, а не берёт кэш прошлого диалога", async () => {
     const user = userEvent.setup();
     function Host() {
@@ -507,6 +705,7 @@ describe("PatroniActionDialog", () => {
     it("Escape из поля имени закрывает один раз", async () => {
       const user = userEvent.setup();
       const onClose = vi.fn();
+      vi.mocked(api.previewPatroniAction).mockResolvedValue(preview(stoppedLeader));
       renderWithClient(dialog(failover, dev, onClose));
       await user.click(await screen.findByLabelText("Подтверждение: имя кандидата"));
       await user.keyboard("{Escape}");

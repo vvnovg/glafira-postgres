@@ -5,24 +5,24 @@ import { api } from "../../api/client";
 import type { Confirmation, ConnectionProfile, PatroniAction, PatroniActionPreview, WatchEvent } from "../../api/types";
 import { formatScheduled } from "../../lib/format";
 import { toRfc3339 } from "../../lib/schedule";
-import { roleLabel } from "../../lib/topology";
+import { isRunningLeader, roleLabel } from "../../lib/topology";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { ErrorBanner } from "../common/ErrorBanner";
-import { REASON_KEYS } from "../diag/FailoverView";
-import { bytesText } from "../diag/viewText";
+import { REASON_KEYS, bytesText } from "../diag/viewText";
 import { WatchPanel } from "./WatchPanel";
 
 // Ключи — литералами: проверка словарей (`pnpm i18n:check`) находит только их. «Снятие паузы» — тоже `pause`, но с `paused: false`.
-const KIND_KEYS = {
-  switchover: "actions.kind.switchover",
-  cancelSwitchover: "actions.kind.cancelSwitchover",
-  failover: "actions.kind.failover",
-  restart: "actions.kind.restart",
-  cancelRestart: "actions.kind.cancelRestart",
-  pause: "actions.kind.pause",
-  resume: "actions.kind.resume",
+// Заголовок диалога — приказ («Cancel switchover»), а не подпись журнала в прошедшем времени (`actions.kind.*`: «Switchover cancelled»).
+const TITLE_KEYS = {
+  switchover: "actions.patroni.titles.switchover",
+  cancelSwitchover: "actions.patroni.titles.cancelSwitchover",
+  failover: "actions.patroni.titles.failover",
+  restart: "actions.patroni.titles.restart",
+  cancelRestart: "actions.patroni.titles.cancelRestart",
+  pause: "actions.patroni.titles.pause",
+  resume: "actions.patroni.titles.resume",
 } as const;
-const kindKey = (a: PatroniAction) => KIND_KEYS[a.kind === "pause" && !a.paused ? "resume" : a.kind];
+const titleKey = (a: PatroniAction) => TITLE_KEYS[a.kind === "pause" && !a.paused ? "resume" : a.kind];
 
 /** Время из `datetime-local` в RFC 3339; пустое или неразборчивое — `null` (ввод проверяется до отправки, а не бросает в отрисовке). */
 function scheduleOf(local: string): string | null {
@@ -83,6 +83,16 @@ export function PatroniActionDialog({ connectionId, profile, action, scope = "",
   const [local, setLocal] = useState("");
   const [pendingOnly, setPendingOnly] = useState<boolean | null>(null);
 
+  // Диалог ещё на экране? Ответ команды может прийти и после того, как его убрали. Ref выставляется в эффекте, поэтому
+  // двойной монтаж StrictMode (размонтирование и тут же монтаж) оставляет его истинным.
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
   const [events, setEvents] = useState<WatchEvent[]>([]);
   const run = useMutation({
     mutationKey: ["patroniAction", connectionId, scope],
@@ -92,10 +102,14 @@ export function PatroniActionDialog({ connectionId, profile, action, scope = "",
         // Конечное событие наблюдения: вид кластера перечитывается ещё раз (между опросами он мог не успеть обновиться).
         if (e.status !== "running") void qc.invalidateQueries({ queryKey: ["topology", connectionId] });
       }),
-    onSuccess: () => {
+    onSuccess: (res) => {
       // Успех и неизвестный исход: кластер мог измениться, а запись о действии появилась в журнале подключения.
       void qc.invalidateQueries({ queryKey: ["topology", connectionId] });
       void qc.invalidateQueries({ queryKey: ["actions", connectionId] });
+      // Этот обработчик — в настройках мутации и переживает диалог. Если его убрали, пока команда шла (закрыта вкладка,
+      // действия перестали предлагаться), панели хода, которая остановила бы наблюдение, уже не будет: останавливаем здесь,
+      // иначе ускоренный опрос шёл бы до конца срока. Сбой остановки не важен: срок в Rust истечёт сам.
+      if (!mounted.current && res.watch) void Promise.resolve(api.stopSession(res.watch)).catch(() => {});
     },
     // Отказ Patroni (`actionRejected`) тоже записан в журнал; отказы до отправки (защита, предусловия) — нет, лишнее чтение безвредно.
     onError: () => void qc.invalidateQueries({ queryKey: ["actions", connectionId] }),
@@ -166,16 +180,22 @@ export function PatroniActionDialog({ connectionId, profile, action, scope = "",
 
   const groupId = useId();
   const scheduleHintId = useId();
-  const title = t(kindKey(action));
+  const title = t(titleKey(action));
 
   /** Пояснения последствий: стоят в рамке подтверждения, рядом с кнопкой. */
   const consequences = (data: PatroniActionPreview) => {
     if (isSwitchover || isFailover) {
+      // Сессии и недоступная запись — последствия «сейчас»: у switchover по расписанию они наступят потом, а число сессий
+      // к тому времени будет другим. Лидера нет (failover при упавшем лидере) — рвать нечего, и «старого лидера» тоже нет.
+      const immediate = !(isSwitchover && when === "scheduled");
+      const hasLeader = data.leader !== null;
       return (
         <ul className="plain-list">
-          <li>{data.leaderClientSessions === null ? t("actions.patroni.sessionsUnknown") : t("actions.patroni.sessions", { count: data.leaderClientSessions })}</li>
-          <li>{t("actions.patroni.writeDown")}</li>
-          <li>{t("actions.patroni.oldLeader")}</li>
+          {immediate && hasLeader && (
+            <li>{data.leaderClientSessions === null ? t("actions.patroni.sessionsUnknown") : t("actions.patroni.sessions", { count: data.leaderClientSessions })}</li>
+          )}
+          {immediate && <li>{t("actions.patroni.writeDown")}</li>}
+          {hasLeader && <li>{t("actions.patroni.oldLeader")}</li>}
         </ul>
       );
     }
@@ -184,7 +204,7 @@ export function PatroniActionDialog({ connectionId, profile, action, scope = "",
     return null;
   };
 
-  const details = (data: PatroniActionPreview) => (
+  const details = (data: PatroniActionPreview, refused: boolean) => (
     <>
       {(isSwitchover || isFailover) && (
         <>
@@ -192,7 +212,8 @@ export function PatroniActionDialog({ connectionId, profile, action, scope = "",
             {t("actions.patroni.leader", { name: data.leader ?? "—" })}
             {data.leaderState && <span className="muted"> ({data.leaderState})</span>}
           </p>
-          {data.leaderReachable === false && <p className="diag-warn">{t("actions.patroni.leaderUnreachable")}</p>}
+          {/* «Действие может не пройти» рядом с отказом — лишнее: причина отказа названа ниже. */}
+          {!refused && data.leaderReachable === false && <p className="diag-warn">{t("actions.patroni.leaderUnreachable")}</p>}
         </>
       )}
       {data.member && (
@@ -277,17 +298,22 @@ export function PatroniActionDialog({ connectionId, profile, action, scope = "",
     if (!data.canSend) return <p className="diag-warn">{t("actions.patroni.authRequired")}</p>;
     const nothing = nothingToDo(data);
     if (nothing) return <p className="muted">{nothing}</p>;
+    // Те же предусловия, что в Rust (`running_leader`): иначе отказ пришёл бы только после ввода имени кандидата.
+    // Решает Rust; ошибка выполнения по-прежнему показывается как есть.
+    const leaderRunning = data.leader !== null && isRunningLeader(data.leaderReachable, data.leaderState);
+    if (isFailover && leaderRunning) return <p className="diag-warn">{t("errors.actions.leaderHealthy")}</p>;
+    if (isSwitchover && !leaderRunning) return <p className="diag-warn">{t("errors.actions.noLeader")}</p>;
     if (isFailover && firstReady === null) {
       return (
         <>
           <p className="diag-warn">{t("actions.patroni.noReadyCandidate")}</p>
-          <ul className="plain-list">
-            {data.candidates.map((c) => (
-              <li key={c.member}>
-                {c.member} — {c.reasons.map((r) => t(REASON_KEYS[r])).join("; ")}
-              </li>
-            ))}
-          </ul>
+          {data.candidates.length > 0 && (
+            <ul className="plain-list">
+              {data.candidates.map((c) => (
+                <li key={c.member}>{c.reasons.length > 0 ? `${c.member} — ${c.reasons.map((r) => t(REASON_KEYS[r])).join("; ")}` : c.member}</li>
+              ))}
+            </ul>
+          )}
         </>
       );
     }
@@ -308,7 +334,7 @@ export function PatroniActionDialog({ connectionId, profile, action, scope = "",
       )}
       {p && !run.data && (
         <>
-          {details(p)}
+          {details(p, block !== null)}
           {block ?? (
             <>
               {(isSwitchover || isFailover) && candidateChoice}
