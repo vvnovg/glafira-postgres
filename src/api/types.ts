@@ -1007,3 +1007,200 @@ export type SamplerEvent =
   | { kind: "gap"; fromMs: number; toMs: number }
   | { kind: "error"; error: AppError }
   | { kind: "stopped" };
+
+// Действия дежурного (P2b). Типы повторяют структуры `src-tauri/src/actions/*` (sessions, slots, patroni, watch,
+// journal): поля — camelCase, `Option` — `| null`, перечисления с `#[serde(tag = …)]` — объединения по тегу.
+
+/** Подтверждение действия (спец. P2 §8.1): имя подключения на prod, имя объекта или число сессий. */
+export interface Confirmation {
+  confirm: string | null;
+  typedName: string | null;
+}
+/** Итог действия и записи журнала (`journal::Outcome`). */
+export type ActionOutcome = "ok" | "partial" | "error";
+
+export type SignalKind = "cancel" | "terminate";
+/** Сессия адресуется парой `(pid, backendStartUs)`: PID переиспользуется, время запуска — нет. */
+export interface SessionRef {
+  pid: number;
+  backendStartUs: number;
+}
+export type SessionTarget =
+  | { kind: "selected"; sessions: SessionRef[] }
+  | { kind: "idleInTransaction"; olderThanS: number }
+  | { kind: "rootBlocker"; pid: number; backendStartUs: number };
+export interface SessionActionRequest {
+  member: string;
+  kind: SignalKind;
+  target: SessionTarget;
+}
+/** Почему сессию нельзя отменить или завершить. */
+export type DenyReason = "superuserSession" | "otherRole" | "notClientBackend" | "ownConnection";
+export interface PreviewSession {
+  pid: number;
+  backendStartUs: number;
+  user: string | null;
+  database: string | null;
+  application: string | null;
+  client: string | null;
+  state: string | null;
+  backendType: string | null;
+  xactAgeS: number | null;
+  stateAgeS: number | null;
+  /** Первые 500 символов текста запроса. */
+  query: string | null;
+}
+export interface PreviewRow {
+  session: PreviewSession;
+  allowed: boolean;
+  reason: DenyReason | null;
+}
+export interface SessionActionPreview {
+  /** Узел, к которому относится предпросмотр: выполнение принимает именно его. */
+  member: string;
+  rows: PreviewRow[];
+}
+/** Запрос выполнения: сессии, показанные в предпросмотре и разрешённые пользователем, и критерий цели для проверки. */
+export interface SessionActionExecute extends SessionActionRequest {
+  sessions: SessionRef[];
+}
+/** Итог одной сессии: пара `(pid, backendStartUs)` и тег `result` (у `failed` — ещё `error`). */
+export type SessionResult = SessionRef &
+  ({ result: "terminated" | "signalSent" | "gone" | "noLongerMatches" | "notAllowed" } | { result: "failed"; error: AppError });
+export interface SessionActionResult {
+  member: string;
+  results: SessionResult[];
+  outcome: ActionOutcome;
+  /** `false` — действие выполнено, но запись в журнал не удалась. */
+  journalWritten: boolean;
+}
+
+export interface SlotDropRequest {
+  member: string;
+  slot: string;
+}
+export interface SlotDropPreview {
+  member: string;
+  /** Слот с отметкой Patroni (`patroni`): интерфейс предупреждает, что Patroni его пересоздаст. */
+  slot: Slot;
+}
+/** Итог действия без подробностей: записан ли журнал. */
+export interface ActionResult {
+  journalWritten: boolean;
+}
+
+/** Действие Patroni; `scheduledAt` — время RFC 3339 со смещением (см. `toRfc3339`), `null` — выполнить сейчас. */
+export type PatroniAction =
+  | { kind: "switchover"; candidate: string | null; scheduledAt: string | null }
+  | { kind: "cancelSwitchover" }
+  | { kind: "failover"; candidate: string }
+  | { kind: "restart"; member: string; onlyPending: boolean; scheduledAt: string | null }
+  | { kind: "cancelRestart"; member: string }
+  | { kind: "pause"; paused: boolean };
+export interface MemberPreview {
+  name: string;
+  role: Role;
+  state: string | null;
+  pendingRestart: boolean;
+  scheduledRestart: ScheduledRestart | null;
+}
+export interface PatroniActionPreview {
+  leader: string | null;
+  /** Состояние лидера, как его прислал Patroni (`running`, `stopped`…). */
+  leaderState: string | null;
+  /** Лидер отвечает при опросе; `null` — лидера в топологии нет. */
+  leaderReachable: boolean | null;
+  paused: boolean;
+  /** Switchover и failover: готовность реплик. */
+  candidates: Candidate[];
+  /** Switchover и failover: клиентские сессии лидера, они оборвутся; `null` — не удалось прочитать. */
+  leaderClientSessions: number | null;
+  /** Restart и его отмена. */
+  member: MemberPreview | null;
+  scheduledSwitchover: ScheduledSwitchover | null;
+  /** В профиле есть логин API: без него выполнение откажет (`errors.patroni.authRequired`). */
+  canSend: boolean;
+}
+export interface PatroniActionResult {
+  /** Ответ Patroni; пусто при неизвестном исходе. */
+  response: string;
+  /** Сессия наблюдения (для `stopSession`); `null` — не наблюдается. */
+  watch: string | null;
+  journalWritten: boolean;
+  /** Запрос ушёл, но ответа нет: выполнилось ли действие, покажет наблюдение. */
+  outcomeUnknown: boolean;
+  /** Причина неизвестного исхода (при `outcomeUnknown`). */
+  error: AppError | null;
+}
+export type WatchStep =
+  | "accepted"
+  | "leaderStepped"
+  | "newLeaderRunning"
+  | "timelineIncreased"
+  | "replicasStreaming"
+  | "restarted"
+  | "memberRunning"
+  | "pendingCleared"
+  | "pauseApplied"
+  | "done";
+export type WatchStatus = "running" | "done" | "failed" | "timedOut";
+/** События наблюдения после действия Patroni (канал `execute_patroni_action`). */
+export interface WatchEvent {
+  step: WatchStep;
+  status: WatchStatus;
+  atMs: number;
+  /** Причина `failed` (например, подключение закрыто). */
+  detail: AppError | null;
+}
+
+// Журнал действий (`actions.jsonl`).
+export interface SessionRecord {
+  pid: number;
+  backendStartUs: number;
+  user: string | null;
+  database: string | null;
+  application: string | null;
+  client: string | null;
+  state: string | null;
+  xactAgeS: number | null;
+  /** Десятичной строкой: 64-битный хеш не помещается в число JS. */
+  queryId: string | null;
+  query: string | null;
+  /** `terminated` | `signalSent` | `gone` | `noLongerMatches` | `notAllowed` | `failed`. */
+  result: string;
+}
+export interface SlotRecord {
+  name: string;
+  slotType: string;
+  plugin: string | null;
+  database: string | null;
+  retainedBytes: number | null;
+  walStatus: string | null;
+}
+export interface PatroniRecord {
+  method: string;
+  /** Полный адрес без учётных данных. */
+  path: string;
+  /** Тело запроса (JSON) или `null`. */
+  body: unknown;
+  status: number | null;
+  /** Первые 500 символов ответа. */
+  response: string | null;
+}
+export interface ActionRecord {
+  /** Мс эпохи. */
+  ts: number;
+  /** `cancel` | `terminate` | `dropSlot` | `switchover` | `cancelSwitchover` | `failover` | `restart` | `cancelRestart` | `pause` | `resume`. */
+  action: string;
+  connection: { id: string; name: string; environment: Environment };
+  member: string | null;
+  prodConfirmed: boolean;
+  outcome: ActionOutcome;
+  /** `AppError.code` при `outcome: "error"`. */
+  code: string | null;
+  ms: number;
+  /** Пустые `sessions`, `slot` и `patroni` в журнал не пишутся: поля отсутствуют. */
+  sessions?: SessionRecord[];
+  slot?: SlotRecord;
+  patroni?: PatroniRecord;
+}

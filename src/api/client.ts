@@ -1,7 +1,10 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
+  ActionRecord,
+  ActionResult,
   AppError,
   AppInfo,
+  Confirmation,
   ConnectionFolder,
   ConnectionProfile,
   DatabaseInfo,
@@ -16,6 +19,9 @@ import type {
   ObjectKind,
   ObjectPage,
   ParsedConnection,
+  PatroniAction,
+  PatroniActionPreview,
+  PatroniActionResult,
   PolicyStatus,
   RoleInfo,
   SamplerEvent,
@@ -23,6 +29,12 @@ import type {
   SecretsInput,
   SecretsSet,
   SequenceDetails,
+  SessionActionExecute,
+  SessionActionPreview,
+  SessionActionRequest,
+  SessionActionResult,
+  SlotDropPreview,
+  SlotDropRequest,
   TableDetails,
   TestEvent,
   TestReport,
@@ -32,6 +44,7 @@ import type {
   UiSettings,
   UpdateCheck,
   ViewDetails,
+  WatchEvent,
 } from "./types";
 
 export function isAppError(e: unknown): e is AppError {
@@ -123,6 +136,24 @@ export const api = {
     return call<string>("start_sampler", { id, member, channel });
   },
   stopSession: (sessionId: string) => call<boolean>("stop_session", { sessionId }),
+
+  previewSessionAction: (id: string, request: SessionActionRequest) =>
+    call<SessionActionPreview>("preview_session_action", { id, request }),
+  executeSessionAction: (id: string, request: SessionActionExecute, confirmation: Confirmation) =>
+    call<SessionActionResult>("execute_session_action", { id, request, confirmation }),
+  previewDropSlot: (id: string, request: SlotDropRequest) => call<SlotDropPreview>("preview_drop_slot", { id, request }),
+  dropSlot: (id: string, request: SlotDropRequest, confirmation: Confirmation) =>
+    call<ActionResult>("drop_slot", { id, request, confirmation }),
+  previewPatroniAction: (id: string, action: PatroniAction) =>
+    call<PatroniActionPreview>("preview_patroni_action", { id, action }),
+  /** Действие Patroni; события наблюдения (если оно открылось) — в `onEvent`, итог — `watch` для `stopSession`. */
+  executePatroniAction: (id: string, action: PatroniAction, confirmation: Confirmation, onEvent: (e: WatchEvent) => void) => {
+    const channel = new Channel<WatchEvent>();
+    channel.onmessage = onEvent;
+    return call<PatroniActionResult>("execute_patroni_action", { id, action, confirmation, channel });
+  },
+  /** Журнал действий (новые первыми): одного подключения или всех (`null`); `limit` не больше 1000. */
+  listActions: (connectionId: string | null, limit: number) => call<ActionRecord[]>("list_actions", { connectionId, limit }),
 
   getUiSettings: () => call<UiSettings>("get_ui_settings"),
   setUiSettings: (settings: UiSettings) => call<UiSettings>("set_ui_settings", { settings }),

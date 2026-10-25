@@ -8,7 +8,14 @@
     "loading": "Загрузка…",
     "details": "Подробности",
     "readOnly": "Только чтение",
-    "copy": "Копировать"
+    "copy": "Копировать",
+    "confirm": {
+      "typeObject": "Для подтверждения введите {{label}} <code>{{name}}</code>",
+      "prodNotice": "Это prod-подключение. Введите его имя <code>{{name}}</code>",
+      "defaultLabel": "имя",
+      "objectAria": "Подтверждение: {{label}}",
+      "connectionAria": "Имя подключения"
+    }
   },
   "errors": {
     "generic": "{{message}}",

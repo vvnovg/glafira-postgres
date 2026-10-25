@@ -8,7 +8,14 @@
     "loading": "Loading…",
     "details": "Details",
     "readOnly": "Read-only",
-    "copy": "Copy"
+    "copy": "Copy",
+    "confirm": {
+      "typeObject": "To confirm, type the {{label}} <code>{{name}}</code>",
+      "prodNotice": "This is a prod connection. Type its name <code>{{name}}</code>",
+      "defaultLabel": "name",
+      "objectAria": "Confirmation: {{label}}",
+      "connectionAria": "Connection name"
+    }
   },
   "errors": {
     "generic": "{{message}}",

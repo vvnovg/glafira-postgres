@@ -1,5 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ConnectionProfile } from "./types";
+import type {
+  ConnectionProfile,
+  Confirmation,
+  PatroniAction,
+  SessionActionExecute,
+  SessionActionRequest,
+  SlotDropRequest,
+  WatchEvent,
+} from "./types";
 
 const sent: unknown[] = [];
 vi.mock("@tauri-apps/api/core", () => {
@@ -25,6 +33,12 @@ const profile: ConnectionProfile = {
   pg: { username: "u", database: "postgres", sslMode: "prefer", tls: { caPath: null, clientCert: null }, connectTimeoutS: 10, databases: null },
   ssh: null,
 };
+
+const sessionReq: SessionActionRequest = { member: "pg-1", kind: "terminate", target: { kind: "idleInTransaction", olderThanS: 300 } };
+const sessionExec: SessionActionExecute = { ...sessionReq, sessions: [{ pid: 42, backendStartUs: 1 }] };
+const slotReq: SlotDropRequest = { member: "pg-1", slot: "it_dead_slot" };
+const pause: PatroniAction = { kind: "pause", paused: true };
+const confirmation: Confirmation = { confirm: "billing-prod", typedName: null };
 
 describe("testConnection", () => {
   // Тело в фигурных скобках: стрелка, возвращающая мок, сделала бы его хуком очистки, который vitest вызовет после теста.
@@ -75,6 +89,32 @@ describe("startSampler", () => {
   });
 });
 
+describe("executePatroniAction", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("события наблюдения приходят в onEvent, итог содержит исход и причину", async () => {
+    const got: WatchEvent[] = [];
+    vi.mocked(invoke).mockImplementation(async (_cmd, args) => {
+      const ch = (args as { channel: { onmessage: (e: WatchEvent) => void } }).channel;
+      ch.onmessage({ step: "accepted", status: "running", atMs: 1, detail: null });
+      return { response: "ok", watch: "w-1", journalWritten: true, outcomeUnknown: false, error: null };
+    });
+    const r = await api.executePatroniAction("c", pause, confirmation, (e) => got.push(e));
+    expect(r.watch).toBe("w-1");
+    expect(r.outcomeUnknown).toBe(false);
+    expect(got.map((e) => e.step)).toEqual(["accepted"]);
+    expect(vi.mocked(invoke).mock.calls[0][0]).toBe("execute_patroni_action");
+    expect(vi.mocked(invoke).mock.calls[0][1]).toMatchObject({ id: "c", action: pause, confirmation });
+  });
+
+  it("ошибка команды приходит как AppError", async () => {
+    vi.mocked(invoke).mockRejectedValue({ code: "CONFIRMATION_REQUIRED", message: "x", retryable: false });
+    await expect(api.executePatroniAction("c", pause, confirmation, () => {})).rejects.toMatchObject({ code: "CONFIRMATION_REQUIRED" });
+  });
+});
+
 // Имена команд и аргументов должны совпадать с Rust: Tauri переводит camelCase аргументов в snake_case параметров.
 describe("команды и аргументы", () => {
   beforeEach(() => {
@@ -121,6 +161,13 @@ describe("команды и аргументы", () => {
     ["exportDiagnostics", () => api.exportDiagnostics("/tmp/d.zip"), "export_diagnostics", { path: "/tmp/d.zip" }],
     ["runDiagnostic", () => api.runDiagnostic("c", { tool: "pulse", member: null }), "run_diagnostic", { id: "c", request: { tool: "pulse", member: null } }],
     ["stopSession", () => api.stopSession("s"), "stop_session", { sessionId: "s" }],
+    ["previewSessionAction", () => api.previewSessionAction("c", sessionReq), "preview_session_action", { id: "c", request: sessionReq }],
+    ["executeSessionAction", () => api.executeSessionAction("c", sessionExec, confirmation), "execute_session_action", { id: "c", request: sessionExec, confirmation }],
+    ["previewDropSlot", () => api.previewDropSlot("c", slotReq), "preview_drop_slot", { id: "c", request: slotReq }],
+    ["dropSlot", () => api.dropSlot("c", slotReq, confirmation), "drop_slot", { id: "c", request: slotReq, confirmation }],
+    ["previewPatroniAction", () => api.previewPatroniAction("c", pause), "preview_patroni_action", { id: "c", action: pause }],
+    ["listActions", () => api.listActions("c", 200), "list_actions", { connectionId: "c", limit: 200 }],
+    ["listActions (все подключения)", () => api.listActions(null, 50), "list_actions", { connectionId: null, limit: 50 }],
     ["listFolders", () => api.listFolders(), "list_folders", undefined],
     ["createFolder", () => api.createFolder("f", null), "create_folder", { name: "f", parentId: null }],
     ["renameFolder", () => api.renameFolder("f1", "g"), "rename_folder", { id: "f1", name: "g" }],
