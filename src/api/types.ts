@@ -11,6 +11,8 @@ export type ErrorCode =
   | "SSH_ERROR"
   | "FEATURE_UNAVAILABLE"
   | "RECOVERY_CONFLICT"
+  | "READ_ONLY"
+  | "CONFIRMATION_REQUIRED"
   | "INTERNAL";
 
 /** Текст из Rust: ключ словаря, параметры и английский текст (запасной вариант). */

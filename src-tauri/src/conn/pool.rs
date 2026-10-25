@@ -392,6 +392,7 @@ mod tests {
             timeout: Duration::from_secs(1),
             socks: None,
             ssh_target: None,
+            options: crate::conn::pg::SESSION_OPTIONS,
         }
     }
 

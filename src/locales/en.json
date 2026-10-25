@@ -182,6 +182,14 @@
     "diag": {
       "patroniOnly": "This tool is available only for Patroni clusters",
       "badWindow": "The window must be 300, 900 or 3600 seconds"
+    },
+    "guard": {
+      "readOnly": "Connection “{{name}}” is read-only",
+      "prodConfirm": "To change a prod connection, type its name “{{name}}”",
+      "typeToConfirm": "Type “{{expected}}” to confirm"
+    },
+    "actions": {
+      "nodeUnavailable": "Node {{member}} is unavailable"
     }
   },
   "connections": {

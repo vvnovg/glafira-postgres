@@ -184,6 +184,14 @@
     "diag": {
       "patroniOnly": "Инструмент доступен только для кластера Patroni",
       "badWindow": "Окно — 300, 900 или 3600 секунд"
+    },
+    "guard": {
+      "readOnly": "Подключение «{{name}}» только для чтения",
+      "prodConfirm": "Чтобы изменить prod-подключение, введите его имя «{{name}}»",
+      "typeToConfirm": "Введите «{{expected}}» для подтверждения"
+    },
+    "actions": {
+      "nodeUnavailable": "Узел {{member}} недоступен"
     }
   },
   "connections": {

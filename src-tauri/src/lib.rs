@@ -1,11 +1,13 @@
 #[macro_use]
 pub mod i18n;
+pub mod actions;
 pub mod catalog;
 pub mod commands;
 pub mod conn;
 pub mod diag;
 pub mod diagnostics;
 pub mod error;
+pub mod guard;
 pub mod logging;
 pub mod migrate;
 pub mod net;

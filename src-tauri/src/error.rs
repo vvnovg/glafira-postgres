@@ -24,6 +24,10 @@ pub enum ErrorCode {
     FeatureUnavailable,
     /// Запрос на узле в recovery отменён конфликтом с применением WAL.
     RecoveryConflict,
+    /// Действие на read-only подключении (P2b): кнопок нет, команда всё равно отказывает.
+    ReadOnly,
+    /// Нет или неверно подтверждение: имя подключения на prod, имя объекта, число сессий.
+    ConfirmationRequired,
     Internal,
 }
 
@@ -145,6 +149,20 @@ mod tests {
     }
 
     #[test]
+    fn guard_codes_serialize_for_frontend() {
+        let v = |code| {
+            serde_json::to_value(AppError::localized(code, LocalizedText::raw("x"))).unwrap()
+        };
+        assert_eq!(v(ErrorCode::ReadOnly)["code"], "READ_ONLY");
+        assert_eq!(
+            v(ErrorCode::ConfirmationRequired)["code"],
+            "CONFIRMATION_REQUIRED"
+        );
+        assert_eq!(v(ErrorCode::ReadOnly)["retryable"], false);
+        assert_eq!(v(ErrorCode::ConfirmationRequired)["retryable"], false);
+    }
+
+    #[test]
     fn retryable_codes() {
         for (code, retry) in [
             (ErrorCode::ConnectionFailed, true),
@@ -156,6 +174,8 @@ mod tests {
             (ErrorCode::SshError, false),
             (ErrorCode::FeatureUnavailable, false),
             (ErrorCode::RecoveryConflict, true),
+            (ErrorCode::ReadOnly, false),
+            (ErrorCode::ConfirmationRequired, false),
         ] {
             assert_eq!(
                 AppError::localized(code, LocalizedText::raw("x")).retryable,

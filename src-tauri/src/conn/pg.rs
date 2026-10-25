@@ -25,6 +25,10 @@ use crate::sync::MutexExt;
 /// а не в стиле сеанса (`'01/03/2026'` при `SQL, DMY`).
 pub const SESSION_OPTIONS: &str = "-c default_transaction_read_only=on -c statement_timeout=5000 -c lock_timeout=1000 -c search_path=pg_catalog -c DateStyle=ISO";
 
+/// Сессия действия (спец. P2 §8.2): те же пределы, но без `default_transaction_read_only`.
+pub const ACTION_SESSION_OPTIONS: &str =
+    "-c statement_timeout=5000 -c lock_timeout=1000 -c search_path=pg_catalog -c DateStyle=ISO";
+
 /// Отсечка молчащего соединения на уровне TCP: после 60 с тишины зонды раз в 10 с. После failover
 /// полуоткрытое соединение иначе живёт в пуле, пока его не попробуют использовать.
 const KEEPALIVE_IDLE: Duration = Duration::from_secs(60);
@@ -60,6 +64,8 @@ pub struct ConnectSpec {
     pub socks: Option<SocketAddr>,
     /// Цель ssh туннеля — для сообщения о сбое проброса.
     pub ssh_target: Option<String>,
+    /// Параметры сессии (`-c …`): `SESSION_OPTIONS` у пулов, `ACTION_SESSION_OPTIONS` у действий.
+    pub options: &'static str,
 }
 
 impl std::fmt::Debug for ConnectSpec {
@@ -122,7 +128,14 @@ impl ConnectSpec {
             timeout: Duration::from_secs(profile.pg.connect_timeout_s),
             socks,
             ssh_target: socks.and(profile.ssh.as_ref().map(|s| s.target.clone())),
+            options: SESSION_OPTIONS,
         })
+    }
+
+    /// То же соединение для действия (P2b): запись разрешена, пределы и `search_path` те же.
+    pub fn for_action(mut self) -> Self {
+        self.options = ACTION_SESSION_OPTIONS;
+        self
     }
 
     pub fn pg_config(&self) -> tokio_postgres::Config {
@@ -131,7 +144,7 @@ impl ConnectSpec {
         c.user(&self.user)
             .dbname(&self.database)
             .application_name(crate::product::PG_APPLICATION_NAME)
-            .options(SESSION_OPTIONS)
+            .options(self.options)
             .ssl_mode(match self.ssl_mode {
                 SslMode::Disable => Wire::Disable,
                 SslMode::Prefer => Wire::Prefer,
@@ -323,6 +336,24 @@ mod tests {
         assert!(!format!("{spec:?}").contains("s3cr3t"));
     }
 
+    #[test]
+    fn action_spec_is_read_write_with_the_same_limits() {
+        let spec = loopback_spec(5432, "localhost", SslMode::Disable, None);
+        assert_eq!(spec.pg_config().get_options(), Some(SESSION_OPTIONS));
+        let action = spec.for_action();
+        let opts = action.pg_config().get_options().map(str::to_string);
+        assert_eq!(opts.as_deref(), Some(ACTION_SESSION_OPTIONS));
+        assert!(!ACTION_SESSION_OPTIONS.contains("default_transaction_read_only"));
+        for o in [
+            "statement_timeout=5000",
+            "lock_timeout=1000",
+            "search_path=pg_catalog",
+            "DateStyle=ISO",
+        ] {
+            assert!(ACTION_SESSION_OPTIONS.contains(o), "{o}");
+        }
+    }
+
     /// Спецификация для заглушки на loopback: TCP — на `port`, имя для проверки сертификата — `host`.
     fn loopback_spec(port: u16, host: &str, mode: SslMode, ca: Option<&str>) -> ConnectSpec {
         ConnectSpec {
@@ -338,6 +369,7 @@ mod tests {
             timeout: Duration::from_secs(10),
             socks: None,
             ssh_target: None,
+            options: SESSION_OPTIONS,
         }
     }
 
