@@ -235,7 +235,7 @@ The confirmation is the [[ui:actions.patroni.run]] button; on prod you also type
 - restart: [[ui:actions.watch.step.accepted]], [[ui:actions.watch.step.restarted]] (the PostgreSQL start time that the member's API reports has changed), [[ui:actions.watch.step.memberRunning]], with the [[ui:actions.patroni.onlyPending]] checkbox on — [[ui:actions.watch.step.pendingCleared]], [[ui:actions.watch.step.done]]; the deadline is 5 minutes;
 - pause and resume: [[ui:actions.watch.step.accepted]], [[ui:actions.watch.step.pauseApplied]], [[ui:actions.watch.step.done]]; the deadline is 30 seconds.
 
-If the deadline passes, the panel says [[ui:actions.watch.timedOut]] and keeps the last step reached. Closing the panel ([[ui:common.close]]) or the overview tab stops the watching and returns polling to the usual interval; closing the connection stops it too. Scheduled actions are not watched: the overview shows a banner or a mark in the member's row.
+If the deadline passes, the panel says [[ui:actions.watch.timedOut]] and keeps the last step reached. Closing the panel ([[ui:common.close]]) or the overview tab stops the watching and returns polling to the usual interval; closing the connection stops it too, and the panel shows the reason. Scheduled actions are not watched: the overview shows a banner or a mark in the member's row.
 
 ## Actions journal {#journal}
 

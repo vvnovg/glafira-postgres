@@ -1,17 +1,17 @@
 //! Наблюдение после действия Patroni (спец. P2 §8.6): ускоренный опрос топологии и шаги до «готово».
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tokio::task::AbortHandle;
 
 use crate::actions::patroni::PatroniAction;
 use crate::error::AppError;
 use crate::session::SessionKind;
 use crate::state::AppState;
 use crate::topology::model::{Role, Topology};
-use crate::topology::runtime::Runtimes;
+use crate::topology::runtime::{Runtimes, not_connected};
 
 /// Опрос топологии во время наблюдения (вместо 10 с).
 pub const BOOST_INTERVAL: Duration = Duration::from_secs(2);
@@ -268,15 +268,38 @@ fn now_ms() -> i64 {
     crate::actions::journal::now_ms()
 }
 
+/// Финальное событие наблюдения (`done`, `timedOut`, `failed`) — одно: шлёт тот, кто первым поставил флаг `sent`
+/// (задача наблюдения или `start`, когда подключение не открыто или закрыто за время старта).
+#[derive(Clone)]
+struct Final {
+    sink: Arc<dyn WatchSink>,
+    sent: Arc<AtomicBool>,
+}
+
+impl Final {
+    fn send(&self, step: WatchStep, status: WatchStatus, detail: Option<AppError>) {
+        if !self.sent.swap(true, Ordering::SeqCst) {
+            self.sink.send(WatchEvent {
+                step,
+                status,
+                at_ms: now_ms(),
+                detail,
+            });
+        }
+    }
+}
+
 /// Открывает сессию наблюдения: ускоренный опрос, шаги по каждому опросу, срок; итог — id сессии для `stop_session`.
-/// Остановка сессии (панель закрыта, подключение закрыто) прерывает задачу и снимает ускорение. Нужен рантайм tokio.
+/// Остановка сессии подаёт задаче сигнал отмены и снимает ускорение. Задача по сигналу сравнивает номер открытия
+/// подключения с запомненным: тот же — сессию остановила панель (`stop_session`), события нет; подключение закрыто
+/// или открыто заново — финальное `failed` с `notConnected`. Нужен рантайм tokio.
 ///
 /// Первое событие («принято») уходит отсюда, до задачи: её события идут не раньше, чем через интервал опроса.
-/// Сессия вносится в реестр до ускорения: подключение, закрытое после этого, остановит её своим слушателем, а
-/// закрытое раньше (или не открытое) `boost` покажет. Закрытое и открытое заново между вставкой и ускорением
-/// `boost` не покажет, но слушатель закрытия уже снял сессию — это видно по реестру, и ускорение, легшее на новое
-/// открытие, снимается. В обоих случаях наблюдение кончается сразу событием `failed`, а id остаётся id
-/// закончившегося наблюдения.
+/// Сессия вносится в реестр до чтения номера открытия и ускорения: подключение, закрытое или открытое заново после
+/// вставки, остановит её своим слушателем, а закрытое раньше (или не открытое) `boost` покажет. Закрытое и открытое
+/// заново между вставкой и ускорением `boost` не покажет, но слушатель закрытия уже снял сессию — это видно по
+/// реестру, и ускорение, легшее на новое открытие, снимается. В обоих случаях `failed` уходит отсюда сразу, а id
+/// остаётся id закончившегося наблюдения.
 pub fn start(st: &AppState, id: &str, plan: WatchPlan, sink: Arc<dyn WatchSink>) -> String {
     let session_id = uuid::Uuid::new_v4().to_string();
     let runtimes = st.runtimes.clone();
@@ -291,91 +314,107 @@ pub fn start(st: &AppState, id: &str, plan: WatchPlan, sink: Arc<dyn WatchSink>)
         at_ms: now_ms(),
         detail: None,
     });
-    let task_sink = sink.clone();
-    let task = tokio::spawn(async move {
-        let sink = task_sink;
+    let fin = Final {
+        sink: sink.clone(),
+        sent: Arc::default(),
+    };
+    let (cancel, mut cancelled) = tokio::sync::watch::channel(false);
+    st.sessions.insert(
+        session_id.clone(),
+        id,
+        SessionKind::Watch,
+        stop_watch(cancel, &st.runtimes, id, &session_id),
+    );
+    let generation = st.runtimes.generation(id);
+    let task_fin = fin.clone();
+    tokio::spawn(async move {
+        let fin = task_fin;
         let mut plan = plan;
         let mut last = WatchStep::Accepted;
-        while Instant::now() < deadline {
-            tokio::time::sleep(BOOST_INTERVAL).await;
-            let Some(t) = runtimes.view(&conn).topology else {
-                continue;
-            };
-            let start_now = match &plan {
-                WatchPlan::Restart { member, .. } => match connections.get(&conn) {
-                    Ok(p) => match live.http_for(&p).await {
-                        Ok(http) => {
-                            crate::actions::patroni::postmaster_start(http.as_ref(), &t, member)
-                                .await
-                        }
+        // Финальное событие: статус и причина; `None` — без события (панель закрыта, канал закрыт).
+        let end = loop {
+            if Instant::now() >= deadline {
+                break Some((WatchStatus::TimedOut, None));
+            }
+            let read = async {
+                tokio::time::sleep(BOOST_INTERVAL).await;
+                let t = runtimes.view(&conn).topology?;
+                let start_now = match &plan {
+                    WatchPlan::Restart { member, .. } => match connections.get(&conn) {
+                        Ok(p) => match live.http_for(&p).await {
+                            Ok(http) => {
+                                crate::actions::patroni::postmaster_start(http.as_ref(), &t, member)
+                                    .await
+                            }
+                            Err(_) => None,
+                        },
                         Err(_) => None,
                     },
-                    Err(_) => None,
-                },
-                _ => None,
+                    _ => None,
+                };
+                Some((t, start_now))
+            };
+            // Отмена прерывает и сон, и идущий опрос — как прежде `abort`.
+            let read = tokio::select! {
+                biased;
+                _ = cancelled.changed() => {
+                    break if generation.is_some() && runtimes.generation(&conn) == generation {
+                        None
+                    } else {
+                        Some((WatchStatus::Failed, Some(not_connected())))
+                    };
+                }
+                read = read => read,
+            };
+            let Some((t, start_now)) = read else {
+                continue;
             };
             plan.observe(&t);
             let step = progress(&plan, &t, start_now.as_deref());
             if step > last {
                 last = step;
-                let status = if step == WatchStep::Done {
-                    WatchStatus::Done
-                } else {
-                    WatchStatus::Running
-                };
-                if !sink.send(WatchEvent {
+                if step == WatchStep::Done {
+                    break Some((WatchStatus::Done, None));
+                }
+                if !fin.sink.send(WatchEvent {
                     step,
-                    status,
+                    status: WatchStatus::Running,
                     at_ms: now_ms(),
                     detail: None,
                 }) {
-                    break;
-                }
-                if step == WatchStep::Done {
-                    break;
+                    break None;
                 }
             }
-        }
-        if last != WatchStep::Done {
-            sink.send(WatchEvent {
-                step: last,
-                status: WatchStatus::TimedOut,
-                at_ms: now_ms(),
-                detail: None,
-            });
+        };
+        if let Some((status, detail)) = end {
+            fin.send(last, status, detail);
         }
         runtimes.unboost(&conn, &sid);
         sessions.forget(&sid);
     });
-    st.sessions.insert(
-        session_id.clone(),
-        id,
-        SessionKind::Watch,
-        stop_watch(task.abort_handle(), &st.runtimes, id, &session_id),
-    );
     let boosted = st.runtimes.boost(id, &session_id, BOOST_INTERVAL, deadline);
     if !boosted || !st.sessions.contains(&session_id) {
-        // Задача прервана до первого своего события (оно — не раньше интервала опроса); сессии могло уже не быть,
-        // если её снял слушатель закрытия, — тогда ускорение снимается здесь.
+        // Флаг финала ставится до остановки: задача, разбуженная ею, второго события не пошлёт. Сессии могло уже
+        // не быть, если её снял слушатель закрытия, — тогда ускорение снимается здесь.
+        fin.send(
+            WatchStep::Accepted,
+            WatchStatus::Failed,
+            Some(not_connected()),
+        );
         st.sessions.stop(&session_id);
         st.runtimes.unboost(id, &session_id);
-        sink.send(WatchEvent {
-            step: WatchStep::Accepted,
-            status: WatchStatus::Failed,
-            at_ms: now_ms(),
-            detail: Some(crate::topology::runtime::not_connected()),
-        });
     }
     session_id
 }
 
-/// Остановка сессии наблюдения `session_id`: прерывание задачи и снятие её ускорения (ускорения других
-/// наблюдений подключения остаются) — быстро и без `await`. Вызывается и из
-/// слушателя закрытия под `entries` `Runtimes` (`disconnect`, переоткрытие): поэтому `Runtimes::unboost` берёт
-/// только свой мьютекс ускорений, а не `entries`, — иначе тот же поток захватил бы `entries` повторно и завис.
-/// `Runtimes` — слабой ссылкой: реестр сессий сам слушатель закрытия `Runtimes`, сильная дала бы цикл ссылок.
+/// Остановка сессии наблюдения `session_id`: сигнал отмены задаче и снятие её ускорения (ускорения других
+/// наблюдений подключения остаются) — быстро и без `await`. Задачу не прерывает `abort`: она сама решает, слать
+/// ли финальное событие. Вызывается и из слушателя закрытия под `entries` `Runtimes` (`disconnect`, переоткрытие):
+/// поэтому ни замыкание, ни `Runtimes::unboost` не берут `entries` (`unboost` — только свой мьютекс ускорений), —
+/// иначе тот же поток захватил бы `entries` повторно и завис. `Runtimes` — слабой ссылкой: реестр сессий сам
+/// слушатель закрытия `Runtimes`, сильная дала бы цикл ссылок.
 pub(crate) fn stop_watch(
-    abort: AbortHandle,
+    cancel: tokio::sync::watch::Sender<bool>,
     runtimes: &Arc<Runtimes>,
     connection: &str,
     session_id: &str,
@@ -386,7 +425,8 @@ pub(crate) fn stop_watch(
         session_id.to_string(),
     );
     Box::new(move || {
-        abort.abort();
+        // Задача могла уже кончиться (приёмника нет) — сигнал тогда не нужен.
+        let _ = cancel.send(true);
         if let Some(rt) = runtimes.upgrade() {
             rt.unboost(&connection, &session_id);
         }
@@ -641,6 +681,111 @@ mod tests {
             2,
             "задача наблюдения не идёт"
         );
+    }
+
+    /// Источник с одной и той же топологией (паузы нет): открытое подключение не ходит в сеть.
+    struct Fixed;
+
+    impl crate::topology::runtime::TopologySource for Fixed {
+        fn observe<'a>(
+            &'a self,
+            _p: &'a crate::conn::profile::ConnectionProfile,
+            _prev: Option<&'a Topology>,
+        ) -> crate::topology::BoxFuture<'a, crate::error::AppResult<Topology>> {
+            Box::pin(async { Ok(topo(vec![m("pg-1", Role::Primary, "running", 1)])) })
+        }
+    }
+
+    /// Состояние с открытым подключением `c`; наблюдение паузы на нём остаётся на шаге «принято».
+    async fn open_state() -> (tempfile::TempDir, AppState) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut st =
+            AppState::new(dir.path(), Arc::new(crate::secrets::MemoryStore::default())).unwrap();
+        st.runtimes = Runtimes::new(Arc::new(Fixed), st.pools.clone(), st.tunnels.clone());
+        // Слушатели `AppState::new` остались у прежнего `Runtimes`: сессии снимает закрытие этого.
+        st.runtimes.add_close_listener(st.sessions.clone());
+        st.runtimes
+            .connect(crate::conn::profile::sample_profile("c"))
+            .await
+            .unwrap();
+        (dir, st)
+    }
+
+    fn statuses(events: &Events) -> Vec<(WatchStep, WatchStatus)> {
+        let got = events.0.lock().unwrap();
+        got.iter().map(|e| (e.step, e.status)).collect()
+    }
+
+    fn last_detail(events: &Events) -> Option<String> {
+        let got = events.0.lock().unwrap();
+        got.last()?.detail.as_ref().map(|e| e.key.clone())
+    }
+
+    /// Подключение закрыто во время наблюдения: последнее событие — `failed` с причиной `notConnected`, после него
+    /// событий нет, сессии нет.
+    #[tokio::test]
+    async fn closing_the_connection_ends_the_watch_with_failed() {
+        let (_dir, st) = open_state().await;
+        let events = Arc::new(Events::default());
+        let sid = start(&st, "c", WatchPlan::Pause { paused: true }, events.clone());
+        st.runtimes.disconnect("c");
+        tokio::time::sleep(BOOST_INTERVAL + Duration::from_millis(200)).await;
+        assert_eq!(
+            statuses(&events),
+            [
+                (WatchStep::Accepted, WatchStatus::Running),
+                (WatchStep::Accepted, WatchStatus::Failed)
+            ]
+        );
+        assert_eq!(
+            last_detail(&events).as_deref(),
+            Some("errors.topology.notConnected")
+        );
+        assert!(!st.sessions.stop(&sid), "сессии нет");
+        tokio::time::sleep(BOOST_INTERVAL).await;
+        assert_eq!(statuses(&events).len(), 2, "после финального событий нет");
+    }
+
+    /// Панель закрыта (`stop_session`), подключение открыто: наблюдение кончается без события.
+    #[tokio::test]
+    async fn stopping_the_session_from_the_panel_sends_nothing() {
+        let (_dir, st) = open_state().await;
+        let events = Arc::new(Events::default());
+        let sid = start(&st, "c", WatchPlan::Pause { paused: true }, events.clone());
+        assert!(st.sessions.stop(&sid));
+        tokio::time::sleep(BOOST_INTERVAL + Duration::from_millis(200)).await;
+        assert_eq!(
+            statuses(&events),
+            [(WatchStep::Accepted, WatchStatus::Running)]
+        );
+    }
+
+    /// Подключение закрыто и открыто заново, пока задача наблюдения не проснулась: открытие уже другое — финальное
+    /// `failed` с `notConnected`, и оно одно.
+    #[tokio::test]
+    async fn reopening_the_connection_ends_the_watch_with_one_failed() {
+        let (_dir, st) = open_state().await;
+        let events = Arc::new(Events::default());
+        start(&st, "c", WatchPlan::Pause { paused: true }, events.clone());
+        st.runtimes.disconnect("c");
+        st.runtimes
+            .connect(crate::conn::profile::sample_profile("c"))
+            .await
+            .unwrap();
+        tokio::time::sleep(BOOST_INTERVAL + Duration::from_millis(200)).await;
+        assert_eq!(
+            statuses(&events),
+            [
+                (WatchStep::Accepted, WatchStatus::Running),
+                (WatchStep::Accepted, WatchStatus::Failed)
+            ]
+        );
+        assert_eq!(
+            last_detail(&events).as_deref(),
+            Some("errors.topology.notConnected")
+        );
+        tokio::time::sleep(BOOST_INTERVAL).await;
+        assert_eq!(statuses(&events).len(), 2, "финальное событие одно");
     }
 
     #[test]

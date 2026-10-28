@@ -1235,12 +1235,12 @@ pub(crate) mod tests {
             Duration::from_millis(30),
             Instant::now() + Duration::from_secs(60),
         );
-        let watch = tokio::spawn(std::future::pending::<()>());
+        let (cancel, cancelled) = tokio::sync::watch::channel(false);
         sessions.insert(
             "w".into(),
             "c",
             crate::session::SessionKind::Watch,
-            crate::actions::watch::stop_watch(watch.abort_handle(), &rt, "c", "w"),
+            crate::actions::watch::stop_watch(cancel, &rt, "c", "w"),
         );
         let (tx, rx) = mpsc::channel();
         let closing = rt.clone();
@@ -1250,10 +1250,7 @@ pub(crate) mod tests {
         });
         rx.recv_timeout(Duration::from_secs(5))
             .expect("закрытие подключения во время наблюдения зависло");
-        assert!(
-            watch.await.unwrap_err().is_cancelled(),
-            "задача наблюдения прервана"
-        );
+        assert!(*cancelled.borrow(), "задаче наблюдения подан сигнал отмены");
         assert!(!sessions.stop("w"), "сессии наблюдения больше нет");
         assert!(rt.boosts.lock_safe().is_empty(), "ускорение снято");
     }
