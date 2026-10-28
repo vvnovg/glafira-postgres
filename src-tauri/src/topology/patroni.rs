@@ -289,9 +289,11 @@ impl ReqwestHttp {
     /// (`tunnelDown`), недоступный адрес (`unreachable`, в том числе срок соединения) и истёкший срок самой пробы
     /// (`HTTP_TIMEOUT`; он тоже становится `unreachable` — по этому ключу вызывающий идёт к следующему адресу, а живой
     /// узел отвечает на `/patroni` за миллисекунды) возвращаются: изменяющий запрос не отправлялся. Ошибка называет
-    /// адрес действия (без учётных данных — их убирают `request_error` и `connect_timed_out`), причина пробы — в
-    /// `details`. Любой HTTP-ответ (код и тело не важны) и иная
-    /// ошибка (TLS) — узел отвечает: `Ok`, и судьбу решает сам запрос.
+    /// адрес действия (без учётных данных — их убирают `request_error`, `connect_timed_out` и ветка срока пробы через
+    /// `chain_without_credentials`), причина пробы — в `details`, с пометкой `probe GET /patroni: ` в начале у каждой
+    /// из этих ошибок (`probe_failure`): по ней видно, что не ответила проба, а не само действие; `params` и
+    /// `message` остаются как у ошибки адреса. Любой HTTP-ответ (код и тело не важны) и иная ошибка (TLS) — узел
+    /// отвечает: `Ok`, и судьбу решает сам запрос.
     async fn probe_through_tunnel(&self, url: &str, target: &reqwest::Url) -> AppResult<()> {
         let probe = format!(
             "{}://{}:{}/patroni",
@@ -304,18 +306,28 @@ impl ReqwestHttp {
             return Ok(());
         };
         let err = self.request_error(url, &e, HTTP_TIMEOUT);
-        match err.key.as_str() {
+        let err = match err.key.as_str() {
             "errors.ssh.forwardFailed" | "errors.ssh.tunnelDown" | "errors.patroni.unreachable" => {
-                Err(err)
+                err
             }
-            "errors.patroni.timeout" => Err(connect_timed_out(url, &e).with_details(format!(
-                "probe GET /patroni did not answer within {} s: {}",
+            "errors.patroni.timeout" => connect_timed_out(url, &e).with_details(format!(
+                "did not answer within {} s: {}",
                 HTTP_TIMEOUT.as_secs(),
-                chain(&e)
-            ))),
-            _ => Ok(()),
-        }
+                chain_without_credentials(url, &e)
+            )),
+            _ => return Ok(()),
+        };
+        Err(probe_failure(err))
     }
+}
+
+/// Пометка причины в `details` ошибки пробного чтения: отличает сбой пробы от сбоя самого действия.
+const PROBE_CAUSE_PREFIX: &str = "probe GET /patroni: ";
+
+/// Ошибка пробы с пометкой `PROBE_CAUSE_PREFIX` перед причиной в `details`; остальные поля не меняются.
+fn probe_failure(mut err: AppError) -> AppError {
+    let cause = err.details.take().unwrap_or_default();
+    err.with_details(format!("{PROBE_CAUSE_PREFIX}{cause}"))
 }
 
 fn is_certificate_error(e: &reqwest::Error) -> bool {
@@ -2694,6 +2706,12 @@ mod tests {
             (ErrorCode::SshError, "errors.ssh.forwardFailed"),
             "{e:?}"
         );
+        assert!(
+            e.details
+                .as_deref()
+                .is_some_and(|d| d.starts_with("probe GET /patroni: ")),
+            "{e:?}"
+        );
         let closed = {
             let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             l.local_addr().unwrap()
@@ -2709,6 +2727,12 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(e.key, "errors.ssh.tunnelDown", "{e:?}");
+        assert!(
+            e.details
+                .as_deref()
+                .is_some_and(|d| d.starts_with("probe GET /patroni: ")),
+            "{e:?}"
+        );
     }
 
     /// Старый `ssh -D` отвечает успехом на SOCKS и лишь потом пробует открыть канал: обрыв после этого клиент не
@@ -2754,6 +2778,17 @@ mod tests {
                 .as_deref()
                 .is_some_and(|d| d.contains("http://patroni1:8008/switchover")),
             "{e:?}"
+        );
+        // Причина помечена как причина пробы: читающему видно, что сбой не самого действия.
+        assert!(
+            e.details
+                .as_deref()
+                .is_some_and(|d| d.starts_with("probe GET /patroni: ")),
+            "{e:?}"
+        );
+        assert!(
+            e.params.values().all(|v| !v.contains("probe GET")) && !e.message.contains("probe GET"),
+            "пометка пробы только в details: {e:?}"
         );
         tunnels.close("c1");
     }
@@ -2842,10 +2877,20 @@ mod tests {
         assert!(
             e.details
                 .as_deref()
-                .is_some_and(|d| d.contains("GET /patroni")),
+                .is_some_and(|d| d.starts_with("probe GET /patroni: ")),
+            "{e:?}"
+        );
+        // Учётные данные из адреса действия нет ни в `details` ветки срока пробы, ни в остальных полях.
+        let details = e.details.as_deref().unwrap();
+        assert!(
+            !details.contains("secret") && !details.contains("user:"),
             "{e:?}"
         );
         assert!(!format!("{e:?}").contains("secret"), "{e:?}");
+        assert!(
+            e.params.values().all(|v| !v.contains("probe GET")) && !e.message.contains("probe GET"),
+            "пометка пробы только в details: {e:?}"
+        );
         assert_eq!(stalled.accepted(), 1, "только проба: запрос не отправлялся");
 
         // Медленно, но в срок: запрос уходит после ответа пробы.

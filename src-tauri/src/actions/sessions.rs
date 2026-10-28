@@ -720,9 +720,10 @@ pub async fn execute(
         ));
     }
     let started = Instant::now();
-    // Ошибка соединения или чтения версии — ошибка команды: действие не началось, строки журнала нет.
+    // Ошибка соединения или чтения версии — ошибка команды: действие не началось, строки журнала нет. Чтение версии —
+    // тоже запрос к серверу и идёт под клиентским сроком `STATEMENT_TIMEOUT` (при обрыве сети серверный не сработает).
     let c = crate::actions::conn::open(st, id, &req.member, None).await?;
-    let caps = Caps::new(crate::diag::head(&c.client).await?.version_num);
+    let caps = Caps::new(timed(crate::diag::head(&c.client)).await??.version_num);
     let sql = signal_sql(req.kind, &req.target, caps);
     let (results, records) = run_batch(
         &sessions,
