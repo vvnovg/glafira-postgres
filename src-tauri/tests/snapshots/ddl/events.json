@@ -75,8 +75,8 @@
     "bound": null,
     "parent": null,
     "partitions": [
-      "shop.events_2026_09",
-      "shop.events_2026_10"
+      { "schema": "shop", "name": "events_2026_09" },
+      { "schema": "shop", "name": "events_2026_10" }
     ]
   },
   "triggers": [],

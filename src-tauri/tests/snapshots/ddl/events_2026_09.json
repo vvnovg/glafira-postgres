@@ -73,7 +73,7 @@
   "partitioning": {
     "key": null,
     "bound": "FOR VALUES FROM ('2026-09-01 00:00:00+00') TO ('2026-10-01 00:00:00+00')",
-    "parent": "shop.events",
+    "parent": { "schema": "shop", "name": "events" },
     "partitions": []
   },
   "triggers": [],

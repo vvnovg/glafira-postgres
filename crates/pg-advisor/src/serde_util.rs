@@ -1,10 +1,32 @@
 //! Помощники serde для JSON-контракта с интерфейсом.
 
+use serde::Deserialize;
+
+/// Входное значение `i64`: десятичная строка (так отдаёт интерфейс) или число (старые данные). Общее для
+/// [`opt_i64_string`] и [`i64_string`].
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StringOrNumber {
+    Text(String),
+    Number(i64),
+}
+
+impl StringOrNumber {
+    fn into_i64<E: serde::de::Error>(self) -> Result<i64, E> {
+        match self {
+            StringOrNumber::Number(n) => Ok(n),
+            StringOrNumber::Text(s) => s.trim().parse().map_err(E::custom),
+        }
+    }
+}
+
 /// `Option<i64>` как десятичная строка в JSON. 64-битное значение (например, `query_id` — хеш) обычно больше 2^53, а
 /// JSON-число в JavaScript точно только до 2^53: числом оно округлилось бы по дороге в интерфейс. При чтении принимается
 /// и строка, и число (совместимость со старыми данными).
 pub mod opt_i64_string {
     use serde::{Deserialize, Deserializer, Serializer};
+
+    use super::StringOrNumber;
 
     pub fn serialize<S: Serializer>(value: &Option<i64>, serializer: S) -> Result<S::Ok, S::Error> {
         match value {
@@ -13,23 +35,12 @@ pub mod opt_i64_string {
         }
     }
 
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum StringOrNumber {
-        Text(String),
-        Number(i64),
-    }
-
     pub fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Option<i64>, D::Error> {
-        match Option::<StringOrNumber>::deserialize(deserializer)? {
-            None => Ok(None),
-            Some(StringOrNumber::Number(n)) => Ok(Some(n)),
-            Some(StringOrNumber::Text(s)) => {
-                s.trim().parse().map(Some).map_err(serde::de::Error::custom)
-            }
-        }
+        Option::<StringOrNumber>::deserialize(deserializer)?
+            .map(StringOrNumber::into_i64)
+            .transpose()
     }
 }
 
@@ -39,22 +50,14 @@ pub mod opt_i64_string {
 pub mod i64_string {
     use serde::{Deserialize, Deserializer, Serializer};
 
+    use super::StringOrNumber;
+
     pub fn serialize<S: Serializer>(value: &i64, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&value.to_string())
     }
 
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum StringOrNumber {
-        Text(String),
-        Number(i64),
-    }
-
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i64, D::Error> {
-        match StringOrNumber::deserialize(deserializer)? {
-            StringOrNumber::Number(n) => Ok(n),
-            StringOrNumber::Text(s) => s.trim().parse().map_err(serde::de::Error::custom),
-        }
+        StringOrNumber::deserialize(deserializer)?.into_i64()
     }
 }
 
