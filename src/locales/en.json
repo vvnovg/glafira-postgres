@@ -205,6 +205,8 @@
       "nodeUnavailable": "Node {{member}} is unavailable",
       "batchTooLarge": "At most {{max}} sessions per action",
       "batchTimeout": "The batch did not finish within {{secs}} s",
+      "statementTimeout": "The server did not answer within {{secs}} s",
+      "batchStopped": "Not attempted: the batch was stopped after a timeout",
       "badThreshold": "The age threshold must be a non-negative number of seconds",
       "noSessions": "No sessions to act on",
       "badTarget": "The sessions do not match the action target",

@@ -765,6 +765,13 @@ impl Runtimes {
             .unwrap_or_else(TopologyView::disconnected)
     }
 
+    /// Номер текущего открытия подключения (`Entry::generation`); `None` — открытия нет (подключение закрыто или не
+    /// открывалось). Пакет действия сравнивает его перед каждой сессией: закрытое или открытое заново подключение
+    /// останавливает пакет.
+    pub fn generation(&self, id: &str) -> Option<u64> {
+        self.entries.lock_safe().get(id).map(|e| e.generation)
+    }
+
     pub fn events(&self, id: &str) -> Vec<TopologyEvent> {
         self.entries
             .lock_safe()
@@ -1391,6 +1398,21 @@ pub(crate) mod tests {
         );
     }
 
+    /// Номер открытия есть только у открытого подключения; у открытия заново он другой.
+    #[tokio::test]
+    async fn generation_is_per_opening() {
+        let (rt, _src, _rec, _pools) = manual(vec![Ok(two("a"))]);
+        assert_eq!(rt.generation("c"), None, "не открывалось");
+        rt.connect(patroni_profile()).await.unwrap();
+        let first = rt.generation("c").expect("открыто");
+        rt.disconnect("c");
+        assert_eq!(rt.generation("c"), None, "закрыто");
+        rt.connect(patroni_profile()).await.unwrap();
+        let second = rt.generation("c").expect("открыто заново");
+        assert_ne!(second, first);
+        rt.shutdown();
+    }
+
     fn forgets(src: &Scripted) -> usize {
         src.log
             .lock_safe()
@@ -1992,7 +2014,7 @@ pub(crate) mod tests {
     }
 
     fn generation_of(rt: &Runtimes, id: &str) -> u64 {
-        rt.entries.lock_safe().get(id).expect("открыто").generation
+        rt.generation(id).expect("открыто")
     }
 
     /// Профиль с теми же настройками соединения, но другим оформлением.

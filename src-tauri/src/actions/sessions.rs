@@ -24,6 +24,9 @@ pub const BATCH_LIMIT: Duration = Duration::from_secs(60);
 pub const GONE_WAIT: Duration = Duration::from_secs(5);
 /// Как часто в это время проверять, что сессия исчезла.
 pub const GONE_POLL: Duration = Duration::from_millis(250);
+/// Клиентский срок ответа на один запрос к серверу: при обрыве сети запрос иначе ждал бы TCP keepalive, а
+/// серверный `statement_timeout` соединения действия (5 с) тут не поможет. Больше него на запас сети.
+pub const STATEMENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -389,11 +392,12 @@ fn result_name(o: &SessionOutcome) -> &'static str {
     }
 }
 
-async fn still_there(c: &Client, s: SessionRef) -> Result<bool, tokio_postgres::Error> {
-    Ok(!c
-        .query(&exists_sql(), &[&s.pid, &s.backend_start_us])
+/// Сессия с той же парой ещё есть. Ошибка — сервера или истёкший клиентский срок (`timed`).
+async fn still_there(c: &Client, s: SessionRef) -> AppResult<bool> {
+    let rows = timed(c.query(&exists_sql(), &[&s.pid, &s.backend_start_us]))
         .await?
-        .is_empty())
+        .map_err(|e| crate::conn::errors::from_pg(&e))?;
+    Ok(!rows.is_empty())
 }
 
 fn failed(e: &tokio_postgres::Error) -> SessionOutcome {
@@ -431,6 +435,8 @@ fn outcome_after_signal(kind: SignalKind, delivered: bool) -> Option<SessionOutc
 }
 
 /// Ждёт после terminate исчезновения сессии с тем же `backend_start`: до `GONE_WAIT`, опрос раз в `GONE_POLL`.
+/// Ошибка сервера при опросе — `signalSent` (сигнал доставлен); опрос без ответа в срок — `failed`: соединение
+/// непригодно, и пакет останавливается.
 async fn wait_gone(c: &Client, s: SessionRef) -> SessionOutcome {
     let deadline = Instant::now() + GONE_WAIT;
     loop {
@@ -438,6 +444,7 @@ async fn wait_gone(c: &Client, s: SessionRef) -> SessionOutcome {
             Ok(false) => break SessionOutcome::Terminated,
             Ok(true) if Instant::now() >= deadline => break SessionOutcome::SignalSent,
             Ok(true) => tokio::time::sleep(GONE_POLL).await,
+            Err(error) if timed_out(&error) => break SessionOutcome::Failed { error },
             Err(_) => break SessionOutcome::SignalSent,
         }
     }
@@ -451,12 +458,18 @@ async fn attempt(
     target: &SessionTarget,
     s: SessionRef,
 ) -> (SessionOutcome, Option<SessionRecord>) {
-    let rows = match target {
-        SessionTarget::IdleInTransaction { older_than_s } => {
-            c.query(sql, &[&s.pid, &s.backend_start_us, older_than_s])
-                .await
+    let query = async {
+        match target {
+            SessionTarget::IdleInTransaction { older_than_s } => {
+                c.query(sql, &[&s.pid, &s.backend_start_us, older_than_s])
+                    .await
+            }
+            _ => c.query(sql, &[&s.pid, &s.backend_start_us]).await,
         }
-        _ => c.query(sql, &[&s.pid, &s.backend_start_us]).await,
+    };
+    let rows = match timed(query).await {
+        Ok(rows) => rows,
+        Err(error) => return (SessionOutcome::Failed { error }, None),
     };
     let row = match rows {
         Ok(rows) => rows.into_iter().next(),
@@ -470,7 +483,7 @@ async fn attempt(
         return match still_there(c, s).await {
             Ok(true) => (SessionOutcome::NoLongerMatches, None),
             Ok(false) => (SessionOutcome::Gone, None),
-            Err(e) => (failed(&e), None),
+            Err(error) => (SessionOutcome::Failed { error }, None),
         };
     };
     let record = SessionRecord {
@@ -586,6 +599,95 @@ pub fn batch_code(results: &[SessionResult], outcome: journal::Outcome) -> Optio
         .map(journal::code_name)
 }
 
+fn statement_timeout() -> AppError {
+    app_err!(
+        ErrorCode::Timeout,
+        "errors.actions.statementTimeout",
+        "The server did not answer within {{secs}} s",
+        secs = STATEMENT_TIMEOUT.as_secs()
+    )
+}
+
+fn batch_timeout() -> AppError {
+    app_err!(
+        ErrorCode::Timeout,
+        "errors.actions.batchTimeout",
+        "The batch did not finish within {{secs}} s",
+        secs = BATCH_LIMIT.as_secs()
+    )
+}
+
+fn batch_stopped() -> AppError {
+    app_err!(
+        ErrorCode::Timeout,
+        "errors.actions.batchStopped",
+        "Not attempted: the batch was stopped after a timeout"
+    )
+}
+
+/// Обращение к серверу под клиентским сроком `STATEMENT_TIMEOUT`: не ответил — `errors.actions.statementTimeout`.
+async fn timed<T>(fut: impl Future<Output = T>) -> Result<T, AppError> {
+    tokio::time::timeout(STATEMENT_TIMEOUT, fut)
+        .await
+        .map_err(|_| statement_timeout())
+}
+
+/// Сервер не ответил в срок: соединение действия после зависшего запроса непригодно.
+fn timed_out(e: &AppError) -> bool {
+    e.key == "errors.actions.statementTimeout"
+}
+
+/// Сессии пакета по одной: `run_one` — сигнал одной сессии. Перед каждой сессией по порядку: подключение
+/// закрыто или открыто заново (`still_open` — `false`) — эта и оставшиеся `errors.topology.notConnected`; вышел
+/// `BATCH_LIMIT` — `batchTimeout`; прошлая сессия не дождалась ответа сервера — `batchStopped`. Такая сессия
+/// получает `failed` и строку журнала без снимка, запроса к серверу по ней нет. `run_one` — замыкание,
+/// возвращающее future, а не `AsyncFnMut`: future асинхронного замыкания компилятор не может доказать `Send`, а
+/// его требует команда Tauri.
+async fn run_batch<F, Fut>(
+    sessions: &[SessionRef],
+    started: Instant,
+    still_open: impl Fn() -> bool,
+    mut run_one: F,
+) -> (Vec<SessionResult>, Vec<SessionRecord>)
+where
+    F: FnMut(SessionRef) -> Fut,
+    Fut: Future<Output = (SessionOutcome, SessionRecord)>,
+{
+    let mut results = Vec::with_capacity(sessions.len());
+    let mut records = Vec::with_capacity(sessions.len());
+    let (mut closed, mut stopped) = (false, false);
+    for s in sessions {
+        closed = closed || !still_open();
+        let skipped = if closed {
+            Some(crate::topology::runtime::not_connected())
+        } else if started.elapsed() >= BATCH_LIMIT {
+            Some(batch_timeout())
+        } else if stopped {
+            Some(batch_stopped())
+        } else {
+            None
+        };
+        let (outcome, record) = match skipped {
+            Some(error) => {
+                let outcome = SessionOutcome::Failed { error };
+                let mut record = blank_record(*s);
+                record.result = result_name(&outcome).to_string();
+                (outcome, record)
+            }
+            None => run_one(*s).await,
+        };
+        stopped =
+            stopped || matches!(&outcome, SessionOutcome::Failed { error } if timed_out(error));
+        records.push(record);
+        results.push(SessionResult {
+            pid: s.pid,
+            backend_start_us: s.backend_start_us,
+            outcome,
+        });
+    }
+    (results, records)
+}
+
 /// Выполняет отмену или завершение сессий, разрешённых в предпросмотре (спец. §8.3). Защита — до обращения к серверу.
 pub async fn execute(
     st: &AppState,
@@ -594,6 +696,8 @@ pub async fn execute(
     confirmation: &Confirmation,
 ) -> AppResult<SessionActionResult> {
     let profile = st.profile(id)?;
+    // Номер открытия подключения: закрытое или открытое заново за время пакета останавливает его.
+    let generation = st.runtimes.generation(id);
     ensure_mutation_allowed(&profile, confirmation.confirm.as_deref())?;
     // Повтор пары — одна сессия: число для подтверждения и пакет считаются без повторов.
     let sessions = dedup_sessions(&req.sessions);
@@ -620,31 +724,13 @@ pub async fn execute(
     let c = crate::actions::conn::open(st, id, &req.member, None).await?;
     let caps = Caps::new(crate::diag::head(&c.client).await?.version_num);
     let sql = signal_sql(req.kind, &req.target, caps);
-    let mut results = Vec::with_capacity(sessions.len());
-    let mut records = Vec::with_capacity(sessions.len());
-    for s in &sessions {
-        let (outcome, record) = if started.elapsed() >= BATCH_LIMIT {
-            let outcome = SessionOutcome::Failed {
-                error: app_err!(
-                    ErrorCode::Timeout,
-                    "errors.actions.batchTimeout",
-                    "The batch did not finish within {{secs}} s",
-                    secs = BATCH_LIMIT.as_secs()
-                ),
-            };
-            let mut record = blank_record(*s);
-            record.result = result_name(&outcome).to_string();
-            (outcome, record)
-        } else {
-            one(&c.client, &sql, req.kind, &req.target, *s).await
-        };
-        records.push(record);
-        results.push(SessionResult {
-            pid: s.pid,
-            backend_start_us: s.backend_start_us,
-            outcome,
-        });
-    }
+    let (results, records) = run_batch(
+        &sessions,
+        started,
+        || st.runtimes.generation(id) == generation,
+        |s| one(&c.client, &sql, req.kind, &req.target, s),
+    )
+    .await;
     let outcome = batch_outcome(&results);
     let record = ActionRecord {
         ts: journal::now_ms(),
@@ -1214,6 +1300,198 @@ mod tests {
         assert_eq!(batch_code(&mixed, Partial), None);
         let gone = [r(SessionOutcome::Gone)];
         assert_eq!(batch_code(&gone, batch_outcome(&gone)), None);
+        // Остановленный пакет — неудача, как прочие ошибки; код — по коду ошибки.
+        for error in [statement_timeout(), batch_stopped()] {
+            let stopped = [r(SessionOutcome::Failed { error })];
+            assert_eq!(batch_outcome(&stopped), Error);
+            assert_eq!(code(&stopped).as_deref(), Some("TIMEOUT"));
+        }
+        let closed = [r(SessionOutcome::Failed {
+            error: crate::topology::runtime::not_connected(),
+        })];
+        assert_eq!(code(&closed).as_deref(), Some("NODE_UNAVAILABLE"));
+    }
+
+    /// Итог сессии без снимка: строка журнала — только пара и итог (как у сессии, по которой сигнала не было).
+    fn ran(s: SessionRef, outcome: SessionOutcome) -> (SessionOutcome, SessionRecord) {
+        let mut record = blank_record(s);
+        record.result = result_name(&outcome).to_string();
+        (outcome, record)
+    }
+
+    fn failure(r: &SessionResult) -> Option<&crate::error::AppError> {
+        match &r.outcome {
+            SessionOutcome::Failed { error } => Some(error),
+            _ => None,
+        }
+    }
+
+    fn three() -> Vec<SessionRef> {
+        vec![pair(1, 1), pair(2, 1), pair(3, 1)]
+    }
+
+    /// Строки журнала идут по сессиям пакета; у невыполненных — только пара и `failed`.
+    fn assert_not_attempted(records: &[SessionRecord], sessions: &[SessionRef]) {
+        assert_eq!(records.len(), sessions.len());
+        for (r, s) in records.iter().zip(sessions) {
+            assert_eq!((r.pid, r.backend_start_us), (s.pid, s.backend_start_us));
+            assert_eq!(r.result, "failed");
+            assert!(r.user.is_none() && r.query.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn closed_connection_stops_the_batch() {
+        let sessions = three();
+        let calls = std::cell::Cell::new(0);
+        let (results, records) = run_batch(
+            &sessions,
+            Instant::now(),
+            || calls.get() == 0,
+            |s| {
+                calls.set(calls.get() + 1);
+                std::future::ready(ran(s, SessionOutcome::Terminated))
+            },
+        )
+        .await;
+        assert_eq!(calls.get(), 1, "после закрытия запросов к серверу нет");
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].outcome, SessionOutcome::Terminated);
+        assert_eq!(records[0].result, "terminated");
+        for r in &results[1..] {
+            let e = failure(r).expect("failed");
+            assert_eq!(e.key, "errors.topology.notConnected");
+            assert_eq!(e.code, ErrorCode::NodeUnavailable);
+        }
+        assert_eq!(results.iter().map(|r| r.pid).collect::<Vec<_>>(), [1, 2, 3]);
+        assert_not_attempted(&records[1..], &sessions[1..]);
+    }
+
+    #[tokio::test]
+    async fn statement_timeout_stops_the_batch() {
+        let sessions = three();
+        let calls = std::cell::Cell::new(0);
+        let (results, records) = run_batch(
+            &sessions,
+            Instant::now(),
+            || true,
+            |s| {
+                calls.set(calls.get() + 1);
+                std::future::ready(ran(
+                    s,
+                    SessionOutcome::Failed {
+                        error: statement_timeout(),
+                    },
+                ))
+            },
+        )
+        .await;
+        assert_eq!(
+            calls.get(),
+            1,
+            "соединение после зависшего запроса не используется"
+        );
+        assert_eq!(
+            failure(&results[0]).map(|e| e.key.as_str()),
+            Some("errors.actions.statementTimeout")
+        );
+        for r in &results[1..] {
+            let e = failure(r).expect("failed");
+            assert_eq!(e.key, "errors.actions.batchStopped");
+            assert_eq!(e.code, ErrorCode::Timeout);
+            assert_eq!(
+                e.message,
+                "Not attempted: the batch was stopped after a timeout"
+            );
+        }
+        assert_not_attempted(&records, &sessions);
+    }
+
+    #[tokio::test]
+    async fn batch_limit_fails_the_rest_without_signals() {
+        let sessions = three();
+        let calls = std::cell::Cell::new(0);
+        let run = async |still_open: bool| {
+            run_batch(
+                &sessions,
+                Instant::now() - BATCH_LIMIT,
+                || still_open,
+                |s| {
+                    calls.set(calls.get() + 1);
+                    std::future::ready(ran(s, SessionOutcome::Terminated))
+                },
+            )
+            .await
+        };
+        let (results, records) = run(true).await;
+        assert_eq!(calls.get(), 0);
+        for r in &results {
+            let e = failure(r).expect("failed");
+            assert_eq!(e.key, "errors.actions.batchTimeout");
+            assert_eq!(e.message, "The batch did not finish within 60 s");
+        }
+        assert_not_attempted(&records, &sessions);
+        // Закрытие подключения проверяется раньше предела пакета.
+        let (results, _) = run(false).await;
+        assert_eq!(calls.get(), 0);
+        for r in &results {
+            assert_eq!(
+                failure(r).map(|e| e.key.as_str()),
+                Some("errors.topology.notConnected")
+            );
+        }
+    }
+
+    /// Прочие неудачи сессии пакет не останавливают: соединение после них пригодно.
+    #[tokio::test]
+    async fn ordinary_batch_runs_every_session() {
+        let sessions = three();
+        let mut outcomes = vec![
+            SessionOutcome::Failed {
+                error: crate::error::AppError::localized(
+                    ErrorCode::ConnectionFailed,
+                    crate::i18n::LocalizedText::raw("server closed the connection"),
+                ),
+            },
+            SessionOutcome::NotAllowed,
+            SessionOutcome::Gone,
+        ]
+        .into_iter();
+        let mut seen = Vec::new();
+        let (results, records) = run_batch(
+            &sessions,
+            Instant::now(),
+            || true,
+            |s| {
+                seen.push(s);
+                std::future::ready(ran(s, outcomes.next().expect("итог сессии")))
+            },
+        )
+        .await;
+        assert_eq!(seen, sessions);
+        assert_eq!(results[1].outcome, SessionOutcome::NotAllowed);
+        assert_eq!(results[2].outcome, SessionOutcome::Gone);
+        assert_eq!(
+            records
+                .iter()
+                .map(|r| r.result.as_str())
+                .collect::<Vec<_>>(),
+            ["failed", "notAllowed", "gone"]
+        );
+    }
+
+    /// Клиентский срок: запрос, на который сервер не отвечает, кончается ошибкой ровно через `STATEMENT_TIMEOUT`.
+    #[tokio::test(start_paused = true)]
+    async fn a_statement_without_an_answer_times_out() {
+        let begun = tokio::time::Instant::now();
+        let e = timed(std::future::pending::<()>()).await.unwrap_err();
+        assert_eq!(begun.elapsed(), STATEMENT_TIMEOUT);
+        assert_eq!(e.code, ErrorCode::Timeout);
+        assert_eq!(e.key, "errors.actions.statementTimeout");
+        assert_eq!(e.message, "The server did not answer within 10 s");
+        assert_eq!(e.params["secs"], "10");
+        // Ответ в срок проходит как есть.
+        assert_eq!(timed(async { 7 }).await.unwrap(), 7);
     }
 
     #[test]

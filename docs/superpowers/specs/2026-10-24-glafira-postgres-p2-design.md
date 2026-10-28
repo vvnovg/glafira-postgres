@@ -632,7 +632,10 @@ failover, число сессий пакета на prod), имя подключ
   (`errors.actions.badTarget`), для `selected` — только пары из выбора цели (тоже `badTarget`); пакет на prod — число сессий в
   `typedName`; больше 500 — `errors.actions.batchTooLarge`.
   Сессии идут по одной, на одном соединении, общий предел 60 с (`BATCH_LIMIT`): оставшиеся после него получают
-  `failed { errors.actions.batchTimeout }`. Одна сессия — один запрос:
+  `failed { errors.actions.batchTimeout }`. У каждого запроса к серверу клиентский срок 10 с (`STATEMENT_TIMEOUT`): истёк —
+  `failed { errors.actions.statementTimeout }`, и пакет останавливается, оставшиеся — `failed { errors.actions.batchStopped }`.
+  Подключение, закрытое или открытое заново между сессиями, останавливает пакет: оставшиеся — `failed { errors.topology.notConnected }`.
+  Перед каждой сессией проверяется сначала подключение, затем `BATCH_LIMIT`, затем остановка после срока. Одна сессия — один запрос:
   ```sql
   SELECT a.usename, a.datname, a.application_name, host(a.client_addr), a.state, <query_id>, left(a.query, 500),
          extract(epoch FROM now() - a.xact_start), pg_terminate_backend(a.pid)      -- или pg_cancel_backend
@@ -650,7 +653,8 @@ failover, число сессий пакета на prod), имя подключ
   `terminated` (после terminate pid с тем же `backend_start` исчез за 5 с, опрос раз в 250 мс),
   `signalSent` (отмена доставлена, или pid ещё жив через 5 с после terminate), `gone` (строки нет и пары уже нет, либо функция
   сигнала вернула `false` — процесса нет), `noLongerMatches` (строки нет, пара ещё есть: критерий не выполняется),
-  `notAllowed` (42501), `failed { error }` (прочая ошибка сервера; следующие сессии продолжаются).
+  `notAllowed` (42501), `failed { error }` (прочая ошибка сервера — следующие сессии продолжаются; истёкший срок и
+  остановка пакета — выше).
   Итог действия (`outcome`): `error`, если все сессии `notAllowed` или `failed`; `ok`, если таких нет; иначе `partial`
   (`gone` и `noLongerMatches` неудачей не считаются). Ответ — `{ member, results, outcome, journalWritten }`.
   Ошибка до первой сессии (соединение, чтение версии) — ошибка команды, строки журнала нет. `backend_start` передаётся
@@ -891,8 +895,8 @@ backendStartUs }]`. `WatchEvent` и `PatroniActionResult` — §8.6, `ActionReco
 | `TLS_ERROR` | Ошибка сертификата при запросе к API Patroni: `errors.patroni.tls` (запрос не дошёл, пробуется следующий адрес) | Тот же ключ, что у чтения |
 | `INVALID_INPUT` | Нарушено предусловие или неверный ввод | `errors.actions.leaderHealthy`, `noLeader`, `leaderChanged`, `badCandidate`, `candidateNotReady` (причины — `params.reasons`, лаг — `params.lagBytes`; интерфейс переводит коды теми же ключами, что вкладка готовности), `badSchedule`, `pastSchedule`, `nothingScheduled`, `pauseUnchanged`, `patroniOnly`, `badThreshold`, `noSessions`, `badTarget`, `batchTooLarge`, `slotActiveOrGone`; `errors.patroni.badUrl` |
 | `NOT_FOUND` | Слота нет на узле | `errors.actions.slotNotFound` |
-| `TIMEOUT` | Пакет не уложился в 60 с | Итог сессии `failed` с `errors.actions.batchTimeout` |
-| `NODE_UNAVAILABLE` | Узел действия недоступен | `errors.actions.nodeUnavailable` |
+| `TIMEOUT` | Пакет не уложился в 60 с; сервер не ответил на запрос за 10 с | Итог сессии `failed` с `errors.actions.batchTimeout` или `statementTimeout`; оставшиеся после `statementTimeout` — `batchStopped` |
+| `NODE_UNAVAILABLE` | Узел действия недоступен; подключение закрыто или открыто заново за время пакета | `errors.actions.nodeUnavailable`; оставшиеся сессии пакета — итог `failed` с `errors.topology.notConnected` |
 
 Частичные результаты — норма: ошибка узла остаётся в его строке пульса или клетке матрицы, ошибка одной сессии пакета — в её итоге.
 Колонка, недоступная по версии, — не ошибка, а `unavailable`.
