@@ -247,7 +247,7 @@ impl ReqwestHttp {
             let cause = format!(
                 "{}: {}",
                 crate::conn::profile::strip_url_credentials(url),
-                chain(e)
+                chain_without_credentials(url, e)
             );
             if refused(e) {
                 return crate::net::ssh::socks::tunnel_down(target, proxy.port(), &cause);
@@ -289,7 +289,8 @@ impl ReqwestHttp {
     /// (`tunnelDown`), недоступный адрес (`unreachable`, в том числе срок соединения) и истёкший срок самой пробы
     /// (`HTTP_TIMEOUT`; он тоже становится `unreachable` — по этому ключу вызывающий идёт к следующему адресу, а живой
     /// узел отвечает на `/patroni` за миллисекунды) возвращаются: изменяющий запрос не отправлялся. Ошибка называет
-    /// адрес действия без учётных данных, причина пробы — в `details`. Любой HTTP-ответ (код и тело не важны) и иная
+    /// адрес действия (без учётных данных — их убирают `request_error` и `connect_timed_out`), причина пробы — в
+    /// `details`. Любой HTTP-ответ (код и тело не важны) и иная
     /// ошибка (TLS) — узел отвечает: `Ok`, и судьбу решает сам запрос.
     async fn probe_through_tunnel(&self, url: &str, target: &reqwest::Url) -> AppResult<()> {
         let probe = format!(
@@ -302,13 +303,12 @@ impl ReqwestHttp {
         let Err(e) = req.send().await else {
             return Ok(());
         };
-        let url = crate::conn::profile::strip_url_credentials(url);
-        let err = self.request_error(&url, &e, HTTP_TIMEOUT);
+        let err = self.request_error(url, &e, HTTP_TIMEOUT);
         match err.key.as_str() {
             "errors.ssh.forwardFailed" | "errors.ssh.tunnelDown" | "errors.patroni.unreachable" => {
                 Err(err)
             }
-            "errors.patroni.timeout" => Err(connect_timed_out(&url, &e).with_details(format!(
+            "errors.patroni.timeout" => Err(connect_timed_out(url, &e).with_details(format!(
                 "probe GET /patroni did not answer within {} s: {}",
                 HTTP_TIMEOUT.as_secs(),
                 chain(&e)
@@ -359,12 +359,15 @@ fn socks_failure_text(text: &str) -> bool {
 
 /// Ошибка запроса без учёта туннеля. Срок соединения (`HTTP_CONNECT_TIMEOUT`; у такого сбоя `is_connect()` тоже
 /// истинно, поэтому он проверяется первым) — адрес недоступен (`connect_timed_out`), а не «не ответил за `timeout`»;
-/// срок после соединения — `errors.patroni.timeout`; сертификат — `tls`; прочее — адрес недоступен.
+/// срок после соединения — `errors.patroni.timeout`; сертификат — `tls`; прочее — адрес недоступен. Адрес в ошибке и
+/// цепочка причин — без учётных данных из userinfo (здесь и в `connect_timed_out` — единственная точка очистки для
+/// ошибок соединения и срока, и у чтения, и у изменяющего запроса).
 fn request_error(url: &str, e: &reqwest::Error, timeout: Duration) -> AppError {
     if e.is_connect() && e.is_timeout() {
         return connect_timed_out(url, e);
     }
-    let text = chain(e);
+    let text = chain_without_credentials(url, e);
+    let url = crate::conn::profile::strip_url_credentials(url);
     if e.is_timeout() {
         app_err!(
             ErrorCode::PatroniError,
@@ -398,17 +401,28 @@ fn connect_timed_out(url: &str, e: &reqwest::Error) -> AppError {
         ErrorCode::PatroniError,
         "errors.patroni.unreachable",
         "Patroni API at {{url}} is unreachable",
-        url = url
+        url = crate::conn::profile::strip_url_credentials(url)
     )
-    .with_details(chain(e))
+    .with_details(chain_without_credentials(url, e))
 }
 
 /// Связь оборвалась после отправки изменяющего запроса: он мог дойти и выполниться, повторять его нельзя.
 /// Адрес в параметрах и в тексте причин — без учётных данных из userinfo.
 fn connection_lost(url: &str, e: &reqwest::Error) -> AppError {
+    app_err!(
+        ErrorCode::PatroniError,
+        "errors.patroni.connectionLost",
+        "The connection to the Patroni API at {{url}} was lost after the request was sent: the outcome is unknown, check the overview",
+        url = crate::conn::profile::strip_url_credentials(url)
+    )
+    .with_details(chain_without_credentials(url, e))
+}
+
+/// Цепочка причин без учётных данных из userinfo: reqwest может напечатать в сообщении адрес запроса как есть
+/// (с userinfo) — вычищаем его и заданный нами вид `url`.
+fn chain_without_credentials(url: &str, e: &reqwest::Error) -> String {
     use crate::conn::profile::strip_url_credentials;
     let mut details = chain(e);
-    // reqwest печатает в сообщении адрес запроса как есть (с userinfo) — вычищаем его и заданный нами вид.
     for known in [Some(url), e.url().map(reqwest::Url::as_str)]
         .into_iter()
         .flatten()
@@ -418,13 +432,7 @@ fn connection_lost(url: &str, e: &reqwest::Error) -> AppError {
             details = details.replace(known, &clean);
         }
     }
-    app_err!(
-        ErrorCode::PatroniError,
-        "errors.patroni.connectionLost",
-        "The connection to the Patroni API at {{url}} was lost after the request was sent: the outcome is unknown, check the overview",
-        url = strip_url_credentials(url)
-    )
-    .with_details(details)
+    details
 }
 
 fn bad_json(url: &str, e: impl std::fmt::Display) -> AppError {
@@ -2376,6 +2384,76 @@ mod tests {
         assert_eq!(bad.key, "errors.patroni.badUrl", "{bad:?}");
         assert_eq!(bad.params["url"], "ftp://host/switchover");
         assert!(!format!("{bad:?}").contains("secret"), "{bad:?}");
+    }
+
+    /// Учётные данные из адреса не попадают и в ошибки фазы соединения и срока — ни у изменяющего запроса, ни у
+    /// чтения (адрес очищается в одной точке: `request_error`, `connect_timed_out`): срок после соединения, отказ
+    /// соединения, срок соединения через туннель.
+    #[tokio::test]
+    async fn connect_and_timeout_errors_do_not_carry_credentials_from_the_address() {
+        let silent = testutil::silent_server();
+        let refused = {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let direct = ReqwestHttp::new(&settings(&["http://x"]), None, None, None, None).unwrap();
+        let proxy = testutil::socks_proxy_with_silent_host("dead", ("127.0.0.1", 9)).await;
+        let tunneled = ReqwestHttp::new(
+            &settings(&["http://dead:8008"]),
+            None,
+            None,
+            Some(proxy),
+            Some("bastion".into()),
+        )
+        .unwrap();
+        let slow = format!("127.0.0.1:{}/switchover", silent.port);
+        let gone = format!("127.0.0.1:{refused}/switchover");
+        let gone_read = format!("127.0.0.1:{refused}/cluster");
+        let with_secret = |rest: &str| format!("http://user:secret@{rest}");
+        let (slow_url, gone_url, gone_read_url) = (
+            with_secret(&slow),
+            with_secret(&gone),
+            with_secret(&gone_read),
+        );
+        let (timed_out, refused_send, refused_read, refused_status, connect_timeout) = tokio::join!(
+            direct.send_json(HttpMethod::Post, &slow_url, None, Duration::from_secs(1)),
+            direct.send_json(HttpMethod::Post, &gone_url, None, HTTP_TIMEOUT),
+            direct.get_json(&gone_read_url),
+            direct.get_status(&gone_read_url),
+            tunneled.get_json("http://user:secret@dead:8008/cluster"),
+        );
+        for (e, key, url) in [
+            (timed_out.unwrap_err(), "errors.patroni.timeout", slow),
+            (
+                refused_send.unwrap_err(),
+                "errors.patroni.unreachable",
+                gone,
+            ),
+            (
+                refused_read.unwrap_err(),
+                "errors.patroni.unreachable",
+                gone_read.clone(),
+            ),
+            (
+                refused_status.unwrap_err(),
+                "errors.patroni.unreachable",
+                gone_read,
+            ),
+            (
+                connect_timeout.unwrap_err(),
+                "errors.patroni.unreachable",
+                "dead:8008/cluster".to_string(),
+            ),
+        ] {
+            assert_eq!(e.key, key, "{e:?}");
+            assert_eq!(e.params["url"], format!("http://{url}"), "{e:?}");
+            assert!(!e.message.contains("secret"), "{e:?}");
+            assert!(
+                e.details.as_deref().is_some_and(|d| !d.contains("secret")),
+                "{e:?}"
+            );
+            assert!(!format!("{e:?}").contains("secret"), "{e:?}");
+        }
     }
 
     /// Неверный адрес (не http(s), без схемы, без узла) — ошибка настройки: сеть не трогается.
