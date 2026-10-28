@@ -369,8 +369,19 @@ fn validate_tls(ca: Option<&String>, cert: Option<&ClientCert>) -> AppResult<()>
         validate_path(ca)?;
     }
     if let Some(c) = cert {
+        // Флажок «клиентский сертификат» в форме создаёт сертификат с пустыми путями: пустой путь — «не задан»,
+        // а не «не абсолютный».
+        if c.certificate_path.trim().is_empty() {
+            return Err(invalid(ltext!(
+                "errors.connections.certRequired",
+                "Specify the client certificate file"
+            )));
+        }
         validate_path(&c.certificate_path)?;
-        match (c.format, &c.key_path) {
+        match (
+            c.format,
+            c.key_path.as_deref().filter(|k| !k.trim().is_empty()),
+        ) {
             (CertFormat::Pem, None) => {
                 return Err(invalid(ltext!(
                     "errors.connections.keyRequired",
@@ -791,6 +802,52 @@ mod tests {
         assert_eq!(u.patroni.as_ref().unwrap().username, None);
     }
 
+    /// Поля путей в форме можно очистить: пустой или из пробелов путь CA и ключа — «не задан», а пустой путь
+    /// сертификата после нормализации остаётся пустым и ловится проверкой `certRequired`.
+    #[test]
+    fn blank_tls_paths_are_normalized_before_validation() {
+        let cert = |cert: &str, key: &str| ClientCert {
+            format: CertFormat::Pem,
+            certificate_path: cert.into(),
+            key_path: Some(key.into()),
+        };
+        let mut p = sample_profile("a");
+        p.pg.tls.ca_path = Some("   ".into());
+        p.pg.tls.client_cert = Some(cert(&abs("c.pem"), "  "));
+        normalize_profile(&mut p);
+        assert_eq!(p.pg.tls.ca_path, None);
+        assert_eq!(p.pg.tls.client_cert.as_ref().unwrap().key_path, None);
+        assert_eq!(
+            validate_profile(&p).unwrap_err().key,
+            "errors.connections.keyRequired"
+        );
+
+        // CA очищен, сертификат с ключом задан — профиль сохраняется.
+        let mut ok = sample_profile("b");
+        ok.pg.tls.ca_path = Some("".into());
+        ok.pg.tls.client_cert = Some(cert(&abs("c.pem"), &abs("k.pem")));
+        normalize_profile(&mut ok);
+        assert_eq!(ok.pg.tls.ca_path, None);
+        assert!(validate_profile(&ok).is_ok());
+
+        // То же у TLS Patroni API.
+        let mut a = patroni(sample_profile("c"));
+        a.patroni.as_mut().unwrap().tls = Some(ApiTls {
+            ca_path: Some(" ".into()),
+            verify_hostname: true,
+            client_cert: Some(cert("  ", "")),
+        });
+        normalize_profile(&mut a);
+        let tls = a.patroni.as_ref().unwrap().tls.as_ref().unwrap();
+        assert_eq!(tls.ca_path, None);
+        assert_eq!(tls.client_cert.as_ref().unwrap().certificate_path, "");
+        assert_eq!(tls.client_cert.as_ref().unwrap().key_path, None);
+        assert_eq!(
+            validate_profile(&a).unwrap_err().key,
+            "errors.connections.certRequired"
+        );
+    }
+
     #[test]
     fn validation_rules() {
         let cases: Vec<Case> = vec![
@@ -871,6 +928,59 @@ mod tests {
                         format: CertFormat::Pem,
                         certificate_path: abs("c.pem"),
                         key_path: None,
+                    })
+                }),
+            ),
+            // Пустой путь сертификата — «укажите файл», а не «путь должен быть абсолютным: » (флажок в форме уже
+            // создаёт сертификат с пустыми путями); проверка идёт раньше абсолютности и не зависит от формата.
+            (
+                "errors.connections.certRequired",
+                Box::new(|p| {
+                    p.pg.tls.client_cert = Some(ClientCert {
+                        format: CertFormat::Pem,
+                        certificate_path: "".into(),
+                        key_path: Some(abs("k.pem")),
+                    })
+                }),
+            ),
+            (
+                "errors.connections.certRequired",
+                Box::new(|p| {
+                    p.pg.tls.client_cert = Some(ClientCert {
+                        format: CertFormat::Pem,
+                        certificate_path: "  ".into(),
+                        key_path: Some(abs("k.pem")),
+                    })
+                }),
+            ),
+            (
+                "errors.connections.certRequired",
+                Box::new(|p| {
+                    p.pg.tls.client_cert = Some(ClientCert {
+                        format: CertFormat::Pkcs12,
+                        certificate_path: "".into(),
+                        key_path: None,
+                    })
+                }),
+            ),
+            // Пустой (или из пробелов) путь ключа PEM — то же, что отсутствующий.
+            (
+                "errors.connections.keyRequired",
+                Box::new(|p| {
+                    p.pg.tls.client_cert = Some(ClientCert {
+                        format: CertFormat::Pem,
+                        certificate_path: abs("c.pem"),
+                        key_path: Some("".into()),
+                    })
+                }),
+            ),
+            (
+                "errors.connections.keyRequired",
+                Box::new(|p| {
+                    p.pg.tls.client_cert = Some(ClientCert {
+                        format: CertFormat::Pem,
+                        certificate_path: abs("c.pem"),
+                        key_path: Some("  ".into()),
                     })
                 }),
             ),

@@ -453,17 +453,26 @@ impl SshErrorKind {
     }
 }
 
-/// Отчёт askpass о неизвестном ключе хоста: хост в кавычках и отпечаток `SHA256:…`.
+/// Отчёт askpass о неизвестном ключе хоста: хост в кавычках и отпечаток `SHA256:…`. Для IP-целей ssh печатает
+/// адрес дважды (`X (X)`) — тогда хост это `X`; имя с адресом (`bastion (10.0.0.5)`) остаётся как есть.
 pub fn parse_host_key_report(report: &str) -> (Option<String>, Option<String>) {
     let host = report
         .split_once("authenticity of host '")
         .and_then(|(_, rest)| rest.split_once('\''))
-        .map(|(h, _)| h.to_string());
+        .map(|(h, _)| collapse_duplicated_host(h).to_string());
     let fingerprint = report
         .split_whitespace()
         .find(|w| w.starts_with("SHA256:"))
         .map(|w| w.trim_end_matches('.').to_string());
     (host, fingerprint)
+}
+
+/// `X (X)` → `X`; всё остальное без изменений.
+fn collapse_duplicated_host(host: &str) -> &str {
+    match host.split_once(" (") {
+        Some((name, rest)) if rest.strip_suffix(')') == Some(name) => name,
+        _ => host,
+    }
 }
 
 /// Вид ошибки по выводу ssh (`stderr_tail`) и отчёту askpass; код выхода у OpenSSH на все ошибки один (255),
@@ -770,6 +779,37 @@ mod tests {
                 host: Some("bastion (10.0.0.5)".into()),
                 fingerprint: Some("SHA256:abcDEF+/=".into())
             }
+        );
+    }
+
+    /// Для IP-целей ssh печатает адрес дважды (`X (X)`): в диалоге доверия показывается один раз.
+    #[test]
+    fn host_key_report_collapses_duplicated_host() {
+        let report = |h: &str| {
+            format!(
+                "The authenticity of host '{h}' can't be established.\nED25519 key fingerprint is SHA256:abcDEF+/=.\nAre you sure you want to continue connecting (yes/no/[fingerprint])?"
+            )
+        };
+        assert_eq!(
+            parse_host_key_report(&report("[127.0.0.1]:2222 ([127.0.0.1]:2222)")),
+            (
+                Some("[127.0.0.1]:2222".into()),
+                Some("SHA256:abcDEF+/=".into())
+            )
+        );
+        assert_eq!(
+            parse_host_key_report(&report("10.0.0.5 (10.0.0.5)")).0,
+            Some("10.0.0.5".into())
+        );
+        // Имя и адрес различаются — оба остаются, как раньше.
+        assert_eq!(
+            parse_host_key_report(&report("bastion (10.0.0.5)")).0,
+            Some("bastion (10.0.0.5)".into())
+        );
+        // Без скобок — как есть.
+        assert_eq!(
+            parse_host_key_report(&report("10.0.0.5")).0,
+            Some("10.0.0.5".into())
         );
     }
 
