@@ -1,8 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type KeyboardEvent, useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api } from "../../api/client";
-import type { Confirmation, ConnectionProfile, PatroniAction, PatroniActionPreview, WatchEvent } from "../../api/types";
+import { api, toAppError } from "../../api/client";
+import type { Confirmation, ConnectionProfile, FailoverReason, PatroniAction, PatroniActionPreview, WatchEvent } from "../../api/types";
 import { formatScheduled } from "../../lib/format";
 import { defaultScheduleLocal, secondsUntil, toRfc3339 } from "../../lib/schedule";
 import { isRunningLeader, roleLabel } from "../../lib/topology";
@@ -184,6 +184,22 @@ export function PatroniActionDialog({ connectionId, profile, action, scope = "",
       default:
         return null;
     }
+  };
+
+  /** Кандидат не готов (Rust перепроверил перед отправкой): причины и лаг из параметров ошибки, переведённые как на вкладке готовности. */
+  const notReadyReasons = (error: unknown) => {
+    const e = toAppError(error);
+    const reasons = e.key === "errors.actions.candidateNotReady" ? e.params?.reasons : undefined;
+    if (!reasons) return null;
+    const lagBytes = e.params?.lagBytes;
+    // Неизвестный код (версия Rust новее интерфейса) показывается как есть. `hasOwnProperty`: код вроде `toString` не ключ словаря.
+    const codes = reasons.split(",").map((code) => (Object.prototype.hasOwnProperty.call(REASON_KEYS, code) ? t(REASON_KEYS[code as FailoverReason]) : code));
+    return (
+      <>
+        <p className="muted">{t("actions.patroni.notReadyReasons", { reasons: codes.join("; ") })}</p>
+        {lagBytes && <p className="muted">{t("actions.patroni.notReadyLag", { lag: bytesText(Number(lagBytes)) })}</p>}
+      </>
+    );
   };
 
   const groupId = useId();
@@ -385,7 +401,12 @@ export function PatroniActionDialog({ connectionId, profile, action, scope = "",
           {block !== null && closeButton}
         </>
       )}
-      {run.error && <ErrorBanner error={run.error} />}
+      {run.error && (
+        <>
+          <ErrorBanner error={run.error} />
+          {notReadyReasons(run.error)}
+        </>
+      )}
       {run.data && (
         <>
           {run.data.outcomeUnknown ? (

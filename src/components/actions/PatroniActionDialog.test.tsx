@@ -677,6 +677,44 @@ describe("PatroniActionDialog", () => {
       expect(vi.mocked(api.executePatroniAction).mock.calls[0][2]).toEqual({ confirm: "billing-prod", typedName: null });
     });
 
+    it("кандидат не готов: причины из параметров переведены теми же ключами, что вкладка готовности, лаг — отдельной строкой", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.executePatroniAction).mockRejectedValue(
+        appError({
+          key: "errors.actions.candidateNotReady",
+          params: { member: "pg-2", reasons: "lagTooHigh,unreachable", lagBytes: "1048576" },
+        }),
+      );
+      renderWithClient(dialog(switchover));
+      await user.click(await screen.findByRole("button", { name: "Выполнить" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("pg-2 не готов стать лидером");
+      const reasons = `${i18n.t("diag.failover.reasons.lagTooHigh")}; ${i18n.t("diag.failover.reasons.unreachable")}`;
+      expect(screen.getByText(`Причины: ${reasons}`)).toHaveClass("muted");
+      expect(screen.getByText("Лаг: 1,0 MB")).toHaveClass("muted");
+      // Коды причин сырыми не показываются.
+      expect(screen.queryByText(/lagTooHigh|unreachable/)).toBeNull();
+    });
+
+    it("кандидат не готов, лаг неизвестен: строки лага нет; неизвестный код показан как есть; без причин строк нет", async () => {
+      const user = userEvent.setup();
+      const reject = (params: Record<string, string>) =>
+        vi.mocked(api.executePatroniAction).mockRejectedValue(appError({ key: "errors.actions.candidateNotReady", params: { member: "pg-2", ...params } }));
+      reject({ reasons: "lagUnknown,fromTheFuture,toString" });
+      renderWithClient(dialog(switchover));
+      await user.click(await screen.findByRole("button", { name: "Выполнить" }));
+      await screen.findByRole("alert");
+      expect(screen.getByText(`Причины: ${i18n.t("diag.failover.reasons.lagUnknown")}; fromTheFuture; toString`)).toBeInTheDocument();
+      expect(screen.queryByText(/^Лаг:/)).toBeNull();
+
+      // Кандидата нет в вердикте: параметров причин нет — только баннер ошибки.
+      reject({});
+      await user.click(screen.getByRole("button", { name: "Выполнить" }));
+      await waitFor(() => expect(api.executePatroniAction).toHaveBeenCalledTimes(2));
+      await screen.findByRole("alert");
+      expect(screen.queryByText(/^Причины:/)).toBeNull();
+      expect(screen.queryByText(/^Лаг:/)).toBeNull();
+    });
+
     it("предпросмотр не удался: ошибка переведена, подтверждения нет, закрыть можно", async () => {
       const user = userEvent.setup();
       const onClose = vi.fn();

@@ -709,7 +709,9 @@ Patroni (412 «leader name does not match» → `actionRejected`). У запла
 /config, paused)`, `/config` не прочитался — пределы Patroni по умолчанию, как в предпросмотре — и названный кандидат должен
 быть `ready`: доступен, получает WAL, лаг известен и не выше `maximum_lag_on_failover`, без `nofailover` и
 `failover_priority: 0`, синхронный в синхронном режиме. Иначе — `errors.actions.candidateNotReady` (`INVALID_INPUT`,
-`params.member`; причины и лаг — в `details`); кандидата нет в вердикте — тот же отказ. Решает чистая функция
+`params.member`; причины — `params.reasons` (коды через запятую), лаг — `params.lagBytes` (байты строкой, только если
+известен); интерфейс переводит коды теми же ключами, что вкладка готовности); кандидата нет в вердикте — тот же отказ
+с одним `params.member`. Решает чистая функция
 `ensure_candidate_ready(candidates, name)`. Это главное для failover: к кандидату, названному явно, Patroni предел лага не
 применяет, а вердикт диалога мог устареть до подтверждения. Проверяется и switchover с кандидатом (интерфейс и так не даёт
 выбрать неготового); «Patroni выберет сам» — нет: кандидата выбирает Patroni по своим правилам.
@@ -887,7 +889,7 @@ backendStartUs }]`. `WatchEvent` и `PatroniActionResult` — §8.6, `ActionReco
 | `AUTH_FAILED` | Patroni отклонил учётные данные (401, 403) | `errors.patroni.unauthorized` или `credentialsWithheld` — те же ключи, что у чтения |
 | `PATRONI_ERROR` | Отказ Patroni и сбои запроса | `errors.patroni.actionRejected` (`params.status`, 500 символов ответа в `details`), `authRequired`, `noUrls`; неизвестный исход — `timeout`, `connectionLost`, `statusUnknown` (§8.5); `unreachable` — запрос не дошёл |
 | `TLS_ERROR` | Ошибка сертификата при запросе к API Patroni: `errors.patroni.tls` (запрос не дошёл, пробуется следующий адрес) | Тот же ключ, что у чтения |
-| `INVALID_INPUT` | Нарушено предусловие или неверный ввод | `errors.actions.leaderHealthy`, `noLeader`, `leaderChanged`, `badCandidate`, `candidateNotReady` (причины в `details`), `badSchedule`, `pastSchedule`, `nothingScheduled`, `pauseUnchanged`, `patroniOnly`, `badThreshold`, `noSessions`, `badTarget`, `batchTooLarge`, `slotActiveOrGone`; `errors.patroni.badUrl` |
+| `INVALID_INPUT` | Нарушено предусловие или неверный ввод | `errors.actions.leaderHealthy`, `noLeader`, `leaderChanged`, `badCandidate`, `candidateNotReady` (причины — `params.reasons`, лаг — `params.lagBytes`; интерфейс переводит коды теми же ключами, что вкладка готовности), `badSchedule`, `pastSchedule`, `nothingScheduled`, `pauseUnchanged`, `patroniOnly`, `badThreshold`, `noSessions`, `badTarget`, `batchTooLarge`, `slotActiveOrGone`; `errors.patroni.badUrl` |
 | `NOT_FOUND` | Слота нет на узле | `errors.actions.slotNotFound` |
 | `TIMEOUT` | Пакет не уложился в 60 с | Итог сессии `failed` с `errors.actions.batchTimeout` |
 | `NODE_UNAVAILABLE` | Узел действия недоступен | `errors.actions.nodeUnavailable` |

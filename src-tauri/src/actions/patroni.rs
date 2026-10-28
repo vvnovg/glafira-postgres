@@ -595,30 +595,34 @@ fn named_candidate(a: &PatroniAction) -> Option<&str> {
 /// Названный кандидат — готовая реплика по вердикту `candidates`: доступна, получает WAL, лаг известен и не выше
 /// `maximum_lag_on_failover`, без `nofailover` и `failover_priority: 0`, синхронная в синхронном режиме. Patroni
 /// сам предел лага к кандидату failover, названному явно, не применяет: без этой проверки отстающая реплика стала
-/// бы лидером с потерей данных. Причины и лаг — в `details`. Кандидата нет в вердикте — тоже отказ.
+/// бы лидером с потерей данных. Причины — параметр `reasons` (коды вердикта через запятую, в его порядке), лаг —
+/// `lagBytes` (байты строкой, только когда известен): интерфейс переводит коды теми же ключами, что вкладка
+/// готовности. Кандидата нет в вердикте — тоже отказ, с одним `member`.
 pub fn ensure_candidate_ready(candidates: &[Candidate], name: &str) -> AppResult<()> {
     let found = candidates.iter().find(|c| c.member == name);
     if found.is_some_and(|c| c.ready) {
         return Ok(());
     }
-    let err = app_err!(
+    let mut err = app_err!(
         ErrorCode::InvalidInput,
         "errors.actions.candidateNotReady",
         "{{member}} is not ready to become the leader",
         member = name
     );
-    Err(match found {
-        Some(c) => err.with_details(format!(
-            "reasons: {}; lagBytes: {}",
+    if let Some(c) = found {
+        err.params.insert(
+            "reasons".into(),
             c.reasons
                 .iter()
                 .map(reason_code)
                 .collect::<Vec<_>>()
-                .join(", "),
-            c.lag_bytes.map_or("unknown".into(), |l| l.to_string())
-        )),
-        None => err,
-    })
+                .join(","),
+        );
+        if let Some(lag) = c.lag_bytes {
+            err.params.insert("lagBytes".into(), lag.to_string());
+        }
+    }
+    Err(err)
 }
 
 /// Имя причины, как в JSON вердикта (`lagTooHigh`…).
@@ -1245,8 +1249,10 @@ mod tests {
             );
             assert_eq!(e.params["member"], "pg-2", "{what}");
             assert_eq!(e.message, "pg-2 is not ready to become the leader");
-            let details = e.details.unwrap_or_default();
-            assert!(details.contains(reason), "{what}: {details}");
+            // Причины — параметром (интерфейс переводит коды), текстового `details` у ошибки нет.
+            assert_eq!(e.details, None, "{what}");
+            let reasons = e.params.get("reasons").map_or("", String::as_str);
+            assert!(reasons.split(',').any(|r| r == reason), "{what}: {reasons}");
             // Соседняя готовая реплика проходит: проверяется именно названный кандидат.
             if what != "not sync" {
                 assert!(
@@ -1258,12 +1264,48 @@ mod tests {
     }
 
     #[test]
+    fn refusal_carries_reasons_and_lag_as_params() {
+        // Две причины сразу: лаг выше предела и реплика не синхронная; порядок — как в вердикте.
+        let sync = DynConfig {
+            synchronous_mode: pg_advisor::failover::SyncMode::On,
+            ..DynConfig::default()
+        };
+        let mut t = leader_down();
+        t.members[1].lag_bytes = Some(2 * pg_advisor::failover::DEFAULT_MAXIMUM_LAG_ON_FAILOVER);
+        let lag = t.members[1].lag_bytes.unwrap();
+        let v = verdict(&t, &sync);
+        let e = ensure_candidate_ready(&v, "pg-2").unwrap_err();
+        assert_eq!(e.params["member"], "pg-2");
+        assert_eq!(e.params["reasons"], "lagTooHigh,notSynchronous", "{v:?}");
+        assert_eq!(e.params["lagBytes"], lag.to_string());
+        assert_eq!(e.params.len(), 3, "{:?}", e.params);
+        assert_eq!(e.details, None);
+        assert_eq!(e.message, "pg-2 is not ready to become the leader");
+    }
+
+    #[test]
+    fn refusal_omits_lag_when_unknown() {
+        let mut t = leader_down();
+        t.members[1].lag_bytes = None;
+        let e = ensure_candidate_ready(&verdict(&t, &DynConfig::default()), "pg-2").unwrap_err();
+        assert_eq!(e.params["reasons"], "lagUnknown");
+        assert!(!e.params.contains_key("lagBytes"), "{:?}", e.params);
+        assert_eq!(e.details, None);
+    }
+
+    #[test]
     fn a_candidate_missing_from_the_verdict_is_refused() {
         let v = verdict(&leader_down(), &DynConfig::default());
         for name in ["pg-9", "pg-1", ""] {
             let e = ensure_candidate_ready(&v, name).unwrap_err();
             assert_eq!(e.key, "errors.actions.candidateNotReady", "{name}");
             assert_eq!(e.details, None, "{name}");
+            // Кандидата нет в вердикте: причин и лага нет, остаётся одно имя.
+            assert_eq!(
+                e.params.keys().map(String::as_str).collect::<Vec<_>>(),
+                ["member"],
+                "{name}"
+            );
         }
         assert_eq!(
             ensure_candidate_ready(&[], "pg-2").unwrap_err().key,

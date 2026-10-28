@@ -1464,6 +1464,8 @@
       "candidateLabel": "имя кандидата",
       "candidateLag": "лаг {{lag}}",
       "noReadyCandidate": "Нет реплики, готовой стать лидером",
+      "notReadyReasons": "Причины: {{reasons}}",
+      "notReadyLag": "Лаг: {{lag}}",
       "when": "Когда",
       "now": "Сейчас",
       "scheduled": "По расписанию",

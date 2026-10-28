@@ -1436,6 +1436,8 @@
       "candidateLabel": "candidate name",
       "candidateLag": "lag {{lag}}",
       "noReadyCandidate": "No replica is ready to become the leader",
+      "notReadyReasons": "Reasons: {{reasons}}",
+      "notReadyLag": "Lag: {{lag}}",
       "when": "When",
       "now": "Now",
       "scheduled": "Scheduled",
