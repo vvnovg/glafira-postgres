@@ -1926,7 +1926,7 @@ mod tests {
 
     /// Failover при мёртвом лидере: его адрес молчит на соединение, запрос наверняка не отправлялся — `send` идёт
     /// к следующему адресу, не дожидаясь общего срока запроса. Настоящий клиент, прокси SOCKS «молчит» для узла
-    /// `dead-leader` и отвечает за `live`.
+    /// `dead-leader` и отвечает за `live`; через прокси (туннель) запросу предшествует пробное чтение `GET /patroni`.
     #[tokio::test]
     async fn send_moves_on_from_an_address_that_never_accepts_the_connection() {
         use crate::conn::profile::PatroniSettings;
@@ -1957,7 +1957,7 @@ mod tests {
             (url.as_str(), reply.status),
             ("http://live:8008/failover", 200)
         );
-        assert_eq!(live.accepted(), 1);
+        assert_eq!(live.accepted(), 2, "пробное чтение и сам запрос");
         assert!(
             took >= HTTP_CONNECT_TIMEOUT - std::time::Duration::from_millis(500)
                 && took < HTTP_TIMEOUT,

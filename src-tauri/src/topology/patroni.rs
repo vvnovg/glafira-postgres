@@ -263,6 +263,53 @@ impl ReqwestHttp {
     fn withholds_credentials(&self, url: &str) -> bool {
         self.auth.is_some() && self.https_only && !is_https(url)
     }
+
+    /// `GET` клиентом чтения с basic auth профиля; второе значение — пароль не отправлен (`withholds_credentials`,
+    /// в журнале — одно предупреждение на адрес).
+    fn read_request(&self, url: &str) -> (reqwest::RequestBuilder, bool) {
+        let mut req = self.client.get(url);
+        let withheld = self.withholds_credentials(url);
+        if withheld {
+            let clean = crate::conn::profile::strip_url_credentials(url);
+            if self.warned.lock_safe().insert(clean.clone()) {
+                tracing::warn!(
+                    "Patroni API {clean}: not https while the connection uses https only; basic auth is not sent"
+                );
+            }
+        } else if let Some((u, p)) = &self.auth {
+            req = req.basic_auth(u, Some(p));
+        }
+        (req, withheld)
+    }
+
+    /// Пробное чтение `GET /patroni` того же узла перед изменяющим запросом через туннель. Старый `ssh -D` отвечает
+    /// успехом SOCKS до открытия канала к узлу, и если бастион до узла не достучался, поток закрывается уже после
+    /// отправки — для изменяющего запроса такой обрыв неотличим от обрыва после доставки. Чтение же можно потерять
+    /// без вреда: его сбой проброса (`forwardFailed`), остановленный туннель (`tunnelDown`) или недоступный адрес
+    /// (`unreachable`, в том числе срок соединения) возвращается — изменяющий запрос не отправлялся. Любой
+    /// HTTP-ответ (код и тело не важны) и любая иная ошибка (срок после соединения, TLS) — узел отвечает: `Ok`, и
+    /// судьбу решает сам запрос.
+    async fn probe_through_tunnel(&self, target: &reqwest::Url) -> AppResult<()> {
+        let probe = format!(
+            "{}://{}:{}/patroni",
+            target.scheme(),
+            target.host_str().unwrap_or_default(),
+            target.port_or_known_default().unwrap_or_default()
+        );
+        let (req, _) = self.read_request(&probe);
+        match req.send().await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                let err = self.request_error(&probe, &e, HTTP_TIMEOUT);
+                match err.key.as_str() {
+                    "errors.ssh.forwardFailed"
+                    | "errors.ssh.tunnelDown"
+                    | "errors.patroni.unreachable" => Err(err),
+                    _ => Ok(()),
+                }
+            }
+        }
+    }
 }
 
 fn is_certificate_error(e: &reqwest::Error) -> bool {
@@ -304,7 +351,13 @@ fn socks_failure_text(text: &str) -> bool {
     text.contains("io error during SOCKS handshake") || text.contains("SOCKS error:")
 }
 
+/// Ошибка запроса без учёта туннеля. Срок соединения (`HTTP_CONNECT_TIMEOUT`; у такого сбоя `is_connect()` тоже
+/// истинно, поэтому он проверяется первым) — адрес недоступен (`connect_timed_out`), а не «не ответил за `timeout`»;
+/// срок после соединения — `errors.patroni.timeout`; сертификат — `tls`; прочее — адрес недоступен.
 fn request_error(url: &str, e: &reqwest::Error, timeout: Duration) -> AppError {
+    if e.is_connect() && e.is_timeout() {
+        return connect_timed_out(url, e);
+    }
     let text = chain(e);
     if e.is_timeout() {
         app_err!(
@@ -395,18 +448,7 @@ fn is_patroni_state(url: &str, v: &serde_json::Value) -> bool {
 impl PatroniHttp for ReqwestHttp {
     fn get_json<'a>(&'a self, url: &'a str) -> BoxFuture<'a, AppResult<serde_json::Value>> {
         Box::pin(async move {
-            let mut req = self.client.get(url);
-            let withheld = self.withholds_credentials(url);
-            if withheld {
-                let clean = crate::conn::profile::strip_url_credentials(url);
-                if self.warned.lock_safe().insert(clean.clone()) {
-                    tracing::warn!(
-                        "Patroni API {clean}: not https while the connection uses https only; basic auth is not sent"
-                    );
-                }
-            } else if let Some((u, p)) = &self.auth {
-                req = req.basic_auth(u, Some(p));
-            }
+            let (req, withheld) = self.read_request(url);
             let resp = req
                 .send()
                 .await
@@ -469,13 +511,20 @@ impl PatroniHttp for ReqwestHttp {
         Box::pin(async move {
             // Неверный адрес — ошибка настройки: до сети дело не доходит, и «не дошёл» тут ни при чём (обход
             // адресов на ней останавливается).
-            if !reqwest::Url::parse(url).is_ok_and(|u| matches!(u.scheme(), "http" | "https")) {
-                return Err(app_err!(
-                    ErrorCode::InvalidInput,
-                    "errors.patroni.badUrl",
-                    "The Patroni API address {{url}} is not a valid http(s) URL",
-                    url = crate::conn::profile::strip_url_credentials(url)
-                ));
+            let target = match reqwest::Url::parse(url) {
+                Ok(u) if matches!(u.scheme(), "http" | "https") => u,
+                _ => {
+                    return Err(app_err!(
+                        ErrorCode::InvalidInput,
+                        "errors.patroni.badUrl",
+                        "The Patroni API address {{url}} is not a valid http(s) URL",
+                        url = crate::conn::profile::strip_url_credentials(url)
+                    ));
+                }
+            };
+            // Через туннель «не дошёл» после успеха SOCKS видно только по чтению (`probe_through_tunnel`).
+            if self.proxy.is_some() {
+                self.probe_through_tunnel(&target).await?;
             }
             let m = match method {
                 HttpMethod::Post => reqwest::Method::POST,
@@ -492,18 +541,14 @@ impl PatroniHttp for ReqwestHttp {
                 req = req.basic_auth(u, Some(p));
             }
             // Изменяющий запрос нельзя повторять вслепую: «не дошёл» решается здесь, где известна фаза сбоя.
-            // Соединение не установилось за `HTTP_CONNECT_TIMEOUT` (фаза соединителя: у такого сбоя `is_connect()`
-            // тоже истинно, поэтому проверяется первым) — запрос наверняка не отправлен: адрес недоступен. Прочий
-            // сбой соединения (TCP, SOCKS, TLS) — обычная классификация, как у чтения. Срок вышел уже после
-            // соединения — `errors.patroni.timeout`, исход неизвестен. Любой другой сбой (обрыв после отправки, а
-            // также ошибка `Builder` после перенаправления, которое reqwest выполняет уже после ответа сервера) и
+            // Сбой соединения (TCP, SOCKS, TLS) и срок — обычная классификация, как у чтения: соединение не
+            // установилось за `HTTP_CONNECT_TIMEOUT` — запрос наверняка не отправлен, адрес недоступен; срок вышел уже
+            // после соединения — `errors.patroni.timeout`, исход неизвестен. Любой другой сбой (обрыв после отправки,
+            // а также ошибка `Builder` после перенаправления, которое reqwest выполняет уже после ответа сервера) и
             // любой сбой при чтении ответа — запрос мог дойти до Patroni и выполниться: исход неизвестен. Неверный
             // адрес отсекается до сети.
             let resp = match req.send().await {
                 Ok(r) => r,
-                Err(e) if e.is_connect() && e.is_timeout() => {
-                    return Err(connect_timed_out(url, &e));
-                }
                 Err(e) if e.is_connect() || e.is_timeout() => {
                     return Err(self.request_error(url, &e, timeout));
                 }
@@ -2129,8 +2174,8 @@ mod tests {
 
     /// Адрес, который не устанавливает соединение (хост за бастионом молчит: ответа SOCKS нет), даёт срок соединения
     /// `HTTP_CONNECT_TIMEOUT`, а не общий срок запроса, и для изменяющего запроса это «адрес недоступен» (запрос не
-    /// отправлялся — вызывающий идёт к следующему адресу), а не `timeout` (исход неизвестен). Чтение ведёт себя как
-    /// раньше: тот же сбой — `errors.patroni.timeout`.
+    /// отправлялся — вызывающий идёт к следующему адресу), а не `timeout` (исход неизвестен). Чтение — так же
+    /// `errors.patroni.unreachable`: «не ответил за 5 с» про срок соединения в 3 с было бы неправдой.
     #[tokio::test]
     async fn send_json_treats_a_connect_timeout_as_an_unreachable_address() {
         let proxy = testutil::socks_proxy_with_silent_host("dead", ("127.0.0.1", 9)).await;
@@ -2154,7 +2199,13 @@ mod tests {
             "{sent:?}"
         );
         assert!(sent.details.as_deref().is_some_and(|d| !d.is_empty()));
-        assert_eq!(read.unwrap_err().key, "errors.patroni.timeout");
+        let read = read.unwrap_err();
+        assert_eq!(
+            (read.code, read.key.as_str()),
+            (ErrorCode::PatroniError, "errors.patroni.unreachable"),
+            "{read:?}"
+        );
+        assert!(read.details.as_deref().is_some_and(|d| !d.is_empty()));
         assert!(
             took >= HTTP_CONNECT_TIMEOUT - Duration::from_millis(500) && took < HTTP_TIMEOUT,
             "срок соединения ≈ 3 с, получилось {took:?}"
@@ -2573,10 +2624,11 @@ mod tests {
     }
 
     /// Старый `ssh -D` отвечает успехом на SOCKS и лишь потом пробует открыть канал: обрыв после этого клиент не
-    /// отличает от обрыва связи после отправки запроса. Для изменяющего запроса это `connectionLost` (исход
-    /// неизвестен, повтора нет), а не `forwardFailed`, как у чтения.
+    /// отличает от обрыва связи после отправки запроса. Поэтому через туннель изменяющему запросу предшествует пробное
+    /// чтение `GET /patroni` того же адреса: его обрыв — сбой проброса (`forwardFailed` с узлом из адреса), и сам
+    /// запрос не отправляется — вызывающий идёт к следующему адресу, а не получает `connectionLost`.
     #[tokio::test]
-    async fn send_json_through_the_tunnel_treats_a_late_forward_failure_as_lost() {
+    async fn send_json_through_the_tunnel_reports_a_late_forward_failure_before_sending() {
         use crate::conn::profile::SshAuth;
         use crate::net::ssh::tunnel::tests::{UNREACHABLE, profile as ssh_profile, registry};
         let dir = tempfile::tempdir().unwrap();
@@ -2596,10 +2648,123 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             (e.code, e.key.as_str()),
-            (ErrorCode::PatroniError, "errors.patroni.connectionLost"),
+            (ErrorCode::SshError, "errors.ssh.forwardFailed"),
+            "{e:?}"
+        );
+        assert_eq!(
+            (
+                e.params["kind"].as_str(),
+                e.params["target"].as_str(),
+                e.params["host"].as_str(),
+                e.params["port"].as_str()
+            ),
+            ("forwardFailed", "bastion", "patroni1", "8008"),
             "{e:?}"
         );
         tunnels.close("c1");
+    }
+
+    /// Узел за туннелем достижим: пробное чтение `GET /patroni` идёт клиентом чтения с basic auth профиля, затем
+    /// уходит сам изменяющий запрос, и его ответ возвращается. Узел видит ровно эти два запроса.
+    #[tokio::test]
+    async fn send_json_through_the_tunnel_reads_patroni_before_the_change() {
+        use crate::conn::profile::SshAuth;
+        use crate::net::ssh::tunnel::tests::{profile as ssh_profile, registry};
+        let (base, seen) = capture_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let (tunnels, _) = registry(
+            dir.path(),
+            vec![(
+                "FAKE_SSH_UPSTREAM",
+                base.trim_start_matches("http://").into(),
+            )],
+        );
+        let socks = tunnels
+            .open(&ssh_profile(SshAuth::Agent), Duration::from_secs(5))
+            .await
+            .unwrap();
+        let mut s = settings(&["http://patroni1:8008"]);
+        s.username = Some("patroni".into());
+        let http = ReqwestHttp::new(
+            &s,
+            Some("secret".into()),
+            None,
+            Some(socks),
+            Some("bastion".into()),
+        )
+        .unwrap();
+        let body = serde_json::json!({"leader": "pg-1"});
+        let reply = http
+            .send_json(
+                HttpMethod::Post,
+                "http://patroni1:8008/switchover",
+                Some(&body),
+                HTTP_TIMEOUT,
+            )
+            .await
+            .unwrap();
+        assert_eq!((reply.status, reply.body.as_str()), (200, "Done"));
+        let basic = "Basic cGF0cm9uaTpzZWNyZXQ=";
+        let calls: Vec<(String, String, String)> = seen
+            .lock_safe()
+            .iter()
+            .map(|c| (c.0.clone(), c.1.clone(), c.2.clone()))
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                ("GET".to_string(), "/patroni".to_string(), basic.to_string()),
+                ("POST".into(), "/switchover".into(), basic.into()),
+            ]
+        );
+        tunnels.close("c1");
+    }
+
+    /// Пробное чтение через туннель не уложилось в срок уже после соединения: узел отвечает, но медленно — это не
+    /// «не дошёл», и изменяющий запрос всё равно отправляется (его исход решает его собственный ответ).
+    #[tokio::test]
+    async fn send_json_through_the_tunnel_sends_the_change_after_a_slow_probe() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    if buf[..n].starts_with(b"GET ") {
+                        // Чтение остаётся без ответа дольше срока клиента.
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        return;
+                    }
+                    let _ = sock
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nDone",
+                        )
+                        .await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        let proxy = testutil::socks_proxy_to(("127.0.0.1", port)).await;
+        let s = settings(&["http://patroni1:8008"]);
+        let http = ReqwestHttp::new(&s, None, None, Some(proxy), Some("bastion".into())).unwrap();
+        let started = std::time::Instant::now();
+        let reply = http
+            .send_json(
+                HttpMethod::Post,
+                "http://patroni1:8008/switchover",
+                None,
+                HTTP_TIMEOUT,
+            )
+            .await
+            .unwrap();
+        assert_eq!((reply.status, reply.body.as_str()), (200, "Done"));
+        assert!(
+            started.elapsed() >= Duration::from_secs(4),
+            "пробное чтение ждало свой срок ≈ 5 с: {:?}",
+            started.elapsed()
+        );
     }
 
     /// OpenSSH 10.x отвечает SOCKS5 только после открытия канала к узлу, а когда бастион до узла не достучался,
