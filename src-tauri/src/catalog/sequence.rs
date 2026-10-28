@@ -16,14 +16,22 @@ pub struct SequenceDetails {
     pub name: String,
     /// `smallint`, `integer` или `bigint`.
     pub data_type: String,
+    // Числа `bigint` уходят в интерфейс строками: JSON-число в JavaScript точно только до 2^53, а граница
+    // `bigint` (9223372036854775807) выше.
+    #[serde(with = "pg_advisor::serde_util::i64_string")]
     pub start: i64,
+    #[serde(with = "pg_advisor::serde_util::i64_string")]
     pub increment: i64,
+    #[serde(with = "pg_advisor::serde_util::i64_string")]
     pub min: i64,
+    #[serde(with = "pg_advisor::serde_util::i64_string")]
     pub max: i64,
     pub cycle: bool,
+    #[serde(with = "pg_advisor::serde_util::i64_string")]
     pub cache: i64,
     /// Последнее выданное значение; `None` — последовательность ещё не использовалась или у роли нет права
     /// SELECT/USAGE на неё (так устроен `pg_sequences`).
+    #[serde(with = "pg_advisor::serde_util::opt_i64_string", default)]
     pub last_value: Option<i64>,
     /// У роли есть право SELECT или USAGE на последовательность (предикат `pg_sequences` для `last_value`).
     /// Нет права — `last_value` и `percent_used` пусты при любом использовании; вкладка отличает это от
@@ -109,5 +117,52 @@ mod tests {
         );
         assert_eq!(percent_used(None, 1, 100, 1), None);
         assert_eq!(percent_used(Some(5), 5, 5, 1), None, "пустой диапазон");
+    }
+
+    fn details(max: i64, last_value: Option<i64>) -> SequenceDetails {
+        SequenceDetails {
+            oid: 16_400,
+            schema: "shop".into(),
+            name: "big_seq".into(),
+            data_type: "bigint".into(),
+            start: 1,
+            increment: -2,
+            min: i64::MIN,
+            max,
+            cycle: false,
+            cache: 1,
+            last_value,
+            readable: true,
+            percent_used: Some(0.5),
+            owned_by: None,
+        }
+    }
+
+    #[test]
+    fn bigint_fields_go_to_the_ui_as_strings_without_losing_digits() {
+        // JSON-число в JavaScript точно только до 2^53: границы bigint уходят строками, `oid` и доля — числами.
+        let json = serde_json::to_value(details(i64::MAX, None)).unwrap();
+        assert_eq!(json["max"], "9223372036854775807");
+        assert_eq!(json["min"], "-9223372036854775808");
+        assert_eq!(json["start"], "1");
+        assert_eq!(json["increment"], "-2");
+        assert_eq!(json["cache"], "1");
+        assert_eq!(json["lastValue"], serde_json::Value::Null);
+        assert_eq!(json["oid"], 16_400);
+        assert_eq!(json["percentUsed"], 0.5);
+        let text = serde_json::to_string(&details(i64::MAX, Some(i64::MAX - 1))).unwrap();
+        assert!(text.contains(r#""max":"9223372036854775807""#), "{text}");
+        assert!(
+            text.contains(r#""lastValue":"9223372036854775806""#),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn details_survive_a_json_round_trip() {
+        let d = details(i64::MAX, Some(i64::MIN));
+        let back: SequenceDetails =
+            serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(back, d);
     }
 }

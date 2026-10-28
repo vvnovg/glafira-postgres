@@ -92,6 +92,15 @@ pub struct TableStats {
     pub autoanalyze_count: Option<i64>,
 }
 
+/// Ссылка на отношение: схема и имя как в каталоге (`nspname`, `relname`), без кавычек. Интерфейс открывает по ней
+/// вкладку таблицы, а кавычки для DDL ставит только `ddl::qualified`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelationRef {
+    pub schema: String,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Partitioning {
@@ -99,10 +108,10 @@ pub struct Partitioning {
     pub key: Option<String>,
     /// Границы (`FOR VALUES FROM (…) TO (…)`) — у партиции.
     pub bound: Option<String>,
-    /// Родитель партиции (`schema.table`, с кавычками где нужно); у потомка по `INHERITS` — `None`.
-    pub parent: Option<String>,
-    /// Прямые партиции (`schema.table`).
-    pub partitions: Vec<String>,
+    /// Родитель партиции; у потомка по `INHERITS` — `None`.
+    pub parent: Option<RelationRef>,
+    /// Прямые партиции.
+    pub partitions: Vec<RelationRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -232,9 +241,7 @@ const HEAD_SQL: &str = "SELECT n.nspname::text, c.relname::text, c.relkind::text
     (extract(epoch FROM s.last_autoanalyze) * 1000)::bigint, \
     s.vacuum_count, s.autovacuum_count, s.analyze_count, s.autoanalyze_count, \
     pg_get_partkeydef(c.oid), pg_get_expr(c.relpartbound, c.oid), \
-    (SELECT quote_ident(pn.nspname) || '.' || quote_ident(p.relname) FROM pg_inherits i \
-       JOIN pg_class p ON p.oid = i.inhparent JOIN pg_namespace pn ON pn.oid = p.relnamespace \
-       WHERE c.relispartition AND i.inhrelid = c.oid LIMIT 1), \
+    par.schema_name, par.rel_name, \
     c.relpersistence = 'u' \
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
   LEFT JOIN pg_tablespace ts ON ts.oid = c.reltablespace \
@@ -255,9 +262,12 @@ const HEAD_SQL: &str = "SELECT n.nspname::text, c.relname::text, c.relkind::text
       sum(st.analyze_count)::bigint AS analyze_count, \
       sum(st.autoanalyze_count)::bigint AS autoanalyze_count \
       FROM pg_stat_all_tables st WHERE st.relid = ANY (t.rels)) s \
+  LEFT JOIN LATERAL (SELECT pn.nspname::text AS schema_name, p.relname::text AS rel_name FROM pg_inherits i \
+      JOIN pg_class p ON p.oid = i.inhparent JOIN pg_namespace pn ON pn.oid = p.relnamespace \
+      WHERE c.relispartition AND i.inhrelid = c.oid LIMIT 1) par ON true \
   WHERE c.oid = $1 AND c.relkind IN ('r', 'p', 'f')";
 
-const PARTITIONS_SQL: &str = "SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname) FROM pg_inherits i \
+const PARTITIONS_SQL: &str = "SELECT n.nspname::text, c.relname::text FROM pg_inherits i \
   JOIN pg_class c ON c.oid = i.inhrelid JOIN pg_namespace n ON n.oid = c.relnamespace \
   WHERE i.inhparent = $1 ORDER BY n.nspname, c.relname";
 
@@ -411,7 +421,10 @@ pub async fn get(c: &Client, schema: &str, name: &str) -> AppResult<TableDetails
         rows(c, PARTITIONS_SQL, oid)
             .await?
             .iter()
-            .map(|r| r.get::<_, String>(0))
+            .map(|r| RelationRef {
+                schema: r.get(0),
+                name: r.get(1),
+            })
             .collect()
     } else {
         Vec::new()
@@ -430,7 +443,7 @@ pub async fn get(c: &Client, schema: &str, name: &str) -> AppResult<TableDetails
         schema: h.get(0),
         name: h.get(1),
         relkind,
-        unlogged: h.get(29),
+        unlogged: h.get(30),
         owner: h.get(3),
         tablespace: h.get(4),
         comment: h.get(5),
@@ -459,7 +472,11 @@ pub async fn get(c: &Client, schema: &str, name: &str) -> AppResult<TableDetails
         partitioning: Partitioning {
             key: h.get(26),
             bound: h.get(27),
-            parent: h.get(28),
+            // Родителя нет — оба столбца `NULL` (`LEFT JOIN LATERAL`).
+            parent: h
+                .get::<_, Option<String>>(28)
+                .zip(h.get::<_, Option<String>>(29))
+                .map(|(schema, name)| RelationRef { schema, name }),
             partitions,
         },
         columns,
@@ -578,5 +595,30 @@ mod tests {
         assert!(inherited_sql(170000).contains("tgparentid"));
         assert!(!inherited_sql(140012).contains("tgparentid"));
         assert!(!inherited_sql(130000).contains("tgparentid"));
+    }
+
+    #[test]
+    fn relation_ref_goes_to_the_ui_as_raw_schema_and_name() {
+        let p = Partitioning {
+            parent: Some(RelationRef {
+                schema: "My Schema".into(),
+                name: "select".into(),
+            }),
+            partitions: vec![RelationRef {
+                schema: "shop".into(),
+                name: "events_2026_09".into(),
+            }],
+            ..Default::default()
+        };
+        // Без кавычек: интерфейс показывает `schema.name` и открывает по паре вкладку таблицы.
+        assert_eq!(
+            serde_json::to_value(&p).unwrap(),
+            serde_json::json!({
+                "key": null,
+                "bound": null,
+                "parent": { "schema": "My Schema", "name": "select" },
+                "partitions": [{ "schema": "shop", "name": "events_2026_09" }],
+            })
+        );
     }
 }

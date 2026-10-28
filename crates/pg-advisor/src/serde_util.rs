@@ -33,6 +33,31 @@ pub mod opt_i64_string {
     }
 }
 
+/// `i64` как десятичная строка в JSON — для обязательных полей, как [`opt_i64_string`] для необязательных. Границы
+/// последовательностей (`max` у `bigint` — 2^63 − 1) выше 2^53, где JSON-число в JavaScript теряет разряды. При чтении
+/// принимается и строка, и число (совместимость со старыми данными).
+pub mod i64_string {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &i64, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrNumber {
+        Text(String),
+        Number(i64),
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i64, D::Error> {
+        match StringOrNumber::deserialize(deserializer)? {
+            StringOrNumber::Number(n) => Ok(n),
+            StringOrNumber::Text(s) => s.trim().parse().map_err(serde::de::Error::custom),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde::{Deserialize, Serialize};
@@ -41,6 +66,12 @@ mod tests {
     struct Holder {
         #[serde(with = "super::opt_i64_string", default)]
         id: Option<i64>,
+    }
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct Plain {
+        #[serde(with = "super::i64_string")]
+        n: i64,
     }
 
     fn round_trip(id: Option<i64>) -> (String, Holder) {
@@ -82,5 +113,33 @@ mod tests {
             Some(42)
         );
         assert!(serde_json::from_str::<Holder>(r#"{"id":"abc"}"#).is_err());
+    }
+
+    #[test]
+    fn plain_i64_extremes_round_trip_as_strings() {
+        for (n, text) in [
+            (i64::MAX, "9223372036854775807"),
+            (i64::MIN, "-9223372036854775808"),
+            (0, "0"),
+            (-1, "-1"),
+        ] {
+            let json = serde_json::to_string(&Plain { n }).unwrap();
+            assert_eq!(json, format!(r#"{{"n":"{text}"}}"#));
+            assert_eq!(serde_json::from_str::<Plain>(&json).unwrap().n, n);
+        }
+    }
+
+    #[test]
+    fn plain_i64_accepts_numbers_and_padded_strings_but_not_garbage() {
+        assert_eq!(serde_json::from_str::<Plain>(r#"{"n":42}"#).unwrap().n, 42);
+        assert_eq!(
+            serde_json::from_str::<Plain>(r#"{"n":" -7 "}"#).unwrap().n,
+            -7
+        );
+        assert!(serde_json::from_str::<Plain>(r#"{"n":"abc"}"#).is_err());
+        assert!(serde_json::from_str::<Plain>(r#"{"n":null}"#).is_err());
+        assert!(serde_json::from_str::<Plain>("{}").is_err());
+        // За пределом i64 — ошибка, а не молчаливое усечение.
+        assert!(serde_json::from_str::<Plain>(r#"{"n":"9223372036854775808"}"#).is_err());
     }
 }

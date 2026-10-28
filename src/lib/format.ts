@@ -68,13 +68,15 @@ export function formatAas(n: number): string {
 const I64_MAX = BigInt("9223372036854775807");
 
 /**
- * Значение bigint из каталога. Rust отдаёт i64 числом JSON, а `number` точен только до 2^53: настоящая
- * граница bigint (9223372036854775807) приходит как 2^63 и без поправки показывалась бы как …808.
- * Остальные значения выше 2^53 приблизительны — точность теряется до интерфейса.
+ * Значение bigint из каталога. Поля последовательностей Rust отдаёт строкой (`i64_string`): `number` точен только до
+ * 2^53, а граница bigint — 9223372036854775807; строка форматируется через BigInt без потери разрядов. Число (старый
+ * вид данных, счётчики) поправляется: i64::MAX из JSON-числа приходит как 2^63 и без поправки показывался бы как …808,
+ * остальные значения выше 2^53 приблизительны — точность теряется до интерфейса.
  */
-export function formatInt64(n: number | null): string {
+export function formatInt64(n: number | string | null): string {
   if (n === null) return "—";
   const locale = currentLocale();
+  if (typeof n === "string") return BigInt(n.trim()).toLocaleString(locale);
   if (n >= 2 ** 63) return I64_MAX.toLocaleString(locale);
   // Intl дописывает нули после 17 значащих цифр (…776 000); через BigInt печатается точное значение числа.
   if (Math.abs(n) > Number.MAX_SAFE_INTEGER) return BigInt(n).toLocaleString(locale);

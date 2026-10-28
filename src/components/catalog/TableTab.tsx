@@ -2,8 +2,9 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
-import type { TableDetails } from "../../api/types";
+import type { RelationRef, TableDetails } from "../../api/types";
 import { formatBytes, formatCount, formatTimestamp } from "../../lib/format";
+import { useWorkspace } from "../../state/workspace";
 import { DdlView } from "./DdlView";
 import { KeyValue } from "./KeyValue";
 import { ObjectTab } from "./ObjectTab";
@@ -136,7 +137,17 @@ function StatsPane({ d }: { d: TableDetails }) {
   );
 }
 
-function PartitioningPane({ d }: { d: TableDetails }) {
+/** Ссылка на таблицу в той же базе: имя `schema.name` как в каталоге (без кавычек), клик открывает её вкладку. */
+function RelationLink({ r, connectionId, database }: { r: RelationRef; connectionId: string; database: string }) {
+  const open = useWorkspace((s) => s.open);
+  return (
+    <button type="button" className="link" onClick={() => open({ kind: "table", connectionId, database, schema: r.schema, name: r.name })}>
+      <code>{`${r.schema}.${r.name}`}</code>
+    </button>
+  );
+}
+
+function PartitioningPane({ d, connectionId, database }: { d: TableDetails; connectionId: string; database: string }) {
   const { t } = useTranslation();
   const p = d.partitioning;
   const code = (v: string | null) => (v === null ? null : <code>{v}</code>);
@@ -145,15 +156,15 @@ function PartitioningPane({ d }: { d: TableDetails }) {
       items={[
         { label: t("object.partitionKey"), value: code(p.key) },
         { label: t("object.partitionBound"), value: code(p.bound) },
-        { label: t("object.parent"), value: code(p.parent) },
+        { label: t("object.parent"), value: p.parent === null ? null : <RelationLink r={p.parent} connectionId={connectionId} database={database} /> },
         {
           label: t("object.partitions"),
           value:
             p.partitions.length === 0 ? null : (
               <ul className="plain-list">
-                {p.partitions.map((name) => (
-                  <li key={name}>
-                    <code>{name}</code>
+                {p.partitions.map((r) => (
+                  <li key={`${r.schema}.${r.name}`}>
+                    <RelationLink r={r} connectionId={connectionId} database={database} />
                   </li>
                 ))}
               </ul>
@@ -191,7 +202,7 @@ function TriggersPane({ d }: { d: TableDetails }) {
   );
 }
 
-function TableBody({ d }: { d: TableDetails }) {
+function TableBody({ d, connectionId, database }: { d: TableDetails; connectionId: string; database: string }) {
   const { t } = useTranslation();
   const [section, setSection] = useState<Section>("columns");
   const tabs: { id: Section; label: string }[] = [
@@ -219,7 +230,7 @@ function TableBody({ d }: { d: TableDetails }) {
             {active === "indexes" && <IndexesTable indexes={d.indexes} />}
             {active === "constraints" && <ConstraintsPane d={d} />}
             {active === "stats" && <StatsPane d={d} />}
-            {active === "partitioning" && <PartitioningPane d={d} />}
+            {active === "partitioning" && <PartitioningPane d={d} connectionId={connectionId} database={database} />}
             {active === "triggers" && <TriggersPane d={d} />}
             {active === "ddl" && <DdlView ddl={d.ddl} />}
           </>
@@ -239,7 +250,7 @@ export function TableTab({ connectionId, database, schema, name }: { connectionI
   });
   return (
     <ObjectTab connectionId={connectionId} title={`${schema}.${name}`} kind={t(`object.kinds.${kindKey(query.data)}`)} query={query}>
-      {(d) => <TableBody d={d} />}
+      {(d) => <TableBody d={d} connectionId={connectionId} database={database} />}
     </ObjectTab>
   );
 }

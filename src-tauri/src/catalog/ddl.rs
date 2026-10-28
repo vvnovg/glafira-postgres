@@ -7,7 +7,7 @@
 //! `ALTER TABLE … ADD CONSTRAINT` (внешние ключи и непроверенные ограничения), триггеры, комментарии.
 //! Результат пригоден для PostgreSQL 13–18.
 
-use super::table::{Column, Constraint, TableDetails, Trigger};
+use super::table::{Column, Constraint, RelationRef, TableDetails, Trigger};
 
 pub const DDL_HEADER: &str = "-- DDL built by Glafira from the catalog; not a replacement for pg_dump (no privileges, RLS policies or owners)";
 
@@ -205,6 +205,11 @@ pub(crate) fn partition_ddl(t: &TableDetails, inherited_triggers: &[Trigger]) ->
     build_ddl(t, inherited_triggers)
 }
 
+/// `schema.name` с кавычками там, где они нужны (как `quote_ident` сервера); каталог отдаёт имена сырыми.
+fn qualified(r: &RelationRef) -> String {
+    format!("{}.{}", quote_ident(&r.schema), quote_ident(&r.name))
+}
+
 fn build_ddl(t: &TableDetails, inherited_triggers: &[Trigger]) -> String {
     let qname = format!("{}.{}", quote_ident(&t.schema), quote_ident(&t.name));
     let mut out = format!("{DDL_HEADER}\n");
@@ -233,8 +238,9 @@ fn build_ddl(t: &TableDetails, inherited_triggers: &[Trigger]) -> String {
     match partition_of {
         Some((parent, bound)) => {
             out.push_str(&format!(
-                "CREATE {}TABLE {qname} PARTITION OF {parent}\n",
-                persistence(t)
+                "CREATE {}TABLE {qname} PARTITION OF {}\n",
+                persistence(t),
+                qualified(parent)
             ));
             // Колонки партиции — колонки родителя; здесь только её собственные ограничения (унаследованные
             // отбирает `table::get`, см. `without_inherited`).
@@ -272,7 +278,14 @@ fn build_ddl(t: &TableDetails, inherited_triggers: &[Trigger]) -> String {
     if !t.partitioning.partitions.is_empty() {
         out.push_str(&format!(
             "-- partitions: {}\n",
-            comment_text(&t.partitioning.partitions.join(", "))
+            comment_text(
+                &t.partitioning
+                    .partitions
+                    .iter()
+                    .map(qualified)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         ));
     }
     // Индексы ограничений (PK, UNIQUE, EXCLUDE) уже созданы ограничениями; у ограничения и индекса имя одно.
@@ -340,7 +353,7 @@ fn build_ddl(t: &TableDetails, inherited_triggers: &[Trigger]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::table::{Index, Partitioning, Trigger};
+    use crate::catalog::table::{Index, Partitioning, RelationRef, Trigger};
 
     fn table(name: &str) -> TableDetails {
         TableDetails {
@@ -361,6 +374,14 @@ mod tests {
             partitioning: Default::default(),
             triggers: vec![],
             ddl: String::new(),
+        }
+    }
+
+    /// Сырое имя отношения, как его отдаёт каталог (без кавычек).
+    fn rel(schema: &str, name: &str) -> RelationRef {
+        RelationRef {
+            schema: schema.into(),
+            name: name.into(),
         }
     }
 
@@ -510,7 +531,7 @@ mod tests {
             key: Some("RANGE (happened_at)".into()),
             bound: None,
             parent: None,
-            partitions: vec!["shop.events_2026_09".into()],
+            partitions: vec![rel("shop", "events_2026_09")],
         };
         let ddl = table_ddl(&parent);
         assert!(ddl.contains(") PARTITION BY RANGE (happened_at);\n"));
@@ -519,10 +540,29 @@ mod tests {
         part.partitioning = Partitioning {
             key: None,
             bound: Some("FOR VALUES FROM ('2026-09-01') TO ('2026-10-01')".into()),
-            parent: Some("shop.events".into()),
+            parent: Some(rel("shop", "events")),
             partitions: vec![],
         };
         assert!(table_ddl(&part).contains("CREATE TABLE shop.events_2026_09 PARTITION OF shop.events\n    FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');\n"));
+    }
+
+    #[test]
+    fn parent_and_partition_references_are_quoted_from_raw_names() {
+        // Каталог отдаёт сырые имена; кавычки ставит только генератор DDL (тем же правилом, что и для самой таблицы).
+        let mut part = table("Events 1");
+        part.schema = "Shop".into();
+        part.partitioning = Partitioning {
+            key: Some("LIST (k)".into()),
+            bound: Some("DEFAULT".into()),
+            parent: Some(rel("My Schema", "select")),
+            partitions: vec![rel("Shop", "Events 1a"), rel("a\"b", "c")],
+        };
+        assert_eq!(
+            table_ddl(&part),
+            format!(
+                "{DDL_HEADER}\nCREATE TABLE \"Shop\".\"Events 1\" PARTITION OF \"My Schema\".\"select\"\n    DEFAULT PARTITION BY LIST (k);\n-- partitions: \"Shop\".\"Events 1a\", \"a\"\"b\".c\n"
+            )
+        );
     }
 
     #[test]
@@ -699,7 +739,7 @@ mod tests {
         );
         // Только внешние ключи и непроверенные ограничения: у таблицы без остальных скобок нет.
         let mut only_fk = table("child");
-        only_fk.partitioning.parent = Some("shop.parent".into());
+        only_fk.partitioning.parent = Some(rel("shop", "parent"));
         only_fk.partitioning.bound = Some("DEFAULT".into());
         only_fk.constraints = vec![constraint(
             "child_fk",
@@ -795,8 +835,8 @@ mod tests {
         part.partitioning = Partitioning {
             key: Some("LIST (kind)".into()),
             bound: Some("FOR VALUES FROM ('2020-01-01') TO ('2021-01-01')".into()),
-            parent: Some("shop.events".into()),
-            partitions: vec!["shop.events_old_a".into()],
+            parent: Some(rel("shop", "events")),
+            partitions: vec![rel("shop", "events_old_a")],
         };
         part.constraints = vec![constraint("events_old_chk", "c", "CHECK (id > 0)", true)];
         part.reloptions = vec!["fillfactor=70".into()];
@@ -808,7 +848,7 @@ mod tests {
             )
         );
         let mut def = table("events_default");
-        def.partitioning.parent = Some("shop.events".into());
+        def.partitioning.parent = Some(rel("shop", "events"));
         def.partitioning.bound = Some("DEFAULT".into());
         assert!(
             table_ddl(&def).contains(
@@ -855,9 +895,9 @@ mod tests {
         parent.columns = vec![column("id", "integer")];
         parent.partitioning.key = Some("RANGE (id)".into());
         parent.partitioning.partitions = vec![
-            "shop.\"p_1\nSELECT 'INJECTED'; --\"".into(),
-            "shop.\"p_2\r\nDROP TABLE shop.events; --\"".into(),
-            "shop.ok".into(),
+            rel("shop", "p_1\nSELECT 'INJECTED'; --"),
+            rel("shop", "p_2\r\nDROP TABLE shop.events; --"),
+            rel("shop", "ok"),
         ];
         let ddl = table_ddl(&parent);
         // Заголовок, CREATE TABLE (3 строки: заголовок, колонка, PARTITION BY) и одна строка-комментарий.
@@ -966,7 +1006,7 @@ mod tests {
     #[test]
     fn disabled_copies_of_inherited_triggers_keep_their_state() {
         let mut part = table("events_2026_09");
-        part.partitioning.parent = Some("shop.events".into());
+        part.partitioning.parent = Some(rel("shop", "events"));
         part.partitioning.bound = Some("DEFAULT".into());
         let trig = |name: &str, enabled: &str| Trigger {
             name: name.into(),
@@ -1019,7 +1059,7 @@ mod tests {
         assert!(table_ddl(&t).contains("CREATE UNLOGGED TABLE shop.t ();\n"));
         let mut part = table("p");
         part.unlogged = true;
-        part.partitioning.parent = Some("shop.t".into());
+        part.partitioning.parent = Some(rel("shop", "t"));
         part.partitioning.bound = Some("DEFAULT".into());
         assert!(table_ddl(&part).contains("CREATE UNLOGGED TABLE shop.p PARTITION OF shop.t\n"));
         // Партиционированная таблица — без слова даже при relpersistence = 'u' (PG 18 такой CREATE отвергает).

@@ -6,6 +6,7 @@ mod common;
 
 use glafira_pg_lib::catalog::ddl::{DDL_HEADER, quote_ident};
 use glafira_pg_lib::catalog::objects::ObjectKind;
+use glafira_pg_lib::catalog::table::RelationRef;
 use glafira_pg_lib::catalog::{
     databases, extensions, function, objects, roles, schemas, sequence, table, view,
 };
@@ -323,12 +324,25 @@ async fn demo_schema_on_every_node() {
             events.partitioning.key.as_deref(),
             Some("RANGE (happened_at)")
         );
+        // Сырые имена из каталога (без кавычек), порядок — по схеме и имени.
         assert_eq!(
-            events.partitioning.partitions,
-            ["shop.events_2026_09", "shop.events_2026_10"]
+            events
+                .partitioning
+                .partitions
+                .iter()
+                .map(|r| (r.schema.as_str(), r.name.as_str()))
+                .collect::<Vec<_>>(),
+            [("shop", "events_2026_09"), ("shop", "events_2026_10")]
         );
         let part = table::get(&c, "shop", "events_2026_09").await.unwrap();
-        assert_eq!(part.partitioning.parent.as_deref(), Some("shop.events"));
+        assert_eq!(
+            part.partitioning.parent,
+            Some(RelationRef {
+                schema: "shop".into(),
+                name: "events".into()
+            })
+        );
+        assert_eq!(events.partitioning.parent, None);
         assert!(
             part.partitioning
                 .bound
@@ -401,6 +415,14 @@ async fn demo_schema_on_every_node() {
             ("integer", 1, false)
         );
         assert_eq!(s.last_value, None, "последовательность не использовалась");
+        // Числа bigint уходят в интерфейс строками (JSON-число теряет разряды выше 2^53); `oid` остаётся числом.
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["max"], "2147483647", "{addr}: {json}");
+        assert_eq!(json["start"], "1", "{addr}: {json}");
+        assert!(
+            json["lastValue"].is_null() && json["oid"].is_u64(),
+            "{addr}: {json}"
+        );
         // `readable` — свойство права, а не использования: у неиспользованной последовательности он тот же.
         let invoice_readable: bool = c
             .query_one(

@@ -13,8 +13,8 @@ import { api } from "../../api/client";
 import { SequenceTab } from "./SequenceTab";
 
 const seq: SequenceDetails = {
-  oid: 9, schema: "shop", name: "orders_id_seq", dataType: "integer", start: 1, increment: 1, min: 1, max: 100, cycle: false, cache: 1,
-  lastValue: 50, readable: true, percentUsed: 49.494949494949495, ownedBy: "shop.orders.id",
+  oid: 9, schema: "shop", name: "orders_id_seq", dataType: "integer", start: "1", increment: "1", min: "1", max: "100", cycle: false, cache: "1",
+  lastValue: "50", readable: true, percentUsed: 49.494949494949495, ownedBy: "shop.orders.id",
 };
 
 beforeEach(() => {
@@ -54,13 +54,29 @@ describe("SequenceTab", () => {
   });
 
   it("границы bigint показываются точно, а не округлёнными вверх (getByText сворачивает неразрывные пробелы)", async () => {
-    vi.mocked(api.getSequence).mockResolvedValue({ ...seq, dataType: "bigint", max: 2 ** 63, lastValue: 1, percentUsed: 0 });
+    vi.mocked(api.getSequence).mockResolvedValue({ ...seq, dataType: "bigint", max: "9223372036854775807", lastValue: "1", percentUsed: 0 });
     renderWithClient(<SequenceTab connectionId="c" database="orders" schema="shop" name="orders_id_seq" />);
     expect(await screen.findByText("9 223 372 036 854 775 807")).toBeInTheDocument();
   });
 
+  it("значения выше 2^53 показываются цифра в цифру: последнее значение, минимум и максимум", async () => {
+    vi.mocked(api.getSequence).mockResolvedValue({
+      ...seq,
+      dataType: "bigint",
+      min: "-9223372036854775808",
+      max: "9223372036854775807",
+      lastValue: "9007199254740993",
+      percentUsed: 50,
+    });
+    renderWithClient(<SequenceTab connectionId="c" database="orders" schema="shop" name="orders_id_seq" />);
+    // 9007199254740993 числом JSON стало бы …992.
+    expect(await screen.findByText("9 007 199 254 740 993")).toBeInTheDocument();
+    expect(screen.getByText("9 223 372 036 854 775 807")).toBeInTheDocument();
+    expect(screen.getByText(/^[-−]9 223 372 036 854 775 808$/)).toBeInTheDocument();
+  });
+
   it("цикличная последовательность и убывающий шаг", async () => {
-    vi.mocked(api.getSequence).mockResolvedValue({ ...seq, cycle: true, increment: -5, cache: 20 });
+    vi.mocked(api.getSequence).mockResolvedValue({ ...seq, cycle: true, increment: "-5", cache: "20" });
     renderWithClient(<SequenceTab connectionId="c" database="orders" schema="shop" name="orders_id_seq" />);
     await screen.findByText("Последнее значение");
     expect(screen.getByText("Да")).toBeInTheDocument();

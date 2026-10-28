@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TableDetails } from "../../api/types";
 import { topologyView } from "../../test/fixtures";
 import { renderWithClient } from "../../test/render";
+import { useWorkspace } from "../../state/workspace";
 import { newProfile } from "../connections/profile";
 
 vi.mock("../../api/client", async (importOriginal) => {
@@ -55,6 +56,7 @@ const notConnected = { code: "CONNECTION_FAILED", message: "not connected", retr
 
 beforeEach(() => {
   vi.resetAllMocks();
+  useWorkspace.setState({ tabs: [], activeId: null });
   vi.mocked(api.getTable).mockResolvedValue(details);
   // Вкладка следит за состоянием подключения (топология), как и остальные части окна.
   vi.mocked(api.getTopology).mockResolvedValue(topologyView());
@@ -90,12 +92,43 @@ describe("TableTab", () => {
   });
 
   it("партиционирование показывается только у партиций и родителей", async () => {
-    vi.mocked(api.getTable).mockResolvedValue({ ...details, relkind: "p", partitioning: { key: "RANGE (happened_at)", bound: null, parent: null, partitions: ["shop.events_2026_09"] } });
+    vi.mocked(api.getTable).mockResolvedValue({
+      ...details,
+      relkind: "p",
+      partitioning: { key: "RANGE (happened_at)", bound: null, parent: null, partitions: [{ schema: "shop", name: "events_2026_09" }] },
+    });
     const user = userEvent.setup();
     renderWithClient(<TableTab connectionId="c" database="orders" schema="shop" name="events" />);
     await user.click(await screen.findByRole("tab", { name: "Партиционирование" }));
     expect(screen.getByText("RANGE (happened_at)")).toBeInTheDocument();
-    expect(screen.getByText("shop.events_2026_09")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "shop.events_2026_09" })).toBeInTheDocument();
+  });
+
+  it("партиции — ссылки: клик открывает вкладку партиции того же подключения и базы, схема берётся у самой партиции", async () => {
+    vi.mocked(api.getTable).mockResolvedValue({
+      ...details,
+      relkind: "p",
+      partitioning: {
+        key: "RANGE (happened_at)",
+        bound: null,
+        parent: null,
+        partitions: [
+          { schema: "shop", name: "events_2026_09" },
+          // Партиция может лежать в другой схеме; имена показываются сырыми, без кавычек.
+          { schema: "Archive 2026", name: "events 10" },
+        ],
+      },
+    });
+    const user = userEvent.setup();
+    renderWithClient(<TableTab connectionId="c" database="orders" schema="shop" name="events" />);
+    await user.click(await screen.findByRole("tab", { name: "Партиционирование" }));
+    await user.click(screen.getByRole("button", { name: "Archive 2026.events 10" }));
+    expect(useWorkspace.getState().tabs).toEqual([
+      { kind: "table", connectionId: "c", database: "orders", schema: "Archive 2026", name: "events 10", id: "table:c:orders:Archive 2026.events 10" },
+    ]);
+    await user.click(screen.getByRole("button", { name: "shop.events_2026_09" }));
+    expect(useWorkspace.getState().activeId).toBe("table:c:orders:shop.events_2026_09");
+    expect(useWorkspace.getState().tabs).toHaveLength(2);
   });
 
   it("у обычной таблицы подвкладки «Партиционирование» нет, у партиции — есть, с границами и родителем", async () => {
@@ -108,12 +141,26 @@ describe("TableTab", () => {
     vi.mocked(api.getTable).mockResolvedValue({
       ...details,
       name: "events_2026_09",
-      partitioning: { key: null, bound: "FOR VALUES FROM ('2026-09-01') TO ('2026-10-01')", parent: "shop.events", partitions: [] },
+      partitioning: { key: null, bound: "FOR VALUES FROM ('2026-09-01') TO ('2026-10-01')", parent: { schema: "shop", name: "events" }, partitions: [] },
     });
     renderWithClient(<TableTab connectionId="c" database="orders" schema="shop" name="events_2026_09" />);
     await user.click(await screen.findByRole("tab", { name: "Партиционирование" }));
     expect(screen.getByText("FOR VALUES FROM ('2026-09-01') TO ('2026-10-01')")).toBeInTheDocument();
-    expect(screen.getByText("shop.events")).toBeInTheDocument();
+    // Родитель — ссылка: клик открывает вкладку родительской таблицы.
+    await user.click(screen.getByRole("button", { name: "shop.events" }));
+    expect(useWorkspace.getState().tabs).toEqual([{ kind: "table", connectionId: "c", database: "orders", schema: "shop", name: "events", id: "table:c:orders:shop.events" }]);
+    expect(useWorkspace.getState().activeId).toBe("table:c:orders:shop.events");
+  });
+
+  it("у партиционированной таблицы без партиций родителя и партиций нет: прочерки и ни одной ссылки", async () => {
+    vi.mocked(api.getTable).mockResolvedValue({ ...details, relkind: "p", partitioning: { key: "RANGE (id)", bound: null, parent: null, partitions: [] } });
+    const user = userEvent.setup();
+    renderWithClient(<TableTab connectionId="c" database="orders" schema="shop" name="events" />);
+    await user.click(await screen.findByRole("tab", { name: "Партиционирование" }));
+    const panel = screen.getByRole("tabpanel");
+    // Границы, родитель и партиции — три прочерка.
+    expect(within(panel).getAllByText("—")).toHaveLength(3);
+    expect(within(panel).queryByRole("button")).not.toBeInTheDocument();
   });
 
   it("партиционированная таблица: размеры — суммы по дереву, подвкладка это поясняет", async () => {
@@ -214,7 +261,7 @@ describe("TableTab: обновление и возврат подключени�
   });
 
   it("подвкладка, которой больше нет после обновления, заменяется первой, и тело показано по ней же", async () => {
-    vi.mocked(api.getTable).mockResolvedValue({ ...details, relkind: "p", partitioning: { key: "RANGE (id)", bound: null, parent: null, partitions: ["shop.e1"] } });
+    vi.mocked(api.getTable).mockResolvedValue({ ...details, relkind: "p", partitioning: { key: "RANGE (id)", bound: null, parent: null, partitions: [{ schema: "shop", name: "e1" }] } });
     const user = userEvent.setup();
     renderWithClient(<TableTab connectionId="c" database="orders" schema="shop" name="events" />);
     await user.click(await screen.findByRole("tab", { name: "Партиционирование" }));

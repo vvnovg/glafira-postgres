@@ -82,6 +82,16 @@ describe("format", () => {
     expect(formatInt64(-1)).toMatch(/^[-\u2212]1$/);
     expect(formatInt64(null)).toBe("—");
   });
+
+  it("int64 строкой (так приходят поля последовательностей): точно, без округления через number", () => {
+    expect(formatInt64("9223372036854775807")).toBe("9 223 372 036 854 775 807".replace(/ /g, "\u00a0"));
+    expect(formatInt64("-9223372036854775808")).toMatch(new RegExp(`^[-\u2212]${"9 223 372 036 854 775 808".replace(/ /g, "\u00a0")}$`));
+    // Выше 2^53 число теряет разряды: 9007199254740993 как number стало бы …992.
+    expect(formatInt64("9007199254740993")).toBe("9 007 199 254 740 993".replace(/ /g, "\u00a0"));
+    expect(formatInt64("-5")).toMatch(/^[-\u2212]5$/);
+    expect(formatInt64(" 42 ")).toBe("42");
+    expect(formatInt64("0")).toBe("0");
+  });
 });
 
 describe("форматы по языку", () => {
@@ -100,6 +110,7 @@ describe("форматы по языку", () => {
     expect(formatPercent(49.5)).toBe("49.5 %");
     expect(formatInt64(1234567)).toBe("1,234,567");
     expect(formatInt64(2 ** 63)).toBe("9,223,372,036,854,775,807");
+    expect(formatInt64("9223372036854775807")).toBe("9,223,372,036,854,775,807");
   });
 
   it("длительность — старшая единица и только смежная за ней", async () => {

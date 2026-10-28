@@ -383,15 +383,20 @@ export interface TableStats {
   analyzeCount: number | null;
   autoanalyzeCount: number | null;
 }
+/** Ссылка на отношение: схема и имя как в каталоге, без кавычек (кавычки нужны только в DDL). */
+export interface RelationRef {
+  schema: string;
+  name: string;
+}
 export interface Partitioning {
   /** Ключ партиционирования (`RANGE (happened_at)`) — у партиционированной таблицы. */
   key: string | null;
   /** Границы (`FOR VALUES FROM (…) TO (…)`) — у партиции. */
   bound: string | null;
-  /** Родитель партиции (`schema.table`); у потомка по `INHERITS` — `null`. */
-  parent: string | null;
-  /** Прямые партиции (`schema.table`). */
-  partitions: string[];
+  /** Родитель партиции; у потомка по `INHERITS` — `null`. */
+  parent: RelationRef | null;
+  /** Прямые партиции. */
+  partitions: RelationRef[];
 }
 export interface Trigger {
   name: string;
@@ -464,14 +469,15 @@ export interface SequenceDetails {
   name: string;
   /** `smallint`, `integer` или `bigint`. */
   dataType: string;
-  start: number;
-  increment: number;
-  min: number;
-  max: number;
+  /** Числа bigint приходят десятичными строками: JSON-число точно только до 2^53, а граница bigint выше. */
+  start: string;
+  increment: string;
+  min: string;
+  max: string;
   cycle: boolean;
-  cache: number;
+  cache: string;
   /** Последнее выданное значение; `null` — последовательность не использовалась или у роли нет права. */
-  lastValue: number | null;
+  lastValue: string | null;
   /** У роли есть право SELECT или USAGE: без него `lastValue` и `percentUsed` пусты при любом использовании. */
   readable: boolean;
   percentUsed: number | null;
