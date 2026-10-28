@@ -110,12 +110,13 @@ pub async fn collect(
     // Отправители есть и у каскадной реплики.
     for r in c.query(SENDERS_SQL, &[]).await.map_err(pg)? {
         let application: Option<String> = r.get(2);
+        let client_addr: Option<String> = r.get(3);
         d.senders.push(Sender {
             pid: r.get(0),
             user: r.get(1),
-            member: sender_member(topology, application.as_deref()),
+            member: sender_member(topology, application.as_deref(), client_addr.as_deref()),
             application,
-            client_addr: r.get(3),
+            client_addr,
             state: r.get(4),
             sync_state: r.get(5),
             sync_priority: r.get(6),

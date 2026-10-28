@@ -12,7 +12,8 @@ pub struct Sender {
     pub pid: i32,
     pub user: Option<String>,
     pub application: Option<String>,
-    /// Участник топологии, которому соответствует `application_name` (без DNS); не сопоставился — пусто.
+    /// Участник топологии, которому соответствует отправитель: по `application_name` или адресу клиента (без DNS);
+    /// не сопоставился — пусто.
     pub member: Option<String>,
     pub client_addr: Option<String>,
     pub state: Option<String>,
@@ -139,9 +140,10 @@ pub fn evaluate(member: Option<&str>, d: &ReplicationData) -> Vec<Finding> {
         }
         out.push(f);
     }
+    // Строка `backup` — копирование `pg_basebackup`, а не реплика, выпавшая из потока.
     let not_streaming: Vec<&Sender> = senders
         .iter()
-        .filter(|s| s.state.as_deref() != Some("streaming"))
+        .filter(|s| !matches!(s.state.as_deref(), Some("streaming" | "backup")))
         .collect();
     if let Some(s) = not_streaming.first() {
         let mut f = Finding::new("replicaNotStreaming", Severity::Warning)
@@ -265,6 +267,33 @@ mod tests {
             ..Default::default()
         };
         assert!(evaluate(None, &ok).is_empty());
+    }
+
+    #[test]
+    fn a_backup_sender_is_not_a_replica_that_fell_out_of_streaming() {
+        let not_streaming = |senders: Vec<Sender>| {
+            let d = ReplicationData {
+                senders,
+                ..Default::default()
+            };
+            evaluate(Some("pg-1"), &d)
+                .into_iter()
+                .find(|f| f.id == "replicaNotStreaming")
+        };
+        // pg_basebackup держит строку в состоянии backup — это копирование, а не реплика.
+        assert!(not_streaming(vec![sender("pg_basebackup", "backup", "async", 0)]).is_none());
+        let f = not_streaming(vec![sender("pg-3", "catchup", "async", 0)]).expect("catchup");
+        assert_eq!(f.params["state"], "catchup");
+        assert_eq!(f.params["count"], 1);
+        // В смеси backup не считается и не подставляется в состояние находки.
+        let f = not_streaming(vec![
+            sender("pg_basebackup", "backup", "async", 0),
+            sender("pg-3", "startup", "async", 0),
+            sender("pg-2", "streaming", "async", 0),
+        ])
+        .expect("startup");
+        assert_eq!(f.params["state"], "startup");
+        assert_eq!(f.params["count"], 1);
     }
 
     #[test]

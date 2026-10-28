@@ -1236,7 +1236,7 @@
     },
     "replicaNotStreaming": {
       "title": "Replicas not streaming: {{count}} (state {{state}})",
-      "fix": "A replica in catchup or backup is not a failover candidate yet."
+      "fix": "A replica in startup or catchup is not a failover candidate yet."
     },
     "replicaReplyStale": {
       "title": "Replicas silent for {{maxS}}: {{count}}",

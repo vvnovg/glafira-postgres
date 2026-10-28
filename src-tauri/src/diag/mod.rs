@@ -189,14 +189,28 @@ pub fn needs_monitor(part: &str) -> Unavailable {
     }
 }
 
-/// Участник топологии для `application_name` отправителя WAL (уточнение 5 плана P2a): имя участника или его хост.
-/// Без DNS: опрос топологии разрешает имена, диагностика — нет. Не сопоставилось — `None`.
-pub fn sender_member(t: &Topology, application: Option<&str>) -> Option<String> {
-    let app = application?;
-    t.members
-        .iter()
-        .find(|m| m.name == app || m.host == app)
-        .map(|m| m.name.clone())
+/// Участник топологии для отправителя WAL (уточнение 5 плана P2a): сначала по `application_name` — имя участника или
+/// его хост, затем, если не нашлось (`walreceiver` и иные имена по умолчанию), по адресу клиента — хост участника
+/// (IPv6 в скобках сравнивается без них). Без DNS: опрос топологии разрешает имена, диагностика — нет, поэтому участник,
+/// чей хост задан именем, по адресу клиента не находится. Не сопоставилось — `None`.
+pub fn sender_member(
+    t: &Topology,
+    application: Option<&str>,
+    client_addr: Option<&str>,
+) -> Option<String> {
+    let by_application = application.and_then(|app| {
+        t.members
+            .iter()
+            .find(|m| m.name == app || m.host == app)
+            .map(|m| m.name.clone())
+    });
+    by_application.or_else(|| {
+        let addr = client_addr?;
+        t.members
+            .iter()
+            .find(|m| m.host.trim_matches(['[', ']']) == addr)
+            .map(|m| m.name.clone())
+    })
 }
 
 /// Запрос узлового инструмента на его узле: соединение пула `Catalog`, предел — `catalog_limit` профиля.
@@ -384,14 +398,69 @@ mod tests {
     }
 
     #[test]
-    fn sender_member_needs_an_application_name() {
+    fn sender_member_matches_the_application_name() {
         let t = crate::topology::model::topo(vec![crate::topology::model::Member::new(
             "pg-1", "db1", 5432,
         )]);
-        assert_eq!(sender_member(&t, Some("pg-1")).as_deref(), Some("pg-1"));
-        assert_eq!(sender_member(&t, Some("db1")).as_deref(), Some("pg-1"));
-        assert_eq!(sender_member(&t, Some("other")), None);
-        assert_eq!(sender_member(&t, None), None);
+        assert_eq!(
+            sender_member(&t, Some("pg-1"), None).as_deref(),
+            Some("pg-1")
+        );
+        assert_eq!(
+            sender_member(&t, Some("db1"), None).as_deref(),
+            Some("pg-1")
+        );
+        assert_eq!(sender_member(&t, Some("other"), None), None);
+        assert_eq!(sender_member(&t, None, None), None);
+    }
+
+    #[test]
+    fn sender_member_falls_back_to_the_client_address() {
+        use crate::topology::model::Member;
+        let t = crate::topology::model::topo(vec![
+            Member::new("pg-1", "10.0.0.11", 5432),
+            Member::new("pg-2", "[fd00::12]", 5432),
+            Member::new("pg-3", "db3.example", 5432),
+        ]);
+        // walreceiver (имя по умолчанию у приёмника без application_name) — участник по адресу клиента.
+        assert_eq!(
+            sender_member(&t, Some("walreceiver"), Some("10.0.0.11")).as_deref(),
+            Some("pg-1")
+        );
+        assert_eq!(
+            sender_member(&t, None, Some("10.0.0.11")).as_deref(),
+            Some("pg-1")
+        );
+        // Хост участника в скобках IPv6, адрес клиента от `host(client_addr)` — без них.
+        assert_eq!(
+            sender_member(&t, Some("walreceiver"), Some("fd00::12")).as_deref(),
+            Some("pg-2")
+        );
+        // Чужой адрес не сопоставляется; хост-имя (pg-3) без DNS по адресу клиента не находится.
+        assert_eq!(
+            sender_member(&t, Some("walreceiver"), Some("10.0.0.99")),
+            None
+        );
+        assert_eq!(
+            sender_member(&t, Some("walreceiver"), Some("10.0.0.13")),
+            None
+        );
+        assert_eq!(sender_member(&t, Some("walreceiver"), None), None);
+        assert_eq!(sender_member(&t, None, None), None);
+    }
+
+    #[test]
+    fn sender_member_prefers_the_application_name_over_the_address() {
+        use crate::topology::model::Member;
+        let t = crate::topology::model::topo(vec![
+            Member::new("pg-1", "10.0.0.11", 5432),
+            Member::new("pg-2", "10.0.0.12", 5432),
+        ]);
+        // Имя указывает на pg-2, адрес — на pg-1: побеждает имя.
+        assert_eq!(
+            sender_member(&t, Some("pg-2"), Some("10.0.0.11")).as_deref(),
+            Some("pg-2")
+        );
     }
 
     #[test]

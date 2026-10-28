@@ -86,7 +86,11 @@ fn slot_holder(row: SlotRow, topology: &Topology) -> Holder {
     };
     Holder {
         kind: HolderKind::Slot,
-        member: sender_member(topology, row.application.as_deref()),
+        member: sender_member(
+            topology,
+            row.application.as_deref(),
+            row.client_addr.as_deref(),
+        ),
         name: row.name,
         xmin_age: row.xmin_age.max(row.catalog_xmin_age).unwrap_or(0),
         duration_s: row.inactive_s,
@@ -99,7 +103,7 @@ fn slot_holder(row: SlotRow, topology: &Topology) -> Holder {
     }
 }
 
-/// Обратная связь реплики без слота; реплика сопоставляется с участником топологии по `application_name`.
+/// Обратная связь реплики без слота; реплика сопоставляется с участником топологии по `application_name` или адресу клиента.
 fn feedback_holder(
     application: String,
     client_addr: Option<String>,
@@ -108,7 +112,7 @@ fn feedback_holder(
 ) -> Holder {
     Holder {
         kind: HolderKind::StandbyFeedback,
-        member: sender_member(topology, Some(&application)),
+        member: sender_member(topology, Some(&application), client_addr.as_deref()),
         name: application,
         xmin_age,
         client_addr,
@@ -372,5 +376,31 @@ mod tests {
             feedback_holder("pg-2".into(), None, 3, &Topology::empty_for_tests()).member,
             None
         );
+    }
+
+    #[test]
+    fn walsender_without_a_known_name_is_matched_by_its_client_address() {
+        let mut m2 = Member::new("pg-2", "10.0.0.2", 5432);
+        m2.role = Role::Replica;
+        let t = topo(vec![Member::new("pg-1", "10.0.0.1", 5432), m2]);
+        let slot = slot_holder(
+            SlotRow {
+                slot_type: Some("physical".into()),
+                active: Some(true),
+                application: Some("walreceiver".into()),
+                client_addr: Some("10.0.0.2".into()),
+                ..row(Some(4), None)
+            },
+            &t,
+        );
+        assert_eq!(slot.member.as_deref(), Some("pg-2"));
+        // Имя «walreceiver» остаётся подписью держателя, участник найден по адресу.
+        assert_eq!(slot.application.as_deref(), Some("walreceiver"));
+        let feedback = feedback_holder("walreceiver".into(), Some("10.0.0.2".into()), 3, &t);
+        assert_eq!(feedback.member.as_deref(), Some("pg-2"));
+        assert_eq!(feedback.name, "walreceiver");
+        // Чужой адрес — участника нет.
+        let stranger = feedback_holder("walreceiver".into(), Some("10.0.0.9".into()), 3, &t);
+        assert_eq!(stranger.member, None);
     }
 }

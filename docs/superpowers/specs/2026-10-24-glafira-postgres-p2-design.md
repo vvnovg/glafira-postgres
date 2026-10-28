@@ -246,7 +246,7 @@ Finding {
 | `ddlQueue` | locks | — | есть DDL в очереди |
 | `xminHorizon` | horizon | держатель старше 10 млн xid или 1 ч | 100 млн xid или 6 ч |
 | `replicaLag` | replication, pulse | ≥ 16 МБ или ≥ 30 с | ≥ 1 ГБ или ≥ 5 мин |
-| `replicaNotStreaming` | replication | `state` ≠ `streaming` | — |
+| `replicaNotStreaming` | replication | `state` ≠ `streaming` и ≠ `backup` | — |
 | `replicaReplyStale` | replication | `reply_time` старше 60 с | — |
 | `syncStandbyMissing` | replication | — | `synchronous_standby_names` задан, sync / quorum реплики нет |
 | `walReceiverDown` | replication | — | на реплике нет работающего WAL receiver |
@@ -361,7 +361,8 @@ waitS, queued: число сессий за ней, relation, relationOid, relat
 Реплика с физическим слотом передаёт обратную связь через `pg_replication_slots.xmin` (держатель — `slot`); активный физический
 слот с сопоставленным участником ссылается на него, как `standbyFeedback`: ссылка находки открывает горизонт на этом
 участнике. **Сопоставление отправителя WAL с участником** (здесь и в §5.6): `application_name` равен имени участника или его
-хосту; DNS не используется (опрос топологии разрешает имена, диагностика — нет); не сопоставилось — `member` пусто и ссылки нет. У
+хосту, а если по имени не нашлось — адрес клиента (`host(client_addr)`) равен хосту участника (IPv6 в скобках сравнивается без них);
+DNS не используется (опрос топологии разрешает имена, диагностика — нет); не сопоставилось — `member` пусто и ссылки нет. У
 `preparedXact` в `params.command` — `ROLLBACK PREPARED '<gid>'` (строковая константа по правилам `quote_literal`). Данные:
 `holders: [{ kind, name, member?, xminAge, durationS?, details }]`, `hotStandbyFeedback` (значение настройки на узле).
 

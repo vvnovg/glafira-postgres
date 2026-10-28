@@ -1258,7 +1258,7 @@
     },
     "replicaNotStreaming": {
       "title": "Реплик не в потоковом режиме: {{count}} (состояние {{state}})",
-      "fix": "Реплика в catchup или backup ещё не кандидат на failover."
+      "fix": "Реплика в startup или catchup ещё не кандидат на failover."
     },
     "replicaReplyStale": {
       "title": "Реплик без ответа {{maxS}}: {{count}}",
