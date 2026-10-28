@@ -195,21 +195,22 @@ describe("TableTab", () => {
 });
 
 describe("TableTab: обновление и возврат подключения", () => {
-  it("кнопка «Обновить» перечитывает таблицу; пока идёт чтение, она недоступна и занята", async () => {
+  it("кнопка «Обновить» перечитывает таблицу; пока идёт чтение, она помечена недоступной и занятой, но не отключена (фокус остаётся)", async () => {
     const user = userEvent.setup();
     renderWithClient(<TableTab connectionId="c" database="orders" schema="shop" name="orders" />);
     await screen.findByRole("table", { name: "Колонки" });
-    expect(screen.getByRole("button", { name: "Обновить" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Обновить" })).toHaveAttribute("aria-disabled", "false");
     let finish: (d: TableDetails) => void = () => {};
     vi.mocked(api.getTable).mockReturnValue(new Promise((resolve) => (finish = resolve)));
     await user.click(screen.getByRole("button", { name: "Обновить" }));
     expect(api.getTable).toHaveBeenCalledTimes(2);
     const busy = screen.getByRole("button", { name: "Обновить" });
-    expect(busy).toBeDisabled();
+    expect(busy).toHaveAttribute("aria-disabled", "true");
+    expect(busy).not.toBeDisabled();
     expect(busy).toHaveAttribute("aria-busy", "true");
     await act(async () => finish({ ...details, columns: [{ ...details.columns[1], name: "created_at", dataType: "timestamptz" }] }));
     expect(await screen.findByText("created_at")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Обновить" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Обновить" })).toHaveAttribute("aria-disabled", "false");
   });
 
   it("подвкладка, которой больше нет после обновления, заменяется первой, и тело показано по ней же", async () => {

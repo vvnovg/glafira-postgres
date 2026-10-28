@@ -72,7 +72,12 @@ export function TestPanel({ events, report }: { events: TestEvent[]; report: Tes
         <ul className="steps">
           {steps.map((s) => (
             <li key={`${s.step}:${s.member ?? ""}`}>
-              <StatusIcon icon={STEP_ICON[s.status]} label={t(`test.status.${s.status}`)} /> <strong>{t(`test.step.${s.step}`)}{s.member ? ` ${s.member}` : ""}:</strong>{" "}
+              <StatusIcon icon={STEP_ICON[s.status]} label={t(`test.status.${s.status}`)} /> <strong>
+                {t(`test.step.${s.step}`)}
+                {s.member ? ` ${s.member}` : ""}
+                {/* Двоеточие — только перед текстом: шаг без сообщения (readiness: ok) не должен заканчиваться пустым «Готовность:». */}
+                {s.message || s.error ? ":" : ""}
+              </strong>{" "}
               {s.message && <span>{tr(s.message)}</span>}
               {s.error && <span className="warn">{tr(s.error)}</span>}
               {s.error?.details && <pre className="muted">{s.error.details}</pre>}

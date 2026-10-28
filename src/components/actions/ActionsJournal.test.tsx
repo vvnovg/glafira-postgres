@@ -89,6 +89,22 @@ describe("ActionsJournal", () => {
     expect(screen.queryByText(/notAllowed/)).toBeNull();
   });
 
+  it("кнопка раскрытия указывает через aria-controls на строку с подробностями; у свёрнутой строки такого элемента нет", async () => {
+    const user = userEvent.setup();
+    renderWithClient(<ActionsJournal connectionId="c" />);
+    const toggle = await screen.findByRole("button", { name: /Завершение сессий/ });
+    const id = toggle.getAttribute("aria-controls");
+    expect(id).toBeTruthy();
+    expect(document.getElementById(id!)).toBeNull();
+    await user.click(toggle);
+    const details = document.getElementById(id!);
+    expect(details).not.toBeNull();
+    expect(details).toHaveTextContent(/UPDATE shop\.orders SET status = 'x'/);
+    // У другой строки свой id.
+    const other = screen.getByRole("button", { name: /Switchover/ });
+    expect(other.getAttribute("aria-controls")).not.toBe(id);
+  });
+
   it("в раскрытой записи есть код ошибки; слот — объект строки", async () => {
     const user = userEvent.setup();
     vi.mocked(api.listActions).mockResolvedValue([dropSlot]);

@@ -303,7 +303,7 @@ OpenSSH с `-E` пишет ошибки в лог, а stderr оставляет 
 |---|---|---|
 | `notFound` | нет `ssh` или `ssh -V` не отвечает как OpenSSH | подсказка по установке |
 | `tooOld` (`FEATURE_UNAVAILABLE`) | OpenSSH ниже 8.4, а нужен askpass | объяснение: агент или ключ без пассфразы |
-| `hostKeyUnknown` | отчёт askpass с отпечатком (или `Host key verification failed`) | диалог: хост, отпечаток, «Доверять и подключиться» → `trust_ssh_host_key(target, fingerprint)`, затем интерфейс повторяет подключение, переподключение или проверку с `GLAFIRA_ASKPASS_TRUST`; ssh сам пишет ключ в `known_hosts` |
+| `hostKeyUnknown` | отчёт askpass с отпечатком (или `Host key verification failed`) | диалог: хост, отпечаток, «Доверять и подключиться» (в форме подключения при проверке — «Доверять и проверить») → `trust_ssh_host_key(target, fingerprint)`, затем интерфейс повторяет подключение, переподключение или проверку с `GLAFIRA_ASKPASS_TRUST`; ssh сам пишет ключ в `known_hosts` |
 | `hostKeyChanged` | `REMOTE HOST IDENTIFICATION HAS CHANGED` | только объяснение; обойти из приложения нельзя, `known_hosts` правят вручную |
 | `authFailed` | `Permission denied`, `Too many authentication failures` (агент с шестью и больше ключами, ни один не принят) | исправить способ входа в форме («Изменить подключение» в меню дерева), затем «Переподключить» (меню подключения в дереве, кнопка обзора); супервизор на стоянке до этого |
 | `bindFailed` | локальный порт SOCKS занят (`Address already in use`) и после повтора с новым портом | «Не удалось занять локальный порт для SSH-туннеля»; `retryable` |

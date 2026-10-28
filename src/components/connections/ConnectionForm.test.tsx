@@ -928,7 +928,7 @@ describe("ConnectionForm: SSH-туннель", () => {
       const dialog = await screen.findByRole("dialog", { name: "Неизвестный ключ хоста" });
       expect(dialog).toHaveTextContent("bastion (10.0.0.5)");
       expect(dialog).toHaveTextContent("SHA256:abc");
-      await user.click(within(dialog).getByRole("button", { name: "Доверять и подключиться" }));
+      await user.click(within(dialog).getByRole("button", { name: "Доверять и проверить" }));
       expect(api.trustSshHostKey).toHaveBeenCalledWith("bastion", "SHA256:abc");
       await waitFor(() => expect(api.testConnection).toHaveBeenCalledTimes(2));
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
@@ -950,7 +950,7 @@ describe("ConnectionForm: SSH-туннель", () => {
       renderWithClient(<ConnectionForm initial={withSsh()} tabId="t" />);
       await user.click(screen.getByRole("button", { name: "Проверить" }));
       const dialog = await screen.findByRole("dialog", { name: "Неизвестный ключ хоста" });
-      await user.click(within(dialog).getByRole("button", { name: "Доверять и подключиться" }));
+      await user.click(within(dialog).getByRole("button", { name: "Доверять и проверить" }));
       await waitFor(() => expect(api.testConnection).toHaveBeenCalledTimes(2));
       expect(await screen.findByText("OpenSSH 9.6, туннель поднят")).toBeInTheDocument();
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
@@ -977,11 +977,11 @@ describe("ConnectionForm: SSH-туннель", () => {
       renderWithClient(<ConnectionForm initial={withSsh()} tabId="t" />);
       await user.click(screen.getByRole("button", { name: "Проверить" }));
       const dialog = await screen.findByRole("dialog", { name: "Неизвестный ключ хоста" });
-      await user.click(within(dialog).getByRole("button", { name: "Доверять и подключиться" }));
+      await user.click(within(dialog).getByRole("button", { name: "Доверять и проверить" }));
       expect(await within(dialog).findByText("Fingerprint is empty")).toBeInTheDocument();
       expect(api.testConnection).toHaveBeenCalledTimes(1);
       // Диалог остался: кнопки снова доступны.
-      expect(within(dialog).getByRole("button", { name: "Доверять и подключиться" })).toBeEnabled();
+      expect(within(dialog).getByRole("button", { name: "Доверять и проверить" })).toBeEnabled();
     });
 
     it("смена ключа хоста доверием не лечится: диалога нет, ошибка — обычным текстом", async () => {

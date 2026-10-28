@@ -7,7 +7,8 @@ import { ErrorBanner } from "../common/ErrorBanner";
 import { hostKeyUnknown } from "./profile";
 
 /**
- * Диалог доверия ключу хоста ssh (спец. P1 §5.2): хост, отпечаток, «Доверять и подключиться» → `trust_ssh_host_key`,
+ * Диалог доверия ключу хоста ssh (спец. P1 §5.2): хост, отпечаток, «Доверять и подключиться» (в форме, где повторяется
+ * проверка, — «Доверять и проверить», `action="check"`) → `trust_ssh_host_key`,
  * затем `onTrusted` — повтор действия, которое упёрлось в ключ (подключение, переподключение или проверка): сам Rust
  * после доверия ничего не повторяет. Диалог открывают только для ошибки, которой можно доверять (`hostKeyUnknown`):
  * для другой ошибки он ничего не рисует. Смена ключа хоста (`hostKeyChanged`) сюда не попадает: её лечат правкой known_hosts.
@@ -15,7 +16,18 @@ import { hostKeyUnknown } from "./profile";
  * Модальный: фокус при открытии — на «Отмена» (случайный Enter ничему не доверяет), Tab ходит по кругу внутри,
  * Escape отменяет, при закрытии фокус возвращается туда, где он был.
  */
-export function TrustHostKeyDialog({ error, onTrusted, onCancel }: { error: AppError; onTrusted: () => void; onCancel: () => void }) {
+export function TrustHostKeyDialog({
+  error,
+  action = "connect",
+  onTrusted,
+  onCancel,
+}: {
+  error: AppError;
+  /** Что повторится после доверия: подключение (дерево, обзор) или проверка из формы — от этого зависит подпись кнопки. */
+  action?: "connect" | "check";
+  onTrusted: () => void;
+  onCancel: () => void;
+}) {
   const { t } = useTranslation();
   const titleId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -77,7 +89,7 @@ export function TrustHostKeyDialog({ error, onTrusted, onCancel }: { error: AppE
         {failure && <ErrorBanner error={failure} />}
         <div className="toolbar">
           <button type="button" className="primary" disabled={busy} onClick={() => void trust()}>
-            {t("hostKey.trust")}
+            {action === "check" ? t("hostKey.trustAndCheck") : t("hostKey.trust")}
           </button>
           <button type="button" ref={cancelRef} disabled={busy} onClick={onCancel}>
             {t("common.cancel")}

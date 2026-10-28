@@ -42,6 +42,21 @@ describe("TestPanel", () => {
     expect(items[2]).toHaveTextContent("Аутентификация не прошла");
   });
 
+  it("шаг без сообщения и без ошибки (readiness: ok) — название без двоеточия; с текстом двоеточие остаётся", () => {
+    const { container } = render(
+      <TestPanel
+        events={[
+          ev({ step: "readiness", status: "ok" }),
+          ev({ member: "db1:5432", status: "ok", message: { key: "test.nodeOk", params: { role: "primary", version: "16.4" }, text: "primary, PostgreSQL 16.4" } }),
+          ev({ member: "db2:5432", status: "failed", error: { code: "AUTH_FAILED", key: "errors.pg.authFailed", message: "Authentication failed", retryable: false } }),
+        ]}
+        report={null}
+      />,
+    );
+    const titles = Array.from(container.querySelectorAll("li > strong")).map((s) => s.textContent);
+    expect(titles).toEqual(["Готовность", "Узел db1:5432:", "Узел db2:5432:"]);
+  });
+
   it("шаг SSH идёт первым: версия OpenSSH, ошибка туннеля, «не используется» при прямом подключении", () => {
     const { unmount } = render(
       <TestPanel events={[ev({ step: "ssh", status: "ok", message: { key: "test.sshOk", params: { version: "9.6" }, text: "OpenSSH 9.6, tunnel is up" } })]} report={null} />,

@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import type { TFunction } from "i18next";
-import { Fragment, useState } from "react";
+import { Fragment, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
 import type { ActionRecord } from "../../api/types";
@@ -59,6 +59,8 @@ export function ActionsJournal({ connectionId, active = true }: { connectionId: 
   const { t } = useTranslation();
   const q = useQuery({ queryKey: ["actions", connectionId], queryFn: () => api.listActions(connectionId, JOURNAL_LIMIT), enabled: active });
   const [openKey, setOpenKey] = useState<string | null>(null);
+  // Префикс id строк с подробностями: журналов на странице может быть несколько (по вкладке на подключение).
+  const idPrefix = useId();
   const rows = q.data ?? [];
   const keys = rowKeys(rows);
   return (
@@ -70,7 +72,7 @@ export function ActionsJournal({ connectionId, active = true }: { connectionId: 
         </button>
       </div>
       {q.error && <ErrorBanner error={q.error} />}
-      {q.isLoading &&<p className="muted">{t("common.loading")}</p>}
+      {q.isLoading && <p className="muted">{t("common.loading")}</p>}
       {q.isSuccess && rows.length === 0 && <p className="muted">{t("actions.journal.empty")}</p>}
       {rows.length > 0 && (
         <div className="table-scroll">
@@ -87,6 +89,8 @@ export function ActionsJournal({ connectionId, active = true }: { connectionId: 
             <tbody>
               {rows.map((r, i) => {
                 const key = keys[i];
+                // Ключ строки содержит имя узла (в нём может быть пробел, а в aria-controls пробел разделяет id).
+                const detailsId = `${idPrefix}-${encodeURIComponent(key)}`;
                 const actionKey = ACTION_KEYS.get(r.action);
                 const outcomeKey = OUTCOME_KEYS.get(r.outcome);
                 return (
@@ -94,7 +98,13 @@ export function ActionsJournal({ connectionId, active = true }: { connectionId: 
                     <tr>
                       <td>{formatTimestamp(r.ts)}</td>
                       <td>
-                        <button type="button" className="link" aria-expanded={openKey === key} onClick={() => setOpenKey(openKey === key ? null : key)}>
+                        <button
+                          type="button"
+                          className="link"
+                          aria-expanded={openKey === key}
+                          aria-controls={detailsId}
+                          onClick={() => setOpenKey(openKey === key ? null : key)}
+                        >
                           {actionKey ? t(actionKey) : r.action}
                         </button>
                       </td>
@@ -103,7 +113,7 @@ export function ActionsJournal({ connectionId, active = true }: { connectionId: 
                       <td className={r.outcome === "ok" ? undefined : "diag-warn"}>{outcomeKey ? t(outcomeKey) : r.outcome}</td>
                     </tr>
                     {openKey === key && (
-                      <tr>
+                      <tr id={detailsId}>
                         <td colSpan={5}>
                           {/* Полная запись как её записал Rust: код ошибки, текст запроса и итог каждой сессии, ответ Patroni. */}
                           <pre>{JSON.stringify(r, null, 2)}</pre>

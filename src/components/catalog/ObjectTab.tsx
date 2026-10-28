@@ -43,7 +43,16 @@ export function ObjectTab<T>({
       <div className="toolbar">
         <h2>{title}</h2>
         <span className="muted">{kind}</span>
-        <button type="button" disabled={query.isFetching} aria-busy={query.isFetching} onClick={() => void query.refetch()}>
+        {/* Не `disabled`: отключённая кнопка теряет фокус, и пользователь клавиатуры оказывается в начале страницы. */}
+        {/* Пока чтение идёт, кнопка помечена aria-disabled, а нажатие игнорируется: повторный refetch отменил бы идущее чтение. */}
+        <button
+          type="button"
+          aria-disabled={query.isFetching}
+          aria-busy={query.isFetching}
+          onClick={() => {
+            if (!query.isFetching) void query.refetch();
+          }}
+        >
           {t("object.refresh")}
         </button>
       </div>

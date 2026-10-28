@@ -329,7 +329,8 @@
     "explain": "The bastion presented a key that is not in known_hosts yet. Compare the fingerprint with the one your administrator gave you.",
     "host": "Host",
     "fingerprint": "Fingerprint",
-    "trust": "Trust and connect"
+    "trust": "Trust and connect",
+    "trustAndCheck": "Trust and check"
   },
   "sidebar": {
     "settings": "Settings",

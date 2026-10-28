@@ -305,7 +305,7 @@ export function ConnectionForm({ initial, tabId, copyOf }: { initial: Connection
 
       {error && <ErrorBanner error={error} />}
       {(events.length > 0 || report) && <TestPanel events={events} report={report} />}
-      {trustError && <TrustHostKeyDialog error={trustError} onTrusted={() => void onTest()} onCancel={() => setTrustDismissed(trustError)} />}
+      {trustError && <TrustHostKeyDialog error={trustError} action="check" onTrusted={() => void onTest()} onCancel={() => setTrustDismissed(trustError)} />}
     </div>
   );
 }

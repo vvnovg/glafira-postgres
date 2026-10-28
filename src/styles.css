@@ -66,7 +66,8 @@
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); }
 button { font: inherit; color: inherit; background: var(--bg-alt); border: 1px solid var(--border); border-radius: 4px; padding: 3px 8px; cursor: pointer; }
-button:disabled { opacity: 0.5; cursor: default; }
+/* aria-disabled — кнопка, которая недоступна, но остаётся в порядке Tab и не теряет фокус (disabled его отнимает). */
+button:disabled, button[aria-disabled="true"] { opacity: 0.5; cursor: default; }
 button.icon { background: none; border: none; padding: 0 4px; }
 button.link { background: none; border: none; color: var(--accent); padding: 2px 0; }
 button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
@@ -219,10 +220,12 @@ label.inline { display: inline-flex; gap: 4px; align-items: center; white-space:
 ul.tree-catalog, .tree-catalog ul { padding-left: 12px; }
 .tree-conn ~ .tree-error { margin-left: 12px; }
 .tree-note { margin: 2px 0; font-size: 12px; color: var(--muted); }
-/* В узкой боковой панели имена объектов переносятся, а не обрезаются: суффикс (events_2026_09) отличает партиции. */
-.tree-wrap { flex-wrap: wrap; column-gap: 6px; }
+/* В узкой боковой панели имена объектов переносятся, а не обрезаются: суффикс (events_2026_09) отличает партиции.
+   Сама строка не переносится (без flex-wrap): имя сжимается до остатка ширины и переносит слова внутри своей кнопки,
+   а размер, «N партиций» и глиф «—» (прямые потомки с классом muted) остаются справа в той же строке. */
 .tree-wrap .tree-folder-toggle { flex: 1 1 auto; }
 .tree-wrap .tree-name { flex: 1 1 auto; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.tree-wrap > .muted { flex: none; white-space: nowrap; }
 .tree-virtual ul { list-style: none; margin: 0; padding: 0; }
 button.link.tree-name { text-align: left; color: inherit; }
 label.inline.wrap { white-space: normal; }

@@ -31,6 +31,26 @@ describe("TrustHostKeyDialog", () => {
     expect(screen.getByRole("button", { name: "Отмена" })).toHaveFocus();
   });
 
+  it("подпись кнопки зависит от действия: без пропа — «Доверять и подключиться», для проверки — «Доверять и проверить»", () => {
+    const { unmount } = render(<TrustHostKeyDialog error={unknown} onTrusted={vi.fn()} onCancel={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "Доверять и подключиться" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Доверять и проверить" })).not.toBeInTheDocument();
+    unmount();
+    render(<TrustHostKeyDialog error={unknown} action="check" onTrusted={vi.fn()} onCancel={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "Доверять и проверить" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Доверять и подключиться" })).not.toBeInTheDocument();
+  });
+
+  it("«Доверять и проверить» делает то же, что и «Доверять и подключиться»: доверяет и сообщает родителю", async () => {
+    vi.mocked(api.trustSshHostKey).mockResolvedValue(undefined);
+    const onTrusted = vi.fn();
+    const user = userEvent.setup();
+    render(<TrustHostKeyDialog error={unknown} action="check" onTrusted={onTrusted} onCancel={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Доверять и проверить" }));
+    expect(api.trustSshHostKey).toHaveBeenCalledWith("bastion", "SHA256:abc");
+    expect(onTrusted).toHaveBeenCalledTimes(1);
+  });
+
   it("«Доверять и подключиться» передаёт цель и отпечаток, затем сообщает родителю", async () => {
     vi.mocked(api.trustSshHostKey).mockResolvedValue(undefined);
     const onTrusted = vi.fn();
