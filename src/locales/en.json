@@ -197,6 +197,12 @@
       "patroniOnly": "This tool is available only for Patroni clusters",
       "badWindow": "The window must be 300, 900 or 3600 seconds"
     },
+    "queries": {
+      "paramsRequired": "The queries tool needs its parameters",
+      "badLimit": "The row limit must be 50, 100 or 200",
+      "betweenUnsupported": "Comparing snapshots is not available yet",
+      "sortUnavailable": "This sort order is not available for this version or mode"
+    },
     "guard": {
       "readOnly": "Connection “{{name}}” is read-only",
       "prodConfirm": "To change a prod connection, type its name “{{name}}”",
@@ -810,6 +816,10 @@
       "privilege": "{{part}}: needs the pg_monitor role",
       "patroniConfig": "{{part}}: the Patroni configuration could not be read",
       "onMember": "{{member}}: {{text}}",
+      "statementsMissing": "{{part}}: pg_stat_statements is not installed in this database",
+      "statementsOld": "{{part}}: pg_stat_statements {{version}} is older than 1.8",
+      "statementsHidden": "{{part}}: needs the pg_read_all_stats role",
+      "statementsStarting": "{{part}}: the statements sampler is starting",
       "parts": {
         "queryId": "Query ID (query_id)",
         "walDir": "pg_wal size",
@@ -821,7 +831,10 @@
         "slotConflicting": "Slot conflict with recovery",
         "slotInactiveSince": "Slot inactive since",
         "subscriptionErrors": "Subscription errors",
-        "patroniSlots": "Patroni slot marks"
+        "patroniSlots": "Patroni slot marks",
+        "statements": "Query statistics (pg_stat_statements)",
+        "others": "Other roles' queries",
+        "window": "Window data"
       }
     },
     "tools": {

@@ -19,6 +19,7 @@ fn req(tool: Tool) -> DiagRequest {
         tool,
         member: None,
         window_s: None,
+        queries: None,
     }
 }
 
@@ -199,6 +200,7 @@ async fn pulse_on_patroni_has_a_row_per_member_and_rates_from_the_second_call() 
         tool: Tool::Pulse,
         member: Some("ignored".into()),
         window_s: None,
+        queries: None,
     };
     let first = diag::run(&st, "it", req.clone()).await.unwrap();
     assert_eq!((first.member, first.follows_leader), (None, false));

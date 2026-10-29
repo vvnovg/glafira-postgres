@@ -199,6 +199,12 @@
       "patroniOnly": "Инструмент доступен только для кластера Patroni",
       "badWindow": "Окно — 300, 900 или 3600 секунд"
     },
+    "queries": {
+      "paramsRequired": "Инструменту «Запросы» нужны его параметры",
+      "badLimit": "Предел строк — 50, 100 или 200",
+      "betweenUnsupported": "Сравнение снимков пока недоступно",
+      "sortUnavailable": "Эта сортировка недоступна для этой версии или режима"
+    },
     "guard": {
       "readOnly": "Подключение «{{name}}» только для чтения",
       "prodConfirm": "Чтобы изменить prod-подключение, введите его имя «{{name}}»",
@@ -832,6 +838,10 @@
       "privilege": "{{part}}: нужна роль pg_monitor",
       "patroniConfig": "{{part}}: не удалось прочитать конфигурацию Patroni",
       "onMember": "{{member}}: {{text}}",
+      "statementsMissing": "{{part}}: pg_stat_statements не установлен в этой базе",
+      "statementsOld": "{{part}}: pg_stat_statements {{version}} старше 1.8",
+      "statementsHidden": "{{part}}: нужна роль pg_read_all_stats",
+      "statementsStarting": "{{part}}: сэмплер запросов запускается",
       "parts": {
         "queryId": "Идентификатор запроса (query_id)",
         "walDir": "Размер pg_wal",
@@ -843,7 +853,10 @@
         "slotConflicting": "Конфликт слота с recovery",
         "slotInactiveSince": "Время простоя слота",
         "subscriptionErrors": "Ошибки подписок",
-        "patroniSlots": "Отметки слотов Patroni"
+        "patroniSlots": "Отметки слотов Patroni",
+        "statements": "Статистика запросов (pg_stat_statements)",
+        "others": "Запросы других ролей",
+        "window": "Данные окна"
       }
     },
     "tools": {

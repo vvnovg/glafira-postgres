@@ -7,6 +7,7 @@ pub mod locks;
 pub mod memory;
 pub mod patroni;
 pub mod pulse;
+pub mod queries;
 pub mod replication;
 pub mod sessions;
 pub mod slots;
@@ -22,6 +23,7 @@ use pg_advisor::rules::horizon::HorizonData;
 use pg_advisor::rules::replication::ReplicationData;
 use pg_advisor::rules::sessions::SessionsData;
 use pg_advisor::rules::slots::SlotsData;
+use queries::{QueriesData, QueriesParams};
 use serde::{Deserialize, Serialize};
 use tokio_postgres::Client;
 
@@ -47,6 +49,7 @@ pub enum Tool {
     Slots,
     Failover,
     Health,
+    Queries,
 }
 
 impl Tool {
@@ -73,6 +76,9 @@ pub struct DiagRequest {
     pub member: Option<String>,
     /// Только `waits`: одно из `WINDOWS_S`, по умолчанию `DEFAULT_WINDOW_S`.
     pub window_s: Option<u32>,
+    /// Только `queries`: режим, сортировка, предел, фильтры (спец. P3 §4.5).
+    #[serde(default)]
+    pub queries: Option<QueriesParams>,
 }
 
 /// Что не показано и почему (версия сервера, нет права).
@@ -102,6 +108,7 @@ pub enum DiagData {
     Slots(SlotsData),
     Failover(FailoverData),
     Health(patroni::HealthData),
+    Queries(QueriesData),
 }
 
 /// Конверт отчёта (спец. P2 §3.2). У инструментов кластера `member`, `serverVersionNum` и `inRecovery` пусты.
@@ -135,6 +142,13 @@ pub fn validate(req: &DiagRequest, kind: ConnectionKind) -> AppResult<()> {
             ErrorCode::InvalidInput,
             "errors.diag.badWindow",
             "The window must be 300, 900 or 3600 seconds"
+        ));
+    }
+    if req.tool == Tool::Queries && req.queries.is_none() {
+        return Err(app_err!(
+            ErrorCode::InvalidInput,
+            "errors.queries.paramsRequired",
+            "The queries tool needs its parameters"
         ));
     }
     Ok(())
@@ -279,6 +293,13 @@ pub async fn run(st: &AppState, id: &str, req: DiagRequest) -> AppResult<DiagRep
         Tool::Slots => slots::report(st, id, &target).await,
         Tool::Failover => patroni::failover_report(st, &target).await,
         Tool::Health => patroni::health_report(st, &target).await,
+        Tool::Queries => {
+            let p = req
+                .queries
+                .as_ref()
+                .ok_or_else(|| AppError::internal_with("queries without params"))?;
+            queries::report(st, id, &target, p).await
+        }
     }
 }
 
@@ -292,6 +313,7 @@ mod tests {
             tool,
             member: None,
             window_s,
+            queries: None,
         };
         assert_eq!(
             validate(&req(Tool::Failover, None), ConnectionKind::Server)

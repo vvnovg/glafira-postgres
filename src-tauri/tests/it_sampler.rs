@@ -55,6 +55,7 @@ async fn sampler_sees_sleep_and_lock_waits_and_stops_with_the_last_subscriber() 
             tool: Tool::Waits,
             member: None,
             window_s: Some(300),
+            queries: None,
         },
     )
     .await
