@@ -11,6 +11,7 @@ import { ChunkBoundary } from "./common/ChunkBoundary";
 import { ConnectionFormTab } from "./connections/ConnectionFormTab";
 import { DiagTab } from "./diag/DiagTab";
 import { Overview } from "./overview/Overview";
+import { QueryTab } from "./queries/QueryTab";
 import { SettingsPanel } from "./settings/SettingsPanel";
 
 // Справка (react-markdown и главы) грузится отдельным чанком при первом открытии.
@@ -50,6 +51,8 @@ export function TabContent({ tab, active = true }: { tab: Tab; active?: boolean 
       return <SequenceTab connectionId={tab.connectionId} database={tab.database} schema={tab.schema} name={tab.name} />;
     case "diag":
       return <DiagTab connectionId={tab.connectionId} tool={tab.tool} member={tab.member ?? null} active={active} tabId={tab.id} />;
+    case "query":
+      return <QueryTab connectionId={tab.connectionId} member={tab.member} database={tab.database} queryId={tab.queryId} active={active} />;
     case "actions":
       return <ActionsJournal connectionId={tab.connectionId} active={active} />;
   }

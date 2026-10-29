@@ -15,7 +15,9 @@
       "defaultLabel": "name",
       "objectAria": "Confirmation: {{label}}",
       "connectionAria": "Connection name"
-    }
+    },
+    "yes": "Yes",
+    "no": "No"
   },
   "errors": {
     "generic": "{{message}}",
@@ -909,6 +911,7 @@
       "none": "No problems found",
       "fix": "What to do",
       "open": "Open “{{tool}}”",
+      "openQuery": "Open query",
       "copy": "Copy command",
       "collapse": "Collapse findings",
       "expand": "Expand findings"
@@ -1273,6 +1276,61 @@
         "max": "Max"
       }
     },
+    "query": {
+      "heading": "Query",
+      "sections": "Query sections",
+      "overview": "Overview",
+      "plan": "Plan",
+      "text": "Query text",
+      "gone": "The query is no longer in pg_stat_statements",
+      "openConsole": "Open in console",
+      "copyLlm": "Copy for LLM",
+      "metrics": "Metrics",
+      "sinceReset": "Since reset",
+      "lastHour": "Last 60 min",
+      "metric": {
+        "calls": "Calls",
+        "total": "Total time",
+        "mean": "Mean",
+        "minMax": "Min / max",
+        "stddev": "Stddev",
+        "rowsPerCall": "Rows per call",
+        "hitRatio": "Cache hit",
+        "read": "Read / written",
+        "temp": "Temp written",
+        "wal": "WAL",
+        "planning": "Planning",
+        "jit": "JIT"
+      },
+      "history": "History (60 min)",
+      "historyCalls": "Calls per minute",
+      "historyMean": "Mean time per minute",
+      "noHistory": "No ticks yet: the sampler collects history while the tab is open",
+      "gaps": "Gaps in history: {{count}}",
+      "byUser": "By role and level",
+      "role": "Role",
+      "toplevel": "Top level",
+      "running": "Running instances",
+      "noRunning": "Not running now",
+      "state": "State",
+      "duration": "Duration",
+      "wait": "Wait",
+      "who": "Role · application · client",
+      "openSessions": "Open in Sessions",
+      "waits": "Waits",
+      "noWaitsBuffer": "Open the Sessions tab to collect waits for this query",
+      "waitEvent": "Event",
+      "share": "Share",
+      "samples": "Samples",
+      "tables": "Tables",
+      "tablesAfterPlan": "Tables appear after the first plan",
+      "getPlan": "Get plan",
+      "noTables": "The plan touches no tables",
+      "source": "Query text",
+      "sourcePgss": "Normalized text (pg_stat_statements)",
+      "sourceRunning": "Running instance PID {{pid}}",
+      "sourceTruncated": "truncated"
+    },
     "plan": {
       "tree": "Plan tree",
       "columns": {
@@ -1352,7 +1410,37 @@
       "copyText": "Copy as text",
       "asJson": "JSON",
       "asText": "As text",
-      "share": "Share of total time: {{pct}}"
+      "share": "Share of total time: {{pct}}",
+      "params": {
+        "title": "Parameters ({{count}})",
+        "generic": "GENERIC_PLAN (no values)",
+        "nullPlaceholder": "NULL"
+      },
+      "run": {
+        "plan": "Plan",
+        "analyze": "Plan with execution",
+        "timeout": "Timeout",
+        "searchPathDefault": "server default",
+        "writesHint": "The query writes data in a read-only transaction.",
+        "asWrite": "Run as a write",
+        "writeOnReplica": "A write cannot run on a replica: choose the primary",
+        "writeReadOnly": "Writes are unavailable: the connection is read-only",
+        "errorAt": "Error at line {{line}}, column {{column}}"
+      },
+      "confirm": {
+        "title": "Execute the query and roll back",
+        "run": "Execute and roll back",
+        "rollback": "Rows will change and be rolled back. Tables:",
+        "sideEffects": "Rollback does not undo fired triggers, sequence advances, NOTIFY and external calls; locks are held while the query runs."
+      },
+      "history": {
+        "title": "History",
+        "item": "#{{n}} {{mode}}, {{tier}}, {{time}}, {{ms}}",
+        "modes": {
+          "plan": "plan",
+          "analyze": "with execution"
+        }
+      }
     }
   },
   "findings": {
@@ -1693,6 +1781,44 @@
       "current": "Reached: {{step}}",
       "timedOut": "The watch timed out: check the overview",
       "failed": "The action failed"
+    }
+  },
+  "llm": {
+    "title": "Query context from Glafira for PostgreSQL",
+    "env": "Environment",
+    "replica": "replica",
+    "node": "Node",
+    "database": "Database",
+    "query": "Query",
+    "truncated": "The text is truncated to 16 384 characters",
+    "statistics": "Statistics",
+    "sinceReset": "Since reset",
+    "lastHour": "Last 60 minutes",
+    "plan": "Plan",
+    "tables": "Tables",
+    "moreTables_one": "… {{count}} more table (over the limit or its DDL could not be read)",
+    "moreTables_other": "… {{count}} more tables (over the limit or their DDL could not be read)",
+    "notes": "Notes",
+    "warnings": {
+      "paramsNeeded": "the plan needs parameter values (PostgreSQL < 16)",
+      "queryGone": "the query is no longer in pg_stat_statements",
+      "planFailed": "the plan could not be built",
+      "ddlFailed": "the DDL of some tables could not be read"
+    },
+    "stats": {
+      "metric": "Metric",
+      "value": "Value",
+      "calls": "Calls",
+      "total": "Total time",
+      "mean": "Mean",
+      "minMax": "Min / max",
+      "stddev": "Stddev",
+      "rowsPerCall": "Rows per call",
+      "hitRatio": "Cache hit",
+      "read": "Read from disk",
+      "temp": "Temp written",
+      "wal": "WAL",
+      "planning": "Planning"
     }
   },
   "hints": {

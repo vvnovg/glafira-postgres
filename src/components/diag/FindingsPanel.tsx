@@ -7,8 +7,6 @@ import { CopyButton } from "../common/CopyButton";
 import { findingFix, findingTitle } from "./findingText";
 
 type ActionLink = Extract<FindingLink, { kind: "action" }>;
-/** Ссылки, которые панель рисует кнопками; `openQuery` (карточка запроса) появится вместе с вкладкой `query`. */
-type ShownLink = Exclude<FindingLink, { kind: "openQuery" }>;
 
 /** Порядок показа: сначала более строгие; внутри одной строгости остаётся порядок сервера (сортировка устойчива). */
 const SEVERITY_ORDER: Record<Severity, number> = { critical: 0, warning: 1, info: 2 };
@@ -37,7 +35,7 @@ function findingKeys(findings: Finding[]): string[] {
 
 /**
  * Находки отчёта (спец. P2 §7.3): строгость (цвет и текстовая метка), заголовок, «что сделать», команда для копирования
- * и кнопки: переход в другой инструмент и действия над сессиями (только при `onAction`). Блок сворачивается;
+ * и кнопки: переход в другой инструмент, карточка запроса и действия над сессиями (только при `onAction`). Блок сворачивается;
  * без находок — «Проблем не найдено». `showMember` — у отчёта кластера: находки относятся к разным узлам, и узел
  * показывается отдельной меткой.
  */
@@ -82,12 +80,13 @@ export function FindingsPanel({
             const command = typeof f.params.command === "string" ? f.params.command : null;
             // Ссылка без узла ведёт туда же, что и узел отчёта: вкладка инструмента одна на подключение.
             // Ссылки-действия (`kind: "action"`) — кнопки только при `onAction` и известном узле (свой у ссылки или узел отчёта):
-            // без узла выполнять негде. Переход «в себя» не предлагается.
-            const links = f.links.filter(
-              (l): l is ShownLink =>
-                l.kind !== "openQuery" &&
-                (l.kind === "action" ? onAction !== undefined && (l.member ?? member ?? null) !== null : !(l.tool === tool && (l.member == null || l.member === member))),
-            );
+            // без узла выполнять негде. Карточка запроса (`openQuery`) — только при известном узле и базе: пустая база
+            // (строка pgss без `datname`) — база неизвестна. Переход «в себя» не предлагается.
+            const links = f.links.filter((l) => {
+              if (l.kind === "openQuery") return l.database !== "" && (l.member ?? member ?? null) !== null;
+              if (l.kind === "action") return onAction !== undefined && (l.member ?? member ?? null) !== null;
+              return !(l.tool === tool && (l.member == null || l.member === member));
+            });
             return (
               <li key={keys[i]} className={`finding sev-${f.severity}`}>
                 <div className="finding-main">
@@ -108,6 +107,17 @@ export function FindingsPanel({
                           {link.action.type === "terminateIdleInTransaction"
                             ? t("actions.findings.terminateIdle", { duration: formatDuration(link.action.olderThanS) })
                             : t("actions.findings.terminateRoot", { pid: link.action.pid })}
+                        </button>
+                      ) : link.kind === "openQuery" ? (
+                        <button
+                          key={`query:${link.database}:${link.queryId}`}
+                          type="button"
+                          onClick={() => {
+                            const node = link.member ?? member ?? null;
+                            if (node !== null) open({ kind: "query", connectionId, member: node, database: link.database, queryId: link.queryId });
+                          }}
+                        >
+                          {t("diag.findings.openQuery")}
                         </button>
                       ) : (
                         <button

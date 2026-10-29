@@ -22,7 +22,7 @@ type TopologyPayload = { connectionId: string; view: TopologyView; newEvents: To
  * Запросы подключения, которые читают PostgreSQL: после отключения удаляются, после переподключения перечитываются.
  * Новый такой ключ добавляется сюда — и отключение, и переподключение (дерево, обзор) его учтут.
  */
-export const PG_QUERY_KEYS = ["catalog", "memberFacts", "diag"] as const;
+export const PG_QUERY_KEYS = ["catalog", "memberFacts", "diag", "queryDetail"] as const;
 
 /** Предикат запросов подключения `id`, у которых первый элемент ключа — один из `prefixes`. */
 export const ofConnection = (prefixes: readonly string[], id: string) => (q: { queryKey: readonly unknown[] }) =>

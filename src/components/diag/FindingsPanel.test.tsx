@@ -19,7 +19,9 @@ describe("FindingsPanel", () => {
     expect(screen.getByRole("button", { name: "Открыть «Idle in transaction»" })).toBeInTheDocument();
   });
 
-  it("находка запроса pgss: текст с формой мс; ссылка openQuery пока кнопки не даёт, ключи различают запросы одной базы", () => {
+  it("находка запроса pgss: текст с формой мс; ссылка openQuery открывает карточку, ключи различают запросы одной базы", async () => {
+    const user = userEvent.setup();
+    useWorkspace.setState({ tabs: [], activeId: null });
     const q = (queryId: string, link: boolean): Finding => ({
       id: "query_unstable",
       severity: "warning",
@@ -32,7 +34,29 @@ describe("FindingsPanel", () => {
     const items = screen.getAllByRole("listitem");
     expect(items).toHaveLength(2);
     expect(items[0]).toHaveTextContent("Нестабильное время: stddev 480 мс при среднем 120 мс");
-    expect(within(items[0]).queryAllByRole("button")).toHaveLength(0);
+    expect(within(items[1]).queryAllByRole("button")).toHaveLength(0);
+    await user.click(within(items[0]).getByRole("button", { name: "Открыть запрос" }));
+    expect(useWorkspace.getState().tabs).toEqual([expect.objectContaining({ kind: "query", connectionId: "c", member: "pg-1", database: "perf", queryId: "1" })]);
+  });
+
+  it("openQuery без узла (ни у ссылки, ни у отчёта) или с пустой базой кнопки не даёт; узел отчёта подставляется", async () => {
+    const user = userEvent.setup();
+    useWorkspace.setState({ tabs: [], activeId: null });
+    const f = (database: string, member: string | null): Finding => ({
+      id: "query_unstable",
+      severity: "warning",
+      member: null,
+      target: { kind: "query", queryId: "9", database },
+      params: { stddevMs: 480, meanMs: 120, calls: 900 },
+      links: [{ kind: "openQuery", queryId: "9", database, member }],
+    });
+    const { rerender } = renderWithClient(<FindingsPanel connectionId="c" findings={[f("perf", null)]} tool="queries" member={null} />);
+    expect(screen.queryByRole("button", { name: "Открыть запрос" })).toBeNull();
+    rerender(<FindingsPanel connectionId="c" findings={[f("", "pg-1")]} tool="queries" member="pg-1" />);
+    expect(screen.queryByRole("button", { name: "Открыть запрос" })).toBeNull();
+    rerender(<FindingsPanel connectionId="c" findings={[f("perf", null)]} tool="queries" member="pg-2" />);
+    await user.click(screen.getByRole("button", { name: "Открыть запрос" }));
+    expect(useWorkspace.getState().tabs).toEqual([expect.objectContaining({ kind: "query", member: "pg-2", database: "perf", queryId: "9" })]);
   });
 
   it("без onAction ссылка-действие кнопки не рисует и не мешает ссылке на инструмент", () => {

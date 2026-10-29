@@ -1,0 +1,243 @@
+import { useTranslation } from "react-i18next";
+import type { QueryDetail, QueryStat, RelationRef } from "../../api/types";
+import { formatBytes, formatCount, formatDuration, formatMs, formatPercent } from "../../lib/format";
+import { useWorkspace } from "../../state/workspace";
+import { FindingsPanel } from "../diag/FindingsPanel";
+import { unavailableText } from "../diag/unavailable";
+import { Sparkline } from "./Sparkline";
+
+/** Строки метрик: ключ подписи — литералом (правило словарей), значение — из строки pgss. */
+const METRICS: { id: string; labelKey: string; of: (s: QueryStat) => string }[] = [
+  { id: "calls", labelKey: "diag.query.metric.calls", of: (s) => formatCount(s.calls) },
+  { id: "total", labelKey: "diag.query.metric.total", of: (s) => formatMs(s.totalExecMs) },
+  { id: "mean", labelKey: "diag.query.metric.mean", of: (s) => formatMs(s.meanExecMs) },
+  { id: "minMax", labelKey: "diag.query.metric.minMax", of: (s) => (s.minExecMs === null || s.maxExecMs === null ? "—" : `${formatMs(s.minExecMs)} / ${formatMs(s.maxExecMs)}`) },
+  { id: "stddev", labelKey: "diag.query.metric.stddev", of: (s) => (s.stddevExecMs === null ? "—" : formatMs(s.stddevExecMs)) },
+  { id: "rowsPerCall", labelKey: "diag.query.metric.rowsPerCall", of: (s) => formatCount(s.rowsPerCall, 1) },
+  { id: "hitRatio", labelKey: "diag.query.metric.hitRatio", of: (s) => (s.hitRatio === null ? "—" : formatPercent(s.hitRatio * 100)) },
+  { id: "read", labelKey: "diag.query.metric.read", of: (s) => `${formatBytes(s.sharedRead * 8192)} / ${formatBytes(s.sharedWritten * 8192)}` },
+  { id: "temp", labelKey: "diag.query.metric.temp", of: (s) => formatBytes(s.tempWritten * 8192) },
+  { id: "wal", labelKey: "diag.query.metric.wal", of: (s) => formatBytes(s.walBytes) },
+  { id: "planning", labelKey: "diag.query.metric.planning", of: (s) => formatMs(s.totalPlanMs) },
+  { id: "jit", labelKey: "diag.query.metric.jit", of: (s) => (s.jitMs === null ? "—" : formatMs(s.jitMs)) },
+];
+
+/**
+ * Обзор карточки (спец. P3 §7.3): текст, метрики (с момента сброса и за час), история, находки, разбивка, экземпляры,
+ * ожидания, таблицы (из последнего плана вкладки; `null` — плана ещё не было).
+ */
+export function QueryOverview({
+  connectionId,
+  member,
+  database,
+  detail,
+  relations,
+  onPlan,
+  onConsole,
+}: {
+  connectionId: string;
+  member: string;
+  database: string;
+  detail: QueryDetail;
+  relations: RelationRef[] | null;
+  onPlan: () => void;
+  onConsole: () => void;
+}) {
+  const { t } = useTranslation();
+  const open = useWorkspace((s) => s.open);
+  const hour = detail.windows.find((w) => w.windowS === 3600)?.stat ?? null;
+  // Находки карточки — об этом же запросе: ссылка «Открыть запрос» вела бы в эту же вкладку.
+  const findings = detail.findings.map((f) => ({ ...f, links: f.links.filter((l) => l.kind !== "openQuery") }));
+  const runningUnavailable = detail.unavailable.some((u) => u.part === "running");
+  const sinceReset = detail.sinceReset;
+  return (
+    <div className="query-overview">
+      <section>
+        {detail.text === null ? (
+          <p className="muted">{t("diag.query.gone")}</p>
+        ) : (
+          <pre className="query-text" role="group" tabIndex={0} aria-label={t("diag.query.text")}>
+            <code>{detail.text}</code>
+            {detail.textTruncated && <span className="muted"> {t("diag.queries.truncated")}</span>}
+          </pre>
+        )}
+        <div className="toolbar">
+          <button type="button" onClick={onPlan}>
+            {t("diag.query.plan")}
+          </button>
+          <button type="button" disabled={detail.text === null} onClick={onConsole}>
+            {t("diag.query.openConsole")}
+          </button>
+        </div>
+      </section>
+      <FindingsPanel connectionId={connectionId} findings={findings} member={member} />
+      {detail.unavailable.map((u, i) => (
+        <p key={`${u.part}:${i}`} className="muted">
+          {unavailableText(u)}
+        </p>
+      ))}
+      {sinceReset && (
+        <section>
+          <h3>{t("diag.query.metrics")}</h3>
+          <div className="table-scroll">
+            <table className="diag-table" aria-label={t("diag.query.metrics")}>
+              <thead>
+                <tr>
+                  <td />
+                  <th scope="col" className="num">
+                    {t("diag.query.sinceReset")}
+                  </th>
+                  <th scope="col" className="num">
+                    {t("diag.query.lastHour")}
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {METRICS.map((m) => (
+                  <tr key={m.id}>
+                    <th scope="row">{t(m.labelKey)}</th>
+                    <td className="num">{m.of(sinceReset)}</td>
+                    <td className="num">{hour ? m.of(hour) : "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+      <section className="query-history">
+        <h3>{t("diag.query.history")}</h3>
+        <Sparkline points={detail.history.map((p) => ({ atMs: p.atMs, value: p.calls }))} label={t("diag.query.historyCalls")} />
+        <Sparkline points={detail.history.map((p) => ({ atMs: p.atMs, value: p.meanExecMs }))} label={t("diag.query.historyMean")} />
+        {detail.history.length === 0 && <p className="muted">{t("diag.query.noHistory")}</p>}
+        {detail.gaps.length > 0 && <p className="muted">{t("diag.query.gaps", { count: detail.gaps.length })}</p>}
+      </section>
+      {detail.byUser.length > 1 && (
+        <section>
+          <h3>{t("diag.query.byUser")}</h3>
+          <div className="table-scroll">
+            <table className="diag-table" aria-label={t("diag.query.byUser")}>
+              <thead>
+                <tr>
+                  <th scope="col">{t("diag.query.role")}</th>
+                  <th scope="col">{t("diag.query.toplevel")}</th>
+                  <th scope="col" className="num">
+                    {t("diag.query.metric.calls")}
+                  </th>
+                  <th scope="col" className="num">
+                    {t("diag.query.metric.total")}
+                  </th>
+                  <th scope="col" className="num">
+                    {t("diag.query.metric.mean")}
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {detail.byUser.map((u) => (
+                  <tr key={`${u.rolname ?? ""}:${u.toplevel}`}>
+                    <td>{u.rolname ?? "—"}</td>
+                    <td>{u.toplevel ? t("common.yes") : t("common.no")}</td>
+                    <td className="num">{formatCount(u.stat.calls)}</td>
+                    <td className="num">{formatMs(u.stat.totalExecMs)}</td>
+                    <td className="num">{formatMs(u.stat.meanExecMs)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+      <section>
+        <h3>{t("diag.query.running")}</h3>
+        {detail.running.length > 0 ? (
+          <div className="table-scroll">
+            <table className="diag-table" aria-label={t("diag.query.running")}>
+              <thead>
+                <tr>
+                  <th scope="col">PID</th>
+                  <th scope="col">{t("diag.query.state")}</th>
+                  <th scope="col" className="num">
+                    {t("diag.query.duration")}
+                  </th>
+                  <th scope="col">{t("diag.query.wait")}</th>
+                  <th scope="col">{t("diag.query.who")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {detail.running.map((r) => (
+                  <tr key={`${r.pid}:${r.backendStartUs}`}>
+                    <td>{r.pid}</td>
+                    <td>{r.state ?? ""}</td>
+                    <td className="num">{formatDuration(r.durationS)}</td>
+                    <td>{r.waitEventType ? `${r.waitEventType}${r.waitEvent ? `:${r.waitEvent}` : ""}` : ""}</td>
+                    <td>{[r.usename, r.applicationName, r.clientAddr].filter(Boolean).join(" · ")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          // На PG 13 экземпляров не узнать: причина — в строке «недоступно» выше, «не выполняется» было бы неправдой.
+          !runningUnavailable && <p className="muted">{t("diag.query.noRunning")}</p>
+        )}
+        <button type="button" className="link" onClick={() => open({ kind: "diag", connectionId, tool: "sessions", member })}>
+          {t("diag.query.openSessions")}
+        </button>
+      </section>
+      <section>
+        <h3>{t("diag.query.waits")}</h3>
+        {detail.waits === null ? (
+          <p className="muted">{t("diag.query.noWaitsBuffer")}</p>
+        ) : (
+          <div className="table-scroll">
+            <table className="diag-table" aria-label={t("diag.query.waits")}>
+              <thead>
+                <tr>
+                  <th scope="col">{t("diag.query.waitEvent")}</th>
+                  <th scope="col" className="num">
+                    {t("diag.query.share")}
+                  </th>
+                  <th scope="col" className="num">
+                    {t("diag.query.samples")}
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {detail.waits.items.map((w) => (
+                  <tr key={`${w.eventType}:${w.event ?? ""}`}>
+                    <td>{w.event ? `${w.eventType}:${w.event}` : w.eventType}</td>
+                    <td className="num">{formatPercent(w.sharePct)}</td>
+                    <td className="num">{formatCount(w.count)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+      <section>
+        <h3>{t("diag.query.tables")}</h3>
+        {relations === null ? (
+          <p className="muted">
+            {t("diag.query.tablesAfterPlan")}{" "}
+            <button type="button" className="link" onClick={onPlan}>
+              {t("diag.query.getPlan")}
+            </button>
+          </p>
+        ) : relations.length === 0 ? (
+          <p className="muted">{t("diag.query.noTables")}</p>
+        ) : (
+          <ul className="plain-list">
+            {relations.map((r) => (
+              <li key={`${r.schema ?? ""}.${r.name}`}>
+                <button type="button" className="link" onClick={() => open({ kind: "table", connectionId, database, schema: r.schema ?? "public", name: r.name })}>
+                  {r.schema ? `${r.schema}.${r.name}` : r.name}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+    </div>
+  );
+}

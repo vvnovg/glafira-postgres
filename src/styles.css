@@ -376,6 +376,14 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .plan-summary-part + .plan-summary-part::before { content: " · "; color: var(--muted); }
 .plan-setting { margin-right: 8px; }
 .plan-details pre { max-height: 240px; overflow: auto; }
+/* Карточка запроса и запуск плана (P3a). */
+.query-text { margin: 0; max-height: 200px; overflow: auto; white-space: pre-wrap; }
+.query-overview, .plan-runner, .query-plan { display: flex; flex-direction: column; gap: 12px; }
+.params-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
+.sparkline { color: var(--accent); margin-right: 12px; }
+.sql-error mark { background: color-mix(in srgb, var(--danger-text) 25%, transparent); color: inherit; outline: 1px solid var(--danger-text); }
+.search-path { display: inline-flex; align-items: center; gap: 4px; }
+.search-path summary { color: var(--muted); cursor: pointer; }
 /* Предупреждение в тексте вида: чистый --warn на светлом фоне ниже 4,5:1, поэтому подмешивается цвет текста (как у меток находок). */
 .diag-warn { color: color-mix(in srgb, var(--warn) 55%, var(--fg)); font-weight: 600; }
 /* Вердикт и коды health: фон клетки плюс слово или код внутри — смысл не держится на одном цвете. */

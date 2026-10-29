@@ -1,0 +1,49 @@
+import { describe, expect, it } from "vitest";
+import type { LlmBundle } from "../api/types";
+import { i18n } from "../i18n";
+import { llmMarkdown } from "./llmMarkdown";
+
+const bundle: LlmBundle = {
+  serverVersionNum: 170_004, pgssVersion: "1.11", inRecovery: false, member: "pg-1", database: "perf",
+  text: "SELECT * FROM shop.customers WHERE id = $1", textTruncated: false,
+  stats: { sinceReset: { key: { queryId: "1", dbid: 1, userid: 1, toplevel: true }, datname: "perf", rolname: "app", calls: 1000, totalExecMs: 500, meanExecMs: 0.5, minExecMs: 0.1, maxExecMs: 3, stddevExecMs: 0.2, rows: 1000, rowsPerCall: 1, plans: 0, totalPlanMs: 0, sharedHit: 4000, sharedRead: 10, sharedDirtied: 0, sharedWritten: 0, localHit: 0, localRead: 0, localDirtied: 0, localWritten: 0, tempRead: 0, tempWritten: 0, ioReadMs: 0, ioWriteMs: 0, tempIoMs: null, walRecords: 0, walFpi: 0, walBytes: 0, jitFunctions: null, jitMs: null, parallelPlanned: null, parallelLaunched: null, sharePct: 12.5, hitRatio: 0.9975, text: null, textTruncated: false }, window3600: null },
+  planText: "Index Scan using customers_pkey on shop.customers  (cost=0.42..8.44 rows=1 width=40)\n", tables: [{ schema: "shop", name: "customers", ddl: "CREATE TABLE shop.customers (...);", indexes: ["CREATE UNIQUE INDEX customers_pkey ON shop.customers USING btree (id)"] }], tablesOmitted: 2, warnings: ["paramsNeeded"],
+};
+
+describe("llmMarkdown", () => {
+  it("разделы на языке интерфейса, статистика таблицей, план и DDL в блоках кода, предупреждения и «ещё N таблиц»", () => {
+    const md = llmMarkdown(bundle, i18n.t.bind(i18n));
+    expect(md).toContain("## Среда");
+    expect(md).toContain("PostgreSQL 17.4");
+    expect(md).toContain("pg_stat_statements 1.11");
+    expect(md).toContain("```sql\nSELECT * FROM shop.customers WHERE id = $1\n```");
+    expect(md).toContain("| Вызовов | 1 000 |");
+    expect(md).toContain("## План\n\n```\nIndex Scan using customers_pkey");
+    expect(md).toContain("### shop.customers\n\n```sql\nCREATE TABLE shop.customers (...);\nCREATE UNIQUE INDEX customers_pkey");
+    expect(md).toContain("… ещё 2 таблиц");
+    expect(md).toContain("план требует значений параметров");
+    expect(md).not.toMatch(/\{\{/);
+  });
+
+  it("каждый ключ предупреждения переведён; усечённый текст объясняет отсутствие плана; без статистики и плана — без их разделов", () => {
+    const md = llmMarkdown(
+      { ...bundle, inRecovery: true, pgssVersion: null, textTruncated: true, stats: null, planText: null, tables: [], tablesOmitted: 1, warnings: ["paramsNeeded", "queryGone", "planFailed", "ddlFailed"] },
+      i18n.t.bind(i18n),
+    );
+    expect(md).toContain("PostgreSQL 17.4 (реплика)");
+    expect(md).not.toContain("pg_stat_statements 1.");
+    expect(md).toContain("Текст обрезан до 16 384 символов");
+    expect(md).not.toContain("## Статистика");
+    expect(md).not.toContain("## План");
+    expect(md).toContain("… ещё 1 таблица");
+    for (const w of ["paramsNeeded", "queryGone", "planFailed", "ddlFailed"]) expect(md).not.toContain(w);
+    expect(md).toContain("DDL части таблиц прочитать не удалось");
+    expect(md).not.toMatch(/\{\{| /);
+  });
+
+  it("неизвестный ключ предупреждения — как есть, без ключа словаря в тексте", () => {
+    const md = llmMarkdown({ ...bundle, warnings: ["somethingNew"] }, i18n.t.bind(i18n));
+    expect(md).toContain("- somethingNew");
+    expect(md).not.toContain("llm.warnings");
+  });
+});
