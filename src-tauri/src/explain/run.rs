@@ -1,6 +1,7 @@
 //! Ход EXPLAIN (спец. P3 §8.3): соединение `for_explain`, пробный план в `READ ONLY`, ярус, выполнение, журнал.
 
-use std::time::Instant;
+use std::future::Future;
+use std::time::{Duration, Instant};
 
 use pg_advisor::plan::json::from_json;
 use pg_advisor::plan::{PlanTree, relations};
@@ -10,11 +11,12 @@ use tokio_postgres::types::{Format, IsNull, ToSql, Type, to_sql_checked};
 use tokio_postgres::{Client, SimpleQueryMessage};
 
 use crate::actions::journal::{self, ActionRecord, ExplainRecord, RecordConnection};
-use crate::conn::errors::{chain, from_pg};
+use crate::conn::errors::from_pg;
 use crate::conn::profile::Environment;
 use crate::diag::caps::V16;
 use crate::diag::head;
 use crate::error::{AppError, AppResult, ErrorCode};
+use crate::explain::params::first_word;
 use crate::explain::tier::{Tier, tier_of};
 use crate::explain::{ExplainRequest, ExplainResult, Mode, PROBE_TIMEOUT_S, Params, validate};
 use crate::guard::ensure_mutation_allowed;
@@ -22,6 +24,10 @@ use crate::state::AppState;
 
 const PROBE_OPTIONS: &str = "FORMAT JSON, VERBOSE, SETTINGS";
 const ANALYZE_OPTIONS: &str = "ANALYZE, BUFFERS, WAL, VERBOSE, SETTINGS, FORMAT JSON";
+/// Запас клиентского срока над серверным `statement_timeout`: сервер успевает прервать запрос сам.
+const CLIENT_MARGIN_S: u64 = 5;
+/// Первые слова пишущих инструкций: даже EXPLAIN без выполнения проверяет у них права записи.
+const WRITE_WORDS: [&str; 5] = ["insert", "update", "delete", "merge", "create"];
 
 /// Ошибка одного EXPLAIN: сырая ошибка сервера нужна до перевода в `AppError` (25006, «вторая инструкция»).
 enum Step {
@@ -103,22 +109,89 @@ impl Origin {
     }
 }
 
-/// Перевод ошибки сервера: вторая инструкция, синтаксис с позицией, 57014, 42501 и прочие — через `from_pg`.
-/// `origin` — для ошибки самой команды EXPLAIN; позиция во внутреннем запросе (тело функции) не показывается.
-fn classify(e: &tokio_postgres::Error, origin: Option<Origin>) -> AppError {
-    let db = e.as_db_error();
-    let message = db
-        .map(|d| d.message().to_string())
-        .unwrap_or_else(|| chain(e));
-    if e.code() == Some(&SqlState::SYNTAX_ERROR) {
-        if message.contains("multiple commands") {
-            return app_err!(
-                ErrorCode::InvalidInput,
-                "errors.explain.oneStatement",
-                "Enter exactly one statement"
-            );
-        }
-        let position = match (db.and_then(|d| d.position()), origin) {
+/// Инструкция пишет: ярус записи или первое слово INSERT / UPDATE / DELETE / MERGE / CREATE (`tier` неизвестен, пока
+/// пробный план не построен). `WITH … UPDATE` по первому слову не распознаётся — до плана подсказка о правах чтения.
+fn is_write_statement(tier: Option<Tier>, sql: &str) -> bool {
+    tier == Some(Tier::Write)
+        || WRITE_WORDS.contains(&first_word(sql).to_ascii_lowercase().as_str())
+}
+
+/// Что известно о команде при переводе ошибки сервера.
+#[derive(Debug, Clone, Copy)]
+struct Context {
+    /// Где SQL пользователя в тексте команды; `None` — ошибка не в команде EXPLAIN (`BEGIN`, `SET LOCAL`).
+    origin: Option<Origin>,
+    /// Пишущая инструкция (`is_write_statement`): подсказка о правах записи, а не чтения.
+    write: bool,
+    /// Транзакция `READ ONLY` (пробный план, ярус чтения): 25006 в ней — `EXPLAIN_WRITES`; вне её — сервер не
+    /// принимает запись вообще (повтор «как запись» ничего бы не дал).
+    read_only: bool,
+}
+
+/// Поля ошибки сервера, по которым она переводится.
+#[derive(Debug, Clone, Copy)]
+struct ServerError<'a> {
+    code: &'a SqlState,
+    message: &'a str,
+    position: Option<&'a ErrorPosition>,
+    /// Функция сервера, поднявшая ошибку (поле `R`): признак, не зависящий от `lc_messages`.
+    routine: Option<&'a str>,
+}
+
+/// Перевод ошибки сервера; не ответ сервера и прочие коды — через `from_pg`.
+fn classify(e: &tokio_postgres::Error, ctx: Context) -> AppError {
+    e.as_db_error()
+        .and_then(|db| {
+            classify_server(
+                ServerError {
+                    code: db.code(),
+                    message: db.message(),
+                    position: db.position(),
+                    routine: db.routine(),
+                },
+                ctx,
+            )
+        })
+        .unwrap_or_else(|| from_pg(e))
+}
+
+/// Вторая инструкция, 57014, 42501 (подсказка по типу инструкции), классы 42 и 22 (ошибки разбора и значений — с
+/// позицией в тексте пользователя), 25006 (по режиму транзакции). Прочее — `None`. Позиция во внутреннем запросе
+/// (тело функции) не показывается.
+fn classify_server(e: ServerError, ctx: Context) -> Option<AppError> {
+    let code = e.code;
+    // Вторая инструкция: Parse расширенного протокола отвергает её в `exec_parse_message` (сообщение переводится по
+    // `lc_messages`, поэтому английский текст — лишь запасной признак).
+    if *code == SqlState::SYNTAX_ERROR
+        && (e.routine == Some("exec_parse_message") || e.message.contains("multiple commands"))
+    {
+        return Some(app_err!(
+            ErrorCode::InvalidInput,
+            "errors.explain.oneStatement",
+            "Enter exactly one statement"
+        ));
+    }
+    if *code == SqlState::QUERY_CANCELED {
+        return Some(explain_timeout());
+    }
+    if *code == SqlState::INSUFFICIENT_PRIVILEGE {
+        let err = if ctx.write {
+            app_err!(
+                ErrorCode::NotAuthorized,
+                "errors.explain.notAuthorizedWrite",
+                "Not enough privileges: EXPLAIN of a write statement needs INSERT/UPDATE/DELETE privileges on its tables even without executing it"
+            )
+        } else {
+            app_err!(
+                ErrorCode::NotAuthorized,
+                "errors.explain.notAuthorized",
+                "Not enough privileges on the query's tables: grant pg_read_all_data (14+) or SELECT"
+            )
+        };
+        return Some(err.with_details(e.message));
+    }
+    if code.code().starts_with("42") || code.code().starts_with("22") {
+        let position = match (e.position, ctx.origin) {
             (Some(ErrorPosition::Original(n)), Some(o)) => o.position(*n),
             _ => None,
         };
@@ -126,32 +199,26 @@ fn classify(e: &tokio_postgres::Error, origin: Option<Origin>) -> AppError {
             ErrorCode::InvalidInput,
             "errors.explain.server",
             "The server rejected the query: {{message}}",
-            message = message
+            message = e.message
         );
-        return match position {
+        return Some(match position {
             Some(p) => err.with_details(format!("position {p}")),
             None => err,
-        };
+        });
     }
-    if e.code() == Some(&SqlState::QUERY_CANCELED) {
-        return app_err!(
-            ErrorCode::Timeout,
-            "errors.explain.timeout",
-            "The plan was not produced in time; execution was cancelled, nothing changed"
-        );
+    if *code == SqlState::READ_ONLY_SQL_TRANSACTION {
+        return Some(if ctx.read_only {
+            explain_writes()
+        } else {
+            app_err!(
+                ErrorCode::ReadOnly,
+                "errors.explain.serverReadOnly",
+                "The server does not accept writes in this session (read-only transaction default or standby)"
+            )
+            .with_details(e.message)
+        });
     }
-    if e.code() == Some(&SqlState::INSUFFICIENT_PRIVILEGE) {
-        return app_err!(
-            ErrorCode::NotAuthorized,
-            "errors.explain.notAuthorized",
-            "Not enough privileges on the query's tables: grant pg_read_all_data (14+) or SELECT"
-        )
-        .with_details(message);
-    }
-    if e.code() == Some(&SqlState::READ_ONLY_SQL_TRANSACTION) {
-        return explain_writes();
-    }
-    from_pg(e)
+    None
 }
 
 fn explain_writes() -> AppError {
@@ -162,10 +229,27 @@ fn explain_writes() -> AppError {
     )
 }
 
-/// Один EXPLAIN внутри транзакции: `BEGIN [READ ONLY]`, `SET LOCAL`, EXPLAIN, `ROLLBACK`.
+fn explain_timeout() -> AppError {
+    app_err!(
+        ErrorCode::Timeout,
+        "errors.explain.timeout",
+        "The plan was not produced in time; execution was cancelled, nothing changed"
+    )
+}
+
+/// Клиентский срок сетевого шага: серверный срок `secs` плюс `CLIENT_MARGIN_S`. По истечении вызывающий возвращает
+/// ошибку и закрывает соединение (`Drop` у `ActionClient`), а сервер откатывает открытую транзакцию.
+async fn within<T>(secs: u32, step: impl Future<Output = Result<T, Step>>) -> Result<T, Step> {
+    tokio::time::timeout(Duration::from_secs(u64::from(secs) + CLIENT_MARGIN_S), step)
+        .await
+        .unwrap_or_else(|_| Err(Step::App(explain_timeout())))
+}
+
+/// Один EXPLAIN внутри транзакции: `BEGIN [READ ONLY]` (по `ctx.read_only`), `SET LOCAL`, EXPLAIN, `ROLLBACK`.
+/// Ошибка самой команды EXPLAIN возвращается сырой (`Step::Pg`): её переводит вызывающий.
 async fn explain_in_tx(
     c: &Client,
-    read_only: bool,
+    ctx: Context,
     timeout_s: u32,
     search_path: Option<&str>,
     options: &str,
@@ -174,14 +258,20 @@ async fn explain_in_tx(
 ) -> Result<serde_json::Value, Step> {
     let mut begin = format!(
         "BEGIN{}; SET LOCAL statement_timeout = '{timeout_s}s'; SET LOCAL lock_timeout = '1s'",
-        if read_only { " READ ONLY" } else { "" }
+        if ctx.read_only { " READ ONLY" } else { "" }
     );
     if let Some(sp) = search_path {
         begin.push_str(&format!("; SET LOCAL search_path = {sp}"));
     }
     let result = match c.batch_execute(&begin).await {
         // Ошибка начала (например, `search_path`) — без позиции: она не в тексте пользователя.
-        Err(e) => Err(Step::App(classify(&e, None))),
+        Err(e) => Err(Step::App(classify(
+            &e,
+            Context {
+                origin: None,
+                ..ctx
+            },
+        ))),
         Ok(()) => explain_query(c, &format!("{}{sql}", explain_prefix(options)), params).await,
     };
     // Откат — страховка: при ошибке транзакция уже прервана сервером, при обрыве соединение закроется.
@@ -206,7 +296,18 @@ async fn explain_query(c: &Client, text: &str, params: &Params) -> Result<serde_
             // переданным значениям, а не обобщённый. Поэтому разбор той же строки расширенным протоколом только
             // проверяет, что инструкция одна, а план даёт простой протокол (без выполнения: GENERIC_PLAN
             // несовместим с ANALYZE).
-            c.prepare(text).await?;
+            // 42P18 (тип параметра не выведен, как у `$1 IS NULL`) поднимается уже при анализе, после проверки
+            // числа инструкций, — значит, инструкция одна; обобщённый план сервер такой строит. Ошибка разбора
+            // прерывает транзакцию, поэтому проверка — под точкой сохранения, к которой тогда и откатываемся.
+            c.batch_execute("SAVEPOINT one_statement").await?;
+            match c.prepare(text).await {
+                Ok(_) => {}
+                Err(e) if e.code() == Some(&SqlState::INDETERMINATE_DATATYPE) => {
+                    c.batch_execute("ROLLBACK TO SAVEPOINT one_statement")
+                        .await?;
+                }
+                Err(e) => return Err(e.into()),
+            }
             let messages = c.simple_query(text).await?;
             let row = messages.iter().find_map(|m| match m {
                 SimpleQueryMessage::Row(r) => Some(r),
@@ -271,7 +372,15 @@ pub async fn run(st: &AppState, id: &str, req: &ExplainRequest) -> AppResult<Exp
     let client =
         crate::actions::conn::open_explain(st, id, &req.member, Some(&req.database)).await?;
     let c = &client.client;
-    let h = head(c).await?;
+    let h = match tokio::time::timeout(
+        Duration::from_secs(u64::from(PROBE_TIMEOUT_S) + CLIENT_MARGIN_S),
+        head(c),
+    )
+    .await
+    {
+        Ok(h) => h?,
+        Err(_) => return Err(explain_timeout()),
+    };
     if req.params == Params::Generic && h.version_num < V16 {
         return Err(app_err!(
             ErrorCode::FeatureUnavailable,
@@ -284,34 +393,40 @@ pub async fn run(st: &AppState, id: &str, req: &ExplainRequest) -> AppResult<Exp
         warnings.push("genericPlan".to_string());
     }
     let sp = req.search_path.as_deref();
-    // 1. Пробный план в READ ONLY; отвергнут 25006 (CREATE … AS на отдельных версиях) — повтор без READ ONLY,
-    //    выполнения всё равно нет (уточнение 12 плана).
+    // 1. Пробный план в READ ONLY. CREATE … AS, отвергнутый 25006 (на отдельных версиях), повторяется без READ ONLY —
+    //    только ради яруса, выполнения всё равно нет (уточнение 12 плана). Прочие 25006 — `EXPLAIN_WRITES`: побочный
+    //    эффект, вычисленный при планировании, в запросе «план» не выполняется.
     let probe_opts = probe_options(&req.params);
-    let probe_origin = Some(Origin::new(&probe_opts, &req.sql));
-    let raw =
-        match explain_in_tx(c, true, PROBE_TIMEOUT_S, sp, &probe_opts, &sql, &req.params).await {
-            Ok(v) => v,
-            Err(Step::Pg(e)) if is_read_only_violation(&e) => {
-                warnings.push("probeWithoutReadOnly".to_string());
-                match explain_in_tx(
-                    c,
-                    false,
-                    PROBE_TIMEOUT_S,
-                    sp,
-                    &probe_opts,
-                    &sql,
-                    &req.params,
-                )
-                .await
-                {
-                    Ok(v) => v,
-                    Err(Step::Pg(e)) => return Err(classify(&e, probe_origin)),
-                    Err(Step::App(e)) => return Err(e),
-                }
+    let probe_ctx = Context {
+        origin: Some(Origin::new(&probe_opts, &req.sql)),
+        write: is_write_statement(None, &sql),
+        read_only: true,
+    };
+    let probe = |ctx| {
+        within(
+            PROBE_TIMEOUT_S,
+            explain_in_tx(c, ctx, PROBE_TIMEOUT_S, sp, &probe_opts, &sql, &req.params),
+        )
+    };
+    let raw = match probe(probe_ctx).await {
+        Ok(v) => v,
+        Err(Step::Pg(e))
+            if is_read_only_violation(&e) && first_word(&sql).eq_ignore_ascii_case("create") =>
+        {
+            warnings.push("probeWithoutReadOnly".to_string());
+            let ctx = Context {
+                read_only: false,
+                ..probe_ctx
+            };
+            match probe(ctx).await {
+                Ok(v) => v,
+                Err(Step::Pg(e)) => return Err(classify(&e, ctx)),
+                Err(Step::App(e)) => return Err(e),
             }
-            Err(Step::Pg(e)) => return Err(classify(&e, probe_origin)),
-            Err(Step::App(e)) => return Err(e),
-        };
+        }
+        Err(Step::Pg(e)) => return Err(classify(&e, probe_ctx)),
+        Err(Step::App(e)) => return Err(e),
+    };
     let tree = parse(&raw)?;
     let tier = if req.force_write {
         Tier::Write
@@ -322,35 +437,38 @@ pub async fn run(st: &AppState, id: &str, req: &ExplainRequest) -> AppResult<Exp
         return Ok(result(Mode::Plan, tier, tree, raw, started, warnings));
     }
     // 3–4. ANALYZE.
-    let read_only = match tier {
-        Tier::Read => true,
-        Tier::Write => {
-            ensure_mutation_allowed(&profile, req.confirmation.confirm.as_deref())?;
-            if h.in_recovery {
-                return Err(app_err!(
-                    ErrorCode::FeatureUnavailable,
-                    "errors.explain.writeOnReplica",
-                    "A write cannot be executed on a replica: choose the primary"
-                ));
-            }
-            false
+    if tier == Tier::Write {
+        ensure_mutation_allowed(&profile, req.confirmation.confirm.as_deref())?;
+        if h.in_recovery {
+            return Err(app_err!(
+                ErrorCode::FeatureUnavailable,
+                "errors.explain.writeOnReplica",
+                "A write cannot be executed on a replica: choose the primary"
+            ));
         }
+    }
+    let analyze_ctx = Context {
+        origin: Some(Origin::new(ANALYZE_OPTIONS, &req.sql)),
+        write: is_write_statement(Some(tier), &sql),
+        read_only: tier == Tier::Read,
     };
-    let analyzed = explain_in_tx(
-        c,
-        read_only,
+    let analyzed = within(
         req.timeout_s,
-        sp,
-        ANALYZE_OPTIONS,
-        &sql,
-        &req.params,
+        explain_in_tx(
+            c,
+            analyze_ctx,
+            req.timeout_s,
+            sp,
+            ANALYZE_OPTIONS,
+            &sql,
+            &req.params,
+        ),
     )
     .await;
-    let analyze_origin = Some(Origin::new(ANALYZE_OPTIONS, &req.sql));
     let outcome = match &analyzed {
         Ok(_) => (journal::Outcome::Ok, None),
         Err(Step::Pg(e)) => {
-            let err = classify(e, analyze_origin);
+            let err = classify(e, analyze_ctx);
             (journal::Outcome::Error, Some(journal::code_name(err.code)))
         }
         Err(Step::App(e)) => (journal::Outcome::Error, Some(journal::code_name(e.code))),
@@ -390,7 +508,7 @@ pub async fn run(st: &AppState, id: &str, req: &ExplainRequest) -> AppResult<Exp
             let tree = parse(&raw)?;
             Ok(result(Mode::Analyze, tier, tree, raw, started, warnings))
         }
-        Err(Step::Pg(e)) => Err(classify(&e, analyze_origin)),
+        Err(Step::Pg(e)) => Err(classify(&e, analyze_ctx)),
         Err(Step::App(e)) => Err(e),
     }
 }
@@ -413,6 +531,238 @@ mod tests {
             None,
             "ошибка в префиксе EXPLAIN — без позиции"
         );
+    }
+
+    #[test]
+    fn write_statement_by_tier_or_first_word() {
+        assert!(!is_write_statement(None, "SELECT * FROM t"));
+        assert!(!is_write_statement(Some(Tier::Read), "select 1"));
+        assert!(
+            is_write_statement(Some(Tier::Write), "SELECT nextval('s')"),
+            "ярус записи (forceWrite)"
+        );
+        for sql in [
+            "UPDATE t SET a = 1",
+            "/* c */ insert into t values (1)",
+            "delete from t",
+            "MERGE INTO t USING s ON true WHEN MATCHED THEN DELETE",
+            "-- x\n create table t2 as select 1",
+        ] {
+            assert!(is_write_statement(None, sql), "{sql}");
+        }
+        assert!(
+            !is_write_statement(None, "with d as (delete from t returning *) select 1"),
+            "до плана — только по первому слову"
+        );
+    }
+
+    fn ctx(read_only: bool, write: bool) -> Context {
+        Context {
+            origin: Some(Origin::new(PROBE_OPTIONS, "  SELEC 1")),
+            write,
+            read_only,
+        }
+    }
+
+    fn server<'a>(
+        code: &'a SqlState,
+        message: &'a str,
+        position: Option<&'a ErrorPosition>,
+        routine: Option<&'a str>,
+    ) -> ServerError<'a> {
+        ServerError {
+            code,
+            message,
+            position,
+            routine,
+        }
+    }
+
+    #[test]
+    fn server_errors_are_classified_by_sqlstate_and_context() {
+        let prefix = explain_prefix(PROBE_OPTIONS).chars().count() as u32;
+        let at = |n: u32| ErrorPosition::Original(prefix + n);
+        // Вторая инструкция — по функции сервера, независимо от языка сообщения; английский текст — запасной признак.
+        let ru = "нельзя вставить несколько команд в подготовленный оператор";
+        let e = classify_server(
+            server(
+                &SqlState::SYNTAX_ERROR,
+                ru,
+                None,
+                Some("exec_parse_message"),
+            ),
+            ctx(true, false),
+        )
+        .unwrap();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (ErrorCode::InvalidInput, "errors.explain.oneStatement")
+        );
+        let en = "cannot insert multiple commands into a prepared statement";
+        assert_eq!(
+            classify_server(
+                server(&SqlState::SYNTAX_ERROR, en, None, None),
+                ctx(true, false)
+            )
+            .unwrap()
+            .key,
+            "errors.explain.oneStatement"
+        );
+        // Классы 42 и 22 — INVALID_INPUT с позицией в тексте пользователя, если сервер её дал.
+        let p = at(1);
+        let e = classify_server(
+            server(
+                &SqlState::SYNTAX_ERROR,
+                "syntax error at or near \"SELEC\"",
+                Some(&p),
+                Some("scanner_yyerror"),
+            ),
+            ctx(true, false),
+        )
+        .unwrap();
+        assert_eq!(
+            (e.code, e.key.as_str(), e.details.as_deref()),
+            (
+                ErrorCode::InvalidInput,
+                "errors.explain.server",
+                Some("position 3")
+            )
+        );
+        let p = at(15);
+        let e = classify_server(
+            server(
+                &SqlState::UNDEFINED_TABLE,
+                "relation \"shop.nope\" does not exist",
+                Some(&p),
+                None,
+            ),
+            ctx(true, false),
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                e.key.as_str(),
+                e.params["message"].as_str(),
+                e.details.as_deref()
+            ),
+            (
+                "errors.explain.server",
+                "relation \"shop.nope\" does not exist",
+                Some("position 17")
+            )
+        );
+        let e = classify_server(
+            server(
+                &SqlState::INVALID_TEXT_REPRESENTATION,
+                "invalid input syntax for type bigint: \"abc\"",
+                None,
+                None,
+            ),
+            ctx(true, false),
+        )
+        .unwrap();
+        assert_eq!(
+            (e.code, e.key.as_str(), e.details),
+            (ErrorCode::InvalidInput, "errors.explain.server", None)
+        );
+        let internal = ErrorPosition::Internal {
+            position: 3,
+            query: "SELECT x".into(),
+        };
+        let e = classify_server(
+            server(
+                &SqlState::UNDEFINED_COLUMN,
+                "column \"x\" does not exist",
+                Some(&internal),
+                None,
+            ),
+            ctx(true, false),
+        )
+        .unwrap();
+        assert_eq!(
+            e.details, None,
+            "позиция во внутреннем запросе не показывается"
+        );
+        // 42501: подсказка по типу инструкции, сообщение сервера — в details.
+        let denied = "permission denied for table balances";
+        let e = classify_server(
+            server(&SqlState::INSUFFICIENT_PRIVILEGE, denied, None, None),
+            ctx(true, true),
+        )
+        .unwrap();
+        assert_eq!(
+            (e.code, e.key.as_str(), e.details.as_deref()),
+            (
+                ErrorCode::NotAuthorized,
+                "errors.explain.notAuthorizedWrite",
+                Some(denied)
+            )
+        );
+        let e = classify_server(
+            server(&SqlState::INSUFFICIENT_PRIVILEGE, denied, None, None),
+            ctx(true, false),
+        )
+        .unwrap();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (ErrorCode::NotAuthorized, "errors.explain.notAuthorized")
+        );
+        // 25006: в READ ONLY — EXPLAIN_WRITES (предложить запись), вне его — сервер не принимает запись (без петли forceWrite).
+        let ro = "cannot execute UPDATE in a read-only transaction";
+        let e = classify_server(
+            server(&SqlState::READ_ONLY_SQL_TRANSACTION, ro, None, None),
+            ctx(true, true),
+        )
+        .unwrap();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (ErrorCode::ExplainWrites, "errors.explain.writes")
+        );
+        let e = classify_server(
+            server(&SqlState::READ_ONLY_SQL_TRANSACTION, ro, None, None),
+            ctx(false, true),
+        )
+        .unwrap();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (ErrorCode::ReadOnly, "errors.explain.serverReadOnly")
+        );
+        // 57014 — срок; прочее — `from_pg`.
+        assert_eq!(
+            classify_server(
+                server(
+                    &SqlState::QUERY_CANCELED,
+                    "canceling statement due to statement timeout",
+                    None,
+                    None
+                ),
+                ctx(false, true)
+            )
+            .unwrap()
+            .code,
+            ErrorCode::Timeout
+        );
+        assert!(
+            classify_server(
+                server(&SqlState::TOO_MANY_CONNECTIONS, "too many", None, None),
+                ctx(true, false)
+            )
+            .is_none()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn client_deadline_expires_after_the_server_timeout_and_a_margin() {
+        let never = std::future::pending::<Result<(), Step>>();
+        let started = tokio::time::Instant::now();
+        match within(5, never).await {
+            Err(Step::App(e)) => assert_eq!(
+                (e.code, e.key.as_str()),
+                (ErrorCode::Timeout, "errors.explain.timeout")
+            ),
+            _ => panic!("срок должен истечь"),
+        }
+        assert_eq!(started.elapsed(), Duration::from_secs(5 + CLIENT_MARGIN_S));
     }
 
     #[test]

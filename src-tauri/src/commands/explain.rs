@@ -1,7 +1,7 @@
 //! Команды планов (спец. P3 §10): EXPLAIN на узле и разбор вставленного плана без сервера.
 
-use pg_advisor::plan::PlanTree;
 use pg_advisor::plan::json::{from_json, from_psql_text};
+use pg_advisor::plan::{PlanError, PlanTree};
 use tauri::State;
 
 use crate::error::{AppResult, ErrorCode};
@@ -17,10 +17,15 @@ pub async fn explain(
     crate::explain::run::run(&state, &id, &request).await
 }
 
-/// Вставленный план: JSON, в том числе с обрамлением psql (P3b — и текст). Без сервера.
+/// Вставленный план: JSON, в том числе с обрамлением psql (P3b — и текст). Без сервера; разбор — вне главного потока
+/// (вставка может быть в мегабайты).
 #[tauri::command]
-pub fn parse_plan(text: String) -> AppResult<PlanTree> {
-    let value = from_psql_text(&text).map_err(|e| {
+pub async fn parse_plan(text: String) -> AppResult<PlanTree> {
+    super::blocking(move || parse_plan_text(&text)).await
+}
+
+fn parse_plan_text(text: &str) -> AppResult<PlanTree> {
+    let unparsed = |e: PlanError| {
         app_err!(
             ErrorCode::InvalidInput,
             "errors.plan.unparsed",
@@ -28,14 +33,6 @@ pub fn parse_plan(text: String) -> AppResult<PlanTree> {
             line = e.line.unwrap_or(1),
             message = e.message
         )
-    })?;
-    from_json(&value).map_err(|e| {
-        app_err!(
-            ErrorCode::InvalidInput,
-            "errors.plan.unparsed",
-            "The plan could not be parsed (line {{line}}): {{message}}",
-            line = e.line.unwrap_or(1),
-            message = e.message
-        )
-    })
+    };
+    from_json(&from_psql_text(text).map_err(unparsed)?).map_err(unparsed)
 }

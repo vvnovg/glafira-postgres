@@ -218,8 +218,10 @@
       "server": "The server rejected the query: {{message}}",
       "timeout": "The plan was not produced in time; execution was cancelled, nothing changed",
       "notAuthorized": "Not enough privileges on the query's tables: grant pg_read_all_data (14+) or SELECT",
+      "notAuthorizedWrite": "Not enough privileges: EXPLAIN of a write statement needs INSERT/UPDATE/DELETE privileges on its tables even without executing it",
       "writes": "The query writes data (a volatile function or trigger): run it as a write with confirmation",
-      "writeOnReplica": "A write cannot be executed on a replica: choose the primary"
+      "writeOnReplica": "A write cannot be executed on a replica: choose the primary",
+      "serverReadOnly": "The server does not accept writes in this session (read-only transaction default or standby)"
     },
     "plan": {
       "unparsed": "The plan could not be parsed (line {{line}}): {{message}}"

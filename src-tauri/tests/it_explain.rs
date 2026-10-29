@@ -100,6 +100,88 @@ async fn plan_and_analyze_read_tier_on_perf() {
         "обобщённый план, а не по значению: {:?}",
         r.plan.root.index_cond
     );
+    // Тип `$1` не выводится (42P18 при разборе расширенным протоколом), но инструкция одна — обобщённый план строится.
+    let r = explain::run::run(
+        &st,
+        "it",
+        &req(
+            &m,
+            "perf",
+            "SELECT 1 WHERE $1 IS NULL",
+            Mode::Plan,
+            Params::Generic,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.plan.root.node_type, "Result");
+    // Ошибки разбора и значений (классы 42 и 22) — INVALID_INPUT; позиция — если сервер её дал.
+    let e = explain::run::run(
+        &st,
+        "it",
+        &req(
+            &m,
+            "perf",
+            "SELECT * FROM shop.nope",
+            Mode::Plan,
+            Params::None,
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        (e.code, e.key.as_str(), e.details.as_deref()),
+        (
+            ErrorCode::InvalidInput,
+            "errors.explain.server",
+            Some("position 15")
+        ),
+        "{e:?}"
+    );
+    let e = explain::run::run(
+        &st,
+        "it",
+        &req(
+            &m,
+            "perf",
+            "SELECT * FROM shop.customers WHERE id = $1",
+            Mode::Plan,
+            values(&["abc"]),
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        (e.code, e.key.as_str(), e.details.as_deref()),
+        (ErrorCode::InvalidInput, "errors.explain.server", None),
+        "{e:?}"
+    );
+    // EXPLAIN пишущей инструкции без прав записи (роль чтения): 42501 уже на пробном плане, подсказка — о правах записи.
+    let e = explain::run::run(
+        &st,
+        "it",
+        &req(
+            &m,
+            "perf",
+            "UPDATE shop.balances SET balance = balance WHERE customer_id = $1",
+            Mode::Plan,
+            values(&["1"]),
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        (e.code, e.key.as_str()),
+        (
+            ErrorCode::NotAuthorized,
+            "errors.explain.notAuthorizedWrite"
+        ),
+        "{e:?}"
+    );
+    assert!(
+        e.details.as_deref().is_some_and(|d| d.contains("balances")),
+        "{e:?}"
+    );
     // ANALYZE чтения — без подтверждения и без строки в журнале.
     let r = explain::run::run(
         &st,
@@ -171,11 +253,21 @@ async fn plan_and_analyze_read_tier_on_perf() {
     forced.force_write = true;
     let r = explain::run::run(&st, "it", &forced).await.unwrap();
     assert_eq!(r.tier, Tier::Write);
+    let records = st.actions.list(Some("it"), 10);
+    assert_eq!(records.len(), 1, "ярус записи — строка журнала");
+    let rec = &records[0];
     assert_eq!(
-        st.actions.list(Some("it"), 10).len(),
-        1,
-        "ярус записи — строка журнала"
+        (rec.action.as_str(), rec.outcome),
+        ("explainAnalyze", Outcome::Ok)
     );
+    let ex = rec.explain.as_ref().expect("поле explain");
+    assert_eq!((ex.database.as_str(), ex.timeout_s), ("perf", 30));
+    assert!(
+        ex.tables.is_empty(),
+        "у lo_creat таблиц нет: {:?}",
+        ex.tables
+    );
+    assert_eq!(ex.sql_head, "SELECT lo_creat(-1)");
     let after: i64 = su.query_one(los, &[]).await.unwrap().get(0);
     assert_eq!(before, after, "запись откатана");
     // Вторая инструкция и таймаут.
@@ -386,6 +478,34 @@ async fn generic_plan_is_refused_before_16_and_writes_are_refused_on_a_replica()
                 ErrorCode::FeatureUnavailable,
                 "errors.explain.writeOnReplica"
             )
+        );
+        // Побочный эффект на реплике: ярус чтения → EXPLAIN_WRITES; «выполнить как запись» отказывает до сервера
+        // (`writeOnReplica`), а не снова EXPLAIN_WRITES — петли forceWrite нет.
+        let lo = req(
+            &m,
+            "orders",
+            "SELECT lo_creat(-1)",
+            Mode::Analyze,
+            Params::None,
+        );
+        let e = explain::run::run(&st, "it", &lo).await.unwrap_err();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (ErrorCode::ExplainWrites, "errors.explain.writes")
+        );
+        let mut forced = lo.clone();
+        forced.force_write = true;
+        let e = explain::run::run(&st, "it", &forced).await.unwrap_err();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (
+                ErrorCode::FeatureUnavailable,
+                "errors.explain.writeOnReplica"
+            )
+        );
+        assert!(
+            st.actions.list(Some("it"), 10).is_empty(),
+            "отказ до сервера в журнал не пишется"
         );
         assert!(
             explain::run::run(
