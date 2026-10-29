@@ -61,6 +61,7 @@ pnpm tauri dev
 | Primary и реплика без Patroni (PG 16) | `localhost:5451`, `localhost:5452` |
 | Одиночный сервер без `pg_stat_statements` (PG 15) | `localhost:5460` |
 | Лаборатория P2: логические слоты, подписка, prepared transactions (PG 16) | `localhost:5470` |
+| Стенд тяжёлых запросов P3 (`pg-perf`, PG 17, hypopg, kcache, wait_sampling) | `localhost:5471` |
 | SSH-бастион `bastion` (OpenSSH, пользователь `tester`) | `localhost:2222` |
 | Матрица версий PG 13…18 (профиль `matrix`, `gp-pg13`…`gp-pg18`) | `localhost:5513`…`localhost:5518` |
 
@@ -68,6 +69,7 @@ pnpm tauri dev
 
 На стенде, поднятом до P2, лаборатория запускается отдельно: `docker compose -f dev/docker-compose.yml up -d --no-recreate pg-lab`
 (образ собирается из `dev/lab/Dockerfile`); роль `glafira_app` интеграционные тесты создают сами (`common::ensure_fixtures`).
+Так же поднимается `pg-perf`: `docker compose -f dev/docker-compose.yml up -d --no-recreate pg-perf` (нагрузка — `dev/perf/README.md`).
 
 Учётные данные: PG `glafira_diag` / `glafira-secret` (роль для диагностики), роль приложения `glafira_app` / `app-secret`
 (сценарии P2: сессии, блокировки, idle in transaction; не суперпользователь), суперпользователь `postgres` / `postgres-secret`;

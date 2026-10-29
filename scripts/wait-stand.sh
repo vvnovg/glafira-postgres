@@ -6,7 +6,7 @@ set -euo pipefail
 # shellcheck source=scripts/lib-wait.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib-wait.sh"
 
-for c in gp-pg-single gp-pg-primary gp-pg-replica gp-pg-lab gp-patroni1 gp-patroni2 gp-patroni3; do
+for c in gp-pg-single gp-pg-primary gp-pg-replica gp-pg-lab gp-pg-perf gp-patroni1 gp-patroni2 gp-patroni3; do
   wait_for docker exec "$c" pg_isready -h localhost -p 5432 -U postgres -q
 done
 
@@ -42,4 +42,6 @@ lab_streaming() {
   [ "$(docker exec gp-pg-lab psql -U postgres -d orders -tAc "select count(*) from pg_replication_slots where slot_name = 'lab_sub_slot' and active")" = "1" ]
 }
 wait_for bash -c "$(declare -f lab_streaming); lab_streaming"
+# Стенд тяжёлых запросов: init-скрипт (база perf, расширения, объёмная схема) отработал — настоящий сервер слушает TCP только после него.
+wait_for docker exec gp-pg-perf psql -U postgres -d perf -tAc "select count(*) from pg_extension where extname = 'hypopg'"
 echo "stand is ready"

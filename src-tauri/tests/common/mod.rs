@@ -126,6 +126,11 @@ pub fn lab_addr() -> Option<String> {
     env("GPG_IT_LAB")
 }
 
+/// Стенд тяжёлых запросов P3 (`GPG_IT_PERF=localhost:5471`, PG 17 с hypopg, pg_stat_kcache, pg_wait_sampling).
+pub fn perf_addr() -> Option<String> {
+    env("GPG_IT_PERF")
+}
+
 /// Узел Patroni, принимающий запись: лидер может быть любым из трёх.
 pub async fn patroni_leader_addr() -> Option<String> {
     env("GPG_IT_PATRONI")?;

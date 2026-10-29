@@ -137,6 +137,47 @@ services:
       - track_io_timing=on
     ports: ["127.0.0.1:5470:5432"]
 
+  # Стенд P3: тяжёлые запросы. PG 17 с pg_stat_statements (track_planning), hypopg, pg_stat_kcache и pg_wait_sampling,
+  # объёмная схема perf.shop и сценарий pgbench /perf/heavy.sql (dev/perf/README.md). Параметры нарочно тесные:
+  # work_mem=1MB — сортировки на диске, max_parallel_workers=2 при per_gather=4 — нехватка воркеров, низкие пороги
+  # JIT — JIT на простых запросах. Init-скрипты запечены в образ (perf/Dockerfile).
+  pg-perf:
+    build:
+      context: .
+      dockerfile: perf/Dockerfile
+    image: glafira-pg-dev/perf:17
+    container_name: gp-pg-perf
+    hostname: pg-perf
+    environment:
+      POSTGRES_PASSWORD: postgres-secret
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements,pg_stat_kcache,pg_wait_sampling
+      - -c
+      - pg_stat_statements.track_planning=on
+      - -c
+      - pg_stat_statements.max=5000
+      - -c
+      - track_io_timing=on
+      - -c
+      - compute_query_id=on
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - work_mem=1MB
+      - -c
+      - max_parallel_workers=2
+      - -c
+      - max_parallel_workers_per_gather=4
+      - -c
+      - jit_above_cost=1000
+      - -c
+      - jit_inline_above_cost=1000
+      - -c
+      - jit_optimize_above_cost=1000
+    ports: ["127.0.0.1:5471:5432"]
+
   # SSH-бастион для проверки туннеля: имена узлов (pg-single, patroni1…) разрешаются во внутренней сети compose.
   # Ключи tester генерирует dev/ssh/gen-keys.sh (до `up --build`), в репозитории их нет.
   bastion:
