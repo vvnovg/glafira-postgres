@@ -381,7 +381,8 @@ async fn query_detail_on_perf_and_on_pg13() {
 }
 
 /// Выполняющийся экземпляр виден в карточке по `query_id` сессии; текст, упёршийся в `track_activity_query_size`
-/// (многобайтный — длина считается в байтах), помечается обрезанным.
+/// (многобайтный — длина считается в байтах), помечается обрезанным. Простаивающая сессия, чья последняя инструкция
+/// имела тот же `query_id` (он сохраняется в `pg_stat_activity`), экземпляром не считается.
 #[tokio::test]
 async fn query_detail_lists_running_instances() {
     let Some(perf) = common::perf_addr() else {
@@ -392,6 +393,14 @@ async fn query_detail_lists_running_instances() {
         .name
         .clone();
     let probe = common::superuser(&perf, "perf").await;
+    // Соединение остаётся открытым и простаивает: его последняя инструкция имеет тот же нормализованный текст.
+    let idle = common::superuser(&perf, "perf").await;
+    let idle_pid: i32 = idle
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .unwrap()
+        .get(0);
+    idle.batch_execute("SELECT pg_sleep(0), '1'").await.unwrap();
     for (literal, truncated) in [("42".to_string(), false), ("я".repeat(800), true)] {
         let sleeper = common::superuser(&perf, "perf").await;
         let pid: i32 = sleeper
@@ -420,10 +429,31 @@ async fn query_detail_lists_running_instances() {
             .await
             .unwrap()
             .get(0);
+        // Предпосылка: простаивающая сессия действительно несёт тот же `query_id` — иначе проверка фильтра пуста.
+        let idle_row = probe
+            .query_one(
+                "SELECT state, query_id FROM pg_stat_activity WHERE pid = $1",
+                &[&idle_pid],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                idle_row.get::<_, String>(0),
+                idle_row.get::<_, Option<i64>>(1)
+            ),
+            ("idle".to_string(), Some(query_id)),
+            "простаивающая сессия хранит query_id последней инструкции"
+        );
         let detail = query_detail::detail(&st, "it", &member, "perf", query_id)
             .await
             .unwrap();
-        assert_eq!(detail.running.len(), 1, "{:?}", detail.running);
+        assert_eq!(
+            detail.running.len(),
+            1,
+            "простаивающая сессия {idle_pid} не экземпляр: {:?}",
+            detail.running
+        );
         let r = &detail.running[0];
         assert_eq!((r.pid, r.state.as_deref()), (pid, Some("active")));
         assert!(r.started_ms.is_some() && r.duration_s.is_some() && r.backend_start_us > 0);

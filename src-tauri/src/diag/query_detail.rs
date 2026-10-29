@@ -26,7 +26,7 @@ use crate::sync::MutexExt;
 /// История и ожидания — за последний час.
 const LOOKBACK_MS: i64 = 3_600_000;
 
-/// Выполняющийся экземпляр запроса: сессия с этим `query_id` в `pg_stat_activity` (14+).
+/// Выполняющийся экземпляр запроса: активный ведущий бэкенд с этим `query_id` в `pg_stat_activity` (14+).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunningInstance {
@@ -41,7 +41,8 @@ pub struct RunningInstance {
     pub application_name: Option<String>,
     pub client_addr: Option<String>,
     pub query: String,
-    /// Текст упёрся в `track_activity_query_size`: литералы могут быть обрезаны, для плана такой текст не годится.
+    /// Текст упёрся в `track_activity_query_size` или срезан до `QUERY_LIMIT`: литералы могут быть обрезаны, для плана
+    /// такой текст не годится.
     pub truncated: bool,
 }
 
@@ -234,17 +235,22 @@ pub fn waits_of(samples: &[Sample<'_>], query_id: i64, since_ms: i64) -> Option<
     })
 }
 
-/// Выполняющиеся экземпляры (14+): `$1` — `query_id`, `$2` — база. Признак обрезки: сервер режет текст до
-/// `track_activity_query_size - 1` байт по границе символа (в UTF-8 — не более 3 байт недобора); предел берётся из
-/// `pg_settings` (байты), а не из `current_setting` (строка с единицей, например `1kB`).
+/// Выполняющиеся экземпляры (14+): `$1` — `query_id`, `$2` — база. Перечисляются только активные ведущие бэкенды
+/// (`state = 'active'`, `leader_pid IS NULL`), как и у сэмплера ожиданий: `query_id` в `pg_stat_activity` сохраняется
+/// и после завершения инструкции (простаивающая сессия не выполняется), а параллельные воркеры несут `query_id`
+/// лидера (дубликаты). Признак обрезки: сервер режет текст до `track_activity_query_size - 1` байт по границе
+/// символа (в UTF-8 — не более 3 байт недобора), а колонка `query` дополнительно срезана `left(.., QUERY_LIMIT)`;
+/// предел берётся из `pg_settings` (байты), а не из `current_setting` (строка с единицей, например `1kB`).
 pub fn running_sql() -> String {
     format!(
         "SELECT a.pid, {BACKEND_START_US}, a.state, (extract(epoch FROM a.query_start) * 1000)::bigint, \
          extract(epoch FROM now() - a.query_start)::float8, a.wait_event_type, a.wait_event, a.usename::text, \
          a.application_name, host(a.client_addr), left(a.query, {QUERY_LIMIT}), \
-         octet_length(a.query) >= (SELECT setting::int FROM pg_settings WHERE name = 'track_activity_query_size') - 4 \
+         (octet_length(a.query) >= (SELECT setting::int FROM pg_settings WHERE name = 'track_activity_query_size') - 4 \
+          OR length(a.query) > {QUERY_LIMIT}) \
          FROM pg_stat_activity a \
-         WHERE a.query_id = $1 AND a.datname = $2 AND a.pid <> pg_backend_pid() ORDER BY a.query_start"
+         WHERE a.query_id = $1 AND a.datname = $2 AND a.state = 'active' AND a.leader_pid IS NULL \
+           AND a.pid <> pg_backend_pid() ORDER BY a.query_start"
     )
 }
 
@@ -644,6 +650,14 @@ mod tests {
             "{sql}"
         );
         assert!(sql.contains("track_activity_query_size"));
+        assert!(
+            sql.contains("a.state = 'active'") && sql.contains("a.leader_pid IS NULL"),
+            "только активные ведущие бэкенды: {sql}"
+        );
+        assert!(
+            sql.contains(&format!("OR length(a.query) > {QUERY_LIMIT})")),
+            "truncated учитывает срез QUERY_LIMIT: {sql}"
+        );
     }
 
     #[test]
