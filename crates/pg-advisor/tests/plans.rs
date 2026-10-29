@@ -39,19 +39,7 @@ fn every_fixture_parses_consistently() {
             "{path:?}"
         );
         let share: f64 = nodes.iter().filter_map(|n| n.share_pct).sum();
-        // Под Gather время узла — среднее по процессам, а `inclusive_ms` умножает его на loops (сумма по процессам):
-        // у параллельных планов сумма долей от времени выполнения законно превышает 100 %.
-        if nodes
-            .iter()
-            .any(|n| n.workers_launched.is_some_and(|w| w > 0))
-        {
-            assert!(
-                share.is_finite() && share >= 0.0,
-                "{path:?}: сумма долей {share}"
-            );
-        } else {
-            assert!(share <= 100.5, "{path:?}: сумма долей {share}");
-        }
+        assert!(share <= 100.5, "{path:?}: сумма долей {share}");
         assert!(
             nodes
                 .iter()

@@ -131,11 +131,15 @@ pub struct PlanNode {
     pub output: Vec<String>,
     /// Нераспознанные поля узла — как есть.
     pub extra: Map<String, Value>,
-    /// `actual.total_ms × loops`; без ANALYZE — `None`.
+    /// Включённое время, мс; без ANALYZE — `None`. Вне параллельной части плана — `actual.total_ms × loops`.
+    /// Под `Gather` / `Gather Merge` время узла в `actual.total_ms` — среднее на процесс (так его отдаёт сервер), а `loops` —
+    /// число процессов, выполнявших узел (воркеры и ведущий, если он участвует), умноженное на внутренние циклы; поэтому
+    /// `total_ms × loops` там — суммарное время всех процессов, а не время по часам. Его делят на число процессов
+    /// (`loops` внешнего потомка Gather): `total_ms × loops / процессов` — вклад узла в время выполнения.
     pub inclusive_ms: Option<f64>,
-    /// Включённое минус включённое детей, не меньше нуля.
+    /// Включённое минус включённое детей (оба — в пересчёте на время по часам, см. `inclusive_ms`), не меньше нуля.
     pub exclusive_ms: Option<f64>,
-    /// Доля собственного времени в `PlanTree::total_ms`, проценты.
+    /// Доля собственного времени в `PlanTree::total_ms`, проценты; сумма долей узлов плана не превышает 100.
     pub share_pct: Option<f64>,
     /// `actual.rows / plan_rows`; `None` без ANALYZE или при `plan_rows = 0` и `actual.rows = 0`.
     pub estimate_ratio: Option<f64>,
@@ -168,7 +172,7 @@ impl PlanTree {
     pub fn finish(&mut self) {
         let mut next = 0u32;
         number(&mut self.root, &mut next);
-        compute_times(&mut self.root);
+        compute_times(&mut self.root, 1.0);
         self.total_ms = self.execution_ms.or(self.root.inclusive_ms);
         if let Some(total) = self.total_ms.filter(|t| *t > 0.0) {
             shares(&mut self.root, total);
@@ -195,12 +199,32 @@ fn number(n: &mut PlanNode, next: &mut u32) {
     }
 }
 
-fn compute_times(n: &mut PlanNode) {
+/// `procs` — число процессов, выполняющих поддерево (1 вне Gather): время узла `total_ms × loops` делится на него.
+fn compute_times(n: &mut PlanNode, procs: f64) {
+    // Под Gather внешний потомок выполняют воркеры и ведущий; InitPlan / SubPlan самого Gather выполняются вне параллельной части.
+    let is_gather = matches!(n.node_type.as_str(), "Gather" | "Gather Merge");
+    let gather_procs = if is_gather {
+        n.children
+            .iter()
+            .find(|c| c.parent_relationship.as_deref() == Some("Outer"))
+            .or_else(|| n.children.iter().find(|c| !is_subplan(c)))
+            .and_then(|c| c.actual)
+            .map(|a| a.loops as f64)
+            .filter(|l| *l > 0.0)
+            .unwrap_or(1.0)
+    } else {
+        procs
+    };
     for c in &mut n.children {
-        compute_times(c);
+        let child_procs = if is_gather && !is_subplan(c) {
+            gather_procs
+        } else {
+            procs
+        };
+        compute_times(c, child_procs);
     }
     if let Some(a) = n.actual {
-        let inclusive = a.total_ms * a.loops as f64;
+        let inclusive = a.total_ms * a.loops as f64 / procs;
         let children: f64 = n.children.iter().filter_map(|c| c.inclusive_ms).sum();
         n.inclusive_ms = Some(inclusive);
         n.exclusive_ms = Some((inclusive - children).max(0.0));
@@ -216,6 +240,13 @@ fn compute_times(n: &mut PlanNode) {
                 && n.plan_rows.max(a.rows) >= MISESTIMATE_MIN_ROWS
         });
     }
+}
+
+fn is_subplan(n: &PlanNode) -> bool {
+    matches!(
+        n.parent_relationship.as_deref(),
+        Some("InitPlan" | "SubPlan")
+    )
 }
 
 fn shares(n: &mut PlanNode, total: f64) {
@@ -272,4 +303,79 @@ pub fn has_modify_table(t: &PlanTree) -> bool {
         n.node_type == "ModifyTable" || n.children.iter().any(walk)
     }
     walk(&t.root)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::plan::json::from_json;
+    use serde_json::json;
+
+    fn share_sum(n: &crate::plan::PlanNode) -> f64 {
+        n.share_pct.unwrap_or(0.0) + n.children.iter().map(share_sum).sum::<f64>()
+    }
+
+    #[test]
+    fn time_under_gather_is_divided_by_process_count() {
+        // Limit → Gather (2 воркера + ведущий) → Parallel Seq Scan: loops = 3, время — среднее на процесс.
+        let v = json!({"Plan": {
+            "Node Type": "Limit", "Startup Cost": 0.0, "Total Cost": 10.0, "Plan Rows": 10, "Plan Width": 4,
+            "Actual Startup Time": 0.0, "Actual Total Time": 105.0, "Actual Rows": 10, "Actual Loops": 1,
+            "Plans": [{
+                "Node Type": "Gather", "Parent Relationship": "Outer", "Workers Planned": 2, "Workers Launched": 2,
+                "Startup Cost": 0.0, "Total Cost": 9.0, "Plan Rows": 10, "Plan Width": 4,
+                "Actual Startup Time": 0.0, "Actual Total Time": 100.0, "Actual Rows": 10, "Actual Loops": 1,
+                "Plans": [{
+                    "Node Type": "Seq Scan", "Parent Relationship": "Outer", "Parallel Aware": true,
+                    "Relation Name": "orders", "Startup Cost": 0.0, "Total Cost": 8.0, "Plan Rows": 100, "Plan Width": 4,
+                    "Actual Startup Time": 0.0, "Actual Total Time": 90.0, "Actual Rows": 100, "Actual Loops": 3
+                }]
+            }]
+        }, "Execution Time": 106.0});
+        let t = from_json(&v).unwrap();
+        let gather = &t.root.children[0];
+        let scan = &gather.children[0];
+        // Узел вне Gather — как раньше (total × loops); под Gather — total × loops / 3 процесса.
+        assert_eq!(t.root.inclusive_ms, Some(105.0));
+        assert_eq!(gather.inclusive_ms, Some(100.0));
+        assert_eq!(scan.inclusive_ms, Some(90.0 * 3.0 / 3.0));
+        assert_eq!(scan.exclusive_ms, Some(90.0));
+        assert_eq!(gather.exclusive_ms, Some(10.0));
+        assert_eq!(t.root.exclusive_ms, Some(5.0));
+        assert!((scan.share_pct.unwrap() - 90.0 / 106.0 * 100.0).abs() < 1e-9);
+        let sum = share_sum(&t.root);
+        assert!(sum <= 100.0, "сумма долей {sum}");
+        // Горячие — по скорректированному собственному времени: Scan (90), Gather (10), Limit (5).
+        assert!(scan.hot && gather.hot && t.root.hot);
+    }
+
+    #[test]
+    fn gather_initplan_runs_outside_the_parallel_part() {
+        // InitPlan идёт в `Plans` раньше внешнего потомка и выполняется ведущим один раз: на число процессов не делится.
+        let v = json!({"Plan": {
+            "Node Type": "Gather", "Workers Planned": 1, "Workers Launched": 1,
+            "Startup Cost": 0.0, "Total Cost": 9.0, "Plan Rows": 10, "Plan Width": 4,
+            "Actual Startup Time": 0.0, "Actual Total Time": 50.0, "Actual Rows": 10, "Actual Loops": 1,
+            "Plans": [
+                {"Node Type": "Aggregate", "Strategy": "Plain", "Parent Relationship": "InitPlan", "Subplan Name": "InitPlan 1",
+                 "Startup Cost": 0.0, "Total Cost": 1.0, "Plan Rows": 1, "Plan Width": 4,
+                 "Actual Startup Time": 4.0, "Actual Total Time": 4.0, "Actual Rows": 1, "Actual Loops": 1},
+                {"Node Type": "Seq Scan", "Parent Relationship": "Outer", "Parallel Aware": true, "Relation Name": "orders",
+                 "Startup Cost": 0.0, "Total Cost": 8.0, "Plan Rows": 100, "Plan Width": 4,
+                 "Actual Startup Time": 0.0, "Actual Total Time": 40.0, "Actual Rows": 100, "Actual Loops": 2}
+            ]
+        }, "Execution Time": 51.0});
+        let t = from_json(&v).unwrap();
+        assert_eq!(
+            t.root.children[0].inclusive_ms,
+            Some(4.0),
+            "InitPlan вне параллельной части"
+        );
+        assert_eq!(
+            t.root.children[1].inclusive_ms,
+            Some(40.0),
+            "40 мс × 2 цикла / 2 процесса"
+        );
+        assert_eq!(t.root.exclusive_ms, Some(6.0));
+        assert!(share_sum(&t.root) <= 100.0);
+    }
 }
