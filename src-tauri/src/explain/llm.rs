@@ -93,15 +93,37 @@ pub fn fit_ddl(tables: Vec<LlmTable>) -> (Vec<LlmTable>, usize) {
     (kept, omitted)
 }
 
+/// Параметры пробного плана по числу `$N` в тексте: без `$N` — `Params::None`, на 16+ — `GENERIC_PLAN`, раньше значения
+/// взять неоткуда (`None` — предупреждение `paramsNeeded`, плана нет).
+fn probe_params(n_params: usize, server_version_num: i32) -> Option<Params> {
+    if n_params == 0 {
+        Some(Params::None)
+    } else if server_version_num >= V16 {
+        Some(Params::Generic)
+    } else {
+        None
+    }
+}
+
+/// Текст для пробного плана: усечённый текст не пробуется (план по обрубку — ошибка или чужой план), о причине
+/// отсутствия плана пользователю говорит `text_truncated` в данных.
+fn probe_text(text: Option<&str>, truncated: bool) -> Option<&str> {
+    text.filter(|_| !truncated)
+}
+
 /// Итог пробного плана: «Скопировать для LLM» — подспорье, текст и статистика нужны и без плана, поэтому любая
-/// ошибка (права на таблицы, ярус записи, отвергнутый текст, срок, узел) — предупреждение `planFailed`, а не отказ.
+/// ошибка (права на таблицы, ярус записи, отвергнутый текст, срок, узел) — предупреждение `planFailed`, а не отказ;
+/// причина остаётся в журнале.
 fn plan_or_warning(
     probe: AppResult<ExplainResult>,
+    id: &str,
+    member: &str,
     warnings: &mut Vec<String>,
 ) -> Option<PlanTree> {
     match probe {
         Ok(r) => Some(r.plan),
-        Err(_) => {
+        Err(e) => {
+            tracing::warn!(connection = %id, member = %member, "LLM bundle: probe plan failed: {}", e.message);
             warnings.push("planFailed".to_string());
             None
         }
@@ -109,14 +131,19 @@ fn plan_or_warning(
 }
 
 /// Итог чтения DDL: `read` — прочитанные таблицы и число не прочитанных; отказ всего чтения (соединение, срок) —
-/// все `picked` не прочитаны. Не прочитанные таблицы не пропадают молча: одно предупреждение `ddlFailed`, а их число
-/// вызывающий прибавляет к `tables_omitted`.
+/// все `picked` не прочитаны (причина — в журнале). Не прочитанные таблицы не пропадают молча: одно предупреждение
+/// `ddlFailed`, а их число вызывающий прибавляет к `tables_omitted`.
 fn ddl_or_warning(
     read: AppResult<(Vec<LlmTable>, usize)>,
     picked: usize,
+    id: &str,
+    member: &str,
     warnings: &mut Vec<String>,
 ) -> (Vec<LlmTable>, usize) {
-    let (fetched, failed) = read.unwrap_or_else(|_| (Vec::new(), picked));
+    let (fetched, failed) = read.unwrap_or_else(|e| {
+        tracing::warn!(connection = %id, member = %member, "LLM bundle: DDL not read: {}", e.message);
+        (Vec::new(), picked)
+    });
     if failed > 0 {
         warnings.push("ddlFailed".to_string());
     }
@@ -132,6 +159,9 @@ pub async fn bundle(
     plan: Option<PlanTree>,
 ) -> AppResult<LlmBundle> {
     let mut warnings = Vec::new();
+    // Узел и профиль берутся до плана: пропажа подключения между шагами не должна отнимать у пользователя текст,
+    // статистику и план, уже собранные.
+    let target = st.runtimes.diag_target(id, Some(member), false)?;
     let (text, text_truncated, stats, version, in_recovery, pgss_version) = match &source {
         LlmSource::Query { query_id } => {
             let d = query_detail::detail(st, id, member, database, *query_id).await?;
@@ -156,7 +186,6 @@ pub async fn bundle(
             )
         }
         LlmSource::Sql { sql } => {
-            let target = st.runtimes.diag_target(id, Some(member), false)?;
             let h =
                 crate::diag::on_member(st, id, &target, |c| Box::pin(crate::diag::head(c))).await?;
             (
@@ -169,25 +198,16 @@ pub async fn bundle(
             )
         }
     };
-    // План: переданный, иначе пробный EXPLAIN без выполнения (GENERIC_PLAN на 16+ при `$N`).
-    let plan = match (plan, &text) {
-        (Some(p), _) => Some(p),
-        (None, Some(sql)) => {
-            let n = count_params(sql);
-            let params = if n == 0 {
-                Some(Params::None)
-            } else if version >= V16 {
-                Some(Params::Generic)
-            } else {
-                warnings.push("paramsNeeded".to_string());
-                None
-            };
-            match params {
+    // План: переданный, иначе пробный EXPLAIN без выполнения (GENERIC_PLAN на 16+ при `$N`); усечённый текст не пробуется.
+    let plan = match plan {
+        Some(p) => Some(p),
+        None => match probe_text(text.as_deref(), text_truncated) {
+            Some(sql) => match probe_params(count_params(sql), version) {
                 Some(params) => {
                     let req = ExplainRequest {
                         member: member.to_string(),
                         database: database.to_string(),
-                        sql: sql.clone(),
+                        sql: sql.to_string(),
                         mode: Mode::Plan,
                         params,
                         timeout_s: crate::explain::DEFAULT_TIMEOUT_S,
@@ -195,12 +215,15 @@ pub async fn bundle(
                         confirmation: Confirmation::default(),
                         force_write: false,
                     };
-                    plan_or_warning(run::run(st, id, &req).await, &mut warnings)
+                    plan_or_warning(run::run(st, id, &req).await, id, member, &mut warnings)
                 }
-                None => None,
-            }
-        }
-        (None, None) => None,
+                None => {
+                    warnings.push("paramsNeeded".to_string());
+                    None
+                }
+            },
+            None => None,
+        },
     };
     let (tables, tables_omitted) = match &plan {
         Some(p) => {
@@ -208,10 +231,11 @@ pub async fn bundle(
             if picked.is_empty() {
                 (Vec::new(), omitted_by_count)
             } else {
-                let (_, profile) = st.runtimes.target(id, Some(member))?;
                 let picked_len = picked.len();
+                // Владеемые копии: будущее запроса не может держать заимствования на время жизни соединения.
+                let (conn, node) = (id.to_string(), member.to_string());
                 let read = on_catalog_node_within(
-                    catalog_limit(&profile),
+                    catalog_limit(&target.profile),
                     st.client(id, Some(member), Some(database)),
                     |c| {
                         Box::pin(async move {
@@ -232,7 +256,13 @@ pub async fn bundle(
                                             .collect(),
                                         ddl: t.ddl,
                                     }),
-                                    Err(_) => failed += 1,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            connection = %conn, member = %node,
+                                            "LLM bundle: DDL of {}.{} not read: {}", schema, r.name, e.message
+                                        );
+                                        failed += 1;
+                                    }
                                 }
                             }
                             Ok((out, failed))
@@ -240,7 +270,7 @@ pub async fn bundle(
                     },
                 )
                 .await;
-                let (fetched, failed) = ddl_or_warning(read, picked_len, &mut warnings);
+                let (fetched, failed) = ddl_or_warning(read, picked_len, id, member, &mut warnings);
                 let (kept, omitted_by_size) = fit_ddl(fetched);
                 (kept, omitted_by_count + failed + omitted_by_size)
             }
@@ -315,6 +345,97 @@ mod tests {
         assert_eq!(kept[0].name, "a");
     }
 
+    /// Таблица с DDL из `ddl_len` байт и индексами заданной длины (в бюджет каждый идёт с `+ 1`).
+    fn sized(name: &str, ddl_len: usize, index_lens: &[usize]) -> LlmTable {
+        LlmTable {
+            schema: "shop".into(),
+            name: name.into(),
+            ddl: "x".repeat(ddl_len),
+            indexes: index_lens.iter().map(|n| "i".repeat(*n)).collect(),
+        }
+    }
+
+    fn names(tables: &[LlmTable]) -> Vec<&str> {
+        tables.iter().map(|t| t.name.as_str()).collect()
+    }
+
+    #[test]
+    fn no_relations_pick_nothing() {
+        assert_eq!(pick_tables(&[]), (vec![], 0));
+    }
+
+    #[test]
+    fn the_table_limit_is_inclusive() {
+        let rels: Vec<RelationRef> = (0..MAX_TABLES + 1).map(|i| rel(&format!("t{i}"))).collect();
+        let (picked, omitted) = pick_tables(&rels[..MAX_TABLES]);
+        assert_eq!((picked.len(), omitted), (MAX_TABLES, 0), "ровно десять");
+        let (picked, omitted) = pick_tables(&rels);
+        assert_eq!(
+            (picked.len(), omitted),
+            (MAX_TABLES, 1),
+            "одиннадцатая за бортом"
+        );
+        assert_eq!(picked.last().map(|r| r.name.as_str()), Some("t9"));
+    }
+
+    #[test]
+    fn index_bytes_count_against_the_ddl_budget() {
+        // DDL второй таблицы сам помещается, а с индексами (201 байт) — нет: она и всё за ней отбрасываются.
+        let tables = vec![
+            sized("a", 17, &[]),
+            sized("b", MAX_DDL_BYTES - 100, &[199, 0]),
+            sized("c", 5, &[]),
+        ];
+        let (kept, omitted) = fit_ddl(tables);
+        assert_eq!(
+            (names(&kept), omitted),
+            (vec!["a"], 2),
+            "отбрасывание с первой не влезшей: маленькая «c» после «b» не берётся"
+        );
+        // Каждый индекс считается с лишним байтом (разделитель): пустой индекс при DDL на весь бюджет уже не влезает.
+        let (kept, omitted) = fit_ddl(vec![sized("a", MAX_DDL_BYTES, &[0])]);
+        assert_eq!((kept.len(), omitted), (0, 1));
+        let (kept, omitted) = fit_ddl(vec![sized("a", MAX_DDL_BYTES - 1, &[0])]);
+        assert_eq!((kept.len(), omitted), (1, 0));
+    }
+
+    #[test]
+    fn the_first_table_over_the_budget_leaves_nothing() {
+        let (kept, omitted) = fit_ddl(vec![sized("a", MAX_DDL_BYTES + 1, &[])]);
+        assert_eq!((kept, omitted), (vec![], 1));
+        // Пустой список — пустой результат.
+        assert_eq!(fit_ddl(vec![]), (vec![], 0));
+    }
+
+    #[test]
+    fn a_total_of_exactly_the_budget_is_kept() {
+        let half = MAX_DDL_BYTES / 2;
+        // 22 + (9 + 1) индекс = 32 768 и 32 768: вместе ровно бюджет.
+        let (kept, omitted) = fit_ddl(vec![sized("a", half - 10, &[9]), sized("b", half, &[])]);
+        assert_eq!((names(&kept), omitted), (vec!["a", "b"], 0));
+        // Лишний байт — вторая таблица уже не влезает.
+        let (kept, omitted) = fit_ddl(vec![sized("a", half - 10, &[9]), sized("b", half + 1, &[])]);
+        assert_eq!((names(&kept), omitted), (vec!["a"], 1));
+    }
+
+    #[test]
+    fn probe_params_follow_the_placeholder_count_and_the_server_version() {
+        // Без `$N` параметры не нужны на любой версии.
+        assert_eq!(probe_params(0, 150_000), Some(Params::None));
+        assert_eq!(probe_params(0, 170_000), Some(Params::None));
+        // С `$N`: GENERIC_PLAN только с 16, раньше значений взять неоткуда.
+        assert_eq!(probe_params(2, 159_999), None);
+        assert_eq!(probe_params(2, 160_000), Some(Params::Generic));
+        assert_eq!(probe_params(1, 170_000), Some(Params::Generic));
+    }
+
+    #[test]
+    fn a_truncated_text_is_not_probed() {
+        assert_eq!(probe_text(Some("SELECT 1"), false), Some("SELECT 1"));
+        assert_eq!(probe_text(Some("SELECT 1"), true), None);
+        assert_eq!(probe_text(None, false), None);
+    }
+
     fn app_error(code: ErrorCode) -> AppError {
         AppError {
             code,
@@ -338,7 +459,7 @@ mod tests {
         ] {
             let mut warnings = Vec::new();
             assert_eq!(
-                plan_or_warning(Err(app_error(code)), &mut warnings),
+                plan_or_warning(Err(app_error(code)), "c", "pg-1", &mut warnings),
                 None,
                 "{code:?}"
             );
@@ -356,17 +477,25 @@ mod tests {
         };
         // Всё прочиталось: предупреждения нет.
         let mut warnings = Vec::new();
-        let (got, failed) = ddl_or_warning(Ok((vec![table("a")], 0)), 1, &mut warnings);
+        let (got, failed) =
+            ddl_or_warning(Ok((vec![table("a")], 0)), 1, "c", "pg-1", &mut warnings);
         assert_eq!((got.len(), failed, warnings.len()), (1, 0, 0));
         // Часть таблиц не прочиталась: остальные сохраняются, предупреждение одно на все.
-        let (got, failed) = ddl_or_warning(Ok((vec![table("a")], 2)), 3, &mut warnings);
+        let (got, failed) =
+            ddl_or_warning(Ok((vec![table("a")], 2)), 3, "c", "pg-1", &mut warnings);
         assert_eq!(
             (got.len(), failed, warnings.as_slice()),
             (1, 2, ["ddlFailed".to_string()].as_slice())
         );
         // Чтение не состоялось вовсе (соединение, срок): не прочитаны все выбранные.
         let mut warnings = Vec::new();
-        let (got, failed) = ddl_or_warning(Err(app_error(ErrorCode::Timeout)), 4, &mut warnings);
+        let (got, failed) = ddl_or_warning(
+            Err(app_error(ErrorCode::Timeout)),
+            4,
+            "c",
+            "pg-1",
+            &mut warnings,
+        );
         assert_eq!(
             (got.len(), failed, warnings.as_slice()),
             (0, 4, ["ddlFailed".to_string()].as_slice())

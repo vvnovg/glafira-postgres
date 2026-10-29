@@ -598,6 +598,17 @@ async fn llm_bundle_has_text_stats_plan_and_ddl() {
         b.tables
     );
     assert!(b.server_version_num >= 170_000 && b.pgss_version.is_some());
+    assert!(
+        b.warnings.is_empty() && b.tables_omitted == 0,
+        "{:?} {}",
+        b.warnings,
+        b.tables_omitted
+    );
+    assert!(
+        b.tables.iter().any(|t| t.name == "customers"),
+        "{:?}",
+        b.tables
+    );
     // Источник — SQL консоли: статистики нет, план и таблицы есть.
     let b = llm::bundle(
         &st,
@@ -612,6 +623,12 @@ async fn llm_bundle_has_text_stats_plan_and_ddl() {
     .await
     .unwrap();
     assert!(b.stats.is_none() && b.plan_text.is_some());
+    assert!(
+        b.warnings.is_empty() && b.tables_omitted == 0,
+        "{:?} {}",
+        b.warnings,
+        b.tables_omitted
+    );
     assert_eq!(
         b.tables.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
         ["orders"]
