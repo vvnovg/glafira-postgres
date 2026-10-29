@@ -203,7 +203,8 @@
       "betweenUnsupported": "Comparing snapshots is not available yet",
       "sortUnavailable": "This sort order is not available for this version or mode",
       "pgssMissing": "pg_stat_statements is not installed in this database",
-      "pgssTooOld": "pg_stat_statements {{version}} is older than 1.8"
+      "pgssTooOld": "pg_stat_statements {{version}} is older than 1.8",
+      "badQueryId": "Query id must be a 64-bit integer"
     },
     "guard": {
       "readOnly": "Connection “{{name}}” is read-only",
@@ -836,7 +837,8 @@
         "patroniSlots": "Patroni slot marks",
         "statements": "Query statistics (pg_stat_statements)",
         "others": "Other roles' queries",
-        "window": "Window data"
+        "window": "Window data",
+        "running": "Running instances (query_id)"
       }
     },
     "tools": {

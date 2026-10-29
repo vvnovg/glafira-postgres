@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use glafira_pg_lib::diag::queries::{self, Detect, QueriesMode, QueriesParams};
+use glafira_pg_lib::diag::query_detail;
 use glafira_pg_lib::diag::{self, DiagData, DiagRequest, Tool};
 use glafira_pg_lib::sampler::registry::SamplerSink;
 use glafira_pg_lib::sampler::statements::{self, StatementsEvent};
@@ -309,4 +310,129 @@ async fn statements_sampler_fills_the_window_and_caches_texts() {
         st.statements.buffer("it", &member).is_some(),
         "буфер остаётся"
     );
+}
+
+/// Карточка запроса на pg-perf (PG 17: экземпляры читаются) и на PG 13 (экземпляров нет — пометка).
+#[tokio::test]
+async fn query_detail_on_perf_and_on_pg13() {
+    if let Some(perf) = common::perf_addr() {
+        let (_dir, st) = common::open_server_in(&perf, "perf").await;
+        let member = st.runtimes.view("it").topology.unwrap().members[0]
+            .name
+            .clone();
+        let r = diag::run(&st, "it", request(since_reset(QuerySort::Calls)))
+            .await
+            .unwrap();
+        let DiagData::Queries(d) = &r.data else {
+            unreachable!()
+        };
+        let top = &d.rows[0];
+        let detail = query_detail::detail(&st, "it", &member, "perf", top.key.query_id)
+            .await
+            .unwrap();
+        assert!(detail.text.as_deref().is_some_and(|t| !t.is_empty()));
+        let since = detail.since_reset.as_ref().expect("строка pgss есть");
+        assert!(
+            since.calls >= top.calls,
+            "карточка суммирует роли и toplevel"
+        );
+        assert!(since.stddev_exec_ms.is_some());
+        assert!(!detail.by_user.is_empty() && detail.totals.calls >= since.calls);
+        assert_eq!(
+            detail
+                .windows
+                .iter()
+                .map(|w| w.window_s)
+                .collect::<Vec<_>>(),
+            [300, 900, 3600]
+        );
+        assert!(
+            detail.unavailable.iter().all(|u| u.part != "running"),
+            "PG 17: экземпляры читаются"
+        );
+        assert!(detail.server_version_num >= 170_000 && !detail.in_recovery);
+        assert_eq!(
+            detail.pgss_version.as_deref().map(|v| v.starts_with("1.")),
+            Some(true)
+        );
+        // Запроса нет в pgss — карточка без текста и статистики, но без ошибки.
+        let gone = query_detail::detail(&st, "it", &member, "perf", 1)
+            .await
+            .unwrap();
+        assert!(gone.text.is_none() && gone.since_reset.is_none() && gone.by_user.is_empty());
+    }
+    if let Some(pg13) = common::matrix_addrs()
+        .into_iter()
+        .find(|a| a.ends_with(":5513"))
+    {
+        let (_dir, st) = common::open_server(&pg13).await;
+        let member = st.runtimes.view("it").topology.unwrap().members[0]
+            .name
+            .clone();
+        let detail = query_detail::detail(&st, "it", &member, "postgres", 1)
+            .await
+            .unwrap();
+        assert!(
+            detail.unavailable.iter().any(|u| u.part == "running"),
+            "{:?}",
+            detail.unavailable
+        );
+    }
+}
+
+/// Выполняющийся экземпляр виден в карточке по `query_id` сессии; текст, упёршийся в `track_activity_query_size`
+/// (многобайтный — длина считается в байтах), помечается обрезанным.
+#[tokio::test]
+async fn query_detail_lists_running_instances() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st) = common::open_server_in(&perf, "perf").await;
+    let member = st.runtimes.view("it").topology.unwrap().members[0]
+        .name
+        .clone();
+    let probe = common::superuser(&perf, "perf").await;
+    for (literal, truncated) in [("42".to_string(), false), ("я".repeat(800), true)] {
+        let sleeper = common::superuser(&perf, "perf").await;
+        let pid: i32 = sleeper
+            .query_one("SELECT pg_backend_pid()", &[])
+            .await
+            .unwrap()
+            .get(0);
+        let sql = format!("SELECT pg_sleep(3), '{literal}'");
+        let job = tokio::spawn(async move { sleeper.batch_execute(&sql).await });
+        common::wait_until("запрос сессии выполняется", Duration::from_secs(5), async || {
+            probe
+                .query_opt(
+                    "SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND state = 'active' AND query_id IS NOT NULL",
+                    &[&pid],
+                )
+                .await
+                .unwrap()
+                .is_some()
+        })
+        .await;
+        let query_id: i64 = probe
+            .query_one(
+                "SELECT query_id FROM pg_stat_activity WHERE pid = $1",
+                &[&pid],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        let detail = query_detail::detail(&st, "it", &member, "perf", query_id)
+            .await
+            .unwrap();
+        assert_eq!(detail.running.len(), 1, "{:?}", detail.running);
+        let r = &detail.running[0];
+        assert_eq!((r.pid, r.state.as_deref()), (pid, Some("active")));
+        assert!(r.started_ms.is_some() && r.duration_s.is_some() && r.backend_start_us > 0);
+        assert_eq!(
+            r.truncated,
+            truncated,
+            "длина текста — {} символов",
+            r.query.chars().count()
+        );
+        job.await.unwrap().unwrap();
+    }
 }

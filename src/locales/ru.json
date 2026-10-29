@@ -205,7 +205,8 @@
       "betweenUnsupported": "Сравнение снимков пока недоступно",
       "sortUnavailable": "Эта сортировка недоступна для этой версии или режима",
       "pgssMissing": "pg_stat_statements не установлен в этой базе",
-      "pgssTooOld": "pg_stat_statements {{version}} старше 1.8"
+      "pgssTooOld": "pg_stat_statements {{version}} старше 1.8",
+      "badQueryId": "Идентификатор запроса — 64-битное целое"
     },
     "guard": {
       "readOnly": "Подключение «{{name}}» только для чтения",
@@ -858,7 +859,8 @@
         "patroniSlots": "Отметки слотов Patroni",
         "statements": "Статистика запросов (pg_stat_statements)",
         "others": "Запросы других ролей",
-        "window": "Данные окна"
+        "window": "Данные окна",
+        "running": "Выполняющиеся экземпляры (query_id)"
       }
     },
     "tools": {

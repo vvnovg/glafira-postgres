@@ -7,6 +7,7 @@ use tauri::State;
 use tauri::ipc::Channel;
 
 use crate::diag::queries::QueryText;
+use crate::diag::query_detail::{self, QueryDetail};
 use crate::error::AppResult;
 use crate::sampler::registry::SamplerSink;
 use crate::sampler::statements::StatementsEvent;
@@ -45,4 +46,17 @@ pub async fn start_statements_sampler(
         member.as_deref(),
         Arc::new(StatementsChannelSink(channel)),
     )
+}
+
+/// Карточка запроса: статистика, окна и история, выполняющиеся экземпляры, ожидания.
+#[tauri::command]
+pub async fn query_detail(
+    state: State<'_, AppState>,
+    id: String,
+    member: String,
+    database: String,
+    query_id: String,
+) -> AppResult<QueryDetail> {
+    let qid = query_detail::parse_query_id(&query_id)?;
+    query_detail::detail(&state, &id, &member, &database, qid).await
 }

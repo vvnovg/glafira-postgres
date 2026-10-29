@@ -121,6 +121,7 @@ pub fn run() {
             commands::diag::stop_session,
             commands::queries::query_texts,
             commands::queries::start_statements_sampler,
+            commands::queries::query_detail,
             commands::actions::list_actions,
             commands::actions::preview_session_action,
             commands::actions::execute_session_action,
