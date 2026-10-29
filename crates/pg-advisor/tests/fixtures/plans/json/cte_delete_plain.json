@@ -1,0 +1,67 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Plain",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Startup Cost": 8.46,
+      "Total Cost": 8.47,
+      "Plan Rows": 1,
+      "Plan Width": 8,
+      "Output": ["count(*)"],
+      "Plans": [
+        {
+          "Node Type": "ModifyTable",
+          "Operation": "Delete",
+          "Parent Relationship": "InitPlan",
+          "Subplan Name": "CTE d",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Relation Name": "audit",
+          "Schema": "shop",
+          "Alias": "audit",
+          "Startup Cost": 0.42,
+          "Total Cost": 8.44,
+          "Plan Rows": 1,
+          "Plan Width": 6,
+          "Output": ["audit.id"],
+          "Plans": [
+            {
+              "Node Type": "Index Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Scan Direction": "Forward",
+              "Index Name": "audit_pkey",
+              "Relation Name": "audit",
+              "Schema": "shop",
+              "Alias": "audit",
+              "Startup Cost": 0.42,
+              "Total Cost": 8.44,
+              "Plan Rows": 1,
+              "Plan Width": 6,
+              "Output": ["audit.ctid"],
+              "Index Cond": "(audit.id = 1)"
+            }
+          ]
+        },
+        {
+          "Node Type": "CTE Scan",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "CTE Name": "d",
+          "Alias": "d",
+          "Startup Cost": 0.00,
+          "Total Cost": 0.02,
+          "Plan Rows": 1,
+          "Plan Width": 0,
+          "Output": ["d.id"]
+        }
+      ]
+    },
+    "Query Identifier": 5894843953785904604
+  }
+]

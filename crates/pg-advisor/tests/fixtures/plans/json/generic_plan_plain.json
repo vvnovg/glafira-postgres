@@ -1,0 +1,29 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Index Scan",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Scan Direction": "Forward",
+      "Index Name": "customers_pkey",
+      "Relation Name": "customers",
+      "Schema": "shop",
+      "Alias": "customers",
+      "Startup Cost": 0.42,
+      "Total Cost": 8.44,
+      "Plan Rows": 1,
+      "Plan Width": 42,
+      "Output": ["id", "email", "region", "created_at"],
+      "Index Cond": "(customers.id = $1)"
+    },
+    "Settings": {
+      "work_mem": "1MB",
+      "max_parallel_workers": "2",
+      "max_parallel_workers_per_gather": "4",
+      "jit_above_cost": "1000",
+      "jit_inline_above_cost": "1000",
+      "jit_optimize_above_cost": "1000"
+    },
+    "Query Identifier": -8730641730912824488
+  }
+]

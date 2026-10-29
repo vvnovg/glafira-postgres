@@ -1,0 +1,37 @@
+[
+  {
+    "Plan": {
+      "Node Type": "ModifyTable",
+      "Operation": "Update",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Relation Name": "balances",
+      "Schema": "shop",
+      "Alias": "balances",
+      "Startup Cost": 0.42,
+      "Total Cost": 8.45,
+      "Plan Rows": 0,
+      "Plan Width": 0,
+      "Plans": [
+        {
+          "Node Type": "Index Scan",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Scan Direction": "Forward",
+          "Index Name": "balances_pkey",
+          "Relation Name": "balances",
+          "Schema": "shop",
+          "Alias": "balances",
+          "Startup Cost": 0.42,
+          "Total Cost": 8.45,
+          "Plan Rows": 1,
+          "Plan Width": 22,
+          "Output": ["(balance + '1'::numeric)", "ctid"],
+          "Index Cond": "(balances.customer_id = 1)"
+        }
+      ]
+    },
+    "Query Identifier": -7105497569708098438
+  }
+]
