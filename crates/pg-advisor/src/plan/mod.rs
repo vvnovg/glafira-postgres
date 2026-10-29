@@ -33,11 +33,13 @@ pub struct RelationRef {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Actual {
-    pub startup_ms: f64,
-    pub total_ms: f64,
+    /// Времён нет при `TIMING OFF` — тогда `None`.
+    pub startup_ms: Option<f64>,
+    pub total_ms: Option<f64>,
     /// Строк на цикл — как отдаёт сервер (на 18 дробное).
     pub rows: f64,
-    pub loops: u64,
+    /// Число циклов; у не выполнявшегося узла — 0, у повторно запущенных узлов — сумма по запускам и процессам.
+    pub loops: f64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,21 +133,25 @@ pub struct PlanNode {
     pub output: Vec<String>,
     /// Нераспознанные поля узла — как есть.
     pub extra: Map<String, Value>,
-    /// Включённое время, мс; без ANALYZE — `None`. Вне параллельной части плана — `actual.total_ms × loops`.
+    /// Включённое время, мс; без ANALYZE и при `TIMING OFF` — `None`. Вне параллельной части плана — `actual.total_ms × loops`.
     /// Под `Gather` / `Gather Merge` время узла в `actual.total_ms` — среднее на процесс (так его отдаёт сервер), а `loops` —
     /// число процессов, выполнявших узел (воркеры и ведущий, если он участвует), умноженное на внутренние циклы; поэтому
-    /// `total_ms × loops` там — суммарное время всех процессов, а не время по часам. Его делят на число процессов
-    /// (`loops` внешнего потомка Gather): `total_ms × loops / процессов` — вклад узла в время выполнения.
+    /// `total_ms × loops` там — суммарное время всех процессов, а не время по часам. Его делят на число процессов:
+    /// `total_ms × loops / процессов` — вклад узла в время выполнения. Число процессов — `loops` внешнего потомка Gather,
+    /// делённое на `loops` самого Gather: при повторном запуске Gather (на внутренней стороне Nested Loop, под коррелированным
+    /// SubPlan) сервер накапливает инструментацию воркеров по всем запускам, и у потомка `loops` = запуски × процессы.
+    /// InitPlan и SubPlan самого Gather в параллельную часть не входят.
     pub inclusive_ms: Option<f64>,
     /// Включённое минус включённое детей (оба — в пересчёте на время по часам, см. `inclusive_ms`), не меньше нуля.
     pub exclusive_ms: Option<f64>,
     /// Доля собственного времени в `PlanTree::total_ms`, проценты; сумма долей узлов плана не превышает 100.
     pub share_pct: Option<f64>,
-    /// `actual.rows / plan_rows`; `None` без ANALYZE или при `plan_rows = 0` и `actual.rows = 0`.
+    /// `actual.rows / plan_rows`; `None` без ANALYZE, у не выполнявшегося узла (сервер отдаёт для него 0 строк) и при
+    /// `plan_rows = 0` и `actual.rows = 0`.
     pub estimate_ratio: Option<f64>,
-    /// Три узла с наибольшим собственным временем (без ANALYZE — по стоимости без детей).
+    /// Три узла с наибольшим собственным временем (без ANALYZE и при `TIMING OFF` — по стоимости без детей).
     pub hot: bool,
-    /// Ошибка оценки ×10 и больше при `max(план, факт) ≥ 100` строк.
+    /// Ошибка оценки ×10 и больше при `max(план, факт) ≥ 100` строк; у не выполнявшегося узла всегда `false`.
     pub misestimated: bool,
     pub children: Vec<PlanNode>,
 }
@@ -160,6 +166,7 @@ pub struct PlanTree {
     pub jit: Option<Jit>,
     pub settings: Vec<Setting>,
     /// Знаменатель долей: `execution_ms`, иначе включённое время корня; без ANALYZE — `None`.
+    /// При `TIMING OFF` доли узлов остаются `None` (нет времён по узлам), даже если `execution_ms` есть.
     pub total_ms: Option<f64>,
 }
 
@@ -177,9 +184,10 @@ impl PlanTree {
         if let Some(total) = self.total_ms.filter(|t| *t > 0.0) {
             shares(&mut self.root, total);
         }
-        let with_actual = self.root.actual.is_some();
+        // Времена по узлам есть только при ANALYZE с TIMING; иначе горячие узлы — по стоимости, как у обычного EXPLAIN.
+        let with_time = self.root.actual.is_some_and(|a| a.total_ms.is_some());
         let mut weights: Vec<(f64, u32)> = Vec::new();
-        collect_weights(&self.root, with_actual, &mut weights);
+        collect_weights(&self.root, with_time, &mut weights);
         weights.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         let hot: Vec<u32> = weights
             .iter()
@@ -204,14 +212,20 @@ fn compute_times(n: &mut PlanNode, procs: f64) {
     // Под Gather внешний потомок выполняют воркеры и ведущий; InitPlan / SubPlan самого Gather выполняются вне параллельной части.
     let is_gather = matches!(n.node_type.as_str(), "Gather" | "Gather Merge");
     let gather_procs = if is_gather {
-        n.children
+        // Повторно запущенный Gather (loops = N) копит инструментацию воркеров по запускам: у потомка loops = N × процессы.
+        let gather_loops = n
+            .actual
+            .map(|a| a.loops)
+            .filter(|l| *l > 0.0)
+            .unwrap_or(1.0);
+        let child_loops = n
+            .children
             .iter()
             .find(|c| c.parent_relationship.as_deref() == Some("Outer"))
             .or_else(|| n.children.iter().find(|c| !is_subplan(c)))
             .and_then(|c| c.actual)
-            .map(|a| a.loops as f64)
-            .filter(|l| *l > 0.0)
-            .unwrap_or(1.0)
+            .map_or(1.0, |a| a.loops);
+        (child_loops / gather_loops).max(1.0)
     } else {
         procs
     };
@@ -224,11 +238,16 @@ fn compute_times(n: &mut PlanNode, procs: f64) {
         compute_times(c, child_procs);
     }
     if let Some(a) = n.actual {
-        let inclusive = a.total_ms * a.loops as f64 / procs;
-        let children: f64 = n.children.iter().filter_map(|c| c.inclusive_ms).sum();
-        n.inclusive_ms = Some(inclusive);
-        n.exclusive_ms = Some((inclusive - children).max(0.0));
-        n.estimate_ratio = if n.plan_rows > 0.0 {
+        if let Some(total_ms) = a.total_ms {
+            let inclusive = total_ms * a.loops / procs;
+            let children: f64 = n.children.iter().filter_map(|c| c.inclusive_ms).sum();
+            n.inclusive_ms = Some(inclusive);
+            n.exclusive_ms = Some((inclusive - children).max(0.0));
+        }
+        // У не выполнявшегося узла сервер отдаёт 0 строк: сравнивать с оценкой нечего.
+        n.estimate_ratio = if n.never_executed {
+            None
+        } else if n.plan_rows > 0.0 {
             Some(a.rows / n.plan_rows)
         } else if a.rows > 0.0 {
             Some(f64::INFINITY)
@@ -256,16 +275,16 @@ fn shares(n: &mut PlanNode, total: f64) {
     }
 }
 
-/// Вес узла для «горячих»: собственное время, без ANALYZE — стоимость без детей.
-fn collect_weights(n: &PlanNode, with_actual: bool, out: &mut Vec<(f64, u32)>) {
-    let w = if with_actual {
+/// Вес узла для «горячих»: собственное время, без ANALYZE и при `TIMING OFF` — стоимость без детей.
+fn collect_weights(n: &PlanNode, with_time: bool, out: &mut Vec<(f64, u32)>) {
+    let w = if with_time {
         n.exclusive_ms.unwrap_or(0.0)
     } else {
         (n.total_cost - n.children.iter().map(|c| c.total_cost).sum::<f64>()).max(0.0)
     };
     out.push((w, n.id));
     for c in &n.children {
-        collect_weights(c, with_actual, out);
+        collect_weights(c, with_time, out);
     }
 }
 
@@ -377,5 +396,61 @@ mod tests {
         );
         assert_eq!(t.root.exclusive_ms, Some(6.0));
         assert!(share_sum(&t.root) <= 100.0);
+    }
+
+    #[test]
+    fn rescanned_gather_divides_by_processes_not_loops() {
+        // Gather на внутренней стороне Nested Loop запускается 10 раз: у потомка loops = 10 запусков × 3 процесса = 30.
+        let v = json!({"Plan": {
+            "Node Type": "Nested Loop", "Join Type": "Inner", "Startup Cost": 0.0, "Total Cost": 10.0, "Plan Rows": 10, "Plan Width": 4,
+            "Actual Startup Time": 0.0, "Actual Total Time": 105.0, "Actual Rows": 10, "Actual Loops": 1,
+            "Plans": [
+                {"Node Type": "Index Scan", "Parent Relationship": "Outer", "Relation Name": "customers",
+                 "Startup Cost": 0.0, "Total Cost": 1.0, "Plan Rows": 10, "Plan Width": 4,
+                 "Actual Startup Time": 0.0, "Actual Total Time": 1.0, "Actual Rows": 10, "Actual Loops": 1},
+                {"Node Type": "Gather", "Parent Relationship": "Inner", "Workers Planned": 2, "Workers Launched": 2,
+                 "Startup Cost": 0.0, "Total Cost": 9.0, "Plan Rows": 1, "Plan Width": 4,
+                 "Actual Startup Time": 0.0, "Actual Total Time": 10.0, "Actual Rows": 1, "Actual Loops": 10,
+                 "Plans": [{
+                    "Node Type": "Seq Scan", "Parent Relationship": "Outer", "Parallel Aware": true, "Relation Name": "orders",
+                    "Startup Cost": 0.0, "Total Cost": 8.0, "Plan Rows": 1, "Plan Width": 4,
+                    "Actual Startup Time": 0.0, "Actual Total Time": 9.0, "Actual Rows": 1, "Actual Loops": 30
+                 }]}
+            ]
+        }, "Execution Time": 106.0});
+        let t = from_json(&v).unwrap();
+        let gather = &t.root.children[1];
+        let scan = &gather.children[0];
+        // 9 мс × 30 / (30 / 10) = 90; делить на все 30 циклов нельзя — вышло бы 9 и собственное время Gather 91.
+        assert!(
+            (scan.inclusive_ms.unwrap() - 90.0).abs() < 1e-9,
+            "{:?}",
+            scan.inclusive_ms
+        );
+        assert!((gather.inclusive_ms.unwrap() - 100.0).abs() < 1e-9);
+        assert!(
+            (gather.exclusive_ms.unwrap() - 10.0).abs() < 1e-9,
+            "{:?}",
+            gather.exclusive_ms
+        );
+        assert!(share_sum(&t.root) <= 100.0);
+    }
+
+    #[test]
+    fn never_executed_node_is_not_misestimated() {
+        // Узел не выполнялся (loops = 0): сервер отдаёт 0 строк, а план обещал 500 — это не ошибка оценки.
+        let node = |loops: u32| {
+            json!({"Plan": {"Node Type": "Seq Scan", "Relation Name": "orders",
+                "Startup Cost": 0.0, "Total Cost": 8.0, "Plan Rows": 500, "Plan Width": 4,
+                "Actual Startup Time": 0.0, "Actual Total Time": 0.0, "Actual Rows": 0, "Actual Loops": loops}})
+        };
+        let skipped = from_json(&node(0)).unwrap().root;
+        assert!(skipped.never_executed);
+        assert_eq!(skipped.estimate_ratio, None);
+        assert!(!skipped.misestimated);
+        // Выполнившийся узел с теми же цифрами — настоящая ошибка оценки: план 500, факт 0.
+        let ran = from_json(&node(1)).unwrap().root;
+        assert_eq!(ran.estimate_ratio, Some(0.0));
+        assert!(ran.misestimated);
     }
 }

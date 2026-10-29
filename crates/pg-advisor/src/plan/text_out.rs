@@ -2,6 +2,8 @@
 
 use std::fmt::Write;
 
+use serde_json::Value;
+
 use crate::plan::{PlanNode, PlanTree};
 
 pub fn to_text(t: &PlanTree) -> String {
@@ -32,15 +34,70 @@ pub fn to_text(t: &PlanTree) -> String {
     out
 }
 
-fn head(n: &PlanNode) -> String {
-    let mut s = n.node_type.clone();
-    if let Some(st) = &n.strategy
-        && st != "Plain"
-    {
-        s = format!("{st}{s}");
+/// Строковое поле из `extra` (ключи, которые модель не разбирает: `Partial Mode`, `Operation`, `CTE Name` …).
+fn extra_str<'a>(n: &'a PlanNode, key: &str) -> Option<&'a str> {
+    n.extra.get(key).and_then(Value::as_str)
+}
+
+/// Имя соединения как в `ExplainNode`: тип вставляется перед «Join» (`Hash Left Join`), у внутреннего соединения
+/// Nested Loop слова «Join» нет.
+fn join_name(n: &PlanNode) -> String {
+    let base = match n.node_type.as_str() {
+        "Hash Join" => "Hash",
+        "Merge Join" => "Merge",
+        _ => "Nested Loop",
+    };
+    match n.join_type.as_deref() {
+        Some(jt) if jt != "Inner" => format!("{base} {jt} Join"),
+        _ if base != "Nested Loop" => format!("{base} Join"),
+        _ => base.to_string(),
     }
+}
+
+/// Имя узла, как его печатает psql: стратегия агрегата и SetOp, `Partial` / `Finalize`, `Async` / `Parallel`,
+/// тип соединения, операция ModifyTable.
+fn node_name(n: &PlanNode) -> String {
+    let strategy = n.strategy.as_deref();
+    let mut name = match n.node_type.as_str() {
+        "Aggregate" => match strategy {
+            Some("Sorted") => "GroupAggregate".to_string(),
+            Some("Hashed") => "HashAggregate".to_string(),
+            Some("Mixed") => "MixedAggregate".to_string(),
+            _ => "Aggregate".to_string(),
+        },
+        "SetOp" if strategy == Some("Hashed") => "HashSetOp".to_string(),
+        "ModifyTable" => extra_str(n, "Operation")
+            .unwrap_or("ModifyTable")
+            .to_string(),
+        "Hash Join" | "Merge Join" | "Nested Loop" => join_name(n),
+        other => other.to_string(),
+    };
+    if n.node_type == "Aggregate"
+        && let Some(mode @ ("Partial" | "Finalize")) = extra_str(n, "Partial Mode")
+    {
+        name = format!("{mode} {name}");
+    }
+    if n.extra.get("Async Capable").and_then(Value::as_bool) == Some(true) {
+        name = format!("Async {name}");
+    }
+    if n.parallel_aware {
+        name = format!("Parallel {name}");
+    }
+    name
+}
+
+/// Цель узла: индекс (`using idx`, `Backward using idx`, у Bitmap Index Scan — `on idx`) и отношение (`on schema.rel alias`);
+/// у CTE / подзапроса / функции — их имя из `extra`.
+fn target(n: &PlanNode, s: &mut String) {
     if let Some(i) = &n.index_name {
-        let _ = write!(s, " using {i}");
+        if n.node_type == "Bitmap Index Scan" {
+            let _ = write!(s, " on {i}");
+        } else {
+            if extra_str(n, "Scan Direction") == Some("Backward") {
+                s.push_str(" Backward");
+            }
+            let _ = write!(s, " using {i}");
+        }
     }
     if let Some(r) = &n.relation {
         let _ = write!(s, " on ");
@@ -53,7 +110,36 @@ fn head(n: &PlanNode) -> String {
         {
             let _ = write!(s, " {a}");
         }
+        return;
     }
+    let alias = extra_str(n, "Alias");
+    let object = match n.node_type.as_str() {
+        "CTE Scan" | "WorkTable Scan" => extra_str(n, "CTE Name"),
+        "Function Scan" => extra_str(n, "Function Name"),
+        _ => None,
+    };
+    match (object, alias) {
+        (Some(o), Some(a)) if o != a => {
+            let _ = write!(s, " on {o} {a}");
+        }
+        (Some(o), _) => {
+            let _ = write!(s, " on {o}");
+        }
+        (None, Some(a))
+            if matches!(
+                n.node_type.as_str(),
+                "Subquery Scan" | "Values Scan" | "Table Function Scan" | "Named Tuplestore Scan"
+            ) =>
+        {
+            let _ = write!(s, " on {a}");
+        }
+        _ => {}
+    }
+}
+
+fn head(n: &PlanNode) -> String {
+    let mut s = node_name(n);
+    target(n, &mut s);
     let _ = write!(
         s,
         "  (cost={:.2}..{:.2} rows={} width={})",
@@ -66,36 +152,43 @@ fn head(n: &PlanNode) -> String {
         if n.never_executed {
             s.push_str(" (never executed)");
         } else {
-            let _ = write!(
-                s,
-                " (actual time={:.3}..{:.3} rows={} loops={})",
-                a.startup_ms,
-                a.total_ms,
-                a.rows.round() as i64,
-                a.loops
-            );
+            let rows = a.rows.round() as i64;
+            let loops = a.loops.round() as i64;
+            match (a.startup_ms, a.total_ms) {
+                (Some(startup), Some(total)) => {
+                    let _ = write!(
+                        s,
+                        " (actual time={startup:.3}..{total:.3} rows={rows} loops={loops})"
+                    );
+                }
+                // `TIMING OFF`: времён нет, psql печатает только строки и циклы.
+                _ => {
+                    let _ = write!(s, " (actual rows={rows} loops={loops})");
+                }
+            }
         }
     }
     s
 }
 
-fn node(n: &PlanNode, depth: usize, out: &mut String) {
-    let indent = "  ".repeat(depth * 3);
-    let (first, rest) = if depth == 0 {
-        (String::new(), "  ".to_string())
-    } else {
-        (
-            format!("{}  ->  ", "  ".repeat(depth * 3 - 3)),
-            format!("{indent}  "),
-        )
-    };
-    let _ = writeln!(out, "{first}{}", head(n));
+/// `indent` — отступ в парах пробелов, как `es->indent` в `ExplainNode`: у корня 0.
+fn node(n: &PlanNode, indent: usize, out: &mut String) {
+    let mut indent = indent;
+    // Имя вложенного плана (`SubPlan 1`, `InitPlan 1`, `CTE d`) — отдельной строкой над узлом.
+    if let Some(name) = &n.subplan_name {
+        let _ = writeln!(out, "{}{name}", "  ".repeat(indent));
+        indent += 1;
+    }
+    if indent > 0 {
+        let _ = write!(out, "{}->  ", "  ".repeat(indent));
+        indent += 2;
+    }
+    let _ = writeln!(out, "{}", head(n));
+    indent += 1;
+    let rest = "  ".repeat(indent);
     let mut line = |label: &str, v: &str| {
         let _ = writeln!(out, "{rest}{label}: {v}");
     };
-    if let Some(name) = &n.subplan_name {
-        line("Subplan Name", name);
-    }
     if let Some(v) = &n.index_cond {
         line("Index Cond", v);
     }
@@ -160,8 +253,10 @@ fn node(n: &PlanNode, depth: usize, out: &mut String) {
     if let Some(h) = n.heap_fetches {
         line("Heap Fetches", &h.to_string());
     }
-    if let (Some(p), Some(l)) = (n.workers_planned, n.workers_launched) {
+    if let Some(p) = n.workers_planned {
         line("Workers Planned", &p.to_string());
+    }
+    if let Some(l) = n.workers_launched {
         line("Workers Launched", &l.to_string());
     }
     if let Some(s) = n.subplans_removed {
@@ -222,7 +317,7 @@ fn node(n: &PlanNode, depth: usize, out: &mut String) {
         );
     }
     for c in &n.children {
-        node(c, depth + 1, out);
+        node(c, indent, out);
     }
 }
 
@@ -265,5 +360,187 @@ mod tests {
         assert_eq!(lines[7], "        Index Cond: (c.id < 100)");
         assert_eq!(lines[8], "Planning Time: 0.500 ms");
         assert_eq!(lines[9], "Execution Time: 55.000 ms");
+    }
+
+    /// Минимальный узел для проверки заголовков: `extra` — дополнительные поля `(ключ, значение)`.
+    fn n(
+        node_type: &str,
+        extra: serde_json::Value,
+        plans: Vec<serde_json::Value>,
+    ) -> serde_json::Value {
+        let mut v = json!({"Node Type": node_type, "Startup Cost": 1.0, "Total Cost": 2.0, "Plan Rows": 3, "Plan Width": 4});
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        if !plans.is_empty() {
+            v["Plans"] = json!(plans);
+        }
+        v
+    }
+
+    fn heads(plan: serde_json::Value) -> Vec<String> {
+        let text = to_text(&from_json(&json!({"Plan": plan})).unwrap());
+        text.lines()
+            .map(|l| l.split("  (cost=").next().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn node_names_follow_explain_node() {
+        let h = heads(n(
+            "Hash Join",
+            json!({"Join Type": "Left"}),
+            vec![
+                n(
+                    "Nested Loop",
+                    json!({"Join Type": "Anti", "Parent Relationship": "Outer"}),
+                    vec![n(
+                        "Nested Loop",
+                        json!({"Join Type": "Inner", "Parent Relationship": "Outer"}),
+                        vec![],
+                    )],
+                ),
+                n(
+                    "Merge Join",
+                    json!({"Join Type": "Full", "Parent Relationship": "Inner"}),
+                    vec![
+                        n(
+                            "Hash Join",
+                            json!({"Join Type": "Inner", "Parent Relationship": "Outer"}),
+                            vec![],
+                        ),
+                        n(
+                            "Hash Join",
+                            json!({"Join Type": "Right Anti", "Parent Relationship": "Inner"}),
+                            vec![],
+                        ),
+                    ],
+                ),
+            ],
+        ));
+        assert_eq!(
+            h,
+            [
+                "Hash Left Join",
+                "  ->  Nested Loop Anti Join",
+                "        ->  Nested Loop",
+                "  ->  Merge Full Join",
+                "        ->  Hash Join",
+                "        ->  Hash Right Anti Join",
+            ]
+        );
+        // Агрегаты и SetOp: стратегия задаёт имя, Partial Mode — приставку; Parallel — приставку к любому узлу.
+        let h = heads(n(
+            "Aggregate",
+            json!({"Strategy": "Plain", "Partial Mode": "Finalize"}),
+            vec![
+                n(
+                    "Gather",
+                    json!({"Parent Relationship": "Outer", "Workers Planned": 2}),
+                    vec![n(
+                        "Aggregate",
+                        json!({"Strategy": "Hashed", "Partial Mode": "Partial", "Parent Relationship": "Outer"}),
+                        vec![n(
+                            "Seq Scan",
+                            json!({"Parallel Aware": true, "Relation Name": "orders", "Schema": "shop", "Alias": "o", "Parent Relationship": "Outer"}),
+                            vec![],
+                        )],
+                    )],
+                ),
+                n(
+                    "Aggregate",
+                    json!({"Strategy": "Sorted", "Partial Mode": "Simple", "Parent Relationship": "Outer"}),
+                    vec![n(
+                        "Aggregate",
+                        json!({"Strategy": "Mixed", "Parent Relationship": "Outer"}),
+                        vec![n(
+                            "SetOp",
+                            json!({"Strategy": "Hashed", "Parent Relationship": "Outer"}),
+                            vec![n(
+                                "SetOp",
+                                json!({"Strategy": "Sorted", "Parent Relationship": "Outer"}),
+                                vec![],
+                            )],
+                        )],
+                    )],
+                ),
+            ],
+        ));
+        assert_eq!(
+            h,
+            [
+                "Finalize Aggregate",
+                "  ->  Gather",
+                "        Workers Planned: 2",
+                "        ->  Partial HashAggregate",
+                "              ->  Parallel Seq Scan on shop.orders o",
+                "  ->  GroupAggregate",
+                "        ->  MixedAggregate",
+                "              ->  HashSetOp",
+                "                    ->  SetOp",
+            ]
+        );
+    }
+
+    #[test]
+    fn index_scan_targets_and_subplan_headers() {
+        let h = heads(n(
+            "Index Scan",
+            json!({"Scan Direction": "Backward", "Index Name": "orders_pkey", "Relation Name": "orders", "Alias": "o"}),
+            vec![
+                n(
+                    "Bitmap Index Scan",
+                    json!({"Index Name": "orders_idx", "Parent Relationship": "Outer"}),
+                    vec![],
+                ),
+                n(
+                    "Aggregate",
+                    json!({"Strategy": "Plain", "Parent Relationship": "SubPlan", "Subplan Name": "SubPlan 1"}),
+                    vec![n(
+                        "Index Only Scan",
+                        json!({"Scan Direction": "Forward", "Index Name": "i2", "Relation Name": "t", "Parent Relationship": "Outer"}),
+                        vec![],
+                    )],
+                ),
+            ],
+        ));
+        // Имя вложенного плана — отдельная строка над узлом, сам узел и его дети сдвинуты на два пробела.
+        assert_eq!(
+            h,
+            [
+                "Index Scan Backward using orders_pkey on orders o",
+                "  ->  Bitmap Index Scan on orders_idx",
+                "  SubPlan 1",
+                "    ->  Aggregate",
+                "          ->  Index Only Scan using i2 on t",
+            ]
+        );
+    }
+
+    #[test]
+    fn workers_planned_without_launched_is_printed() {
+        // Обычный EXPLAIN: воркеров запущено ещё нет, но план их заказывает.
+        let text = to_text(
+            &from_json(&json!({"Plan": n("Gather", json!({"Workers Planned": 2}), vec![])}))
+                .unwrap(),
+        );
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines,
+            [
+                "Gather  (cost=1.00..2.00 rows=3 width=4)",
+                "  Workers Planned: 2"
+            ]
+        );
+    }
+
+    #[test]
+    fn timing_off_prints_rows_and_loops_only() {
+        let v = json!({"Plan": n("Seq Scan", json!({"Relation Name": "orders", "Actual Rows": 5, "Actual Loops": 2}), vec![])});
+        let text = to_text(&from_json(&v).unwrap());
+        assert_eq!(
+            text.lines().next().unwrap(),
+            "Seq Scan on orders  (cost=1.00..2.00 rows=3 width=4) (actual rows=5 loops=2)"
+        );
     }
 }

@@ -67,10 +67,14 @@ pub fn from_json(v: &Value) -> Result<PlanTree, PlanError> {
         .unwrap_or_default();
     let jit = obj.get("JIT").and_then(Value::as_object).map(|j| {
         let timing = j.get("Timing").and_then(Value::as_object);
+        // С PG 17 `Generation` — объект `{"Deform": …, "Total": …}` (Deform входит в Total); раньше — число.
         let t = |k: &str| {
             timing
                 .and_then(|t| t.get(k))
-                .and_then(Value::as_f64)
+                .and_then(|v| match v {
+                    Value::Object(o) => o.get("Total").and_then(Value::as_f64),
+                    other => other.as_f64(),
+                })
                 .unwrap_or(0.0)
         };
         Jit {
@@ -154,27 +158,22 @@ fn node(v: &Value) -> Result<PlanNode, PlanError> {
         name,
         alias: take_str(&mut m, "Alias"),
     });
+    // Времена отсутствуют при `TIMING OFF`, но строки и циклы есть. Ключи снимаем всегда, чтобы они не попали в `extra`.
+    let startup_ms = take_f64(&mut m, "Actual Startup Time");
+    let total_ms = take_f64(&mut m, "Actual Total Time");
     let actual = match (
-        take_f64(&mut m, "Actual Total Time"),
         take_f64(&mut m, "Actual Rows"),
-        take_i64(&mut m, "Actual Loops"),
+        take_f64(&mut m, "Actual Loops"),
     ) {
-        (Some(total_ms), Some(rows), Some(loops)) => Some(Actual {
-            startup_ms: take_f64(&mut m, "Actual Startup Time").unwrap_or(0.0),
+        (Some(rows), Some(loops)) => Some(Actual {
+            startup_ms,
             total_ms,
             rows,
-            loops: loops.max(0) as u64,
-        }),
-        // Без TIMING времени нет, но строки и циклы есть.
-        (None, Some(rows), Some(loops)) => Some(Actual {
-            startup_ms: 0.0,
-            total_ms: 0.0,
-            rows,
-            loops: loops.max(0) as u64,
+            loops: loops.max(0.0),
         }),
         _ => None,
     };
-    let never_executed = actual.is_some_and(|a| a.loops == 0);
+    let never_executed = actual.is_some_and(|a| a.loops <= 0.0);
     let has_buffers = m.contains_key("Shared Hit Blocks");
     let buffers = has_buffers.then(|| Buffers {
         shared_hit: take_i64(&mut m, "Shared Hit Blocks").unwrap_or(0),
@@ -356,7 +355,7 @@ mod tests {
         );
         assert_eq!(
             idx.actual.as_ref().map(|a| (a.rows, a.loops)),
-            Some((100.0, 1))
+            Some((100.0, 1.0))
         );
     }
 
@@ -480,5 +479,56 @@ mod tests {
         let cte = json!({"Plan": {"Node Type": "CTE Scan", "Startup Cost": 0.0, "Total Cost": 1.0, "Plan Rows": 1, "Plan Width": 4,
             "Plans": [{"Node Type": "ModifyTable", "Operation": "Delete", "Parent Relationship": "InitPlan", "Subplan Name": "CTE d", "Relation Name": "t", "Startup Cost": 0.0, "Total Cost": 1.0, "Plan Rows": 1, "Plan Width": 4}]}});
         assert!(crate::plan::has_modify_table(&from_json(&cte).unwrap()));
+    }
+
+    #[test]
+    fn jit_generation_object_of_pg17_uses_total() {
+        // PG 17+: `Generation` — объект, `Deform` уже входит в `Total` (не складывать).
+        let v = json!({"Plan": {"Node Type": "Result", "Startup Cost": 0.0, "Total Cost": 0.01, "Plan Rows": 1, "Plan Width": 4},
+            "JIT": {"Functions": 5, "Timing": {"Generation": {"Deform": 0.109, "Total": 0.469}, "Inlining": 1.0, "Optimization": 2.0, "Emission": 3.0, "Total": 6.469}}});
+        let j = from_json(&v).unwrap().jit.unwrap();
+        assert_eq!(
+            (j.functions, j.generation_ms, j.total_ms),
+            (5, 0.469, 6.469)
+        );
+        assert_eq!(
+            (j.inlining_ms, j.optimization_ms, j.emission_ms),
+            (1.0, 2.0, 3.0)
+        );
+    }
+
+    #[test]
+    fn timing_off_keeps_rows_and_loops_but_not_times() {
+        // `EXPLAIN (ANALYZE, TIMING OFF)`: у узлов нет Actual Startup / Total Time, строки и циклы есть.
+        let v = json!([{"Plan": {
+            "Node Type": "Hash Join", "Join Type": "Inner", "Startup Cost": 10.0, "Total Cost": 100.0, "Plan Rows": 1000, "Plan Width": 8,
+            "Actual Rows": 10, "Actual Loops": 1,
+            "Plans": [
+              {"Node Type": "Seq Scan", "Parent Relationship": "Outer", "Relation Name": "orders",
+               "Startup Cost": 0.0, "Total Cost": 60.0, "Plan Rows": 500, "Plan Width": 8, "Actual Rows": 5, "Actual Loops": 1},
+              {"Node Type": "Index Scan", "Parent Relationship": "Inner", "Relation Name": "customers", "Index Name": "customers_pkey",
+               "Startup Cost": 0.3, "Total Cost": 4.0, "Plan Rows": 100, "Plan Width": 8, "Actual Rows": 100, "Actual Loops": 1}
+            ]}, "Planning Time": 0.5, "Execution Time": 55.0}]);
+        let t = from_json(&v).unwrap();
+        let seq = &t.root.children[0];
+        let a = seq.actual.unwrap();
+        assert_eq!(
+            (a.startup_ms, a.total_ms, a.rows, a.loops),
+            (None, None, 5.0, 1.0)
+        );
+        assert!(seq.extra.is_empty(), "{:?}", seq.extra);
+        // Времён по узлам нет — нет и производных; Execution Time у сервера остаётся.
+        assert_eq!(t.execution_ms, Some(55.0));
+        assert!(
+            t.root.inclusive_ms.is_none()
+                && t.root.exclusive_ms.is_none()
+                && t.root.share_pct.is_none()
+        );
+        assert!(seq.inclusive_ms.is_none() && seq.share_pct.is_none());
+        // Оценка строк считается и без времён: 500 → 5, ошибка ×100.
+        assert_eq!(seq.estimate_ratio, Some(0.01));
+        assert!(seq.misestimated);
+        // Горячие — по стоимости без детей, как у обычного EXPLAIN: Seq Scan (60), корень (100 − 64 = 36), Index Scan (4).
+        assert!(seq.hot && t.root.hot && t.root.children[1].hot);
     }
 }
