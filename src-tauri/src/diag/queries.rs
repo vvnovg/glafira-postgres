@@ -370,7 +370,7 @@ pub fn missing() -> Unavailable {
         member: None,
         reason: ltext!(
             "diag.unavailable.statementsMissing",
-            "{{part}}: pg_stat_statements is not installed in this database",
+            "{{part}}: pg_stat_statements is not installed in this database (CREATE EXTENSION pg_stat_statements)",
             part = "statements"
         ),
     }

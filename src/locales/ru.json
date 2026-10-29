@@ -838,7 +838,7 @@
       "privilege": "{{part}}: нужна роль pg_monitor",
       "patroniConfig": "{{part}}: не удалось прочитать конфигурацию Patroni",
       "onMember": "{{member}}: {{text}}",
-      "statementsMissing": "{{part}}: pg_stat_statements не установлен в этой базе",
+      "statementsMissing": "{{part}}: pg_stat_statements не установлен в этой базе (CREATE EXTENSION pg_stat_statements)",
       "statementsOld": "{{part}}: pg_stat_statements {{version}} старше 1.8",
       "statementsHidden": "{{part}}: нужна роль pg_read_all_stats",
       "statementsStarting": "{{part}}: сэмплер запросов запускается",

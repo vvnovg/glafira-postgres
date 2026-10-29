@@ -816,7 +816,7 @@
       "privilege": "{{part}}: needs the pg_monitor role",
       "patroniConfig": "{{part}}: the Patroni configuration could not be read",
       "onMember": "{{member}}: {{text}}",
-      "statementsMissing": "{{part}}: pg_stat_statements is not installed in this database",
+      "statementsMissing": "{{part}}: pg_stat_statements is not installed in this database (CREATE EXTENSION pg_stat_statements)",
       "statementsOld": "{{part}}: pg_stat_statements {{version}} is older than 1.8",
       "statementsHidden": "{{part}}: needs the pg_read_all_stats role",
       "statementsStarting": "{{part}}: the statements sampler is starting",
