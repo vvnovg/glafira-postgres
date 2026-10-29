@@ -47,6 +47,9 @@ describe("workspace", () => {
     expect(tabId({ kind: "diag", connectionId: "c", tool: "idleTx", member: "pg-2" })).toBe("diag:c:idleTx");
     // Журнал действий — одна вкладка на подключение.
     expect(tabId({ kind: "actions", connectionId: "c" })).toBe("actions:c");
+    // Карточка запроса — по узлу, базе и queryId (title в id не входит); консоль EXPLAIN — одна на подключение.
+    expect(tabId({ kind: "query", connectionId: "c", member: "pg-1", database: "perf", queryId: "42", title: "select 1" })).toBe("query:c:pg-1:perf:42");
+    expect(tabId({ kind: "explain", connectionId: "c", member: "pg-2", database: "perf", sql: "select 1" })).toBe("explain:c");
   });
 
   it("closeForConnection закрывает все вкладки подключения", () => {

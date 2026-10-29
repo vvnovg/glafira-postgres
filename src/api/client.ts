@@ -10,11 +10,15 @@ import type {
   DatabaseInfo,
   DiagReport,
   DiagRequest,
+  ExplainRequest,
+  ExplainResult,
   ExportSummary,
   ExtensionInfo,
   FunctionDetails,
   ImportPreview,
   LanguageSettings,
+  LlmBundle,
+  LlmSource,
   MemberFacts,
   ObjectKind,
   ObjectPage,
@@ -22,7 +26,11 @@ import type {
   PatroniAction,
   PatroniActionPreview,
   PatroniActionResult,
+  PlanTree,
   PolicyStatus,
+  QueryDetail,
+  QueryKey,
+  QueryText,
   RoleInfo,
   SamplerEvent,
   SchemaInfo,
@@ -35,6 +43,7 @@ import type {
   SessionActionResult,
   SlotDropPreview,
   SlotDropRequest,
+  StatementsEvent,
   TableDetails,
   TestEvent,
   TestReport,
@@ -136,6 +145,19 @@ export const api = {
     return call<string>("start_sampler", { id, member, channel });
   },
   stopSession: (sessionId: string) => call<boolean>("stop_session", { sessionId }),
+
+  queryTexts: (id: string, member: string | null, keys: QueryKey[]) => call<QueryText[]>("query_texts", { id, member, keys }),
+  /** Подписка на сэмплер pg_stat_statements узла; итог — id сессии для `stopSession`. */
+  startStatementsSampler: (id: string, member: string | null, onEvent: (e: StatementsEvent) => void) => {
+    const channel = new Channel<StatementsEvent>();
+    channel.onmessage = onEvent;
+    return call<string>("start_statements_sampler", { id, member, channel });
+  },
+  queryDetail: (id: string, member: string, database: string, queryId: string) => call<QueryDetail>("query_detail", { id, member, database, queryId }),
+  explain: (id: string, request: ExplainRequest) => call<ExplainResult>("explain", { id, request }),
+  parsePlan: (text: string) => call<PlanTree>("parse_plan", { text }),
+  queryLlmBundle: (id: string, member: string, database: string, source: LlmSource, plan: PlanTree | null) =>
+    call<LlmBundle>("query_llm_bundle", { id, member, database, source, plan }),
 
   previewSessionAction: (id: string, request: SessionActionRequest) =>
     call<SessionActionPreview>("preview_session_action", { id, request }),

@@ -12,13 +12,15 @@ const IDS = [
   "rootBlocker", "ddlQueue", "xminHorizon", "replicaLag", "replicaNotStreaming", "replicaReplyStale", "syncStandbyMissing", "walReceiverDown",
   "replayPaused", "recoveryConflicts", "recoveryConflictsTotal", "slotRetainsWal", "slotLost", "subscriptionErrors", "failoverCandidates",
   "clusterPaused", "syncModeWithoutSync", "patroniTiming", "healthPrimary", "healthUnhealthy", "replicaOutOfPool", "cacheHitLow", "tempFiles",
-  "noIdleTimeout", "hiddenQueries", "lockCycle",
+  "noIdleTimeout", "hiddenQueries", "lockCycle", "query_n_plus_one", "query_unstable", "query_low_hit_ratio", "query_temp", "query_planning_heavy",
+  "queries_incomplete",
 ];
 
 const GIB = 1024 ** 3;
 const session = { kind: "session", pid: 4242, backendStartUs: 1_700_000_000_000_000 } as const;
 const slot = { kind: "slot", name: "old_slot" } as const;
 const node = { kind: "member", name: "pg-2" } as const;
+const query = { kind: "query", queryId: "1234567890123456789", database: "perf" } as const;
 const CLUSTER = { member: null } as const;
 
 /**
@@ -68,6 +70,12 @@ const EMITTED: (Pick<Finding, "id"> & Partial<Finding>)[] = [
   { id: "noIdleTimeout", params: { command: "ALTER ROLE \"app\" SET idle_in_transaction_session_timeout = '10min';" } },
   { id: "hiddenQueries", params: { count: 7 } },
   { id: "lockCycle", params: { count: 2 } },
+  { id: "query_n_plus_one", target: query, params: { callsSharePct: 62.5, meanMs: 0.04, calls: 125_000 } },
+  { id: "query_unstable", target: query, params: { stddevMs: 480, meanMs: 120, calls: 900 } },
+  { id: "query_low_hit_ratio", target: query, params: { hitRatioPct: 41.5, readBytes: 3 * GIB } },
+  { id: "query_temp", target: query, params: { tempBytes: 64 * 1024 * 1024, calls: 300 } },
+  { id: "query_planning_heavy", target: query, params: { planMs: 12_000, execMs: 8000 } },
+  { id: "queries_incomplete", target: node, params: { dealloc: 1200, max: 5000 } },
 ];
 
 describe("тексты находок", () => {
@@ -76,6 +84,14 @@ describe("тексты находок", () => {
     const p = findingParams(f({ params: { maxS: 3725, retainedBytes: 2048, usedPct: 96.5, count: 1200, state: "catchup" }, target: { kind: "slot", name: "dead" } }));
     // Разделитель разрядов в ru — неразрывный пробел: ожидание строится той же функцией.
     expect(p).toMatchObject({ maxS: "1 ч 2 мин", retainedBytes: "2,0 KB", usedPct: "96,5 %", count: formatCount(1200), state: "catchup", name: "dead", member: "pg-1" });
+  });
+
+  it("миллисекунды (…Ms) форматируются по порядку величины; у запроса pgss в параметрах — queryId и база, без name", async () => {
+    await i18n.changeLanguage("ru");
+    const p = findingParams(f({ id: "query_unstable", target: query, params: { stddevMs: 1250, meanMs: 0.42, calls: 900 } }));
+    expect(p).toMatchObject({ stddevMs: "1,25 с", meanMs: "0,42 мс", queryId: "1234567890123456789", database: "perf" });
+    expect(p).not.toHaveProperty("name");
+    expect(findingTitle(f({ id: "query_unstable", target: query, params: { stddevMs: 1250, meanMs: 0.42, calls: 900 } }))).toBe("Нестабильное время: stddev 1,25 с при среднем 0,42 мс");
   });
 
   it("лаг собирается из байт и времени, вид держателя горизонта переводится", async () => {
@@ -164,7 +180,7 @@ describe("тексты находок", () => {
   });
 
   it("тексты есть у каждой находки в обоих языках (ключ не показывается как есть)", async () => {
-    expect(IDS).toHaveLength(35);
+    expect(IDS).toHaveLength(41);
     // Словарь и список id не расходятся: новая находка без записи в этом тесте не пройдёт.
     expect(Object.keys(DICTIONARIES.en.findings as object).sort()).toEqual([...IDS].sort());
     for (const lng of ["ru", "en"]) {

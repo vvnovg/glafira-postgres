@@ -5,7 +5,7 @@ import { TreeGroup } from "./TreeGroup";
 
 /** Инструменты в дереве (спец. P2 §7.1); у кластера Patroni — ещё готовность к failover и матрица health. */
 export function DIAG_TOOLS_FOR(kind: ConnectionKind): DiagTool[] {
-  const common: DiagTool[] = ["pulse", "sessions", "idleTx", "waits", "locks", "horizon", "replication", "slots"];
+  const common: DiagTool[] = ["pulse", "sessions", "idleTx", "waits", "locks", "horizon", "replication", "slots", "queries"];
   return kind === "patroni" ? [...common, "failover", "health"] : common;
 }
 

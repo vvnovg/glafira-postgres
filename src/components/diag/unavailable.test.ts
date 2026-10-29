@@ -19,7 +19,7 @@ describe("unavailableText", () => {
 
   it("у каждой части, которую шлёт Rust, есть подпись", () => {
     // Имена частей из src-tauri/src/diag (caps.missing, needs_monitor, Unavailable { part }).
-    const rust = ["queryId", "walDir", "otherSessionsXmin", "replicationDetails", "replayPauseState", "conflictActiveLogicalSlot", "slotTwoPhase", "slotConflicting", "slotInactiveSince", "subscriptionErrors", "patroniSlots"];
+    const rust = ["queryId", "walDir", "otherSessionsXmin", "replicationDetails", "replayPauseState", "conflictActiveLogicalSlot", "slotTwoPhase", "slotConflicting", "slotInactiveSince", "subscriptionErrors", "patroniSlots", "statements", "others", "window", "running"];
     expect(Object.keys(UNAVAILABLE_PARTS).sort()).toEqual([...rust].sort());
   });
 });

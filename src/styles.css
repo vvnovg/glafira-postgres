@@ -353,6 +353,10 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .diag-table .kind-badge { white-space: nowrap; }
 /* Вторая строка внутри значения карточки (`.stats div` красит любой div, поэтому это span). */
 .diag-sub { display: block; }
+/* Инструмент «Запросы»: текст запроса в ячейке — одной строкой, без разрыва таблицы. */
+.diag-query-cell { max-width: 480px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diag-query-cell button { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.mono { font-family: var(--mono, ui-monospace, monospace); }
 .diag-command { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .diag-facts { display: flex; flex-direction: column; gap: 2px; }
 /* Предупреждение в тексте вида: чистый --warn на светлом фоне ниже 4,5:1, поэтому подмешивается цвет текста (как у меток находок). */

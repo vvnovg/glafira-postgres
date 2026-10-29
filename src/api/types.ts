@@ -13,6 +13,7 @@ export type ErrorCode =
   | "RECOVERY_CONFLICT"
   | "READ_ONLY"
   | "CONFIRMATION_REQUIRED"
+  | "EXPLAIN_WRITES"
   | "INTERNAL";
 
 /** Текст из Rust: ключ словаря, параметры и английский текст (запасной вариант). */
@@ -383,8 +384,11 @@ export interface TableStats {
   analyzeCount: number | null;
   autoanalyzeCount: number | null;
 }
-/** Ссылка на отношение: схема и имя как в каталоге, без кавычек (кавычки нужны только в DDL). */
-export interface RelationRef {
+/**
+ * Ссылка на отношение: схема и имя как в каталоге, без кавычек (кавычки нужны только в DDL). Не путать с `RelationRef`
+ * плана (там схема может отсутствовать).
+ */
+export interface CatalogRelationRef {
   schema: string;
   name: string;
 }
@@ -394,11 +398,12 @@ export interface Partitioning {
   /** Границы (`FOR VALUES FROM (…) TO (…)`) — у партиции. */
   bound: string | null;
   /** Родитель партиции; у потомка по `INHERITS` — `null`. */
-  parent: RelationRef | null;
+  parent: CatalogRelationRef | null;
   /** Прямые партиции. */
-  partitions: RelationRef[];
+  partitions: CatalogRelationRef[];
 }
-export interface Trigger {
+/** Триггер таблицы (вкладка таблицы); триггер из плана запроса — `Trigger`. */
+export interface TableTrigger {
   name: string;
   /** `tgenabled`: `O`, `D`, `R`, `A`. */
   enabled: string;
@@ -422,7 +427,7 @@ export interface TableDetails {
   incomingFks: IncomingFk[];
   stats: TableStats;
   partitioning: Partitioning;
-  triggers: Trigger[];
+  triggers: TableTrigger[];
   /** DDL по каталогу (не замена pg_dump). */
   ddl: string;
 }
@@ -549,7 +554,7 @@ export interface LanguageSettings {
 // ---------------------------------------------------------------------------------------------------------------
 
 /** Вкладка инструмента. `idleTx` — вкладка фронтенда поверх `sessions`, в Rust отдельного инструмента нет. */
-export type DiagTool = "pulse" | "sessions" | "idleTx" | "waits" | "locks" | "horizon" | "replication" | "slots" | "failover" | "health";
+export type DiagTool = "pulse" | "sessions" | "idleTx" | "waits" | "locks" | "horizon" | "replication" | "slots" | "failover" | "health" | "queries";
 /** Инструмент Rust (`diag::Tool`). */
 export type RustTool = Exclude<DiagTool, "idleTx">;
 export type Severity = "info" | "warning" | "critical";
@@ -558,7 +563,9 @@ export type FindingTarget =
   | { kind: "slot"; name: string }
   | { kind: "member"; name: string }
   | { kind: "relation"; name: string }
-  | { kind: "database"; name: string };
+  | { kind: "database"; name: string }
+  /** Запрос pgss: `queryId` — десятичная строка, `database` — пустая, если базы строки не знали. */
+  | { kind: "query"; queryId: string; database: string };
 /** Действие с сессиями, которое предлагает находка: `idleInTransaction` и `rootBlocker`. */
 export type SessionActionLink =
   | { type: "terminateIdleInTransaction"; olderThanS: number }
@@ -566,7 +573,9 @@ export type SessionActionLink =
 /** Куда ведёт кнопка находки; `tool` — id вкладки (`idleTx` допустим), `action` — действие P2b (кнопки — задача 11). */
 export type FindingLink =
   | { kind: "openTool"; tool: DiagTool; member: string | null }
-  | { kind: "action"; action: SessionActionLink; member: string | null };
+  | { kind: "action"; action: SessionActionLink; member: string | null }
+  /** Карточка запроса (вкладка `query`); без узла или с пустой базой кнопки нет. */
+  | { kind: "openQuery"; queryId: string; database: string; member: string | null };
 export interface Finding {
   /** Ключ текста: `findings.<id>.title` и `findings.<id>.fix`. */
   id: string;
@@ -589,6 +598,339 @@ export interface DiagRequest {
   member: string | null;
   /** Только `waits`: 300, 900 или 3600. */
   windowS?: number;
+  /** Только `queries`. */
+  queries?: QueriesParams;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Тяжёлые запросы (P3a): зеркало `pg_advisor::{queries, plan}`, `diag::{queries, query_detail}`, `explain`, `sampler::statements`.
+// `queryId` — всегда строка (64-битный хеш не помещается в number).
+// ---------------------------------------------------------------------------------------------------------------
+
+export interface QueryKey {
+  queryId: string;
+  dbid: number;
+  userid: number;
+  toplevel: boolean;
+}
+export type QuerySort =
+  | "totalTime"
+  | "meanTime"
+  | "maxTime"
+  | "stddevTime"
+  | "calls"
+  | "rowsPerCall"
+  | "sharedRead"
+  | "hitRatio"
+  | "tempWritten"
+  | "walBytes"
+  | "ioTime"
+  | "planTime"
+  | "jitTime";
+/** Режим отчёта; `between` (сравнение снимков) — P3b, в P3a Rust его отклоняет. */
+export type QueriesMode = { kind: "sinceReset" } | { kind: "window"; s: 300 | 900 | 3600 } | { kind: "between"; from: string; to: string };
+export interface QueriesParams {
+  mode: QueriesMode;
+  sort: QuerySort;
+  limit: 50 | 100 | 200;
+  database: string | null;
+  toplevelOnly: boolean;
+}
+/** Строка отчёта: накопительная («с момента сброса») или дельта за окно; `min`/`max`/`stddev` у окна — `null`. */
+export interface QueryStat {
+  key: QueryKey;
+  datname: string | null;
+  rolname: string | null;
+  calls: number;
+  totalExecMs: number;
+  meanExecMs: number;
+  minExecMs: number | null;
+  maxExecMs: number | null;
+  stddevExecMs: number | null;
+  rows: number;
+  rowsPerCall: number;
+  plans: number;
+  totalPlanMs: number;
+  sharedHit: number;
+  sharedRead: number;
+  sharedDirtied: number;
+  sharedWritten: number;
+  localHit: number;
+  localRead: number;
+  localDirtied: number;
+  localWritten: number;
+  tempRead: number;
+  tempWritten: number;
+  ioReadMs: number;
+  ioWriteMs: number;
+  tempIoMs: number | null;
+  walRecords: number;
+  walFpi: number;
+  walBytes: number;
+  jitFunctions: number | null;
+  jitMs: number | null;
+  parallelPlanned: number | null;
+  parallelLaunched: number | null;
+  /** Доля в `totals.totalExecMs`, проценты; `hitRatio` — 0..1 или null без чтений. */
+  sharePct: number;
+  hitRatio: number | null;
+  /** Текст из кеша; `null` — ещё не запрашивался (`query_texts`). */
+  text: string | null;
+  textTruncated: boolean;
+}
+export interface PgssMeta {
+  version: string;
+  max: number;
+  trackPlanning: boolean;
+  statsResetMs: number | null;
+  dealloc: number | null;
+}
+export interface QueriesData {
+  mode: QueriesMode;
+  /** Только у режима окна: сколько секунд часового буфера покрыто тиками. */
+  coverageS: number | null;
+  ticks: number | null;
+  /** `null` — расширения нет (причина — в `unavailable`). */
+  pgss: PgssMeta | null;
+  totals: { calls: number; totalExecMs: number; rows: number };
+  rows: QueryStat[];
+}
+export interface QueryText {
+  key: QueryKey;
+  text: string | null;
+  truncated: boolean;
+}
+/** События сэмплера pg_stat_statements (канал `start_statements_sampler`). */
+export type StatementsEvent =
+  | { kind: "tick"; atMs: number; coverageS: number; ticks: number; changed: number }
+  | { kind: "gap"; fromMs: number; toMs: number }
+  | { kind: "error"; error: AppError }
+  | { kind: "stopped" };
+
+/** Выполняющийся экземпляр запроса: активный ведущий бэкенд с этим `query_id` (PG 14+). */
+export interface RunningInstance {
+  pid: number;
+  backendStartUs: number;
+  state: string | null;
+  startedMs: number | null;
+  durationS: number | null;
+  waitEventType: string | null;
+  waitEvent: string | null;
+  usename: string | null;
+  applicationName: string | null;
+  clientAddr: string | null;
+  query: string;
+  /** Текст упёрся в `track_activity_query_size` или срезан: для плана не годится. */
+  truncated: boolean;
+}
+export interface QueryWaits {
+  source: "sampler" | "pgWaitSampling";
+  sinceMs: number;
+  total: number;
+  items: { eventType: string; event: string | null; count: number; sharePct: number }[];
+}
+export interface ByUser {
+  rolname: string | null;
+  toplevel: boolean;
+  stat: QueryStat;
+}
+/** Статистика запроса за окно буфера сэмплера; `stat: null` — дельт запроса в окне нет. */
+export interface WindowStat {
+  windowS: 300 | 900 | 3600;
+  stat: QueryStat | null;
+}
+export interface HistoryPoint {
+  atMs: number;
+  calls: number;
+  totalExecMs: number;
+  meanExecMs: number;
+}
+export interface QueryDetail {
+  text: string | null;
+  textTruncated: boolean;
+  /** Сумма строк pgss запроса в базе; `null` — запроса в pgss уже нет. */
+  sinceReset: QueryStat | null;
+  windows: WindowStat[];
+  totals: { calls: number; totalExecMs: number; rows: number };
+  byUser: ByUser[];
+  history: HistoryPoint[];
+  gaps: { fromMs: number; toMs: number }[];
+  running: RunningInstance[];
+  /** `null` — буфера сэмплера активности на узле нет. */
+  waits: QueryWaits | null;
+  findings: Finding[];
+  unavailable: Unavailable[];
+  serverVersionNum: number;
+  inRecovery: boolean;
+  pgssVersion: string | null;
+}
+
+// План запроса (`pg_advisor::plan`): разобранный вывод EXPLAIN (FORMAT JSON) с вычисленными долями времени.
+export interface RelationRef {
+  schema: string | null;
+  name: string;
+}
+export interface Buffers {
+  sharedHit: number;
+  sharedRead: number;
+  sharedDirtied: number;
+  sharedWritten: number;
+  localHit: number;
+  localRead: number;
+  localDirtied: number;
+  localWritten: number;
+  tempRead: number;
+  tempWritten: number;
+}
+export interface Jit {
+  functions: number;
+  generationMs: number;
+  inliningMs: number;
+  optimizationMs: number;
+  emissionMs: number;
+  totalMs: number;
+}
+export interface Trigger {
+  name: string;
+  relation: string | null;
+  timeMs: number;
+  calls: number;
+}
+export interface Setting {
+  name: string;
+  value: string;
+}
+export interface PlanNode {
+  /** Порядок обхода в глубину, с нуля. */
+  id: number;
+  nodeType: string;
+  parentRelationship: string | null;
+  subplanName: string | null;
+  relation: { schema: string | null; name: string; alias: string | null } | null;
+  indexName: string | null;
+  strategy: string | null;
+  joinType: string | null;
+  parallelAware: boolean;
+  startupCost: number;
+  totalCost: number;
+  planRows: number;
+  planWidth: number;
+  /** Времена — `null` при `TIMING OFF` (строки и циклы остаются). */
+  actual: { startupMs: number | null; totalMs: number | null; rows: number; loops: number } | null;
+  neverExecuted: boolean;
+  workersPlanned: number | null;
+  workersLaunched: number | null;
+  rowsRemovedByFilter: number | null;
+  rowsRemovedByIndexRecheck: number | null;
+  rowsRemovedByJoinFilter: number | null;
+  heapFetches: number | null;
+  filter: string | null;
+  indexCond: string | null;
+  recheckCond: string | null;
+  hashCond: string | null;
+  joinFilter: string | null;
+  mergeCond: string | null;
+  sortKey: string[];
+  groupKey: string[];
+  sortMethod: string | null;
+  sortSpaceKb: number | null;
+  sortSpaceType: string | null;
+  hashBatches: number | null;
+  hashBuckets: number | null;
+  peakMemoryKb: number | null;
+  exactHeapBlocks: number | null;
+  lossyHeapBlocks: number | null;
+  subplansRemoved: number | null;
+  buffers: Buffers | null;
+  ioReadMs: number | null;
+  ioWriteMs: number | null;
+  output: string[];
+  /** Нераспознанные поля узла — как есть. */
+  extra: Record<string, unknown>;
+  /** Вычисленные поля (без ANALYZE и при `TIMING OFF` времена и доли — `null`). Под `Gather` время усреднено по процессам. */
+  inclusiveMs: number | null;
+  exclusiveMs: number | null;
+  sharePct: number | null;
+  /** `null` без ANALYZE, у невыполнявшегося узла и при бесконечном отношении — ошибку оценки показывает флаг `misestimated`. */
+  estimateRatio: number | null;
+  hot: boolean;
+  misestimated: boolean;
+  children: PlanNode[];
+}
+export interface PlanTree {
+  root: PlanNode;
+  planningMs: number | null;
+  executionMs: number | null;
+  triggers: Trigger[];
+  jit: Jit | null;
+  settings: Setting[];
+  /** Знаменатель долей узлов; без ANALYZE — `null`. */
+  totalMs: number | null;
+}
+
+// EXPLAIN (консоль и карточка запроса).
+export type ExplainMode = "plan" | "analyze";
+export type ExplainParams = { kind: "none" } | { kind: "generic" } | { kind: "values"; values: (string | null)[] };
+export type ExplainTier = "read" | "write";
+export interface ExplainRequest {
+  member: string;
+  database: string;
+  sql: string;
+  mode: ExplainMode;
+  params: ExplainParams;
+  /** Только ANALYZE, 5…600 с. */
+  timeoutS: number;
+  searchPath: string | null;
+  confirmation: Confirmation;
+  /** Выполнить как запись, хотя пробный план — чтение (после `EXPLAIN_WRITES`). */
+  forceWrite: boolean;
+}
+export interface ExplainResult {
+  mode: ExplainMode;
+  tier: ExplainTier;
+  plan: PlanTree;
+  /** JSON сервера как есть. */
+  raw: unknown;
+  relations: RelationRef[];
+  elapsedMs: number;
+  /** Ключи предупреждений: `genericPlan`, `probeWithoutReadOnly`. */
+  warnings: string[];
+}
+
+// «Скопировать для LLM».
+export type LlmSource = { kind: "query"; queryId: string } | { kind: "sql"; sql: string };
+export interface LlmTable {
+  schema: string;
+  name: string;
+  ddl: string;
+  indexes: string[];
+}
+export interface LlmStats {
+  sinceReset: QueryStat | null;
+  window3600: QueryStat | null;
+}
+export interface LlmBundle {
+  serverVersionNum: number;
+  pgssVersion: string | null;
+  inRecovery: boolean;
+  member: string;
+  database: string;
+  text: string | null;
+  textTruncated: boolean;
+  stats: LlmStats | null;
+  planText: string | null;
+  tables: LlmTable[];
+  /** Таблиц плана, не попавших в `tables`: сверх лимита или с непрочитанным DDL. */
+  tablesOmitted: number;
+  /** Ключи: `paramsNeeded`, `queryGone`, `planFailed`, `ddlFailed`. */
+  warnings: string[];
+}
+/** Запись журнала для EXPLAIN ANALYZE яруса записи (`ActionRecord.explain`). */
+export interface ExplainRecord {
+  database: string;
+  tables: string[];
+  timeoutS: number;
+  sqlHead: string;
 }
 
 // Сессии и idle in transaction (`pg_advisor::rules::sessions`).
@@ -994,7 +1336,8 @@ export type DiagData =
   | ({ kind: "replication" } & ReplicationData)
   | ({ kind: "slots" } & SlotsData)
   | ({ kind: "failover" } & FailoverData)
-  | ({ kind: "health" } & HealthData);
+  | ({ kind: "health" } & HealthData)
+  | ({ kind: "queries" } & QueriesData);
 /** Конверт отчёта. У инструментов кластера `member`, `serverVersionNum` и `inRecovery` пусты. */
 export interface DiagReport<D extends DiagData = DiagData> {
   tool: RustTool;
@@ -1202,7 +1545,7 @@ export interface PatroniRecord {
 export interface ActionRecord {
   /** Мс эпохи. */
   ts: number;
-  /** `cancel` | `terminate` | `dropSlot` | `switchover` | `cancelSwitchover` | `failover` | `restart` | `cancelRestart` | `pause` | `resume`. */
+  /** `cancel` | `terminate` | `dropSlot` | `switchover` | `cancelSwitchover` | `failover` | `restart` | `cancelRestart` | `pause` | `resume` | `explainAnalyze`. */
   action: string;
   connection: { id: string; name: string; environment: Environment };
   member: string | null;
@@ -1211,8 +1554,10 @@ export interface ActionRecord {
   /** `AppError.code` при `outcome: "error"`. */
   code: string | null;
   ms: number;
-  /** Пустые `sessions`, `slot` и `patroni` в журнал не пишутся: поля отсутствуют. */
+  /** Пустые `sessions`, `slot`, `patroni` и `explain` в журнал не пишутся: поля отсутствуют. */
   sessions?: SessionRecord[];
   slot?: SlotRecord;
   patroni?: PatroniRecord;
+  /** Только `explainAnalyze`: запись яруса записи EXPLAIN ANALYZE. */
+  explain?: ExplainRecord;
 }

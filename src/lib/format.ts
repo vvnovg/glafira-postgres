@@ -105,3 +105,13 @@ export function formatDuration(seconds: number | null): string {
   }
   return parts.join(" ");
 }
+
+/** Миллисекунды: до 10 — два знака, до 1000 — один, дальше секунды с двумя знаками, от минуты — длительность. */
+export function formatMs(ms: number): string {
+  if (ms >= 60_000) return formatDuration(ms / 1000);
+  if (ms >= 1000) return `${num(ms / 1000, 2)} ${i18n.t("diag.duration.secShort")}`;
+  if (ms >= 100) return `${num(ms, 0)} ${i18n.t("diag.duration.msShort")}`;
+  if (ms >= 10) return `${num(ms, 1)} ${i18n.t("diag.duration.msShort")}`;
+  if (ms >= 0.01) return `${num(ms, 2)} ${i18n.t("diag.duration.msShort")}`;
+  return `<${num(0.01, 2)} ${i18n.t("diag.duration.msShort")}`;
+}

@@ -19,6 +19,22 @@ describe("FindingsPanel", () => {
     expect(screen.getByRole("button", { name: "Открыть «Idle in transaction»" })).toBeInTheDocument();
   });
 
+  it("находка запроса pgss: текст с формой мс; ссылка openQuery пока кнопки не даёт, ключи различают запросы одной базы", () => {
+    const q = (queryId: string, link: boolean): Finding => ({
+      id: "query_unstable",
+      severity: "warning",
+      member: "pg-1",
+      target: { kind: "query", queryId, database: "perf" },
+      params: { stddevMs: 480, meanMs: 120, calls: 900 },
+      links: link ? [{ kind: "openQuery", queryId, database: "perf", member: "pg-1" }] : [],
+    });
+    renderWithClient(<FindingsPanel connectionId="c" findings={[q("1", true), q("2", false)]} tool="queries" member="pg-1" />);
+    const items = screen.getAllByRole("listitem");
+    expect(items).toHaveLength(2);
+    expect(items[0]).toHaveTextContent("Нестабильное время: stddev 480 мс при среднем 120 мс");
+    expect(within(items[0]).queryAllByRole("button")).toHaveLength(0);
+  });
+
   it("без onAction ссылка-действие кнопки не рисует и не мешает ссылке на инструмент", () => {
     const only: Finding = { id: "idleInTransaction", severity: "critical", member: "pg-1", target: null, params: { maxS: 2000, count: 1 }, links: [{ kind: "action", action: { type: "terminateIdleInTransaction", olderThanS: 300 }, member: "pg-1" }] };
     const both: Finding = { id: "rootBlocker", severity: "warning", member: "pg-1", target: { kind: "session", pid: 7, backendStartUs: 1 }, params: { count: 1, maxS: 20 }, links: [{ kind: "openTool", tool: "sessions", member: "pg-1" }, { kind: "action", action: { type: "terminateRootBlocker", pid: 7, backendStartUs: 1 }, member: "pg-1" }] };

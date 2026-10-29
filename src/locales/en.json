@@ -450,7 +450,9 @@
     "overview": "Overview: {{conn}}",
     "unknownConnection": "?",
     "diag": "{{tool}} — {{conn}}",
-    "actions": "Actions — {{conn}}"
+    "actions": "Actions — {{conn}}",
+    "query": "{{text}} — {{conn}}",
+    "explain": "EXPLAIN — {{conn}}"
   },
   "settings": {
     "title": "Settings",
@@ -884,7 +886,8 @@
       "replication": "Replicas",
       "slots": "Replication slots",
       "failover": "Failover readiness",
-      "health": "Health matrix"
+      "health": "Health matrix",
+      "queries": "Queries"
     },
     "header": {
       "node": "Node",
@@ -919,7 +922,9 @@
       "d": "{{n}} d",
       "h": "{{n}} h",
       "m": "{{n}} min",
-      "s": "{{n}} s"
+      "s": "{{n}} s",
+      "msShort": "ms",
+      "secShort": "s"
     },
     "horizon": {
       "kinds": {
@@ -1231,6 +1236,42 @@
         "activity": "Activity",
         "other": "Other"
       }
+    },
+    "queries": {
+      "mode": "Mode",
+      "modes": {
+        "sinceReset": "Since reset",
+        "window": "Last {{min}} min"
+      },
+      "coverage": "{{have}} of {{want}} min collected",
+      "firstTick": "Waiting for the first tick of the sampler…",
+      "database": "Database",
+      "allDatabases": "All databases",
+      "toplevelOnly": "Top level only",
+      "limit": "Rows",
+      "sortUnavailable": "Not available for this version or mode",
+      "truncated": "(truncated)",
+      "empty": "pg_stat_statements has no rows",
+      "emptyWindow": "No deltas in the window yet",
+      "pgss": "pg_stat_statements {{version}}, statistics reset {{reset}}",
+      "noTrackPlanning": "track_planning is off: planning columns are empty",
+      "columns": {
+        "query": "Query",
+        "share": "Share",
+        "total": "Total",
+        "mean": "Mean",
+        "calls": "Calls",
+        "rowsPerCall": "Rows/call",
+        "hitRatio": "Hit %",
+        "read": "Read",
+        "temp": "Temp",
+        "wal": "WAL",
+        "io": "I/O",
+        "plan": "Planning",
+        "jit": "JIT",
+        "stddev": "Stddev",
+        "max": "Max"
+      }
     }
   },
   "findings": {
@@ -1373,6 +1414,30 @@
     "lockCycle": {
       "title": "Sessions waiting for each other: {{count}}",
       "fix": "The deadlock detector will resolve it within deadlock_timeout; details are in the server log."
+    },
+    "query_n_plus_one": {
+      "title": "{{callsSharePct}} of all calls, {{meanMs}} each ({{calls}} calls)",
+      "fix": "Looks like N+1: the application repeats a tiny query in a loop. Fetch the rows in one query with a JOIN or an IN (…) list."
+    },
+    "query_unstable": {
+      "title": "Unstable execution time: stddev {{stddevMs}} at mean {{meanMs}}",
+      "fix": "The plan or the data volume differs between calls: compare EXPLAIN ANALYZE with different parameter values; check for generic vs custom plan flips and skewed data."
+    },
+    "query_low_hit_ratio": {
+      "title": "Cache hit {{hitRatioPct}}: {{readBytes}} read from disk",
+      "fix": "The working set does not fit shared_buffers or the query scans too much: look for Seq Scan in the plan and consider an index; check shared_buffers."
+    },
+    "query_temp": {
+      "title": "Temp files: {{tempBytes}} per call",
+      "fix": "Sorts or hashes spill to disk: raise work_mem for the session or role, or add an index that avoids the sort."
+    },
+    "query_planning_heavy": {
+      "title": "Planning {{planMs}} takes longer than execution {{execMs}}",
+      "fix": "Use prepared statements (plan_cache_mode), touch fewer partitions or simplify the query."
+    },
+    "queries_incomplete": {
+      "title": "The top is incomplete: {{dealloc}} evictions from pg_stat_statements",
+      "fix": "Raise pg_stat_statements.max (now {{max}}) or reset statistics less often: rarely seen queries have been evicted."
     }
   },
   "actions": {
@@ -1578,7 +1643,8 @@
       "slots": "A slot keeps WAL on the server until its consumer reads it. An inactive or lagging slot accumulates WAL and can fill the disk.",
       "failover": "Whether Patroni can fail over to a replica if the leader fails: a verdict and reasons for each candidate, next to the settings it depends on.",
       "health": "Response codes of Patroni REST API endpoints per member, as a load balancer sees them. 200 means the node fits the endpoint, 503 means it does not.",
-      "lastEnd": "When the replica last reported a new WAL position to the primary. If nothing is written to the cluster, the position stays put and this time grows; that is normal."
+      "lastEnd": "When the replica last reported a new WAL position to the primary. If nothing is written to the cluster, the position stays put and this time grows; that is normal.",
+      "queries": "Top queries from pg_stat_statements: since the last reset or over the last 5, 15 or 60 minutes (the sampler reads the statistics once a minute while the tab is open). Click a row for the query card."
     }
   }
 }

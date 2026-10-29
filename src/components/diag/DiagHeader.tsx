@@ -17,6 +17,7 @@ const TOOL_HINTS: Record<DiagTool, string> = {
   slots: "hints.diag.slots",
   failover: "hints.diag.failover",
   health: "hints.diag.health",
+  queries: "hints.diag.queries",
 };
 
 /** Значение пункта «За лидером» в выборе узла и пункта «Пауза» в выборе интервала. */

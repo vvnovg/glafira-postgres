@@ -16,6 +16,7 @@ import { FindingsPanel } from "./FindingsPanel";
 import { HealthView } from "./HealthView";
 import { HorizonView } from "./HorizonView";
 import { LocksView } from "./LocksView";
+import { QueriesView } from "../queries/QueriesView";
 import { PulseView } from "./PulseView";
 import { ReplicationView } from "./ReplicationView";
 import { SessionsView } from "./SessionsView";
@@ -79,6 +80,9 @@ function ToolBody({
       return <HealthView connectionId={connectionId} report={report} />;
     case "waits":
       return <WaitsView connectionId={connectionId} report={report} />;
+    // «Запросы» рисует `QueriesView` целиком (своя шапка и свой отчёт); вариант нужен исчерпывающему `switch`.
+    case "queries":
+      return null;
   }
 }
 
@@ -112,6 +116,8 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
   const dropping = useIsMutating({ mutationKey: ["dropSlot", connectionId, dropScope] }) > 0;
 
   const cluster = isClusterTool(tool);
+  // «Запросы» — отдельный вид со своим отчётом и сэмплером (`QueriesView`): общий отчёт вкладки для него не читается.
+  const isQueries = tool === "queries";
   const state = view.data?.state;
   const live = state === "connected" || state === "degraded";
   // Отчёты кластера узла не берут; остальные ждут выбранный узел (null — лидер).
@@ -119,7 +125,7 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
     active,
     intervalS,
     windowS: tool === "waits" ? windowS : undefined,
-    live,
+    live: live && !isQueries,
   });
   const report = q.data;
   // Подключение закрыто: подтверждение не ждёт переоткрытия (после него предпросмотр был бы устаревшим).
@@ -211,6 +217,13 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
   const topo = view.data.topology;
   // Выбор узла — у узловых инструментов; у одиночного сервера узел один, у инструментов кластера узел не берётся.
   const members = !cluster && topo && topo.kind !== "server" ? topo.members : null;
+  if (isQueries) {
+    return (
+      <div className="page diag-tab">
+        <QueriesView connectionId={connectionId} member={member} active={active} live={live} members={members} kind={topo?.kind ?? "server"} onSelectMember={pick} />
+      </div>
+    );
+  }
   return (
     <div className="page diag-tab">
       <DiagHeader

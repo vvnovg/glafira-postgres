@@ -7,12 +7,15 @@ import { CopyButton } from "../common/CopyButton";
 import { findingFix, findingTitle } from "./findingText";
 
 type ActionLink = Extract<FindingLink, { kind: "action" }>;
+/** Ссылки, которые панель рисует кнопками; `openQuery` (карточка запроса) появится вместе с вкладкой `query`. */
+type ShownLink = Exclude<FindingLink, { kind: "openQuery" }>;
 
 /** Порядок показа: сначала более строгие; внутри одной строгости остаётся порядок сервера (сортировка устойчива). */
 const SEVERITY_ORDER: Record<Severity, number> = { critical: 0, warning: 1, info: 2 };
 
-/** Часть ключа находки по её объекту: сессия — `pid` и время старта backend (pid переиспользуется), остальное — имя. */
-const targetKey = (t: FindingTarget | null) => (t === null ? "" : t.kind === "session" ? `${t.pid}:${t.backendStartUs}` : t.name);
+/** Часть ключа находки по её объекту: сессия — `pid` и время старта backend (pid переиспользуется), запрос — база и `queryId`, остальное — имя. */
+const targetKey = (t: FindingTarget | null) =>
+  t === null ? "" : t.kind === "session" ? `${t.pid}:${t.backendStartUs}` : t.kind === "query" ? `${t.database}:${t.queryId}` : t.name;
 
 /** Ключ кнопки действия: тип и сессия (у корня — pid и время старта: pid переиспользуется). */
 const actionKey = (l: ActionLink) =>
@@ -80,8 +83,10 @@ export function FindingsPanel({
             // Ссылка без узла ведёт туда же, что и узел отчёта: вкладка инструмента одна на подключение.
             // Ссылки-действия (`kind: "action"`) — кнопки только при `onAction` и известном узле (свой у ссылки или узел отчёта):
             // без узла выполнять негде. Переход «в себя» не предлагается.
-            const links = f.links.filter((l) =>
-              l.kind === "action" ? onAction !== undefined && (l.member ?? member ?? null) !== null : !(l.tool === tool && (l.member == null || l.member === member)),
+            const links = f.links.filter(
+              (l): l is ShownLink =>
+                l.kind !== "openQuery" &&
+                (l.kind === "action" ? onAction !== undefined && (l.member ?? member ?? null) !== null : !(l.tool === tool && (l.member == null || l.member === member))),
             );
             return (
               <li key={keys[i]} className={`finding sev-${f.severity}`}>

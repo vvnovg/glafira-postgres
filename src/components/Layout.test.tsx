@@ -102,6 +102,22 @@ describe("Layout tabs", () => {
     expect(useWorkspace.getState().tabs.find((t) => t.id === "help")).toMatchObject({ kind: "help", chapter: "diagnostics", anchor: "journal" });
   });
 
+  it("карточка запроса — начало текста (без текста queryId) и подключение; консоль EXPLAIN — подключение", async () => {
+    useWorkspace.setState({
+      tabs: [
+        { kind: "query", connectionId: "c1", member: "pg-1", database: "perf", queryId: "1", title: "select * from orders", id: "query:c1:pg-1:perf:1" },
+        { kind: "query", connectionId: "c1", member: "pg-1", database: "perf", queryId: "2", id: "query:c1:pg-1:perf:2" },
+        { kind: "explain", connectionId: "c1", id: "explain:c1" },
+      ],
+      activeId: "explain:c1",
+    });
+    renderWithClient(<Layout />);
+    const list = screen.getByRole("tablist");
+    expect(await within(list).findByRole("tab", { name: "select * from orders — prod-1" })).toBeInTheDocument();
+    expect(within(list).getByRole("tab", { name: "2 — prod-1" })).toBeInTheDocument();
+    expect(within(list).getByRole("tab", { name: "EXPLAIN — prod-1" })).toBeInTheDocument();
+  });
+
   it("форма подключения: в заголовке имя, а не id; без подключения — прочерк-заглушка", async () => {
     useWorkspace.setState({
       tabs: [

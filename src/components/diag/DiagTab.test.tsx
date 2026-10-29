@@ -9,7 +9,7 @@ import { renderWithClient } from "../../test/render";
 
 vi.mock("../../api/client", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../../api/client")>();
-  return { ...orig, api: { runDiagnostic: vi.fn(), getTopology: vi.fn(), listConnections: vi.fn(), connect: vi.fn(), startSampler: vi.fn(), stopSession: vi.fn(), previewSessionAction: vi.fn(), executeSessionAction: vi.fn(), previewDropSlot: vi.fn(), dropSlot: vi.fn() } };
+  return { ...orig, api: { runDiagnostic: vi.fn(), getTopology: vi.fn(), listConnections: vi.fn(), connect: vi.fn(), startSampler: vi.fn(), startStatementsSampler: vi.fn(), queryTexts: vi.fn(), stopSession: vi.fn(), previewSessionAction: vi.fn(), executeSessionAction: vi.fn(), previewDropSlot: vi.fn(), dropSlot: vi.fn() } };
 });
 
 import { api } from "../../api/client";
@@ -141,6 +141,36 @@ describe("DiagTab", () => {
     await waitFor(() => expect(api.runDiagnostic).toHaveBeenLastCalledWith("c", { tool: "locks", member: "pg-2" }));
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Узел" })).toHaveDisplayValue("pg-2 — Реплика"));
     expect(screen.queryByText(/Узел сменился/)).not.toBeInTheDocument();
+  });
+
+  it("«Запросы» рисует свой вид: общий отчёт вкладки не читается, отчёт — с параметрами инструмента, узел выбирается в шапке, сэмплер pgss снимается вместе с вкладкой", async () => {
+    vi.mocked(api.runDiagnostic).mockResolvedValue(
+      diagReport({
+        kind: "queries",
+        mode: { kind: "sinceReset" },
+        coverageS: null,
+        ticks: null,
+        pgss: { version: "1.11", max: 5000, trackPlanning: true, statsResetMs: null, dealloc: 0 },
+        totals: { calls: 0, totalExecMs: 0, rows: 0 },
+        rows: [],
+      }),
+    );
+    vi.mocked(api.startStatementsSampler).mockResolvedValue("s-1");
+    vi.mocked(api.stopSession).mockResolvedValue(true);
+    const user = userEvent.setup();
+    openTab("queries", null);
+    const { unmount } = renderWithClient(<Host tool="queries" />);
+    expect(await screen.findByRole("table", { name: "Запросы" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Запросы" })).toBeInTheDocument();
+    // Один запрос отчёта, и он несёт параметры: пустой запрос `{ tool: "queries" }` Rust отклонил бы.
+    expect(api.runDiagnostic).toHaveBeenCalledTimes(1);
+    expect(api.runDiagnostic).toHaveBeenCalledWith("c", expect.objectContaining({ tool: "queries", member: null, queries: expect.objectContaining({ sort: "totalTime", limit: 50 }) }));
+    expect(api.startStatementsSampler).toHaveBeenCalledWith("c", null, expect.any(Function));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Узел" }), "pg-2");
+    expect(useWorkspace.getState().tabs[0]).toMatchObject({ kind: "diag", tool: "queries", member: "pg-2" });
+    await waitFor(() => expect(api.startStatementsSampler).toHaveBeenLastCalledWith("c", "pg-2", expect.any(Function)));
+    unmount();
+    await waitFor(() => expect(api.stopSession).toHaveBeenCalledWith("s-1"));
   });
 
   it("idleTx — вкладка поверх sessions: заголовок свой, запрос sessions", async () => {

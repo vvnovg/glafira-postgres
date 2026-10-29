@@ -13,7 +13,7 @@ describe("DiagnosticsNodes", () => {
     await user.click(screen.getByRole("button", { name: "Диагностика" }));
     // Стрелка раскрытия группы — декоративный символ (aria-hidden): в имя кнопки она не входит.
     const names = screen.getAllByRole("button").map((b) => b.textContent?.replace(/^[▸▾]/, ""));
-    expect(names).toEqual(["Диагностика", "Пульс", "Сессии", "Idle in transaction", "Профиль ожиданий", "Блокировки", "Горизонт xmin", "Реплики", "Слоты репликации", "Журнал действий"]);
+    expect(names).toEqual(["Диагностика", "Пульс", "Сессии", "Idle in transaction", "Профиль ожиданий", "Блокировки", "Горизонт xmin", "Реплики", "Слоты репликации", "Запросы", "Журнал действий"]);
     await user.click(screen.getByRole("button", { name: "Блокировки" }));
     expect(useWorkspace.getState().tabs[0]).toMatchObject({ kind: "diag", connectionId: "c", tool: "locks", id: "diag:c:locks" });
     expect(useWorkspace.getState().tabs[0]).not.toHaveProperty("member", "pg-1");

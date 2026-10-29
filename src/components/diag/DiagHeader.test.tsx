@@ -17,6 +17,7 @@ const TOOLS: Record<DiagTool, true> = {
   slots: true,
   failover: true,
   health: true,
+  queries: true,
 };
 
 describe("DiagHeader", () => {

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { i18n } from "../i18n";
-import { formatAas, formatBytes, formatCount, formatDuration, formatInt64, formatPercent, formatScheduled, formatTimestamp } from "./format";
+import { formatAas, formatBytes, formatCount, formatDuration, formatInt64, formatMs, formatPercent, formatScheduled, formatTimestamp } from "./format";
 
 describe("format", () => {
   it("timestamp в UTC с миллисекундами", () => {
@@ -145,5 +145,16 @@ describe("форматы по языку", () => {
     expect(formatScheduled("2026-10-25T05:00:00+03:00")).toBe(formatScheduled("2026-10-25T02:00:00Z"));
     expect(formatScheduled("завтра")).toBe("завтра");
     expect(formatScheduled("")).toBe("");
+  });
+});
+
+describe("formatMs", () => {
+  it("миллисекунды с точностью по порядку, секунды от 1000 мс, длительность от минуты", () => {
+    expect(formatMs(0.004)).toBe("<0,01 мс");
+    expect(formatMs(0.42)).toBe("0,42 мс");
+    expect(formatMs(12.34)).toBe("12,3 мс");
+    expect(formatMs(999)).toBe("999 мс");
+    expect(formatMs(1250)).toBe("1,25 с");
+    expect(formatMs(90_000)).toBe("1 мин 30 с");
   });
 });

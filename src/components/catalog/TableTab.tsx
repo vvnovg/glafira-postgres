@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
-import type { RelationRef, TableDetails } from "../../api/types";
+import type { CatalogRelationRef, TableDetails } from "../../api/types";
 import { formatBytes, formatCount, formatTimestamp } from "../../lib/format";
 import { useWorkspace } from "../../state/workspace";
 import { DdlView } from "./DdlView";
@@ -138,7 +138,7 @@ function StatsPane({ d }: { d: TableDetails }) {
 }
 
 /** Ссылка на таблицу в той же базе: имя `schema.name` как в каталоге (без кавычек), клик открывает её вкладку. */
-function RelationLink({ r, connectionId, database }: { r: RelationRef; connectionId: string; database: string }) {
+function RelationLink({ r, connectionId, database }: { r: CatalogRelationRef; connectionId: string; database: string }) {
   const open = useWorkspace((s) => s.open);
   return (
     <button type="button" className="link" onClick={() => open({ kind: "table", connectionId, database, schema: r.schema, name: r.name })}>

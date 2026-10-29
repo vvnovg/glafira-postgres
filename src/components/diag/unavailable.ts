@@ -18,6 +18,10 @@ export const UNAVAILABLE_PARTS: Record<string, string> = {
   slotInactiveSince: "diag.unavailable.parts.slotInactiveSince",
   subscriptionErrors: "diag.unavailable.parts.subscriptionErrors",
   patroniSlots: "diag.unavailable.parts.patroniSlots",
+  statements: "diag.unavailable.parts.statements",
+  others: "diag.unavailable.parts.others",
+  window: "diag.unavailable.parts.window",
+  running: "diag.unavailable.parts.running",
 };
 
 /** Текст строки «недоступно»: причина из Rust с подписью части вместо её внутреннего имени. */

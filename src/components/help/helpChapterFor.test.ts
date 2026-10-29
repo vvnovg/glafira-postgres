@@ -5,7 +5,10 @@ import { parseChapter } from "../../guide/parse";
 import { helpAnchorFor, helpChapterFor } from "./helpChapterFor";
 
 /** Все инструменты диагностики: тип `Record` не даст добавить инструмент, не внеся его сюда (а значит, и в проверку якорей). */
-const DIAG_TOOLS: Record<DiagTool, true> = { pulse: true, sessions: true, idleTx: true, waits: true, locks: true, horizon: true, replication: true, slots: true, failover: true, health: true };
+const DIAG_TOOLS: Record<DiagTool, true> = { pulse: true, sessions: true, idleTx: true, waits: true, locks: true, horizon: true, replication: true, slots: true, failover: true, health: true, queries: true };
+
+/** Инструменты, чьего раздела в руководстве ещё нет: глава «Запросы» и якорь появятся в задаче 16 (тогда список опустеет). */
+const NO_GUIDE_SECTION_YET: DiagTool[] = ["queries"];
 
 describe("helpChapterFor", () => {
   it("для null, настроек и обзора — «Начало работы»", () => {
@@ -40,6 +43,14 @@ describe("helpChapterFor", () => {
     expect(helpAnchorFor(null)).toBeUndefined();
   });
 
+  it("карточка запроса и консоль EXPLAIN — глава «Диагностика» (до главы «Запросы»), якорь queries", () => {
+    const query = { kind: "query", connectionId: "c", member: "pg-1", database: "perf", queryId: "1" } as const;
+    expect(helpChapterFor(query)).toBe("diagnostics");
+    expect(helpChapterFor({ kind: "explain", connectionId: "c" })).toBe("diagnostics");
+    expect(helpAnchorFor(query)).toBe("queries");
+    expect(helpAnchorFor({ kind: "explain", connectionId: "c" })).toBe("queries");
+  });
+
   it("вкладка «Журнал действий» — глава «Диагностика», якорь journal", () => {
     expect(helpChapterFor({ kind: "actions", connectionId: "c" })).toBe("diagnostics");
     expect(helpAnchorFor({ kind: "actions", connectionId: "c" })).toBe("journal");
@@ -49,7 +60,7 @@ describe("helpChapterFor", () => {
     for (const lang of ["en", "ru"]) {
       const chapter = (await loadGuide(lang)).diagnostics;
       const anchors = parseChapter("diagnostics", chapter, (key) => key).sections.map((s) => s.id);
-      for (const tool of Object.keys(DIAG_TOOLS) as DiagTool[]) {
+      for (const tool of (Object.keys(DIAG_TOOLS) as DiagTool[]).filter((t) => !NO_GUIDE_SECTION_YET.includes(t))) {
         const anchor = helpAnchorFor({ kind: "diag", connectionId: "c", tool });
         expect(anchor, `${lang}: ${tool}`).toBeDefined();
         expect(anchors, `${lang}: якорь ${anchor} инструмента ${tool}`).toContain(anchor);

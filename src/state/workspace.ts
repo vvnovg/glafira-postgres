@@ -18,6 +18,10 @@ export type TabSpec =
   | { kind: "sequence"; connectionId: string; database: string; schema: string; name: string }
   /** Инструмент диагностики; member — закреплённый узел, нет — за лидером (одна вкладка на подключение и инструмент). */
   | { kind: "diag"; connectionId: string; tool: DiagTool; member?: string | null }
+  /** Карточка запроса pgss: узел, база и queryId; title — начало текста для заголовка вкладки (не часть id). */
+  | { kind: "query"; connectionId: string; member: string; database: string; queryId: string; title?: string }
+  /** Консоль EXPLAIN — одна на подключение; member/database/sql — подстановка при открытии из карточки. */
+  | { kind: "explain"; connectionId: string; member?: string | null; database?: string; sql?: string }
   /** Журнал действий подключения (одна вкладка на подключение). */
   | { kind: "actions"; connectionId: string };
 
@@ -44,6 +48,10 @@ export function tabId(spec: TabSpec): string {
       return `function:${spec.connectionId}:${spec.database}:${spec.oid}`;
     case "diag":
       return `diag:${spec.connectionId}:${spec.tool}`;
+    case "query":
+      return `query:${spec.connectionId}:${spec.member}:${spec.database}:${spec.queryId}`;
+    case "explain":
+      return `explain:${spec.connectionId}`;
     case "actions":
       return `actions:${spec.connectionId}`;
   }
