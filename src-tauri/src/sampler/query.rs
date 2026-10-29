@@ -59,7 +59,7 @@ impl PoolSampleSource {
     }
 }
 
-impl SampleSource for PoolSampleSource {
+impl SampleSource<Vec<RawSample>> for PoolSampleSource {
     fn sample<'a>(&'a self) -> BoxFuture<'a, AppResult<Vec<RawSample>>> {
         Box::pin(async move {
             let known = self.caps.get().copied();

@@ -1,4 +1,5 @@
-//! Сэмплер активности (спец. P2 §6): раз в секунду не-idle сессии узла, в памяти, пока подписана вкладка.
+//! Сэмплеры (спец. P2 §6, P3 §5): активность раз в секунду и `pg_stat_statements` раз в минуту — в памяти,
+//! пока подписана вкладка.
 
 pub mod buffer;
 pub mod query;
@@ -10,15 +11,36 @@ use crate::error::{AppError, AppResult};
 use crate::session::{SessionKind, SessionRegistry};
 use crate::state::AppState;
 use crate::topology::runtime::not_connected;
-use registry::{SamplerRegistry, SamplerSink};
+use registry::{SampleSource, SamplerEvent, SamplerRegistry, SamplerSink, Sampling};
 
-/// Подписка на сэмплер узла (`member = None` — «за лидером» на момент подписки). Возвращает id сессии для
-/// `stop_session`. Нужен рантайм tokio: задача сэмплера запускается здесь же.
+/// Подписка на сэмплер активности узла (`member = None` — «за лидером» на момент подписки). Возвращает id
+/// сессии для `stop_session`. Нужен рантайм tokio: задача сэмплера запускается здесь же.
 pub fn start(
     st: &AppState,
     id: &str,
     member: Option<&str>,
-    sink: Arc<dyn SamplerSink>,
+    sink: Arc<dyn SamplerSink<SamplerEvent>>,
+) -> AppResult<String> {
+    start_with(
+        st,
+        id,
+        member,
+        sink,
+        &st.samplers,
+        SessionKind::Sampler,
+        |st, id, m| Arc::new(query::PoolSampleSource::new(st.clone(), id, m)),
+    )
+}
+
+/// Подписка на сэмплер вида `S` в реестре `registry`: сессия вида `kind`, источник — `source(st, id, member)`.
+pub fn start_with<S: Sampling>(
+    st: &AppState,
+    id: &str,
+    member: Option<&str>,
+    sink: Arc<dyn SamplerSink<S::Event>>,
+    registry: &Arc<SamplerRegistry<S>>,
+    kind: SessionKind,
+    source: impl FnOnce(&AppState, &str, &str) -> Arc<dyn SampleSource<S::Sample>>,
 ) -> AppResult<String> {
     let target = st.runtimes.diag_target(id, member, false)?;
     let m = target
@@ -26,16 +48,15 @@ pub fn start(
         .map(|m| m.name)
         .ok_or_else(|| AppError::internal_with("sampler without a member"))?;
     let session_id = uuid::Uuid::new_v4().to_string();
-    let source = Arc::new(query::PoolSampleSource::new(st.clone(), id, &m));
+    let source = source(st, id, &m);
     // Остановка сессии только отписывает её (std-мьютекс реестра сэмплеров): годится и для слушателя закрытия.
     st.sessions.insert(
         session_id.clone(),
         id,
-        SessionKind::Sampler,
-        unsubscribe_on_stop(&st.samplers, id, &m, &session_id),
+        kind,
+        unsubscribe_on_stop(registry, id, &m, &session_id),
     );
-    st.samplers
-        .subscribe(id, target.generation, &m, &session_id, sink, source);
+    registry.subscribe(id, target.generation, &m, &session_id, sink, source);
     // Подключение могли закрыть (или переоткрыть) между выбором узла и подпиской: слушатели закрытия тогда
     // не видели ни сессии, ни подписки. Проверка после подписки — под той же блокировкой `Runtimes`, что и
     // рассылка закрытий: закрытие либо уже было (видно здесь), либо будет и найдёт сессию. Если оно уже было,
@@ -44,7 +65,7 @@ pub fn start(
     if current.as_ref().map(|t| t.generation).ok() != Some(target.generation) {
         withdraw_late(
             &st.sessions,
-            &st.samplers,
+            registry,
             id,
             &m,
             &session_id,
@@ -57,8 +78,8 @@ pub fn start(
 
 /// Остановка сессии сэмплера: отписка вкладки от узла. Реестр сэмплеров — слабая ссылка: он сам держит реестр
 /// сессий, сильная дала бы цикл ссылок.
-fn unsubscribe_on_stop(
-    samplers: &Arc<SamplerRegistry>,
+fn unsubscribe_on_stop<S: Sampling>(
+    samplers: &Arc<SamplerRegistry<S>>,
     connection: &str,
     member: &str,
     session_id: &str,
@@ -81,9 +102,9 @@ fn unsubscribe_on_stop(
 /// свежая подписка осталась бы на узле закрытого подключения — задача узла сэмплировала бы его дальше. Поэтому
 /// отписка здесь явная, а запись сессии (если она ещё есть) забывается без вызова остановки: повторной
 /// отписки нет. Пустой узел этого открытия убирается вместе с буфером.
-fn withdraw_late(
+fn withdraw_late<S: Sampling>(
     sessions: &SessionRegistry,
-    samplers: &SamplerRegistry,
+    samplers: &SamplerRegistry<S>,
     connection: &str,
     member: &str,
     session_id: &str,
@@ -110,7 +131,7 @@ mod tests {
 
     #[derive(Default)]
     struct Calls(AtomicUsize);
-    impl SampleSource for Calls {
+    impl SampleSource<Vec<RawSample>> for Calls {
         fn sample<'a>(&'a self) -> BoxFuture<'a, AppResult<Vec<RawSample>>> {
             Box::pin(async move {
                 self.0.fetch_add(1, Ordering::SeqCst);
@@ -121,7 +142,7 @@ mod tests {
 
     #[derive(Default)]
     struct Events(Mutex<Vec<SamplerEvent>>);
-    impl SamplerSink for Events {
+    impl SamplerSink<SamplerEvent> for Events {
         fn send(&self, e: SamplerEvent) -> bool {
             self.0.lock_safe().push(e);
             true
@@ -134,7 +155,12 @@ mod tests {
     #[tokio::test]
     async fn subscription_that_lost_the_race_with_a_close_is_withdrawn() {
         let sessions = Arc::new(SessionRegistry::default());
-        let samplers = SamplerRegistry::new(Duration::from_millis(20), sessions.clone());
+        let samplers = SamplerRegistry::new(
+            registry::Activity {
+                interval: Duration::from_millis(20),
+            },
+            sessions.clone(),
+        );
         sessions.insert(
             "s1".into(),
             "c",
@@ -166,7 +192,12 @@ mod tests {
     #[tokio::test]
     async fn withdrawing_keeps_the_other_subscribers_of_the_node() {
         let sessions = Arc::new(SessionRegistry::default());
-        let samplers = SamplerRegistry::new(Duration::from_millis(20), sessions.clone());
+        let samplers = SamplerRegistry::new(
+            registry::Activity {
+                interval: Duration::from_millis(20),
+            },
+            sessions.clone(),
+        );
         let (source, other, late) = (
             Arc::new(Calls::default()),
             Arc::new(Events::default()),

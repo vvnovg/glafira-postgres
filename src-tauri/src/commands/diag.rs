@@ -22,7 +22,7 @@ pub async fn run_diagnostic(
 /// Канал вкладки: ошибка отправки — канал закрыт, подписка снимается.
 struct ChannelSink(Channel<SamplerEvent>);
 
-impl SamplerSink for ChannelSink {
+impl SamplerSink<SamplerEvent> for ChannelSink {
     fn send(&self, e: SamplerEvent) -> bool {
         self.0.send(e).is_ok()
     }

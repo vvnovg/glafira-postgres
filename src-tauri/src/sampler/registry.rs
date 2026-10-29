@@ -1,5 +1,6 @@
-//! Реестр сэмплеров (спец. P2 §6): задача на узел, пока подписана хоть одна вкладка; буфер — до закрытия подключения
-//! или исчезновения участника.
+//! Реестр сэмплеров (спец. P2 §6, P3 §5): задача на узел, пока подписана хоть одна вкладка; буфер — до закрытия
+//! подключения или исчезновения участника. Реестр обобщён трейтом `Sampling`: активность (раз в секунду) и
+//! `pg_stat_statements` (раз в минуту) — два экземпляра с разными сэмплами, буферами и событиями.
 //!
 //! Порядок блокировок. `nodes` — std-мьютекс, держится без `await` и без вызова чужого кода: подписчикам события
 //! шлются после того, как блокировка отпущена, реестр сессий (`SessionRegistry::forget`) — тоже вне её.
@@ -21,9 +22,70 @@ use crate::session::SessionRegistry;
 use crate::sync::MutexExt;
 use crate::topology::runtime::CloseListener;
 
-/// Событие канала вкладки: `tick` — раз в секунду (индикатор «живой»), `gap` — промежуток в истории, `error` —
-/// сэмпл не удался (сэмплер продолжает с паузой), `stopped` — сэмплер узла остановлен не вкладкой (отказ во
-/// входе, подключение закрыто, участник исчез).
+/// Вид сэмплера: что читается с узла, где копится и какие события получают вкладки.
+pub trait Sampling: Send + Sync + 'static {
+    type Sample: Send + 'static;
+    type Buffer: Default + Send + 'static;
+    type Event: Clone + Send + 'static;
+
+    fn interval(&self) -> Duration;
+    /// Записывает сэмпл в буфер; события уходят подписчикам по порядку (например, `gap`, затем `tick`).
+    fn push(buffer: &mut Self::Buffer, at_ms: i64, sample: Self::Sample) -> Vec<Self::Event>;
+    fn error_event(error: AppError) -> Self::Event;
+    fn stopped_event() -> Self::Event;
+    /// Ошибка, после которой сэмплер останавливается, а не повторяет с паузой. Отказ во входе — у всех видов:
+    /// повтор подбирал бы пароль (LDAP, fail2ban).
+    fn fatal(error: &AppError) -> bool {
+        error.code == ErrorCode::AuthFailed
+    }
+}
+
+/// Сэмплер активности P2: `pg_stat_activity` раз в секунду.
+pub struct Activity {
+    pub interval: Duration,
+}
+
+impl Sampling for Activity {
+    type Sample = Vec<RawSample>;
+    type Buffer = Buffer;
+    type Event = SamplerEvent;
+
+    fn interval(&self) -> Duration {
+        self.interval
+    }
+
+    fn push(buffer: &mut Buffer, at_ms: i64, rows: Vec<RawSample>) -> Vec<SamplerEvent> {
+        let active = rows.len() as u32;
+        let waiting = rows
+            .iter()
+            .filter(|r| r.wait_type.as_deref() == Some("Lock"))
+            .count() as u32;
+        let mut out = Vec::with_capacity(2);
+        if let Some((from_ms, to_ms)) = buffer.push(at_ms, rows) {
+            out.push(SamplerEvent::Gap { from_ms, to_ms });
+        }
+        out.push(SamplerEvent::Tick {
+            at_ms,
+            active,
+            waiting,
+        });
+        out
+    }
+
+    fn error_event(error: AppError) -> SamplerEvent {
+        SamplerEvent::Error { error }
+    }
+
+    fn stopped_event() -> SamplerEvent {
+        SamplerEvent::Stopped
+    }
+}
+
+pub type ActivityRegistry = SamplerRegistry<Activity>;
+
+/// Событие канала вкладки сэмплера активности: `tick` — раз в секунду (индикатор «живой»), `gap` — промежуток в
+/// истории, `error` — сэмпл не удался (сэмплер продолжает с паузой), `stopped` — сэмплер узла остановлен не
+/// вкладкой (отказ во входе, подключение закрыто, участник исчез).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum SamplerEvent {
@@ -45,13 +107,13 @@ pub enum SamplerEvent {
 }
 
 /// Канал вкладки. `false` — канал закрыт (вкладка закрыта, вебвью перезагружен): подписка снимается.
-pub trait SamplerSink: Send + Sync {
-    fn send(&self, e: SamplerEvent) -> bool;
+pub trait SamplerSink<E>: Send + Sync {
+    fn send(&self, e: E) -> bool;
 }
 
-/// Откуда берутся сэмплы: в приложении — запрос к узлу (`query::PoolSampleSource`), в тестах — подмена.
-pub trait SampleSource: Send + Sync {
-    fn sample<'a>(&'a self) -> BoxFuture<'a, AppResult<Vec<RawSample>>>;
+/// Откуда берутся сэмплы: в приложении — запрос к узлу, в тестах — подмена.
+pub trait SampleSource<T>: Send + Sync {
+    fn sample<'a>(&'a self) -> BoxFuture<'a, AppResult<T>>;
 
     /// Предел одного сэмпла целиком (подключение и запрос), которым источник ограничивает себя сам и по
     /// которому закрывает соединение. Задача сэмплера ждёт на секунду дольше — только как страховка.
@@ -70,22 +132,24 @@ pub(crate) const SAMPLE_TIMEOUT: Duration = Duration::from_secs(5);
 const SAMPLE_TIMEOUT_GRACE: Duration = Duration::from_secs(1);
 
 type Key = (String, String);
+/// Канал вкладки сэмплера вида `S`.
+type SinkOf<S> = Arc<dyn SamplerSink<<S as Sampling>::Event>>;
 
-struct Node {
+struct Node<S: Sampling> {
     /// Номер открытия подключения (`Entry::generation`): буфер прошлого открытия не продолжается.
     generation: u64,
-    buffer: Arc<Mutex<Buffer>>,
+    buffer: Arc<Mutex<S::Buffer>>,
     /// Подписки вкладок: id сессии → канал.
-    subscribers: HashMap<String, Arc<dyn SamplerSink>>,
+    subscribers: HashMap<String, SinkOf<S>>,
     /// Задача сэмплера; `None` — не идёт.
     task: Option<AbortHandle>,
 }
 
-impl Node {
+impl<S: Sampling> Node<S> {
     fn new(generation: u64) -> Self {
         Self {
             generation,
-            buffer: Arc::new(Mutex::new(Buffer::default())),
+            buffer: Arc::new(Mutex::new(S::Buffer::default())),
             subscribers: HashMap::new(),
             task: None,
         }
@@ -98,32 +162,32 @@ impl Node {
     }
 }
 
-pub struct SamplerRegistry {
-    nodes: Mutex<HashMap<Key, Node>>,
-    interval: Duration,
+pub struct SamplerRegistry<S: Sampling> {
+    nodes: Mutex<HashMap<Key, Node<S>>>,
+    sampling: S,
     sessions: Arc<SessionRegistry>,
 }
 
-impl SamplerRegistry {
-    pub fn new(interval: Duration, sessions: Arc<SessionRegistry>) -> Arc<Self> {
+impl<S: Sampling> SamplerRegistry<S> {
+    pub fn new(sampling: S, sessions: Arc<SessionRegistry>) -> Arc<Self> {
         Arc::new(Self {
             nodes: Mutex::new(HashMap::new()),
-            interval,
+            sampling,
             sessions,
         })
     }
 
     /// Подписка вкладки на сэмплер узла: узла нет или он от более раннего открытия подключения — новый буфер;
     /// задача сэмплера запускается, если не идёт. Подписка от более раннего открытия, чем у узла, отклоняется:
-    /// узел не трогается, вкладке — `Stopped`, её сессия забывается. Нужен рантайм tokio (`tokio::spawn`).
+    /// узел не трогается, вкладке — `stopped`, её сессия забывается. Нужен рантайм tokio (`tokio::spawn`).
     pub fn subscribe(
         self: &Arc<Self>,
         connection: &str,
         generation: u64,
         member: &str,
         session_id: &str,
-        sink: Arc<dyn SamplerSink>,
-        source: Arc<dyn SampleSource>,
+        sink: Arc<dyn SamplerSink<S::Event>>,
+        source: Arc<dyn SampleSource<S::Sample>>,
     ) {
         let key = (connection.to_string(), member.to_string());
         let stale = {
@@ -131,7 +195,7 @@ impl SamplerRegistry {
             if nodes.get(&key).is_some_and(|n| n.generation > generation) {
                 drop(nodes);
                 // Подписка запоздала: подключение уже переоткрыто, и узел принадлежит новому открытию.
-                sink.send(SamplerEvent::Stopped);
+                sink.send(S::stopped_event());
                 self.sessions.forget(session_id);
                 return;
             }
@@ -144,7 +208,8 @@ impl SamplerRegistry {
             if node.task.is_none() {
                 let (weak, buffer) = (Arc::downgrade(self), node.buffer.clone());
                 node.task = Some(
-                    tokio::spawn(run(weak, key, source, buffer, self.interval)).abort_handle(),
+                    tokio::spawn(run(weak, key, source, buffer, self.sampling.interval()))
+                        .abort_handle(),
                 );
             }
             stale
@@ -183,7 +248,7 @@ impl SamplerRegistry {
         }
     }
 
-    pub fn buffer(&self, connection: &str, member: &str) -> Option<Arc<Mutex<Buffer>>> {
+    pub fn buffer(&self, connection: &str, member: &str) -> Option<Arc<Mutex<S::Buffer>>> {
         self.nodes
             .lock_safe()
             .get(&(connection.to_string(), member.to_string()))
@@ -199,8 +264,8 @@ impl SamplerRegistry {
 
     /// Рассылка подписчикам от задачи `me`; закрытые каналы отписываются (и забываются в реестре сессий).
     /// Без подписчиков задача снимается с узла — `false`; задача уже не текущая — тоже `false`, без рассылки.
-    fn broadcast(&self, key: &Key, me: Id, e: &SamplerEvent) -> bool {
-        let sinks: Vec<(String, Arc<dyn SamplerSink>)> = {
+    fn broadcast(&self, key: &Key, me: Id, e: &S::Event) -> bool {
+        let sinks: Vec<(String, SinkOf<S>)> = {
             let nodes = self.nodes.lock_safe();
             match nodes.get(key).filter(|n| n.runs(me)) {
                 Some(n) => n
@@ -239,7 +304,7 @@ impl SamplerRegistry {
         alive
     }
 
-    /// Задача `me` остановилась сама (отказ во входе): узел без задачи, подписчикам — `Stopped`, их сессии
+    /// Задача `me` остановилась сама (отказ во входе): узел без задачи, подписчикам — `stopped`, их сессии
     /// закончены. Буфер остаётся до закрытия подключения.
     fn finished(&self, key: &Key, me: Id) {
         let subscribers = {
@@ -255,15 +320,15 @@ impl SamplerRegistry {
         self.stop_subscribers(subscribers);
     }
 
-    fn stop_subscribers(&self, subscribers: HashMap<String, Arc<dyn SamplerSink>>) {
+    fn stop_subscribers(&self, subscribers: HashMap<String, SinkOf<S>>) {
         for (id, sink) in subscribers {
-            sink.send(SamplerEvent::Stopped);
+            sink.send(S::stopped_event());
             self.sessions.forget(&id);
         }
     }
 
-    /// Узлы удалены из реестра: задачи прерываются, подписчикам — `Stopped`.
-    fn stop_nodes(&self, gone: Vec<Node>) {
+    /// Узлы удалены из реестра: задачи прерываются, подписчикам — `stopped`.
+    fn stop_nodes(&self, gone: Vec<Node<S>>) {
         for n in gone {
             if let Some(t) = n.task {
                 t.abort();
@@ -274,11 +339,11 @@ impl SamplerRegistry {
 }
 
 /// Закрытие подключения и исчезновение участника: задачи прерываются, буферы удаляются, подписчикам —
-/// `Stopped`. Регистрируется в `Runtimes` раньше реестра сессий: иначе остановка сессий успела бы отписать
-/// вкладки, и `Stopped` никто бы не получил.
-impl CloseListener for SamplerRegistry {
+/// `stopped`. Регистрируется в `Runtimes` раньше реестра сессий: иначе остановка сессий успела бы отписать
+/// вкладки, и `stopped` никто бы не получил.
+impl<S: Sampling> CloseListener for SamplerRegistry<S> {
     fn connection_closed(&self, connection_id: &str) {
-        let gone: Vec<Node> = {
+        let gone: Vec<Node<S>> = {
             let mut nodes = self.nodes.lock_safe();
             let keys: Vec<Key> = nodes
                 .keys()
@@ -300,11 +365,11 @@ impl CloseListener for SamplerRegistry {
 }
 
 /// Задача сэмплера узла: тик раз в `interval`, сэмпл, буфер, события подписчикам.
-async fn run(
-    weak: Weak<SamplerRegistry>,
+async fn run<S: Sampling>(
+    weak: Weak<SamplerRegistry<S>>,
     key: Key,
-    source: Arc<dyn SampleSource>,
-    buffer: Arc<Mutex<Buffer>>,
+    source: Arc<dyn SampleSource<S::Sample>>,
+    buffer: Arc<Mutex<S::Buffer>>,
     interval: Duration,
 ) {
     let me = tokio::task::id();
@@ -320,45 +385,34 @@ async fn run(
         let failed = !matches!(result, Ok(Ok(_)));
         let Some(reg) = weak.upgrade() else { return };
         let alive = match result {
-            Ok(Ok(rows)) => {
+            Ok(Ok(sample)) => {
                 failures = 0;
                 // Время сэмпла — часы приложения (уточнение 10 плана P2a): тики, промежутки и окно отчёта
                 // считаются одними часами.
                 let at_ms = crate::topology::model::now_ms();
-                let active = rows.len() as u32;
-                let waiting = rows
-                    .iter()
-                    .filter(|r| r.wait_type.as_deref() == Some("Lock"))
-                    .count() as u32;
-                let gap = buffer.lock_safe().push(at_ms, rows);
+                let events = {
+                    let mut b = buffer.lock_safe();
+                    S::push(&mut b, at_ms, sample)
+                };
                 let mut alive = true;
-                if let Some((from_ms, to_ms)) = gap {
-                    alive &= reg.broadcast(&key, me, &SamplerEvent::Gap { from_ms, to_ms });
+                for e in &events {
+                    if !alive {
+                        break;
+                    }
+                    alive = reg.broadcast(&key, me, e);
                 }
                 alive
-                    && reg.broadcast(
-                        &key,
-                        me,
-                        &SamplerEvent::Tick {
-                            at_ms,
-                            active,
-                            waiting,
-                        },
-                    )
             }
-            Ok(Err(e)) if e.code == ErrorCode::AuthFailed => {
-                // Вход отвергнут: повтор подбирал бы пароль (LDAP, fail2ban) — сэмплер останавливается.
-                reg.broadcast(&key, me, &SamplerEvent::Error { error: e });
+            Ok(Err(e)) if S::fatal(&e) => {
+                reg.broadcast(&key, me, &S::error_event(e));
                 reg.finished(&key, me);
                 return;
             }
-            Ok(Err(e)) => reg.broadcast(&key, me, &SamplerEvent::Error { error: e }),
+            Ok(Err(e)) => reg.broadcast(&key, me, &S::error_event(e)),
             Err(_) => reg.broadcast(
                 &key,
                 me,
-                &SamplerEvent::Error {
-                    error: crate::topology::probe::no_answer(limit),
-                },
+                &S::error_event(crate::topology::probe::no_answer(limit)),
             ),
         };
         if !alive {
@@ -382,7 +436,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct Fake(Mutex<Vec<AppResult<Vec<RawSample>>>>, AtomicUsize);
-    impl SampleSource for Fake {
+    impl SampleSource<Vec<RawSample>> for Fake {
         fn sample<'a>(&'a self) -> BoxFuture<'a, AppResult<Vec<RawSample>>> {
             Box::pin(async move {
                 self.1.fetch_add(1, Ordering::SeqCst);
@@ -398,16 +452,18 @@ mod tests {
 
     #[derive(Default)]
     struct Sink(Mutex<Vec<SamplerEvent>>, std::sync::atomic::AtomicBool);
-    impl SamplerSink for Sink {
+    impl SamplerSink<SamplerEvent> for Sink {
         fn send(&self, e: SamplerEvent) -> bool {
             self.0.lock_safe().push(e);
             !self.1.load(Ordering::SeqCst)
         }
     }
 
-    fn reg() -> Arc<SamplerRegistry> {
+    fn reg() -> Arc<ActivityRegistry> {
         SamplerRegistry::new(
-            Duration::from_millis(20),
+            Activity {
+                interval: Duration::from_millis(20),
+            },
             Arc::new(SessionRegistry::default()),
         )
     }
@@ -507,7 +563,12 @@ mod tests {
     async fn closing_stops_subscribers_and_ends_their_sessions() {
         use crate::session::SessionKind;
         let sessions = Arc::new(SessionRegistry::default());
-        let r = SamplerRegistry::new(Duration::from_millis(20), sessions.clone());
+        let r = SamplerRegistry::new(
+            Activity {
+                interval: Duration::from_millis(20),
+            },
+            sessions.clone(),
+        );
         let src = Arc::new(Fake(Mutex::new(vec![Ok(vec![])]), AtomicUsize::new(0)));
         let sinks: Vec<Arc<Sink>> = (0..4).map(|_| Arc::new(Sink::default())).collect();
         for (sid, member, sink) in [
@@ -559,7 +620,12 @@ mod tests {
     async fn subscribe_with_an_older_generation_is_refused_and_leaves_the_node() {
         use crate::session::SessionKind;
         let sessions = Arc::new(SessionRegistry::default());
-        let r = SamplerRegistry::new(Duration::from_millis(20), sessions.clone());
+        let r = SamplerRegistry::new(
+            Activity {
+                interval: Duration::from_millis(20),
+            },
+            sessions.clone(),
+        );
         let src = Arc::new(Fake(Mutex::new(vec![Ok(vec![])]), AtomicUsize::new(0)));
         let (fresh, late) = (Arc::new(Sink::default()), Arc::new(Sink::default()));
         for sid in ["new", "late"] {
@@ -610,7 +676,7 @@ mod tests {
         overlaps: AtomicUsize,
         calls: AtomicUsize,
     }
-    impl SampleSource for Slow {
+    impl SampleSource<Vec<RawSample>> for Slow {
         fn sample<'a>(&'a self) -> BoxFuture<'a, AppResult<Vec<RawSample>>> {
             Box::pin(async move {
                 self.calls.fetch_add(1, Ordering::SeqCst);
@@ -629,7 +695,12 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn slow_link_sample_within_the_source_limit_is_not_cut_and_ticks_never_overlap() {
-        let r = SamplerRegistry::new(Duration::from_secs(1), Arc::new(SessionRegistry::default()));
+        let r = SamplerRegistry::new(
+            Activity {
+                interval: Duration::from_secs(1),
+            },
+            Arc::new(SessionRegistry::default()),
+        );
         let src = Arc::new(Slow {
             limit: Duration::from_secs(25),
             takes: Duration::from_secs(8),
@@ -665,7 +736,12 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn silent_source_is_cut_by_the_outer_guard_past_its_limit() {
-        let r = SamplerRegistry::new(Duration::from_secs(1), Arc::new(SessionRegistry::default()));
+        let r = SamplerRegistry::new(
+            Activity {
+                interval: Duration::from_secs(1),
+            },
+            Arc::new(SessionRegistry::default()),
+        );
         let src = Arc::new(Slow {
             limit: Duration::from_secs(3),
             takes: Duration::from_secs(60),

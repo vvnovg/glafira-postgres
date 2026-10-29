@@ -16,7 +16,7 @@ use pg_advisor::ash::WaitClass;
 
 #[derive(Default)]
 struct Events(Mutex<Vec<SamplerEvent>>);
-impl SamplerSink for Events {
+impl SamplerSink<SamplerEvent> for Events {
     fn send(&self, e: SamplerEvent) -> bool {
         self.0.lock().unwrap().push(e);
         true
