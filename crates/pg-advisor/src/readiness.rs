@@ -37,6 +37,15 @@ pub struct ReadinessFacts {
     /// Участник → есть ли `pg_stat_statements` в `shared_preload_libraries` (только доступные).
     pub preload_by_member: Vec<(String, bool)>,
     pub pgss_installed: bool,
+    /// `pg_extension.extversion` расширения (P3): колонки топа запросов зависят от неё.
+    #[serde(default)]
+    pub pgss_version: Option<String>,
+    /// `pg_stat_statements.track_planning`; `None` — настройка не видна (библиотека не загружена).
+    #[serde(default)]
+    pub pgss_track_planning: Option<String>,
+    /// Член `pg_read_all_data` (14+): EXPLAIN запросов приложения читает его таблицы.
+    #[serde(default)]
+    pub read_all_data: bool,
     pub compute_query_id: Option<String>,
     pub track_io_timing: String,
     pub track_activity_query_size: i64,
@@ -218,6 +227,33 @@ pub fn evaluate(f: &ReadinessFacts) -> Vec<ReadinessItem> {
         )
     });
 
+    // Планирование считается только при `track_planning = on`; без расширения настройки нет — пункт не нужен.
+    if f.pgss_installed {
+        out.push(if f.pgss_track_planning.as_deref() == Some("on") {
+            item("pgssTrackPlanning", Status::Ok, &[], None)
+        } else {
+            item(
+                "pgssTrackPlanning",
+                Status::Warn,
+                &[],
+                Some("pg_stat_statements.track_planning = on".into()),
+            )
+        });
+    }
+    // EXPLAIN запроса приложения читает его таблицы: нужна роль `pg_read_all_data` (14+) или права на таблицы.
+    out.push(if f.is_superuser || f.read_all_data {
+        item("readAllData", Status::Ok, &[], None)
+    } else if f.server_version_num >= 140_000 {
+        item("readAllData", Status::Warn, &[], grant("pg_read_all_data"))
+    } else {
+        item(
+            "readAllData",
+            Status::Warn,
+            &[("reason", "version".into())],
+            None,
+        )
+    });
+
     for name in OPTIONAL_EXTENSIONS {
         let fact = f.extensions.iter().find(|e| e.name == name);
         out.push(match fact {
@@ -258,9 +294,13 @@ mod tests {
                 "pg_monitor".into(),
                 "pg_signal_backend".into(),
                 "pg_maintain".into(),
+                "pg_read_all_data".into(),
             ],
             preload_by_member: vec![("a".into(), true), ("b".into(), true)],
             pgss_installed: true,
+            pgss_version: Some("1.11".into()),
+            pgss_track_planning: Some("on".into()),
+            read_all_data: true,
             compute_query_id: Some("auto".into()),
             track_io_timing: "on".into(),
             track_activity_query_size: 4096,
@@ -293,7 +333,7 @@ mod tests {
     #[test]
     fn healthy_setup_is_ok() {
         let items = evaluate(&facts());
-        let ids: Vec<&str> = items.iter().map(|i| i.id).take(9).collect();
+        let ids: Vec<&str> = items.iter().map(|i| i.id).take(11).collect();
         assert_eq!(
             ids,
             [
@@ -305,14 +345,16 @@ mod tests {
                 "pgssInstalled",
                 "computeQueryId",
                 "trackIoTiming",
-                "trackActivityQuerySize"
+                "trackActivityQuerySize",
+                "pgssTrackPlanning",
+                "readAllData"
             ]
         );
         assert!(
-            items[..9].iter().all(|i| i.status == Status::Ok),
+            items[..11].iter().all(|i| i.status == Status::Ok),
             "{items:?}"
         );
-        assert_eq!(items.len(), 9 + OPTIONAL_EXTENSIONS.len());
+        assert_eq!(items.len(), 11 + OPTIONAL_EXTENSIONS.len());
         assert_eq!(ext(&items, "hypopg").status, Status::Ok);
         assert_eq!(ext(&items, "hypopg").params["version"], "1.4.1");
         let pst = ext(&items, "pgstattuple");
@@ -441,6 +483,48 @@ mod tests {
         let q = get(&items, "trackActivityQuerySize");
         assert_eq!(q.status, Status::Warn);
         assert_eq!(q.params["value"], "1024");
+    }
+
+    #[test]
+    fn track_planning_item_follows_the_setting_and_needs_pgss() {
+        let items = evaluate(&facts());
+        assert_eq!(get(&items, "pgssTrackPlanning").status, Status::Ok);
+        let mut f = facts();
+        f.pgss_track_planning = Some("off".into());
+        let i = get(&evaluate(&f), "pgssTrackPlanning").clone();
+        assert_eq!(
+            (i.status, i.fix.as_deref()),
+            (Status::Warn, Some("pg_stat_statements.track_planning = on"))
+        );
+        f.pgss_installed = false;
+        f.pgss_track_planning = None;
+        assert!(
+            evaluate(&f).iter().all(|i| i.id != "pgssTrackPlanning"),
+            "без pgss пункт не показывается"
+        );
+    }
+
+    #[test]
+    fn read_all_data_item_depends_on_version_and_membership() {
+        assert_eq!(get(&evaluate(&facts()), "readAllData").status, Status::Ok);
+        let mut f = facts();
+        f.read_all_data = false;
+        let i = get(&evaluate(&f), "readAllData").clone();
+        assert_eq!(
+            (i.status, i.fix.as_deref()),
+            (
+                Status::Warn,
+                Some("GRANT pg_read_all_data TO \"glafira_diag\";")
+            )
+        );
+        f.server_version_num = 130_000;
+        let i = get(&evaluate(&f), "readAllData").clone();
+        assert_eq!(
+            (i.status, i.params.get("reason").map(String::as_str), i.fix),
+            (Status::Warn, Some("version"), None)
+        );
+        f.is_superuser = true;
+        assert_eq!(get(&evaluate(&f), "readAllData").status, Status::Ok);
     }
 
     #[test]

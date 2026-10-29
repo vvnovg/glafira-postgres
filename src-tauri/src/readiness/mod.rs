@@ -60,10 +60,10 @@ pub async fn collect_facts(
         .map_err(pg)?;
     let (server_version_num, user, is_superuser, has_replication): (i32, String, bool, bool) =
         (r.get(0), r.get(1), r.get(2), r.get(3));
-    let member_of = c
+    let member_of: Vec<String> = c
         .query(
             "SELECT b.rolname::text FROM pg_roles b \
-             WHERE b.rolname IN ('pg_monitor', 'pg_signal_backend', 'pg_maintain', 'pg_read_all_stats') \
+             WHERE b.rolname IN ('pg_monitor', 'pg_signal_backend', 'pg_maintain', 'pg_read_all_stats', 'pg_read_all_data') \
              AND pg_has_role(current_user, b.oid, 'USAGE')",
             &[],
         )
@@ -72,21 +72,27 @@ pub async fn collect_facts(
         .iter()
         .map(|r| r.get(0))
         .collect();
-    let pgss_installed: bool = c
-        .query_one(
-            "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements')",
+    // На PostgreSQL 13 роли нет — `false`: EXPLAIN запросов приложения зависит от прав на их таблицы.
+    let read_all_data = member_of.iter().any(|r| r == "pg_read_all_data");
+    // Версия расширения (не сервера) определяет колонки топа запросов (P3); `None` — расширения нет.
+    let pgss_version: Option<String> = c
+        .query_opt(
+            "SELECT extversion::text FROM pg_extension WHERE extname = 'pg_stat_statements'",
             &[],
         )
         .await
         .map_err(pg)?
-        .get(0);
+        .map(|r| r.get(0));
+    let pgss_installed = pgss_version.is_some();
     let mut compute_query_id = None;
+    let mut pgss_track_planning = None;
     let mut track_io_timing = String::from("off");
     let mut track_activity_query_size = 1024;
     for r in c
         .query(
             "SELECT name::text, setting FROM pg_settings \
-             WHERE name IN ('compute_query_id', 'track_io_timing', 'track_activity_query_size')",
+             WHERE name IN ('compute_query_id', 'track_io_timing', 'track_activity_query_size', \
+             'pg_stat_statements.track_planning')",
             &[],
         )
         .await
@@ -99,6 +105,7 @@ pub async fn collect_facts(
         match name.as_str() {
             "compute_query_id" => compute_query_id = Some(setting),
             "track_io_timing" => track_io_timing = setting,
+            "pg_stat_statements.track_planning" => pgss_track_planning = Some(setting),
             // В pg_settings — байты.
             _ => track_activity_query_size = setting.parse().unwrap_or(1024),
         }
@@ -128,6 +135,9 @@ pub async fn collect_facts(
         member_of,
         preload_by_member,
         pgss_installed,
+        pgss_version,
+        pgss_track_planning,
+        read_all_data,
         compute_query_id,
         track_io_timing,
         track_activity_query_size,

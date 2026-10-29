@@ -76,6 +76,7 @@
     "overview.head",
     "overview.scope",
     "readiness.computeQueryId.title",
+    "readiness.pgssTrackPlanning.title",
     "readiness.trackActivityQuerySize.title",
     "readiness.trackIoTiming.title",
     "sidebar.timeline",

@@ -675,6 +675,19 @@
       "warn": "Сейчас {{value}} байт — длинные запросы обрезаются",
       "affects": "Тексты текущих запросов будут неполными"
     },
+    "pgssTrackPlanning": {
+      "title": "pg_stat_statements.track_planning",
+      "ok": "Включён",
+      "warn": "Выключен",
+      "affects": "Колонки планирования в топе запросов пустые; подсказка «планирование дольше выполнения» молчит"
+    },
+    "readAllData": {
+      "title": "Чтение таблиц приложения (EXPLAIN)",
+      "ok": "Разрешено",
+      "warn": "Роль не входит в pg_read_all_data",
+      "version": "PostgreSQL 13: выдайте SELECT на таблицы запросов, которые нужно объяснять",
+      "affects": "EXPLAIN запросов приложения падает с «permission denied»"
+    },
     "extension": {
       "title": "Расширение {{name}}",
       "ok": "Установлено, версия {{version}}",

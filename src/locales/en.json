@@ -659,6 +659,19 @@
       "warn": "Currently {{value}} bytes: long queries are truncated",
       "affects": "Texts of current queries will be incomplete"
     },
+    "pgssTrackPlanning": {
+      "title": "pg_stat_statements.track_planning",
+      "ok": "On",
+      "warn": "Off",
+      "affects": "Planning time columns in the query top stay empty; the “planning heavier than execution” hint is silent"
+    },
+    "readAllData": {
+      "title": "Reading application tables (EXPLAIN)",
+      "ok": "Allowed",
+      "warn": "The role is not a member of pg_read_all_data",
+      "version": "PostgreSQL 13: grant SELECT on the tables of the queries you want to explain",
+      "affects": "EXPLAIN of application queries fails with “permission denied”"
+    },
     "extension": {
       "title": "Extension {{name}}",
       "ok": "Installed, version {{version}}",

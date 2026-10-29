@@ -172,6 +172,8 @@ describe("TestPanel", () => {
       computeQueryId: ["ok", "warn", "missing", "version"],
       trackIoTiming: ["ok", "warn"],
       trackActivityQuerySize: ["ok", "warn"],
+      pgssTrackPlanning: ["ok", "warn"],
+      readAllData: ["ok", "warn", "version"],
       extension: ["ok", "warn", "missing"],
     };
     const missing: string[] = [];
