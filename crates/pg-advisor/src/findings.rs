@@ -34,6 +34,12 @@ pub enum FindingTarget {
     Database {
         name: String,
     },
+    /// Запрос pgss: `query_id` десятичной строкой и база (личность запроса — `queryid` в пределах базы).
+    #[serde(rename_all = "camelCase")]
+    Query {
+        query_id: String,
+        database: String,
+    },
 }
 
 /// Куда ведёт кнопка находки. `tool` — id вкладки инструмента во фронтенде (`sessions`, `idleTx`, `locks`…);
@@ -47,6 +53,13 @@ pub enum FindingLink {
     },
     Action {
         action: SessionActionLink,
+        member: Option<String>,
+    },
+    /// Карточка запроса (вкладка `query`); без узла интерфейс кнопки не даёт.
+    #[serde(rename_all = "camelCase")]
+    OpenQuery {
+        query_id: String,
+        database: String,
         member: Option<String>,
     },
 }
@@ -114,6 +127,15 @@ impl Finding {
         });
         self
     }
+
+    pub fn link_query(mut self, query_id: &str, database: &str, member: Option<&str>) -> Self {
+        self.links.push(FindingLink::OpenQuery {
+            query_id: query_id.to_string(),
+            database: database.to_string(),
+            member: member.map(str::to_string),
+        });
+        self
+    }
 }
 
 /// Строгость по двум порогам: `value ≥ crit` — critical, `value ≥ warn` — warning, иначе нет находки.
@@ -173,6 +195,24 @@ pub mod thresholds {
     pub const CACHE_HIT_LOW_PCT: f64 = 90.0;
     /// Cache hit оценивается, если за интервал прочитано не меньше блоков.
     pub const CACHE_HIT_MIN_READS: i64 = 1000;
+    /// Топ запросов (спец. P3 §6): N+1 — доля вызовов, среднее (мс) и минимум вызовов.
+    pub const QUERY_N1_CALLS_SHARE: f64 = 0.20;
+    pub const QUERY_N1_MEAN_MS: f64 = 1.0;
+    pub const QUERY_N1_MIN_CALLS: i64 = 1000;
+    /// Нестабильный план: stddev во столько раз больше среднего; среднее не меньше (мс); минимум вызовов.
+    pub const QUERY_UNSTABLE_STDDEV_RATIO: f64 = 2.0;
+    pub const QUERY_UNSTABLE_MIN_MEAN_MS: f64 = 1.0;
+    pub const QUERY_UNSTABLE_MIN_CALLS: i64 = 50;
+    /// Низкий hit ratio: прочитано не меньше блоков и доля попаданий ниже.
+    pub const QUERY_HIT_MIN_READ_BLOCKS: i64 = 10_000;
+    pub const QUERY_HIT_RATIO_LOW: f64 = 0.90;
+    /// Temp-файлы: записано блоков на вызов (128 блоков — 1 МБ); минимум вызовов.
+    pub const QUERY_TEMP_BLOCKS_PER_CALL: i64 = 128;
+    pub const QUERY_TEMP_MIN_CALLS: i64 = 10;
+    /// Планирование дольше выполнения: минимум планирований.
+    pub const QUERY_PLANNING_MIN_PLANS: i64 = 100;
+    /// Блок PostgreSQL, байты.
+    pub const BLOCK_BYTES: i64 = 8192;
 }
 
 #[cfg(test)]
@@ -224,6 +264,25 @@ mod tests {
             json!({"kind": "slot", "name": "s"})
         );
         assert_eq!(serde_json::to_value(&slot).unwrap()["member"], json!(null));
+    }
+
+    #[test]
+    fn query_target_and_link_serialize_with_string_ids() {
+        let f = Finding::new("query_temp", Severity::Warning)
+            .target(FindingTarget::Query {
+                query_id: "123".into(),
+                database: "perf".into(),
+            })
+            .link_query("123", "perf", Some("pg-1"));
+        let v = serde_json::to_value(&f).unwrap();
+        assert_eq!(
+            v["target"],
+            json!({"kind": "query", "queryId": "123", "database": "perf"})
+        );
+        assert_eq!(
+            v["links"][0],
+            json!({"kind": "openQuery", "queryId": "123", "database": "perf", "member": "pg-1"})
+        );
     }
 
     #[test]

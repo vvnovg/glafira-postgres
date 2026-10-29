@@ -4,6 +4,8 @@ pub mod ash;
 pub mod failover;
 pub mod findings;
 pub mod locktree;
+pub mod pgss;
+pub mod queries;
 pub mod rates;
 pub mod readiness;
 pub mod rules;
