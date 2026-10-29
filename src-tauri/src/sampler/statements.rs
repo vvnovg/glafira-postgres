@@ -2,12 +2,13 @@
 //! пула `Sampler`, буфер дельт на 60 мин; живёт, пока подписаны инструмент «Запросы» или карточки запроса узла.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 use pg_advisor::queries::{Counters, Cumulative, QueryKey};
 use serde::Serialize;
+use tokio_postgres::Client;
 
 use crate::commands::catalog::{catalog_limit, on_catalog_node_split};
 use crate::conn::pool::PoolPurpose;
@@ -19,6 +20,7 @@ use crate::sampler::registry::{
 };
 use crate::session::SessionKind;
 use crate::state::AppState;
+use crate::sync::MutexExt;
 
 pub const INTERVAL: Duration = Duration::from_secs(60);
 /// Записей `(ключ, дельта)` на узел — порядка 50 МБ.
@@ -159,8 +161,12 @@ impl StatementsBuffer {
                 deltas.push((row.key, delta));
             }
         }
+        // Вытеснений за тик: рост `dealloc`; на тике сброса `dealloc` обнулён вместе со статистикой, и новая база
+        // даёт дельту, равную накопительному значению, — то же правило, что у счётчиков.
         let dealloc_delta = match (self.info.and_then(|i| i.dealloc), s.snapshot.info.dealloc) {
-            (Some(prev), Some(now)) if !baseline && !reset && now > prev => now - prev,
+            _ if baseline => 0,
+            (_, Some(now)) if reset => now,
+            (Some(prev), Some(now)) if now > prev => now - prev,
             _ => 0,
         };
         self.latest = s.snapshot.rows.into_iter().map(|r| (r.key, r)).collect();
@@ -370,12 +376,14 @@ pub fn pgss_too_old(version: &str) -> AppError {
     )
 }
 
-/// Сэмпл pgss узла через пул `Sampler`: шапка, расширение (ищется один раз), строки без текстов.
+/// Сэмпл pgss узла через пул `Sampler`: шапка, расширение (кеш прошлого сэмпла; при ошибке чтения ищется заново),
+/// строки без текстов.
 pub struct PoolStatementsSource {
     st: AppState,
     connection_id: String,
     member: String,
-    pgss: OnceLock<PgssInstalled>,
+    /// Расширение, найденное раньше; блокировка короткая и никогда не держится через `await`.
+    pgss: Arc<Mutex<Option<PgssInstalled>>>,
 }
 
 impl PoolStatementsSource {
@@ -384,7 +392,7 @@ impl PoolStatementsSource {
             st,
             connection_id: connection_id.to_string(),
             member: member.to_string(),
-            pgss: OnceLock::new(),
+            pgss: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -401,8 +409,8 @@ impl PoolStatementsSource {
 impl SampleSource<StatementsSample> for PoolStatementsSource {
     fn sample<'a>(&'a self) -> BoxFuture<'a, AppResult<StatementsSample>> {
         Box::pin(async move {
-            let known = self.pgss.get().cloned();
-            let (sample, pgss) = on_catalog_node_split(
+            let cache = Arc::clone(&self.pgss);
+            on_catalog_node_split(
                 self.acquire_limit(),
                 SAMPLE_TIMEOUT,
                 self.st.client_with(
@@ -414,35 +422,91 @@ impl SampleSource<StatementsSample> for PoolStatementsSource {
                 move |c| {
                     Box::pin(async move {
                         let head = head(c).await?;
-                        let pgss = match known {
-                            Some(p) => p,
-                            None => match detect(c).await? {
-                                Detect::Installed(p) => p,
-                                Detect::Missing => return Err(pgss_missing()),
-                                Detect::TooOld(v) => return Err(pgss_too_old(&v)),
-                            },
-                        };
-                        let snapshot = read_cumulative(c, &pgss).await?;
-                        Ok((
-                            StatementsSample {
-                                head,
-                                pgss: pgss.clone(),
-                                snapshot,
-                            },
+                        let (pgss, snapshot) = read_known_or_detect(c, &cache).await?;
+                        Ok(StatementsSample {
+                            head,
                             pgss,
-                        ))
+                            snapshot,
+                        })
                     })
                 },
             )
-            .await?;
-            let _ = self.pgss.set(pgss);
-            Ok(sample)
+            .await
         })
     }
 
     /// Получение соединения плюс запрос: задача сэмплера не обрывает источник раньше его собственных пределов.
     fn limit(&self) -> Duration {
         self.acquire_limit() + SAMPLE_TIMEOUT
+    }
+}
+
+/// Что делать после ошибки чтения при закешированном расширении.
+#[derive(Debug, PartialEq)]
+pub enum ReadRetry {
+    /// Остановить сэмпл этой ошибкой: расширение исчезло или слишком старое (`FEATURE_UNAVAILABLE` — для
+    /// сэмплера фатально) либо сбой временный (исходная ошибка, дальше — паузы реестра).
+    Fail(AppError),
+    /// Схема или версия расширения изменились: один повтор чтения с новыми возможностями.
+    Retry(PgssInstalled),
+}
+
+/// Расширение из результата поиска или ошибка `FEATURE_UNAVAILABLE`, если его нет или оно старше 1.8.
+fn require_installed(found: Detect) -> AppResult<PgssInstalled> {
+    match found {
+        Detect::Installed(p) => Ok(p),
+        Detect::Missing => Err(pgss_missing()),
+        Detect::TooOld(v) => Err(pgss_too_old(&v)),
+    }
+}
+
+/// Решение после ошибки `original` чтения с закешированным `known`, когда расширение найдено заново
+/// (`redetected`): исчезло или устарело — ошибка `FEATURE_UNAVAILABLE`; установлено иначе (другая схема или
+/// версия, например `ALTER EXTENSION … UPDATE`) — повтор с новыми возможностями; как прежде — ошибка
+/// временная, возвращается исходная.
+pub fn after_read_error(
+    known: &PgssInstalled,
+    redetected: Detect,
+    original: AppError,
+) -> ReadRetry {
+    match require_installed(redetected) {
+        Ok(p) if p != *known => ReadRetry::Retry(p),
+        Ok(_) => ReadRetry::Fail(original),
+        Err(gone) => ReadRetry::Fail(gone),
+    }
+}
+
+/// Чтение строк pgss: расширение берётся из кеша источника; нет кеша — ищется. Ошибка чтения при кеше — повторный
+/// поиск на том же соединении (`after_read_error`): «расширение исчезло» останавливает сэмплер, а не повторяется.
+async fn read_known_or_detect(
+    c: &Client,
+    cache: &Mutex<Option<PgssInstalled>>,
+) -> AppResult<(PgssInstalled, Snapshot)> {
+    // Копия под короткой блокировкой: защёлка не доживает до `await`.
+    let known = cache.lock_safe().clone();
+    let Some(known) = known else {
+        let found = require_installed(detect(c).await?)?;
+        *cache.lock_safe() = Some(found.clone());
+        let snapshot = read_cumulative(c, &found).await?;
+        return Ok((found, snapshot));
+    };
+    match read_cumulative(c, &known).await {
+        Ok(snapshot) => Ok((known, snapshot)),
+        Err(original) => {
+            // Сбой самого поиска — тот же временный сбой: возвращается исходная ошибка чтения.
+            let step = match detect(c).await {
+                Ok(redetected) => after_read_error(&known, redetected, original),
+                Err(_) => ReadRetry::Fail(original),
+            };
+            match step {
+                ReadRetry::Fail(error) => Err(error),
+                ReadRetry::Retry(found) => {
+                    *cache.lock_safe() = Some(found.clone());
+                    let snapshot = read_cumulative(c, &found).await?;
+                    Ok((found, snapshot))
+                }
+            }
+        }
     }
 }
 
@@ -578,8 +642,9 @@ mod tests {
             (w.sums[&key(1)].calls, w.sums[&key(2)].calls, w.dealloc_grew),
             (3, 1, true)
         );
-        // Сброс статистики: новая база для всех ключей, прошлые тики остаются.
-        let e = b.push(3 * M, sample(vec![row(1, 2, 20.0), row(2, 7, 70.0)], 2, 0));
+        // Сброс статистики: новая база для всех ключей, прошлые тики остаются. `dealloc` обнулён сбросом и снова
+        // вырос до 2: дельта тика сброса — накопительное значение 2, а не разность со старым (1).
+        let e = b.push(3 * M, sample(vec![row(1, 2, 20.0), row(2, 7, 70.0)], 2, 2));
         assert_eq!(ticks(&e), [(2, 2)]);
         let w = b.window(300).unwrap();
         assert_eq!(
@@ -590,13 +655,23 @@ mod tests {
             w.dealloc_grew,
             "рост dealloc во втором тике остаётся в окне"
         );
-        // Окно из одного последнего тика: после сброса dealloc (1 → 0) не сравнивается со старым значением.
+        // Окно из одного последнего тика (рост в прошлом тике сюда не входит): вытеснения после сброса видны.
+        let last = b.window(60).unwrap();
+        assert_eq!(last.ticks, 1);
+        assert!(
+            last.dealloc_grew,
+            "dealloc на тике сброса — вытеснения с момента сброса"
+        );
+        assert_eq!(b.ticks.back().map(|t| t.dealloc_delta), Some(2));
+        // Сброс без вытеснений: dealloc = 0, окно из одного тика роста не показывает.
+        b.push(4 * M, sample(vec![row(1, 3, 30.0), row(2, 8, 80.0)], 3, 0));
         let last = b.window(60).unwrap();
         assert_eq!(last.ticks, 1);
         assert!(
             !last.dealloc_grew,
-            "dealloc после сброса не сравнивается со старым"
+            "сброс с dealloc = 0 роста вытеснений не даёт"
         );
+        assert_eq!(b.ticks.back().map(|t| t.dealloc_delta), Some(0));
     }
 
     #[test]
@@ -688,6 +763,65 @@ mod tests {
             b.text(&key(MAX_TEXTS as i64 + 1)).is_some(),
             "новые тексты записаны"
         );
+    }
+
+    fn installed(version: &str, schema: &str) -> PgssInstalled {
+        PgssInstalled {
+            schema: schema.into(),
+            version: version.into(),
+            caps: PgssCaps::from_version(version).unwrap(),
+        }
+    }
+
+    /// Обычная ошибка PostgreSQL после `DROP EXTENSION`: `undefined_function` (42883), код — не `FEATURE_UNAVAILABLE`.
+    fn read_failure() -> AppError {
+        app_err!(
+            ErrorCode::Internal,
+            "errors.pg.serverError",
+            "PostgreSQL error {{code}}",
+            code = "42883"
+        )
+    }
+
+    #[test]
+    fn read_error_decides_between_stop_retry_and_backoff() {
+        let known = installed("1.11", "public");
+        // Расширение удалено: FEATURE_UNAVAILABLE, для сэмплера фатально — остановка, а не повторы.
+        let ReadRetry::Fail(gone) = after_read_error(&known, Detect::Missing, read_failure())
+        else {
+            panic!("исчезнувшее расширение — не повтор");
+        };
+        assert_eq!(gone.code, ErrorCode::FeatureUnavailable);
+        assert_eq!(gone, pgss_missing());
+        assert!(Statements::fatal(&gone));
+        // Версию откатили ниже 1.8: тоже FEATURE_UNAVAILABLE, с версией в параметрах.
+        let ReadRetry::Fail(old) =
+            after_read_error(&known, Detect::TooOld("1.7".into()), read_failure())
+        else {
+            panic!("слишком старое расширение — не повтор");
+        };
+        assert_eq!(old.code, ErrorCode::FeatureUnavailable);
+        assert_eq!(old, pgss_too_old("1.7"));
+        assert!(Statements::fatal(&old));
+        // `ALTER EXTENSION … UPDATE` или другая схема: один повтор с новыми возможностями.
+        let updated = installed("1.12", "public");
+        assert_eq!(
+            after_read_error(&known, Detect::Installed(updated.clone()), read_failure()),
+            ReadRetry::Retry(updated)
+        );
+        let moved = installed("1.11", "ext");
+        assert_eq!(
+            after_read_error(&known, Detect::Installed(moved.clone()), read_failure()),
+            ReadRetry::Retry(moved)
+        );
+        // Расширение то же: сбой временный — исходная ошибка, не фатальная; дальше паузы реестра.
+        let ReadRetry::Fail(same) =
+            after_read_error(&known, Detect::Installed(known.clone()), read_failure())
+        else {
+            panic!("то же расширение — не повтор");
+        };
+        assert_eq!(same, read_failure());
+        assert!(!Statements::fatal(&same));
     }
 
     #[test]
