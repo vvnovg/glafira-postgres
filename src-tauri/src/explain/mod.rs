@@ -1,6 +1,7 @@
 //! EXPLAIN и EXPLAIN ANALYZE (спец. P3 §8): запрос, результат, проверки до сервера. Ход — `run`, параметры —
 //! `params`, ярус — `tier`, данные для LLM — `llm`.
 
+pub mod llm;
 pub mod params;
 pub mod run;
 pub mod tier;

@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use pg_advisor::plan::PlanTree;
 use pg_advisor::queries::QueryKey;
 use tauri::State;
 use tauri::ipc::Channel;
@@ -9,6 +10,7 @@ use tauri::ipc::Channel;
 use crate::diag::queries::QueryText;
 use crate::diag::query_detail::{self, QueryDetail};
 use crate::error::AppResult;
+use crate::explain::llm::{self, LlmBundle, LlmSource};
 use crate::sampler::registry::SamplerSink;
 use crate::sampler::statements::StatementsEvent;
 use crate::state::AppState;
@@ -59,4 +61,17 @@ pub async fn query_detail(
 ) -> AppResult<QueryDetail> {
     let qid = query_detail::parse_query_id(&query_id)?;
     query_detail::detail(&state, &id, &member, &database, qid).await
+}
+
+/// Данные для «Скопировать для LLM»: markdown собирает фронтенд.
+#[tauri::command]
+pub async fn query_llm_bundle(
+    state: State<'_, AppState>,
+    id: String,
+    member: String,
+    database: String,
+    source: LlmSource,
+    plan: Option<PlanTree>,
+) -> AppResult<LlmBundle> {
+    llm::bundle(&state, &id, &member, &database, source, plan).await
 }

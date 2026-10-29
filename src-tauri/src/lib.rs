@@ -123,6 +123,7 @@ pub fn run() {
             commands::queries::query_texts,
             commands::queries::start_statements_sampler,
             commands::queries::query_detail,
+            commands::queries::query_llm_bundle,
             commands::explain::explain,
             commands::explain::parse_plan,
             commands::actions::list_actions,

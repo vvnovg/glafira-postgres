@@ -12,8 +12,12 @@ mod common;
 use glafira_pg_lib::actions::Confirmation;
 use glafira_pg_lib::actions::journal::Outcome;
 use glafira_pg_lib::conn::profile::Environment;
+use glafira_pg_lib::diag::queries::{QueriesMode, QueriesParams};
+use glafira_pg_lib::diag::{self, DiagData, DiagRequest, Tool};
 use glafira_pg_lib::error::ErrorCode;
+use glafira_pg_lib::explain::llm::{self, LlmSource};
 use glafira_pg_lib::explain::{self, ExplainRequest, Mode, Params, Tier};
+use pg_advisor::queries::QuerySort;
 
 fn req(member: &str, database: &str, sql: &str, mode: Mode, params: Params) -> ExplainRequest {
     ExplainRequest {
@@ -523,4 +527,133 @@ async fn generic_plan_is_refused_before_16_and_writes_are_refused_on_a_replica()
             .is_ok()
         );
     }
+}
+
+#[tokio::test]
+async fn llm_bundle_has_text_stats_plan_and_ddl() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st) = common::open_server_in(&perf, "perf").await;
+    let m = member_of(&st).await;
+    // Самый частый запрос pgbench — точечный выбор покупателя с $1.
+    let r = diag::run(
+        &st,
+        "it",
+        DiagRequest {
+            tool: Tool::Queries,
+            member: None,
+            window_s: None,
+            queries: Some(QueriesParams {
+                mode: QueriesMode::SinceReset,
+                sort: QuerySort::Calls,
+                limit: 50,
+                database: None,
+                toplevel_only: true,
+            }),
+        },
+    )
+    .await
+    .unwrap();
+    let DiagData::Queries(d) = &r.data else {
+        unreachable!()
+    };
+    // Самый частый на стенде — `id = $1 + $2`: с типом `unknown` у обоих параметров GENERIC_PLAN его не строит
+    // («operator is not unique»), поэтому берётся именно точечный выбор с одним `$1`.
+    let keys: Vec<_> = d
+        .rows
+        .iter()
+        .filter(|x| x.rolname.as_deref() == Some("postgres"))
+        .map(|x| x.key)
+        .collect();
+    let qid = diag::queries::texts(&st, "it", Some(&m), keys)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|t| t.text.as_deref() == Some("SELECT * FROM shop.customers WHERE id = $1"))
+        .map(|t| t.key.query_id)
+        .expect("точечный выбор покупателя в строках pgbench");
+    let b = llm::bundle(
+        &st,
+        "it",
+        &m,
+        "perf",
+        LlmSource::Query { query_id: qid },
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(b.text.as_deref().is_some_and(|t| !t.is_empty()));
+    assert!(b.stats.as_ref().is_some_and(|s| s.since_reset.is_some()));
+    assert!(
+        b.plan_text.as_deref().is_some_and(|p| p.contains("(cost=")),
+        "{:?} {:?} {:?}",
+        b.plan_text,
+        b.warnings,
+        b.text
+    );
+    assert!(
+        !b.tables.is_empty() && b.tables.iter().all(|t| t.ddl.contains("CREATE TABLE")),
+        "{:?}",
+        b.tables
+    );
+    assert!(b.server_version_num >= 170_000 && b.pgss_version.is_some());
+    // Источник — SQL консоли: статистики нет, план и таблицы есть.
+    let b = llm::bundle(
+        &st,
+        "it",
+        &m,
+        "perf",
+        LlmSource::Sql {
+            sql: "SELECT count(*) FROM shop.orders WHERE status = 'new'".into(),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(b.stats.is_none() && b.plan_text.is_some());
+    assert_eq!(
+        b.tables.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        ["orders"]
+    );
+}
+
+/// Пробный план не построился из-за самого запроса — данные без плана и предупреждение; из-за прав — ошибка.
+#[tokio::test]
+async fn llm_bundle_softens_query_plan_failures_but_not_privilege_errors() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st) = common::open_server_in(&perf, "perf").await;
+    let m = member_of(&st).await;
+    // `unknown + unknown`: GENERIC_PLAN не строится, сервер отвергает запрос (InvalidInput) — предупреждение.
+    let b = llm::bundle(
+        &st,
+        "it",
+        &m,
+        "perf",
+        LlmSource::Sql {
+            sql: "SELECT * FROM shop.customers WHERE id = $1 + $2".into(),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(b.warnings, ["planFailed"]);
+    assert!(b.plan_text.is_none() && b.tables.is_empty() && b.tables_omitted == 0);
+    assert!(b.text.is_some());
+    // Запись у `glafira_diag` без прав на таблицу: NOT_AUTHORIZED доходит до вызывающего, а не прячется в предупреждении.
+    let e = llm::bundle(
+        &st,
+        "it",
+        &m,
+        "perf",
+        LlmSource::Sql {
+            sql: "UPDATE shop.balances SET balance = balance WHERE customer_id = 1".into(),
+        },
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotAuthorized, "{e:?}");
 }

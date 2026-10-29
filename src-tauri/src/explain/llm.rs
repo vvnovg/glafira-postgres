@@ -1,0 +1,387 @@
+//! Данные для «Скопировать для LLM» (спец. P3 §7.4): среда, текст, статистика, текст плана и DDL таблиц.
+//! Markdown с заголовками на языке интерфейса собирает фронтенд (`src/lib/llmMarkdown.ts`).
+
+use pg_advisor::plan::text_out::to_text;
+use pg_advisor::plan::{PlanTree, RelationRef, relations};
+use pg_advisor::queries::QueryStat;
+use serde::{Deserialize, Serialize};
+
+use crate::actions::Confirmation;
+use crate::catalog::table;
+use crate::commands::catalog::{catalog_limit, on_catalog_node_within};
+use crate::diag::caps::V16;
+use crate::diag::query_detail;
+use crate::error::{AppResult, ErrorCode};
+use crate::explain::params::count_params;
+use crate::explain::{ExplainRequest, Mode, Params, run};
+use crate::state::AppState;
+
+/// Таблиц плана в данных не больше: остальные считаются в `tables_omitted`.
+pub const MAX_TABLES: usize = 10;
+/// Бюджет DDL (таблицы вместе с индексами), байты.
+pub const MAX_DDL_BYTES: usize = 65_536;
+
+/// Откуда запрос: строка pgss по `queryId` или SQL консоли.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum LlmSource {
+    #[serde(rename_all = "camelCase")]
+    Query {
+        #[serde(with = "pg_advisor::serde_util::i64_string")]
+        query_id: i64,
+    },
+    Sql {
+        sql: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmTable {
+    pub schema: String,
+    pub name: String,
+    pub ddl: String,
+    pub indexes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmStats {
+    pub since_reset: Option<QueryStat>,
+    pub window_3600: Option<QueryStat>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmBundle {
+    pub server_version_num: i32,
+    pub pgss_version: Option<String>,
+    pub in_recovery: bool,
+    pub member: String,
+    pub database: String,
+    pub text: Option<String>,
+    pub text_truncated: bool,
+    pub stats: Option<LlmStats>,
+    pub plan_text: Option<String>,
+    pub tables: Vec<LlmTable>,
+    pub tables_omitted: usize,
+    /// Ключи интерфейса: `paramsNeeded` (PG < 16, текст с `$N` без значений — плана нет), `queryGone`, `planFailed`.
+    pub warnings: Vec<String>,
+}
+
+/// Первые `MAX_TABLES` отношений плана и сколько осталось за бортом.
+pub fn pick_tables(rels: &[RelationRef]) -> (Vec<RelationRef>, usize) {
+    let picked: Vec<RelationRef> = rels.iter().take(MAX_TABLES).cloned().collect();
+    (picked, rels.len().saturating_sub(MAX_TABLES))
+}
+
+/// Укладывает DDL в бюджет: таблицы в порядке плана, первая не влезшая и все за ней отбрасываются.
+pub fn fit_ddl(tables: Vec<LlmTable>) -> (Vec<LlmTable>, usize) {
+    let mut used = 0usize;
+    let mut kept = Vec::new();
+    let total = tables.len();
+    for t in tables {
+        let size = t.ddl.len() + t.indexes.iter().map(|i| i.len() + 1).sum::<usize>();
+        if used + size > MAX_DDL_BYTES {
+            break;
+        }
+        used += size;
+        kept.push(t);
+    }
+    let omitted = total - kept.len();
+    (kept, omitted)
+}
+
+/// Пробный план не построился из-за самого запроса или срока (сервер отверг текст, исчезла таблица, не хватило
+/// времени): данных без плана достаточно, ошибка превращается в предупреждение `planFailed`. Остальное — права, ярус,
+/// связь с узлом — это не свойство запроса, и такая ошибка уходит вызывающему как есть.
+fn plan_failure_is_soft(code: ErrorCode) -> bool {
+    matches!(
+        code,
+        ErrorCode::InvalidInput | ErrorCode::Timeout | ErrorCode::FeatureUnavailable
+    )
+}
+
+pub async fn bundle(
+    st: &AppState,
+    id: &str,
+    member: &str,
+    database: &str,
+    source: LlmSource,
+    plan: Option<PlanTree>,
+) -> AppResult<LlmBundle> {
+    let mut warnings = Vec::new();
+    let (text, text_truncated, stats, version, in_recovery, pgss_version) = match &source {
+        LlmSource::Query { query_id } => {
+            let d = query_detail::detail(st, id, member, database, *query_id).await?;
+            if d.text.is_none() {
+                warnings.push("queryGone".to_string());
+            }
+            let window_3600 = d
+                .windows
+                .iter()
+                .find(|w| w.window_s == 3600)
+                .and_then(|w| w.stat.clone());
+            (
+                d.text.clone(),
+                d.text_truncated,
+                Some(LlmStats {
+                    since_reset: d.since_reset.clone(),
+                    window_3600,
+                }),
+                d.server_version_num,
+                d.in_recovery,
+                d.pgss_version.clone(),
+            )
+        }
+        LlmSource::Sql { sql } => {
+            let target = st.runtimes.diag_target(id, Some(member), false)?;
+            let h =
+                crate::diag::on_member(st, id, &target, |c| Box::pin(crate::diag::head(c))).await?;
+            (
+                Some(sql.clone()),
+                false,
+                None,
+                h.version_num,
+                h.in_recovery,
+                None,
+            )
+        }
+    };
+    // План: переданный, иначе пробный EXPLAIN без выполнения (GENERIC_PLAN на 16+ при `$N`).
+    let plan = match (plan, &text) {
+        (Some(p), _) => Some(p),
+        (None, Some(sql)) => {
+            let n = count_params(sql);
+            let params = if n == 0 {
+                Some(Params::None)
+            } else if version >= V16 {
+                Some(Params::Generic)
+            } else {
+                warnings.push("paramsNeeded".to_string());
+                None
+            };
+            match params {
+                Some(params) => {
+                    let req = ExplainRequest {
+                        member: member.to_string(),
+                        database: database.to_string(),
+                        sql: sql.clone(),
+                        mode: Mode::Plan,
+                        params,
+                        timeout_s: crate::explain::DEFAULT_TIMEOUT_S,
+                        search_path: None,
+                        confirmation: Confirmation::default(),
+                        force_write: false,
+                    };
+                    match run::run(st, id, &req).await {
+                        Ok(r) => Some(r.plan),
+                        Err(e) if plan_failure_is_soft(e.code) => {
+                            warnings.push("planFailed".to_string());
+                            None
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                None => None,
+            }
+        }
+        (None, None) => None,
+    };
+    let (tables, tables_omitted) = match &plan {
+        Some(p) => {
+            let (picked, omitted_by_count) = pick_tables(&relations(p));
+            let (_, profile) = st.runtimes.target(id, Some(member))?;
+            let fetched: Vec<LlmTable> = on_catalog_node_within(
+                catalog_limit(&profile),
+                st.client(id, Some(member), Some(database)),
+                |c| {
+                    Box::pin(async move {
+                        let mut out = Vec::new();
+                        for r in &picked {
+                            let schema = r.schema.clone().unwrap_or_else(|| "public".to_string());
+                            match table::get(c, &schema, &r.name).await {
+                                Ok(t) => out.push(LlmTable {
+                                    schema,
+                                    name: r.name.clone(),
+                                    indexes: t
+                                        .indexes
+                                        .iter()
+                                        .map(|i| i.definition.clone())
+                                        .collect(),
+                                    ddl: t.ddl,
+                                }),
+                                // Отношение не таблица (представление, исчезнувшая партиция) — пропускается;
+                                // любая другая ошибка (обрыв, срок) данных не урезает молча.
+                                Err(e) if e.code == ErrorCode::NotFound => {}
+                                Err(e) => return Err(e),
+                            }
+                        }
+                        Ok(out)
+                    })
+                },
+            )
+            .await?;
+            let (kept, omitted_by_size) = fit_ddl(fetched);
+            (kept, omitted_by_count + omitted_by_size)
+        }
+        None => (Vec::new(), 0),
+    };
+    Ok(LlmBundle {
+        server_version_num: version,
+        pgss_version,
+        in_recovery,
+        member: member.to_string(),
+        database: database.to_string(),
+        text,
+        text_truncated,
+        stats,
+        plan_text: plan.as_ref().map(to_text),
+        tables,
+        tables_omitted,
+        warnings,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rel(n: &str) -> RelationRef {
+        RelationRef {
+            schema: Some("shop".into()),
+            name: n.into(),
+        }
+    }
+
+    #[test]
+    fn at_most_ten_tables_and_the_rest_is_counted() {
+        let rels: Vec<RelationRef> = (0..12).map(|i| rel(&format!("t{i}"))).collect();
+        let (picked, omitted) = pick_tables(&rels);
+        assert_eq!((picked.len(), omitted), (MAX_TABLES, 2));
+        assert_eq!(picked[0].name, "t0");
+    }
+
+    #[test]
+    fn ddl_budget_drops_whole_tables_from_the_end() {
+        let big = "x".repeat(MAX_DDL_BYTES / 2 + 1);
+        let tables = vec![
+            LlmTable {
+                schema: "shop".into(),
+                name: "a".into(),
+                ddl: big.clone(),
+                indexes: vec![],
+            },
+            LlmTable {
+                schema: "shop".into(),
+                name: "b".into(),
+                ddl: big.clone(),
+                indexes: vec![],
+            },
+            LlmTable {
+                schema: "shop".into(),
+                name: "c".into(),
+                ddl: "small".into(),
+                indexes: vec!["CREATE INDEX i ON c (x)".into()],
+            },
+        ];
+        let (kept, omitted) = fit_ddl(tables);
+        assert_eq!(
+            (kept.len(), omitted),
+            (1, 2),
+            "вторая таблица не влезла, третья тоже не берётся (порядок плана важен)"
+        );
+        assert_eq!(kept[0].name, "a");
+    }
+
+    #[test]
+    fn only_the_querys_own_plan_failures_become_a_warning() {
+        for code in [
+            ErrorCode::InvalidInput,
+            ErrorCode::Timeout,
+            ErrorCode::FeatureUnavailable,
+        ] {
+            assert!(plan_failure_is_soft(code), "{code:?}");
+        }
+        for code in [
+            ErrorCode::NotAuthorized,
+            ErrorCode::ExplainWrites,
+            ErrorCode::ReadOnly,
+            ErrorCode::ConnectionFailed,
+            ErrorCode::NodeUnavailable,
+            ErrorCode::Internal,
+        ] {
+            assert!(!plan_failure_is_soft(code), "{code:?}");
+        }
+    }
+
+    #[test]
+    fn bundle_json_is_camel_case() {
+        let b = LlmBundle {
+            server_version_num: 170_000,
+            pgss_version: Some("1.11".into()),
+            in_recovery: false,
+            member: "pg-1".into(),
+            database: "perf".into(),
+            text: Some("SELECT 1".into()),
+            text_truncated: false,
+            stats: Some(LlmStats {
+                since_reset: None,
+                window_3600: None,
+            }),
+            plan_text: None,
+            tables: vec![LlmTable {
+                schema: "shop".into(),
+                name: "orders".into(),
+                ddl: "CREATE TABLE shop.orders ();".into(),
+                indexes: vec![],
+            }],
+            tables_omitted: 0,
+            warnings: vec!["planFailed".into()],
+        };
+        let v = serde_json::to_value(&b).unwrap();
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "database",
+                "inRecovery",
+                "member",
+                "pgssVersion",
+                "planText",
+                "serverVersionNum",
+                "stats",
+                "tables",
+                "tablesOmitted",
+                "text",
+                "textTruncated",
+                "warnings"
+            ]
+        );
+        assert_eq!(
+            v["stats"],
+            serde_json::json!({"sinceReset": null, "window3600": null})
+        );
+        assert_eq!(
+            v["tables"][0],
+            serde_json::json!({"schema": "shop", "name": "orders", "ddl": "CREATE TABLE shop.orders ();", "indexes": []})
+        );
+        assert!(v["planText"].is_null());
+    }
+
+    #[test]
+    fn source_json() {
+        let s: LlmSource =
+            serde_json::from_value(serde_json::json!({"kind": "query", "queryId": "-5"})).unwrap();
+        assert_eq!(s, LlmSource::Query { query_id: -5 });
+        let s: LlmSource =
+            serde_json::from_value(serde_json::json!({"kind": "sql", "sql": "SELECT 1"})).unwrap();
+        assert_eq!(
+            s,
+            LlmSource::Sql {
+                sql: "SELECT 1".into()
+            }
+        );
+    }
+}
