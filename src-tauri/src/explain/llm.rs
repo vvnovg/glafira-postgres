@@ -11,9 +11,9 @@ use crate::catalog::table;
 use crate::commands::catalog::{catalog_limit, on_catalog_node_within};
 use crate::diag::caps::V16;
 use crate::diag::query_detail;
-use crate::error::{AppResult, ErrorCode};
+use crate::error::AppResult;
 use crate::explain::params::count_params;
-use crate::explain::{ExplainRequest, Mode, Params, run};
+use crate::explain::{ExplainRequest, ExplainResult, Mode, Params, run};
 use crate::state::AppState;
 
 /// Таблиц плана в данных не больше: остальные считаются в `tables_omitted`.
@@ -65,7 +65,8 @@ pub struct LlmBundle {
     pub plan_text: Option<String>,
     pub tables: Vec<LlmTable>,
     pub tables_omitted: usize,
-    /// Ключи интерфейса: `paramsNeeded` (PG < 16, текст с `$N` без значений — плана нет), `queryGone`, `planFailed`.
+    /// Ключи интерфейса: `paramsNeeded` (PG < 16, текст с `$N` без значений — плана нет), `queryGone`, `planFailed`
+    /// (пробный план не получен — по любой причине, в том числе из-за прав), `ddlFailed` (DDL части таблиц прочитать не удалось).
     pub warnings: Vec<String>,
 }
 
@@ -92,14 +93,34 @@ pub fn fit_ddl(tables: Vec<LlmTable>) -> (Vec<LlmTable>, usize) {
     (kept, omitted)
 }
 
-/// Пробный план не построился из-за самого запроса или срока (сервер отверг текст, исчезла таблица, не хватило
-/// времени): данных без плана достаточно, ошибка превращается в предупреждение `planFailed`. Остальное — права, ярус,
-/// связь с узлом — это не свойство запроса, и такая ошибка уходит вызывающему как есть.
-fn plan_failure_is_soft(code: ErrorCode) -> bool {
-    matches!(
-        code,
-        ErrorCode::InvalidInput | ErrorCode::Timeout | ErrorCode::FeatureUnavailable
-    )
+/// Итог пробного плана: «Скопировать для LLM» — подспорье, текст и статистика нужны и без плана, поэтому любая
+/// ошибка (права на таблицы, ярус записи, отвергнутый текст, срок, узел) — предупреждение `planFailed`, а не отказ.
+fn plan_or_warning(
+    probe: AppResult<ExplainResult>,
+    warnings: &mut Vec<String>,
+) -> Option<PlanTree> {
+    match probe {
+        Ok(r) => Some(r.plan),
+        Err(_) => {
+            warnings.push("planFailed".to_string());
+            None
+        }
+    }
+}
+
+/// Итог чтения DDL: `read` — прочитанные таблицы и число не прочитанных; отказ всего чтения (соединение, срок) —
+/// все `picked` не прочитаны. Не прочитанные таблицы не пропадают молча: одно предупреждение `ddlFailed`, а их число
+/// вызывающий прибавляет к `tables_omitted`.
+fn ddl_or_warning(
+    read: AppResult<(Vec<LlmTable>, usize)>,
+    picked: usize,
+    warnings: &mut Vec<String>,
+) -> (Vec<LlmTable>, usize) {
+    let (fetched, failed) = read.unwrap_or_else(|_| (Vec::new(), picked));
+    if failed > 0 {
+        warnings.push("ddlFailed".to_string());
+    }
+    (fetched, failed)
 }
 
 pub async fn bundle(
@@ -174,14 +195,7 @@ pub async fn bundle(
                         confirmation: Confirmation::default(),
                         force_write: false,
                     };
-                    match run::run(st, id, &req).await {
-                        Ok(r) => Some(r.plan),
-                        Err(e) if plan_failure_is_soft(e.code) => {
-                            warnings.push("planFailed".to_string());
-                            None
-                        }
-                        Err(e) => return Err(e),
-                    }
+                    plan_or_warning(run::run(st, id, &req).await, &mut warnings)
                 }
                 None => None,
             }
@@ -191,39 +205,45 @@ pub async fn bundle(
     let (tables, tables_omitted) = match &plan {
         Some(p) => {
             let (picked, omitted_by_count) = pick_tables(&relations(p));
-            let (_, profile) = st.runtimes.target(id, Some(member))?;
-            let fetched: Vec<LlmTable> = on_catalog_node_within(
-                catalog_limit(&profile),
-                st.client(id, Some(member), Some(database)),
-                |c| {
-                    Box::pin(async move {
-                        let mut out = Vec::new();
-                        for r in &picked {
-                            let schema = r.schema.clone().unwrap_or_else(|| "public".to_string());
-                            match table::get(c, &schema, &r.name).await {
-                                Ok(t) => out.push(LlmTable {
-                                    schema,
-                                    name: r.name.clone(),
-                                    indexes: t
-                                        .indexes
-                                        .iter()
-                                        .map(|i| i.definition.clone())
-                                        .collect(),
-                                    ddl: t.ddl,
-                                }),
-                                // Отношение не таблица (представление, исчезнувшая партиция) — пропускается;
-                                // любая другая ошибка (обрыв, срок) данных не урезает молча.
-                                Err(e) if e.code == ErrorCode::NotFound => {}
-                                Err(e) => return Err(e),
+            if picked.is_empty() {
+                (Vec::new(), omitted_by_count)
+            } else {
+                let (_, profile) = st.runtimes.target(id, Some(member))?;
+                let picked_len = picked.len();
+                let read = on_catalog_node_within(
+                    catalog_limit(&profile),
+                    st.client(id, Some(member), Some(database)),
+                    |c| {
+                        Box::pin(async move {
+                            let mut out = Vec::new();
+                            let mut failed = 0usize;
+                            for r in &picked {
+                                let schema =
+                                    r.schema.clone().unwrap_or_else(|| "public".to_string());
+                                // Отношение не прочиталось (не таблица, исчезло, обрыв, срок) — таблица пропускается.
+                                match table::get(c, &schema, &r.name).await {
+                                    Ok(t) => out.push(LlmTable {
+                                        schema,
+                                        name: r.name.clone(),
+                                        indexes: t
+                                            .indexes
+                                            .iter()
+                                            .map(|i| i.definition.clone())
+                                            .collect(),
+                                        ddl: t.ddl,
+                                    }),
+                                    Err(_) => failed += 1,
+                                }
                             }
-                        }
-                        Ok(out)
-                    })
-                },
-            )
-            .await?;
-            let (kept, omitted_by_size) = fit_ddl(fetched);
-            (kept, omitted_by_count + omitted_by_size)
+                            Ok((out, failed))
+                        })
+                    },
+                )
+                .await;
+                let (fetched, failed) = ddl_or_warning(read, picked_len, &mut warnings);
+                let (kept, omitted_by_size) = fit_ddl(fetched);
+                (kept, omitted_by_count + failed + omitted_by_size)
+            }
         }
         None => (Vec::new(), 0),
     };
@@ -246,6 +266,7 @@ pub async fn bundle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::{AppError, ErrorCode};
 
     fn rel(n: &str) -> RelationRef {
         RelationRef {
@@ -294,25 +315,62 @@ mod tests {
         assert_eq!(kept[0].name, "a");
     }
 
-    #[test]
-    fn only_the_querys_own_plan_failures_become_a_warning() {
-        for code in [
-            ErrorCode::InvalidInput,
-            ErrorCode::Timeout,
-            ErrorCode::FeatureUnavailable,
-        ] {
-            assert!(plan_failure_is_soft(code), "{code:?}");
+    fn app_error(code: ErrorCode) -> AppError {
+        AppError {
+            code,
+            key: "errors.test".into(),
+            params: Default::default(),
+            message: "test".into(),
+            details: None,
+            retryable: false,
         }
+    }
+
+    #[test]
+    fn any_probe_error_is_a_warning_and_not_a_failure() {
+        // Права на таблицы, ярус записи, отвергнутый текст, срок, потеря узла: данные без плана остаются доступны.
         for code in [
             ErrorCode::NotAuthorized,
             ErrorCode::ExplainWrites,
-            ErrorCode::ReadOnly,
+            ErrorCode::InvalidInput,
+            ErrorCode::Timeout,
             ErrorCode::ConnectionFailed,
-            ErrorCode::NodeUnavailable,
-            ErrorCode::Internal,
         ] {
-            assert!(!plan_failure_is_soft(code), "{code:?}");
+            let mut warnings = Vec::new();
+            assert_eq!(
+                plan_or_warning(Err(app_error(code)), &mut warnings),
+                None,
+                "{code:?}"
+            );
+            assert_eq!(warnings, ["planFailed"], "{code:?}");
         }
+    }
+
+    #[test]
+    fn unread_tables_give_one_ddl_warning_and_are_counted() {
+        let table = |n: &str| LlmTable {
+            schema: "shop".into(),
+            name: n.into(),
+            ddl: "CREATE TABLE t ();".into(),
+            indexes: vec![],
+        };
+        // Всё прочиталось: предупреждения нет.
+        let mut warnings = Vec::new();
+        let (got, failed) = ddl_or_warning(Ok((vec![table("a")], 0)), 1, &mut warnings);
+        assert_eq!((got.len(), failed, warnings.len()), (1, 0, 0));
+        // Часть таблиц не прочиталась: остальные сохраняются, предупреждение одно на все.
+        let (got, failed) = ddl_or_warning(Ok((vec![table("a")], 2)), 3, &mut warnings);
+        assert_eq!(
+            (got.len(), failed, warnings.as_slice()),
+            (1, 2, ["ddlFailed".to_string()].as_slice())
+        );
+        // Чтение не состоялось вовсе (соединение, срок): не прочитаны все выбранные.
+        let mut warnings = Vec::new();
+        let (got, failed) = ddl_or_warning(Err(app_error(ErrorCode::Timeout)), 4, &mut warnings);
+        assert_eq!(
+            (got.len(), failed, warnings.as_slice()),
+            (0, 4, ["ddlFailed".to_string()].as_slice())
+        );
     }
 
     #[test]

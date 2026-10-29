@@ -618,23 +618,23 @@ async fn llm_bundle_has_text_stats_plan_and_ddl() {
     );
 }
 
-/// Пробный план не построился из-за самого запроса — данные без плана и предупреждение; из-за прав — ошибка.
+/// Данные без плана и без части DDL остаются доступны: ошибка пробного плана (в том числе прав) и ошибка чтения
+/// DDL — предупреждения `planFailed` и `ddlFailed`, а не отказ команды.
 #[tokio::test]
-async fn llm_bundle_softens_query_plan_failures_but_not_privilege_errors() {
+async fn llm_bundle_keeps_text_when_the_plan_or_the_ddl_cannot_be_read() {
     let Some(perf) = common::perf_addr() else {
         return;
     };
     let (_dir, st) = common::open_server_in(&perf, "perf").await;
     let m = member_of(&st).await;
-    // `unknown + unknown`: GENERIC_PLAN не строится, сервер отвергает запрос (InvalidInput) — предупреждение.
+    let sql_source = |sql: &str| LlmSource::Sql { sql: sql.into() };
+    // `unknown + unknown`: GENERIC_PLAN не строится, сервер отвергает запрос.
     let b = llm::bundle(
         &st,
         "it",
         &m,
         "perf",
-        LlmSource::Sql {
-            sql: "SELECT * FROM shop.customers WHERE id = $1 + $2".into(),
-        },
+        sql_source("SELECT * FROM shop.customers WHERE id = $1 + $2"),
         None,
     )
     .await
@@ -642,18 +642,42 @@ async fn llm_bundle_softens_query_plan_failures_but_not_privilege_errors() {
     assert_eq!(b.warnings, ["planFailed"]);
     assert!(b.plan_text.is_none() && b.tables.is_empty() && b.tables_omitted == 0);
     assert!(b.text.is_some());
-    // Запись у `glafira_diag` без прав на таблицу: NOT_AUTHORIZED доходит до вызывающего, а не прячется в предупреждении.
-    let e = llm::bundle(
+    // Запись у `glafira_diag` без прав на таблицу: NOT_AUTHORIZED пробы — тоже предупреждение, текст остаётся.
+    let update = "UPDATE shop.balances SET balance = balance WHERE customer_id = 1";
+    let b = llm::bundle(&st, "it", &m, "perf", sql_source(update), None)
+        .await
+        .unwrap();
+    assert_eq!(b.warnings, ["planFailed"]);
+    assert!(b.plan_text.is_none() && b.tables.is_empty() && b.tables_omitted == 0);
+    assert_eq!(b.text.as_deref(), Some(update));
+    // Переданный план ссылается на таблицу, которой нет: DDL не читается — `ddlFailed` и счёт в `tables_omitted`.
+    let ok = explain::run::run(
+        &st,
+        "it",
+        &req(
+            &m,
+            "perf",
+            "SELECT count(*) FROM shop.orders",
+            Mode::Plan,
+            Params::None,
+        ),
+    )
+    .await
+    .unwrap();
+    let ghost = serde_json::to_string(&ok.plan)
+        .unwrap()
+        .replace("\"orders\"", "\"no_such_table\"");
+    let plan = serde_json::from_str(&ghost).unwrap();
+    let b = llm::bundle(
         &st,
         "it",
         &m,
         "perf",
-        LlmSource::Sql {
-            sql: "UPDATE shop.balances SET balance = balance WHERE customer_id = 1".into(),
-        },
-        None,
+        sql_source("SELECT count(*) FROM shop.orders"),
+        Some(plan),
     )
     .await
-    .unwrap_err();
-    assert_eq!(e.code, ErrorCode::NotAuthorized, "{e:?}");
+    .unwrap();
+    assert_eq!(b.warnings, ["ddlFailed"]);
+    assert!(b.plan_text.is_some() && b.tables.is_empty() && b.tables_omitted == 1);
 }
