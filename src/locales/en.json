@@ -201,7 +201,9 @@
       "paramsRequired": "The queries tool needs its parameters",
       "badLimit": "The row limit must be 50, 100 or 200",
       "betweenUnsupported": "Comparing snapshots is not available yet",
-      "sortUnavailable": "This sort order is not available for this version or mode"
+      "sortUnavailable": "This sort order is not available for this version or mode",
+      "pgssMissing": "pg_stat_statements is not installed in this database",
+      "pgssTooOld": "pg_stat_statements {{version}} is older than 1.8"
     },
     "guard": {
       "readOnly": "Connection “{{name}}” is read-only",

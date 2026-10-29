@@ -15,6 +15,7 @@ use crate::topology::runtime::CloseListener;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionKind {
     Sampler,
+    Statements,
     Watch,
 }
 

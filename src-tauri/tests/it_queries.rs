@@ -4,8 +4,13 @@
 
 mod common;
 
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
 use glafira_pg_lib::diag::queries::{self, Detect, QueriesMode, QueriesParams};
 use glafira_pg_lib::diag::{self, DiagData, DiagRequest, Tool};
+use glafira_pg_lib::sampler::registry::SamplerSink;
+use glafira_pg_lib::sampler::statements::{self, StatementsEvent};
 use pg_advisor::queries::QuerySort;
 
 fn since_reset(sort: QuerySort) -> QueriesParams {
@@ -53,6 +58,7 @@ async fn top_since_reset_on_perf() {
             .all(|w| w[0].total_exec_ms >= w[1].total_exec_ms),
         "по убыванию времени"
     );
+    // Сэмплер pgss не запущен: кеша текстов у узла нет, строки без текстов (они подгружаются по ключам).
     assert!(
         d.rows
             .iter()
@@ -183,4 +189,124 @@ async fn statements_sql_runs_on_every_version() {
             .unwrap();
         assert!(!texts.is_empty(), "{addr}");
     }
+}
+
+#[derive(Default)]
+struct Events(Mutex<Vec<StatementsEvent>>);
+impl SamplerSink<StatementsEvent> for Events {
+    fn send(&self, e: StatementsEvent) -> bool {
+        self.0.lock().unwrap().push(e);
+        true
+    }
+}
+
+/// Сэмплер pgss на pg-perf: первый тик — база, второй (через минуту) — дельты; окно считается из буфера без
+/// сервера; тексты, прочитанные по ключам, попадают в кеш и возвращаются в строках отчёта.
+#[tokio::test]
+async fn statements_sampler_fills_the_window_and_caches_texts() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st) = common::open_server_in(&perf, "perf").await;
+    let events = Arc::new(Events::default());
+    let sid = statements::start(&st, "it", None, events.clone()).unwrap();
+    let member = st.runtimes.view("it").topology.unwrap().members[0]
+        .name
+        .clone();
+    common::wait_until(
+        "первый тик сэмплера pgss",
+        Duration::from_secs(20),
+        async || {
+            events
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, StatementsEvent::Tick { ticks: 0, .. }))
+        },
+    )
+    .await;
+    // Окно до второго тика: пусто с пометкой.
+    let window = QueriesParams {
+        mode: QueriesMode::Window { s: 300 },
+        ..since_reset(QuerySort::TotalTime)
+    };
+    let r = diag::run(&st, "it", request(window.clone())).await.unwrap();
+    let DiagData::Queries(d) = &r.data else {
+        unreachable!()
+    };
+    assert!(d.rows.is_empty() && d.coverage_s.is_none());
+    assert!(r.unavailable.iter().any(|u| u.part == "window"));
+    // Тексты по ключам — в кеш узла.
+    let since = diag::run(&st, "it", request(since_reset(QuerySort::Calls)))
+        .await
+        .unwrap();
+    let DiagData::Queries(d) = &since.data else {
+        unreachable!()
+    };
+    let keys: Vec<_> = d.rows.iter().take(2).map(|x| x.key).collect();
+    queries::texts(&st, "it", None, keys.clone()).await.unwrap();
+    let again = diag::run(&st, "it", request(since_reset(QuerySort::Calls)))
+        .await
+        .unwrap();
+    let DiagData::Queries(d) = &again.data else {
+        unreachable!()
+    };
+    assert!(
+        d.rows
+            .iter()
+            .filter(|x| keys.contains(&x.key))
+            .all(|x| x.text.is_some()),
+        "тексты из кеша"
+    );
+    // Нагрузка между тиками, затем второй тик (до 75 с).
+    let app = common::superuser(&perf, "perf").await;
+    for _ in 0..50 {
+        app.batch_execute("SELECT count(*) FROM shop.orders WHERE status = 'disputed'")
+            .await
+            .unwrap();
+    }
+    common::wait_until(
+        "второй тик сэмплера pgss",
+        Duration::from_secs(75),
+        async || {
+            events
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, StatementsEvent::Tick { ticks: 1, .. }))
+        },
+    )
+    .await;
+    let r = diag::run(&st, "it", request(window)).await.unwrap();
+    let DiagData::Queries(d) = &r.data else {
+        unreachable!()
+    };
+    assert_eq!(d.ticks, Some(1));
+    assert!(
+        d.coverage_s.is_some_and(|c| (60..=300).contains(&c)),
+        "{:?}",
+        d.coverage_s
+    );
+    assert!(
+        d.rows.iter().any(|x| x.calls >= 50),
+        "дельты за минуту видны: {:?}",
+        d.rows.iter().map(|x| x.calls).collect::<Vec<_>>()
+    );
+    assert!(
+        d.rows.iter().all(|x| x.stddev_exec_ms.is_none()),
+        "за окно stddev нет"
+    );
+    assert!(d.pgss.is_some() && r.server_version_num.is_some());
+    assert!(st.statements.is_running("it", &member));
+    assert!(st.sessions.stop(&sid));
+    assert!(
+        !st.statements.is_running("it", &member),
+        "последний подписчик — задача снята"
+    );
+    assert!(
+        st.statements.buffer("it", &member).is_some(),
+        "буфер остаётся"
+    );
 }

@@ -203,7 +203,9 @@
       "paramsRequired": "Инструменту «Запросы» нужны его параметры",
       "badLimit": "Предел строк — 50, 100 или 200",
       "betweenUnsupported": "Сравнение снимков пока недоступно",
-      "sortUnavailable": "Эта сортировка недоступна для этой версии или режима"
+      "sortUnavailable": "Эта сортировка недоступна для этой версии или режима",
+      "pgssMissing": "pg_stat_statements не установлен в этой базе",
+      "pgssTooOld": "pg_stat_statements {{version}} старше 1.8"
     },
     "guard": {
       "readOnly": "Подключение «{{name}}» только для чтения",

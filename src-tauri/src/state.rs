@@ -6,6 +6,7 @@ use crate::diag::memory::CounterMemory;
 use crate::error::AppResult;
 use crate::net::ssh::tunnel::{TunnelConfig, TunnelRegistry};
 use crate::sampler::registry::{Activity, ActivityRegistry, SamplerRegistry};
+use crate::sampler::statements::{Statements, StatementsRegistry};
 use crate::secrets::SecretStore;
 use crate::session::SessionRegistry;
 use crate::settings::SettingsStore;
@@ -32,6 +33,8 @@ pub struct AppState {
     pub sessions: Arc<SessionRegistry>,
     /// Сэмплеры активности узлов и их буферы.
     pub samplers: Arc<ActivityRegistry>,
+    /// Сэмплеры `pg_stat_statements` узлов и их буферы дельт (P3).
+    pub statements: Arc<StatementsRegistry>,
     /// Туннели ssh открытых подключений и проверок; доверенные ключи хостов.
     pub tunnels: Arc<TunnelRegistry>,
     /// Операции с секретами подключений (сохранение формы, импорт, удаление) идут по одной. Иначе импорт,
@@ -78,9 +81,11 @@ impl AppState {
             },
             sessions.clone(),
         );
+        let statements = SamplerRegistry::new(Statements, sessions.clone());
         // Сэмплеры — раньше сессий: закрытие подключения сначала шлёт вкладкам `Stopped`, потом снимает сессии
         // (их остановка — отписка от уже удалённого узла). В обратном порядке отписка опередила бы `Stopped`.
         runtimes.add_close_listener(samplers.clone());
+        runtimes.add_close_listener(statements.clone());
         runtimes.add_close_listener(sessions.clone());
         Ok(Self {
             connections: Arc::new(ConnectionStore::open(data_dir)?),
@@ -93,6 +98,7 @@ impl AppState {
             counters,
             sessions,
             samplers,
+            statements,
             tunnels,
             secrets_lock: Arc::new(std::sync::Mutex::new(())),
             actions: Arc::new(crate::actions::journal::ActionJournal::new(data_dir)),

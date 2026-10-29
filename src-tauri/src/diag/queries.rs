@@ -15,10 +15,11 @@ use crate::catalog::ddl::quote_ident;
 use crate::conn::errors::from_pg;
 use crate::diag::sessions::QUERY_LIMIT;
 use crate::diag::{
-    DiagData, DiagReport, Tool, Unavailable, WINDOWS_S, head, make_report, on_member,
+    DiagData, DiagReport, Head, Tool, Unavailable, WINDOWS_S, head, make_report, on_member,
 };
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::state::AppState;
+use crate::sync::MutexExt;
 use crate::topology::runtime::DiagTarget;
 
 /// Пределы строк отчёта (спец. §4.2).
@@ -513,33 +514,134 @@ async fn report_since_reset(
     ))
 }
 
-/// Режим окна: буфер сэмплера pgss появляется в задаче 6; без него — пустой отчёт с пометкой «сэмплер запускается».
+/// Срез буфера под блокировкой: всё, что нужно отчёту, копируется наружу.
+struct WindowSlice {
+    pgss: PgssInstalled,
+    info: PgssInfo,
+    head: Option<Head>,
+    hidden: bool,
+    window: Option<crate::sampler::statements::WindowSum>,
+    names: std::collections::HashMap<QueryKey, (Option<String>, Option<String>)>,
+}
+
+fn window_slice(st: &AppState, id: &str, member: &str, window_s: u32) -> Option<WindowSlice> {
+    let buffer = st.statements.buffer(id, member)?;
+    let b = buffer.lock_safe();
+    let pgss = b.pgss()?.clone();
+    let window = b.window(window_s);
+    let names = window
+        .as_ref()
+        .map(|w| w.sums.keys().map(|k| (*k, b.names(k))).collect())
+        .unwrap_or_default();
+    Some(WindowSlice {
+        pgss,
+        info: b.info().unwrap_or_default(),
+        head: b.last_head(),
+        hidden: b.hidden(),
+        window,
+        names,
+    })
+}
+
+/// Режим окна — из буфера сэмплера pgss, без обращения к серверу (спец. §4.2). Буфера или тиков с дельтами ещё
+/// нет — пустой отчёт с пометкой «сэмплер запускается».
 async fn report_window(
     st: &AppState,
     id: &str,
     target: &DiagTarget,
     p: &QueriesParams,
-    _window_s: u32,
+    window_s: u32,
 ) -> AppResult<DiagReport> {
-    let h = on_member(st, id, target, |c| Box::pin(head(c))).await?;
+    let member = member_name(target)?;
+    let slice = window_slice(st, id, &member, window_s);
+    let head_of = |h: Option<Head>| async move {
+        match h {
+            Some(h) => Ok(h),
+            None => on_member(st, id, target, |c| Box::pin(head(c))).await,
+        }
+    };
+    let Some(WindowSlice {
+        pgss,
+        info,
+        head: h,
+        hidden,
+        window: Some(w),
+        names,
+    }) = slice
+    else {
+        let h = head_of(slice.as_ref().and_then(|s| s.head)).await?;
+        return Ok(make_report(
+            Tool::Queries,
+            target,
+            Some(&h),
+            DiagData::Queries(QueriesData::empty(p.mode.clone())),
+            Vec::new(),
+            vec![window_starting()],
+        ));
+    };
+    if !p.sort.available(&pgss.caps, true) {
+        return Err(sort_unavailable());
+    }
+    let h = head_of(h).await?;
+    let kept: Vec<(QueryKey, Counters, Option<String>, Option<String>)> = w
+        .sums
+        .iter()
+        .map(|(k, c)| {
+            let (datname, rolname) = names.get(k).cloned().unwrap_or_default();
+            (*k, *c, datname, rolname)
+        })
+        .filter(|(k, _, datname, _)| {
+            (!p.toplevel_only || k.toplevel)
+                && p.database
+                    .as_deref()
+                    .is_none_or(|d| datname.as_deref() == Some(d))
+        })
+        .collect();
+    let t = totals(kept.iter().map(|(_, c, _, _)| c));
+    let mut rows: Vec<QueryStat> = kept
+        .into_iter()
+        .map(|(k, c, datname, rolname)| stat(k, datname, rolname, &c, None, &t))
+        .collect();
+    top(&mut rows, p.sort, p.limit);
+    attach_texts(&mut rows, |k| cached_text(st, id, &member, k));
+    let mut unavailable = Vec::new();
+    if hidden {
+        unavailable.push(hidden_rows());
+    }
+    let state = PgssState {
+        track_planning: info.track_planning,
+        dealloc: info.dealloc,
+        dealloc_grew: w.dealloc_grew,
+        max: info.max,
+    };
+    let findings = rules::evaluate(Some(&member), &rows, &t, &state, Mode::Window);
     Ok(make_report(
         Tool::Queries,
         target,
         Some(&h),
-        DiagData::Queries(QueriesData::empty(p.mode.clone())),
-        Vec::new(),
-        vec![window_starting()],
+        DiagData::Queries(QueriesData {
+            mode: p.mode.clone(),
+            coverage_s: Some(w.coverage_s),
+            ticks: Some(w.ticks),
+            pgss: Some(PgssMeta::of(&pgss, &info)),
+            totals: t,
+            rows,
+        }),
+        findings,
+        unavailable,
     ))
 }
 
-/// Текст из кеша узла; кеш живёт в буфере сэмплера pgss (задача 6) — до него текстов в кеше нет.
+/// Текст из кеша узла (буфер сэмплера pgss, спец. §4.6).
 pub fn cached_text(
-    _st: &AppState,
-    _id: &str,
-    _member: &str,
-    _key: &QueryKey,
+    st: &AppState,
+    id: &str,
+    member: &str,
+    key: &QueryKey,
 ) -> Option<(Arc<str>, bool)> {
-    None
+    st.statements
+        .buffer(id, member)
+        .and_then(|b| b.lock_safe().text(key))
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -591,6 +693,15 @@ pub async fn texts(
         })
     })
     .await?;
+    // Прочитанные тексты — в кеш узла: следующие отчёты подставят их без обращения к серверу.
+    if let Some(m) = target.member.as_ref().map(|m| m.name.clone())
+        && let Some(b) = st.statements.buffer(id, &m)
+    {
+        b.lock_safe().remember_texts(
+            rows.iter()
+                .filter_map(|t| t.text.clone().map(|text| (t.key, text, t.truncated))),
+        );
+    }
     Ok(rows)
 }
 

@@ -4,6 +4,7 @@
 pub mod buffer;
 pub mod query;
 pub mod registry;
+pub mod statements;
 
 use std::sync::Arc;
 
