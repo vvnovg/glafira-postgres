@@ -120,6 +120,46 @@ describe("план без времён и без ANALYZE", () => {
     expect(rows[2].querySelector(".plan-misestimate")).toBeNull();
   });
 
+  it("степени ошибки оценки: ×10 и больше — оранжевая, ×100 и больше — красная", () => {
+    const tree = planTree();
+    tree.root.children[0] = planNode({ ...tree.root.children[0], estimateRatio: 0.005, misestimated: true });
+    tree.root.children[1] = planNode({ ...tree.root.children[1], estimateRatio: 20, misestimated: true });
+    render(<PlanTreeView tree={tree} selectedId={null} onSelect={() => {}} />);
+    const rows = screen.getAllByRole("row").slice(1);
+    const severe = within(rows[1]).getByText("×200");
+    expect(severe).toHaveClass("plan-misestimate", "plan-misestimate-severe");
+    const moderate = within(rows[2]).getByText("×20");
+    expect(moderate).toHaveClass("plan-misestimate");
+    expect(moderate).not.toHaveClass("plan-misestimate-severe");
+  });
+
+  it("бесконечная ошибка оценки — красная степень", () => {
+    const tree = planTree();
+    tree.root.children[0] = planNode({ ...tree.root.children[0], planRows: 0, estimateRatio: null, misestimated: true });
+    render(<PlanTreeView tree={tree} selectedId={null} onSelect={() => {}} />);
+    expect(within(screen.getAllByRole("row")[2]).getByText("×∞")).toHaveClass("plan-misestimate-severe");
+  });
+
+  it("полоса доли времени имеет текстовую подпись с процентом", () => {
+    render(<PlanTreeView tree={planTree()} selectedId={null} onSelect={() => {}} />);
+    const rows = screen.getAllByRole("row").slice(1);
+    expect(within(rows[1]).getByRole("img", { name: "Доля общего времени: 54,5 %" })).toBeInTheDocument();
+    expect(within(rows[2]).getByRole("img", { name: "Доля общего времени: 0,7 %" })).toBeInTheDocument();
+  });
+
+  it("развёртка сбрасывается при смене плана и сохраняется при перерисовке того же плана", async () => {
+    const user = userEvent.setup();
+    const tree = planTree();
+    const { rerender } = render(<PlanTreeView tree={tree} selectedId={null} onSelect={() => {}} />);
+    await user.click(screen.getByRole("button", { name: "Свернуть" }));
+    expect(screen.getAllByRole("row")).toHaveLength(2);
+    rerender(<PlanTreeView tree={tree} selectedId={1} onSelect={() => {}} />);
+    expect(screen.getAllByRole("row")).toHaveLength(2);
+    rerender(<PlanTreeView tree={planTree()} selectedId={null} onSelect={() => {}} />);
+    expect(screen.getAllByRole("row")).toHaveLength(4);
+    expect(screen.getByRole("button", { name: "Свернуть" })).toBeInTheDocument();
+  });
+
   it("выбранная строка помечена aria-selected и классом, разворачивание возвращает детей", async () => {
     const user = userEvent.setup();
     render(<PlanTreeView tree={planTree()} selectedId={2} onSelect={() => {}} />);
@@ -263,6 +303,47 @@ describe("PlanNodeDetails", () => {
     expect(screen.queryByText("Index Cond")).not.toBeInTheDocument();
     expect(screen.getByText("Прочие поля (1)")).toBeInTheDocument();
     expect(screen.getByText(/"Mystery Field": 1/)).toBeInTheDocument();
+  });
+
+  it("все распознанные поля: группировка, фильтр соединения, heap-блоки, подпланы, корзины, локальные буферы, включённое время и доля", () => {
+    render(
+      <PlanNodeDetails
+        node={planNode({
+          subplanName: "SubPlan 1", groupKey: ["o.status", "o.region"], rowsRemovedByJoinFilter: 1200, exactHeapBlocks: 3, lossyHeapBlocks: 1, subplansRemoved: 2,
+          hashBatches: 4, hashBuckets: 1024, peakMemoryKb: 64, startupCost: 1.5, totalCost: 1234.5,
+          buffers: { sharedHit: 80, sharedRead: 20, sharedDirtied: 0, sharedWritten: 0, localHit: 7, localRead: 3, localDirtied: 1, localWritten: 0, tempRead: 0, tempWritten: 0 },
+          inclusiveMs: 42, exclusiveMs: 30, sharePct: 54.5,
+        })}
+      />,
+    );
+    const value = (label: string) => screen.getByText(label).nextElementSibling;
+    expect(value("Имя вложенного плана")).toHaveTextContent("SubPlan 1");
+    expect(value("Ключ группировки")).toHaveTextContent("o.status, o.region");
+    expect(value("Отсеяно фильтром соединения")).toHaveTextContent("1 200");
+    expect(value("Блоки кучи (exact / lossy)")).toHaveTextContent("3 / 1");
+    expect(value("Исключено подпланов")).toHaveTextContent("2");
+    expect(value("Хеш")).toHaveTextContent("батчей 4, корзин 1 024, 64 kB");
+    expect(value("Локальные буферы")).toHaveTextContent("local hit 7, read 3, dirtied 1, written 0");
+    expect(value("Включённое время")).toHaveTextContent("42,0 мс");
+    expect(value("Собственное время")).toHaveTextContent("30,0 мс");
+    expect(value("Доля общего времени")).toHaveTextContent("54,5 %");
+    expect(value("Стоимость")).toHaveTextContent("1,50..1 234,50");
+  });
+
+  it("поля, которых у узла нет, не показываются", () => {
+    render(<PlanNodeDetails node={planNode({ inclusiveMs: null, exclusiveMs: null, sharePct: null })} />);
+    for (const label of ["Имя вложенного плана", "Ключ группировки", "Отсеяно фильтром соединения", "Блоки кучи (exact / lossy)", "Исключено подпланов", "Хеш", "Локальные буферы", "Включённое время", "Доля общего времени"]) {
+      expect(screen.queryByText(label)).not.toBeInTheDocument();
+    }
+  });
+
+  it("не выполнявшийся узел: «не выполнялся» вместо нулевого факта и времён", () => {
+    render(<PlanNodeDetails node={planNode({ neverExecuted: true, actual: { startupMs: 0, totalMs: 0, rows: 0, loops: 0 }, inclusiveMs: 0, exclusiveMs: 0, sharePct: 0 })} />);
+    expect(screen.getByText("Факт").nextElementSibling).toHaveTextContent(/^не выполнялся$/);
+    expect(screen.queryByText("Включённое время")).not.toBeInTheDocument();
+    expect(screen.queryByText("Собственное время")).not.toBeInTheDocument();
+    expect(screen.queryByText("Доля общего времени")).not.toBeInTheDocument();
+    expect(screen.queryByText(/циклы 0/)).not.toBeInTheDocument();
   });
 
   it("TIMING OFF: время не печатается, NaN нет", () => {

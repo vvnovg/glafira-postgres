@@ -1322,7 +1322,16 @@
         "buffers": "Buffers",
         "io": "I/O read / write",
         "output": "Output",
-        "extra": "Other fields ({{count}})"
+        "extra": "Other fields ({{count}})",
+        "subplan": "Plan name",
+        "inclusive": "Inclusive time",
+        "share": "Share of total time",
+        "removedByJoinFilter": "Rows removed by join filter",
+        "heapBlocks": "Heap blocks (exact / lossy)",
+        "groupKey": "Group key",
+        "buckets": "buckets",
+        "subplansRemoved": "Subplans removed",
+        "buffersLocal": "Local buffers"
       },
       "summary": {
         "planning": "Planning: {{ms}}",
@@ -1342,7 +1351,8 @@
       "copyJson": "Copy JSON",
       "copyText": "Copy as text",
       "asJson": "JSON",
-      "asText": "As text"
+      "asText": "As text",
+      "share": "Share of total time: {{pct}}"
     }
   },
   "findings": {

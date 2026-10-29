@@ -1,18 +1,27 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { PlanTree } from "../../../api/types";
-import { formatCount, formatMs } from "../../../lib/format";
-import { estimateLabel, flatten, marks, nodeLabel } from "./planText";
+import { formatCount, formatMs, formatPercent } from "../../../lib/format";
+import { estimateLabel, estimateSeverity, flatten, marks, nodeLabel } from "./planText";
 
-/** Полоса доли собственного времени, ширина — проценты. */
+/** Полоса доли собственного времени, ширина — проценты; процент доступен и вспомогательным технологиям (картинка с подписью). */
 function ShareBar({ pct }: { pct: number | null }) {
+  const { t } = useTranslation();
   if (pct === null) return null;
+  const label = t("diag.plan.share", { pct: formatPercent(pct) });
   return (
-    <span className="plan-share" aria-hidden="true">
+    <span className="plan-share" role="img" aria-label={label} title={label}>
       <span style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />
     </span>
   );
 }
+
+/** Свёрнутые узлы одного плана: номера узлов привязаны к плану, поэтому состояние помнит, к какому плану относится. */
+interface Collapsed {
+  tree: PlanTree;
+  ids: ReadonlySet<number>;
+}
+const NONE: ReadonlySet<number> = new Set();
 
 /**
  * Дерево плана (спец. P3 §8.6): таблица-дерево с отступами и развёрткой; колонки — узел, время (включённое и
@@ -22,14 +31,16 @@ function ShareBar({ pct }: { pct: number | null }) {
  */
 export function PlanTreeView({ tree, selectedId, onSelect }: { tree: PlanTree; selectedId: number | null; onSelect: (id: number) => void }) {
   const { t } = useTranslation();
-  const [collapsed, setCollapsed] = useState<ReadonlySet<number>>(new Set());
+  // Развёртка сбрасывается при смене плана (номера узлов нового плана — другие): состояние хранит план, к которому относится.
+  const [state, setState] = useState<Collapsed>(() => ({ tree, ids: NONE }));
+  const collapsed = state.tree === tree ? state.ids : NONE;
   const rows = flatten(tree.root, collapsed);
   const toggle = (id: number) =>
-    setCollapsed((s) => {
-      const next = new Set(s);
+    setState((prev) => {
+      const next = new Set(prev.tree === tree ? prev.ids : NONE);
       if (next.has(id)) next.delete(id);
       else next.add(id);
-      return next;
+      return { tree, ids: next };
     });
   const withActual = tree.root.actual !== null;
   return (
@@ -48,6 +59,7 @@ export function PlanTreeView({ tree, selectedId, onSelect }: { tree: PlanTree; s
         <tbody>
           {rows.map(({ node: n, depth }) => {
             const est = estimateLabel(n);
+            const severity = estimateSeverity(n);
             const isCollapsed = collapsed.has(n.id);
             const classes = [n.hot ? "plan-hot" : "", n.id === selectedId ? "plan-selected" : ""].filter(Boolean).join(" ") || undefined;
             return (
@@ -84,7 +96,7 @@ export function PlanTreeView({ tree, selectedId, onSelect }: { tree: PlanTree; s
                 <td className="num">
                   {formatCount(n.planRows)}
                   {n.actual && <> → {formatCount(n.actual.rows)}</>}
-                  {est && <> <span className="plan-misestimate">{est}</span></>}
+                  {est && <> <span className={severity === "severe" ? "plan-misestimate plan-misestimate-severe" : "plan-misestimate"}>{est}</span></>}
                 </td>
                 <td className="num">{n.actual ? formatCount(n.actual.loops) : "—"}</td>
                 <td className="num">

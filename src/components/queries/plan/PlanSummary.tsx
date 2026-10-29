@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import type { ExplainTier, PlanTree } from "../../../api/types";
 import { formatMs } from "../../../lib/format";
@@ -13,6 +14,9 @@ const WARNING_KEYS: Record<string, string> = {
 /** Сводка плана: планирование, выполнение, ярус, JIT, триггеры, settings, предупреждения; «JSON» и «Как текст». */
 export function PlanSummary({ tree, tier, warnings = [], raw, elapsedMs }: { tree: PlanTree; tier?: ExplainTier; warnings?: string[]; raw?: unknown; elapsedMs?: number }) {
   const { t } = useTranslation();
+  // Текст и JSON большого плана собираются один раз на план, а не при каждой перерисовке сводки.
+  const json = useMemo(() => (raw === undefined ? null : JSON.stringify(raw, null, 2)), [raw]);
+  const text = useMemo(() => renderText(tree), [tree]);
   const parts = [
     tree.planningMs !== null && t("diag.plan.summary.planning", { ms: formatMs(tree.planningMs) }),
     tree.executionMs !== null && t("diag.plan.summary.execution", { ms: formatMs(tree.executionMs) }),
@@ -40,15 +44,15 @@ export function PlanSummary({ tree, tier, warnings = [], raw, elapsedMs }: { tre
       ))}
       <div className="toolbar">
         {/* Кнопки копирования одинаково подписаны «Копировать»: что именно копируется, говорит подпись рядом (имя кнопки для скринридера — полное). */}
-        {raw !== undefined && (
+        {json !== null && (
           <span className="plan-copy">
             <span className="muted">{t("diag.plan.asJson")}</span>
-            <CopyButton text={JSON.stringify(raw, null, 2)} label={t("diag.plan.copyJson")} />
+            <CopyButton text={json} label={t("diag.plan.copyJson")} />
           </span>
         )}
         <span className="plan-copy">
           <span className="muted">{t("diag.plan.asText")}</span>
-          <CopyButton text={renderText(tree)} label={t("diag.plan.copyText")} />
+          <CopyButton text={text} label={t("diag.plan.copyText")} />
         </span>
       </div>
     </section>

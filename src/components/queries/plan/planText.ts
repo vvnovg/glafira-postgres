@@ -100,16 +100,33 @@ export function marks(n: PlanNode): string[] {
 }
 
 /**
- * Ошибка оценки строк как «×N»: N — во сколько раз факт отличается от оценки в любую сторону (направление видно из «оценка → факт»).
- * Ошибку размечает флаг `misestimated`, а не число: `estimateRatio` при нём может быть `null` (оценка 0 строк, факт больше —
- * отношение бесконечно) или 0 (факт 0 при большой оценке) — оба случая «×∞». Без флага ошибки нет — `null`.
+ * Во сколько раз факт отличается от оценки строк в любую сторону (округлено до целого); `Infinity` — отношение бесконечно,
+ * `null` — ошибки оценки нет. Ошибку размечает флаг `misestimated`, а не число: `estimateRatio` при нём может быть `null`
+ * (оценка 0 строк, факт больше — отношение бесконечно) или 0 (факт 0 при большой оценке) — оба случая бесконечные.
  */
-export function estimateLabel(n: PlanNode): string | null {
+export function estimateFactor(n: PlanNode): number | null {
   if (!n.misestimated) return null;
   const r = n.estimateRatio;
-  if (r === null || !Number.isFinite(r) || r <= 0) return "×∞";
-  const k = r >= 1 ? r : 1 / r;
-  return Number.isFinite(k) ? `×${Math.round(k)}` : "×∞";
+  if (r === null || !Number.isFinite(r) || r <= 0) return Number.POSITIVE_INFINITY;
+  const k = Math.round(r >= 1 ? r : 1 / r);
+  return Number.isFinite(k) ? k : Number.POSITIVE_INFINITY;
+}
+
+/** Ошибка оценки строк как «×N» (направление видно из «оценка → факт»); `×∞` — бесконечная; `null` — ошибки нет. */
+export function estimateLabel(n: PlanNode): string | null {
+  const k = estimateFactor(n);
+  if (k === null) return null;
+  return Number.isFinite(k) ? `×${k}` : "×∞";
+}
+
+/** Порог «красной» ошибки оценки: ×10 — оранжевая (порог `misestimated` в `pg-advisor`), ×100 и больше — красная (спец. P3 §8.6). */
+const SEVERE_ESTIMATE_FACTOR = 100;
+
+/** Степень ошибки оценки: `severe` — ×100 и больше (и бесконечная), `high` — от ×10 до ×100, `null` — ошибки нет. */
+export function estimateSeverity(n: PlanNode): "high" | "severe" | null {
+  const k = estimateFactor(n);
+  if (k === null) return null;
+  return k >= SEVERE_ESTIMATE_FACTOR ? "severe" : "high";
 }
 
 const f2 = (x: number) => x.toFixed(2);

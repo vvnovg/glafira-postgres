@@ -1344,7 +1344,16 @@
         "buffers": "Буферы",
         "io": "I/O чтение / запись",
         "output": "Output",
-        "extra": "Прочие поля ({{count}})"
+        "extra": "Прочие поля ({{count}})",
+        "subplan": "Имя вложенного плана",
+        "inclusive": "Включённое время",
+        "share": "Доля общего времени",
+        "removedByJoinFilter": "Отсеяно фильтром соединения",
+        "heapBlocks": "Блоки кучи (exact / lossy)",
+        "groupKey": "Ключ группировки",
+        "buckets": "корзин",
+        "subplansRemoved": "Исключено подпланов",
+        "buffersLocal": "Локальные буферы"
       },
       "summary": {
         "planning": "Планирование: {{ms}}",
@@ -1364,7 +1373,8 @@
       "copyJson": "Копировать JSON",
       "copyText": "Копировать как текст",
       "asJson": "JSON",
-      "asText": "Как текст"
+      "asText": "Как текст",
+      "share": "Доля общего времени: {{pct}}"
     }
   },
   "findings": {

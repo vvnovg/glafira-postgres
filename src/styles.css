@@ -366,6 +366,8 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .plan-node .link { text-align: left; }
 .plan-tree .plan-caret { display: inline-block; flex: none; width: 16px; padding: 0; text-align: center; }
 .plan-misestimate { color: color-mix(in srgb, var(--warn) 55%, var(--fg)); font-weight: 600; }
+/* ×100 и больше (и бесконечная ошибка): красный, как у `.lock-victims`; само «×N» говорит о степени и без цвета. */
+.plan-misestimate-severe { color: color-mix(in srgb, var(--danger-text) 85%, var(--fg)); }
 .plan-share { display: inline-block; width: 60px; height: 6px; margin-left: 6px; background: var(--border); vertical-align: middle; }
 .plan-share > span { display: block; height: 100%; background: var(--accent); }
 .plan-summary { display: flex; flex-direction: column; gap: 6px; }
