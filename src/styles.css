@@ -359,6 +359,21 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .mono { font-family: var(--mono, ui-monospace, monospace); }
 .diag-command { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .diag-facts { display: flex; flex-direction: column; gap: 2px; }
+/* Дерево плана (P3): горячие узлы жирным, выбранный — фоном, ошибка оценки — цветом и словом «×N» (цвет не единственный признак). */
+.plan-tree tr.plan-hot td:first-child { font-weight: 600; }
+.plan-tree tr.plan-selected { background: color-mix(in srgb, var(--accent) 15%, transparent); }
+.plan-node { display: flex; align-items: baseline; gap: 4px; }
+.plan-node .link { text-align: left; }
+.plan-tree .plan-caret { display: inline-block; flex: none; width: 16px; padding: 0; text-align: center; }
+.plan-misestimate { color: color-mix(in srgb, var(--warn) 55%, var(--fg)); font-weight: 600; }
+.plan-share { display: inline-block; width: 60px; height: 6px; margin-left: 6px; background: var(--border); vertical-align: middle; }
+.plan-share > span { display: block; height: 100%; background: var(--accent); }
+.plan-summary { display: flex; flex-direction: column; gap: 6px; }
+.plan-summary p { margin: 0; }
+.plan-copy { display: inline-flex; align-items: center; gap: 6px; }
+.plan-summary-part + .plan-summary-part::before { content: " · "; color: var(--muted); }
+.plan-setting { margin-right: 8px; }
+.plan-details pre { max-height: 240px; overflow: auto; }
 /* Предупреждение в тексте вида: чистый --warn на светлом фоне ниже 4,5:1, поэтому подмешивается цвет текста (как у меток находок). */
 .diag-warn { color: color-mix(in srgb, var(--warn) 55%, var(--fg)); font-weight: 600; }
 /* Вердикт и коды health: фон клетки плюс слово или код внутри — смысл не держится на одном цвете. */

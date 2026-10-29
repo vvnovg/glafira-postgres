@@ -1272,6 +1272,77 @@
         "stddev": "Stddev",
         "max": "Max"
       }
+    },
+    "plan": {
+      "tree": "Plan tree",
+      "columns": {
+        "node": "Node",
+        "time": "Time (incl. / own)",
+        "cost": "Cost",
+        "rows": "Rows (plan → actual)",
+        "loops": "Loops",
+        "buffers": "Buffers (hit / read)",
+        "marks": "Marks"
+      },
+      "expand": "Expand",
+      "collapse": "Collapse",
+      "inclusive": "Inclusive time (with child nodes)",
+      "marks": {
+        "neverExecuted": "never executed",
+        "disk": "disk",
+        "lossy": "lossy",
+        "heapFetches": "heap fetches",
+        "workersShort": "fewer workers",
+        "parallel": "parallel"
+      },
+      "details": {
+        "title": "Node details",
+        "type": "Node",
+        "parent": "Relationship",
+        "cost": "Cost",
+        "planRows": "Plan rows × width",
+        "actual": "Actual",
+        "rowsUnit": "rows",
+        "loops": "loops",
+        "exclusive": "Own time",
+        "filter": "Filter",
+        "indexCond": "Index Cond",
+        "recheckCond": "Recheck Cond",
+        "hashCond": "Hash Cond",
+        "joinFilter": "Join Filter",
+        "mergeCond": "Merge Cond",
+        "removedByFilter": "Rows removed by filter",
+        "removedByRecheck": "Rows removed by recheck",
+        "heapFetches": "Heap fetches",
+        "sortKey": "Sort key",
+        "sortMethod": "Sort method",
+        "hash": "Hash",
+        "batches": "batches",
+        "workers": "Workers launched / planned",
+        "buffers": "Buffers",
+        "io": "I/O read / write",
+        "output": "Output",
+        "extra": "Other fields ({{count}})"
+      },
+      "summary": {
+        "planning": "Planning: {{ms}}",
+        "execution": "Execution: {{ms}}",
+        "tier": "Tier: {{tier}}",
+        "elapsed": "Round trip: {{ms}}",
+        "jit": "JIT: {{functions}} functions, {{ms}}"
+      },
+      "tiers": {
+        "read": "read",
+        "write": "write"
+      },
+      "warnings": {
+        "genericPlan": "Generic plan (GENERIC_PLAN): no parameter values",
+        "probeWithoutReadOnly": "The probe plan was built outside READ ONLY (the server refused it there)"
+      },
+      "copyJson": "Copy JSON",
+      "copyText": "Copy as text",
+      "asJson": "JSON",
+      "asText": "As text"
     }
   },
   "findings": {

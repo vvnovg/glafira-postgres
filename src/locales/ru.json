@@ -1294,6 +1294,77 @@
         "stddev": "Stddev",
         "max": "Max"
       }
+    },
+    "plan": {
+      "tree": "Дерево плана",
+      "columns": {
+        "node": "Узел",
+        "time": "Время (вкл. / собств.)",
+        "cost": "Стоимость",
+        "rows": "Строки (оценка → факт)",
+        "loops": "Циклы",
+        "buffers": "Буферы (hit / read)",
+        "marks": "Пометки"
+      },
+      "expand": "Развернуть",
+      "collapse": "Свернуть",
+      "inclusive": "Включённое время (вместе с дочерними узлами)",
+      "marks": {
+        "neverExecuted": "не выполнялся",
+        "disk": "диск",
+        "lossy": "lossy",
+        "heapFetches": "heap fetches",
+        "workersShort": "меньше воркеров",
+        "parallel": "параллельно"
+      },
+      "details": {
+        "title": "Узел",
+        "type": "Узел",
+        "parent": "Связь",
+        "cost": "Стоимость",
+        "planRows": "Оценка строк × ширина",
+        "actual": "Факт",
+        "rowsUnit": "строк",
+        "loops": "циклы",
+        "exclusive": "Собственное время",
+        "filter": "Filter",
+        "indexCond": "Index Cond",
+        "recheckCond": "Recheck Cond",
+        "hashCond": "Hash Cond",
+        "joinFilter": "Join Filter",
+        "mergeCond": "Merge Cond",
+        "removedByFilter": "Отсеяно фильтром",
+        "removedByRecheck": "Отсеяно перепроверкой",
+        "heapFetches": "Heap fetches",
+        "sortKey": "Ключ сортировки",
+        "sortMethod": "Метод сортировки",
+        "hash": "Хеш",
+        "batches": "батчей",
+        "workers": "Воркеров запущено / план",
+        "buffers": "Буферы",
+        "io": "I/O чтение / запись",
+        "output": "Output",
+        "extra": "Прочие поля ({{count}})"
+      },
+      "summary": {
+        "planning": "Планирование: {{ms}}",
+        "execution": "Выполнение: {{ms}}",
+        "tier": "Ярус: {{tier}}",
+        "elapsed": "Запрос: {{ms}}",
+        "jit": "JIT: функций {{functions}}, {{ms}}"
+      },
+      "tiers": {
+        "read": "чтение",
+        "write": "запись"
+      },
+      "warnings": {
+        "genericPlan": "План общий (GENERIC_PLAN): без значений параметров",
+        "probeWithoutReadOnly": "Пробный план построен вне READ ONLY (сервер отверг его там)"
+      },
+      "copyJson": "Копировать JSON",
+      "copyText": "Копировать как текст",
+      "asJson": "JSON",
+      "asText": "Как текст"
     }
   },
   "findings": {
