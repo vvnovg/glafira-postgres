@@ -206,6 +206,24 @@
       "pgssTooOld": "pg_stat_statements {{version}} is older than 1.8",
       "badQueryId": "Query id must be a 64-bit integer"
     },
+    "explain": {
+      "emptySql": "Enter a query",
+      "sqlTooLong": "The query is longer than {{max}} bytes",
+      "paramsCount": "The query has {{expected}} parameters, {{got}} values given",
+      "genericAnalyze": "GENERIC_PLAN cannot be combined with ANALYZE: enter parameter values",
+      "badTimeout": "The timeout must be between 5 and 600 seconds",
+      "badSearchPath": "search_path may contain only identifiers, quotes, commas and spaces",
+      "genericUnsupported": "GENERIC_PLAN needs PostgreSQL 16 or newer: enter parameter values",
+      "oneStatement": "Enter exactly one statement",
+      "server": "The server rejected the query: {{message}}",
+      "timeout": "The plan was not produced in time; execution was cancelled, nothing changed",
+      "notAuthorized": "Not enough privileges on the query's tables: grant pg_read_all_data (14+) or SELECT",
+      "writes": "The query writes data (a volatile function or trigger): run it as a write with confirmation",
+      "writeOnReplica": "A write cannot be executed on a replica: choose the primary"
+    },
+    "plan": {
+      "unparsed": "The plan could not be parsed (line {{line}}): {{message}}"
+    },
     "guard": {
       "readOnly": "Connection “{{name}}” is read-only",
       "prodConfirm": "To change a prod connection, type its name “{{name}}”",
@@ -1366,7 +1384,8 @@
       "restart": "Restart",
       "cancelRestart": "Restart cancelled",
       "pause": "Pause",
-      "resume": "Resume"
+      "resume": "Resume",
+      "explainAnalyze": "EXPLAIN ANALYZE (write)"
     },
     "outcome": {
       "ok": "done",

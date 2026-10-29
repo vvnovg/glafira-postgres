@@ -208,6 +208,24 @@
       "pgssTooOld": "pg_stat_statements {{version}} старше 1.8",
       "badQueryId": "Идентификатор запроса — 64-битное целое"
     },
+    "explain": {
+      "emptySql": "Введите запрос",
+      "sqlTooLong": "Запрос длиннее {{max}} байт",
+      "paramsCount": "В запросе {{expected}} параметров, значений передано {{got}}",
+      "genericAnalyze": "GENERIC_PLAN несовместим с ANALYZE: введите значения параметров",
+      "badTimeout": "Срок — от 5 до 600 секунд",
+      "badSearchPath": "search_path — только идентификаторы, кавычки, запятые и пробелы",
+      "genericUnsupported": "GENERIC_PLAN требует PostgreSQL 16 и новее: введите значения параметров",
+      "oneStatement": "Введите ровно одну инструкцию",
+      "server": "Сервер отверг запрос: {{message}}",
+      "timeout": "План не получен за отведённое время; выполнение прервано, изменений нет",
+      "notAuthorized": "Не хватает прав на таблицы запроса: выдайте pg_read_all_data (14+) или SELECT",
+      "writes": "Запрос пишет данные (volatile-функция или триггер): выполните как запись с подтверждением",
+      "writeOnReplica": "Запись на реплике невозможна: выберите primary"
+    },
+    "plan": {
+      "unparsed": "План не разобран (строка {{line}}): {{message}}"
+    },
     "guard": {
       "readOnly": "Подключение «{{name}}» только для чтения",
       "prodConfirm": "Чтобы изменить prod-подключение, введите его имя «{{name}}»",
@@ -1390,7 +1408,8 @@
       "restart": "Restart",
       "cancelRestart": "Отмена restart",
       "pause": "Пауза",
-      "resume": "Снятие паузы"
+      "resume": "Снятие паузы",
+      "explainAnalyze": "EXPLAIN ANALYZE (запись)"
     },
     "outcome": {
       "ok": "выполнено",

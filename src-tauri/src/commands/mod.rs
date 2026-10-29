@@ -3,6 +3,7 @@ pub mod app;
 pub mod catalog;
 pub mod connections;
 pub mod diag;
+pub mod explain;
 pub mod folders;
 pub mod queries;
 pub mod settings;

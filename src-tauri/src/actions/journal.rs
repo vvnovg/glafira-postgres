@@ -89,12 +89,22 @@ pub struct PatroniRecord {
     pub response: Option<String>,
 }
 
+/// EXPLAIN ANALYZE яруса записи (спец. P3 §8.4): база, затронутые таблицы `schema.name`, срок и начало текста.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplainRecord {
+    pub database: String,
+    pub tables: Vec<String>,
+    pub timeout_s: u32,
+    pub sql_head: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActionRecord {
     pub ts: i64,
     /// `cancel` | `terminate` | `dropSlot` | `switchover` | `cancelSwitchover` | `failover` | `restart` |
-    /// `cancelRestart` | `pause` | `resume`.
+    /// `cancelRestart` | `pause` | `resume` | `explainAnalyze`.
     pub action: String,
     pub connection: RecordConnection,
     pub member: Option<String>,
@@ -109,6 +119,8 @@ pub struct ActionRecord {
     pub slot: Option<SlotRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patroni: Option<PatroniRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explain: Option<ExplainRecord>,
 }
 
 pub fn now_ms() -> i64 {
@@ -248,6 +260,7 @@ mod tests {
             }],
             slot: None,
             patroni: None,
+            explain: None,
         }
     }
 
@@ -277,7 +290,7 @@ mod tests {
         );
         assert_eq!(v["sessions"][0]["queryId"], "-123");
         assert!(
-            v.get("slot").is_none() && v.get("patroni").is_none(),
+            v.get("slot").is_none() && v.get("patroni").is_none() && v.get("explain").is_none(),
             "пустые части не пишутся"
         );
     }

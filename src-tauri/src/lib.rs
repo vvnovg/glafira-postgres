@@ -7,6 +7,7 @@ pub mod conn;
 pub mod diag;
 pub mod diagnostics;
 pub mod error;
+pub mod explain;
 pub mod guard;
 pub mod logging;
 pub mod migrate;
@@ -122,6 +123,8 @@ pub fn run() {
             commands::queries::query_texts,
             commands::queries::start_statements_sampler,
             commands::queries::query_detail,
+            commands::explain::explain,
+            commands::explain::parse_plan,
             commands::actions::list_actions,
             commands::actions::preview_session_action,
             commands::actions::execute_session_action,

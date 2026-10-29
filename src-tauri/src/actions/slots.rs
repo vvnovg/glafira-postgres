@@ -180,6 +180,7 @@ pub async fn drop(
         sessions: vec![],
         slot: Some(slot_record(&slot)),
         patroni: None,
+        explain: None,
     };
     let journal = st.actions.clone();
     let journal_written = crate::conn::run_blocking(move || Ok(journal.append(&record)))

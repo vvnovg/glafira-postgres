@@ -913,6 +913,7 @@ async fn send_and_record(
         sessions: vec![],
         slot: None,
         patroni: Some(sent.record),
+        explain: None,
     };
     let log = journal.clone();
     let journal_written = crate::conn::run_blocking(move || Ok(log.append(&entry)))

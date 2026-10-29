@@ -28,6 +28,8 @@ pub enum ErrorCode {
     ReadOnly,
     /// Нет или неверно подтверждение: имя подключения на prod, имя объекта, число сессий.
     ConfirmationRequired,
+    /// Запрос, признанный чтением, пытается писать (SQLSTATE 25006 в `READ ONLY`).
+    ExplainWrites,
     Internal,
 }
 
@@ -160,6 +162,10 @@ mod tests {
         );
         assert_eq!(v(ErrorCode::ReadOnly)["retryable"], false);
         assert_eq!(v(ErrorCode::ConfirmationRequired)["retryable"], false);
+        assert_eq!(
+            serde_json::to_value(ErrorCode::ExplainWrites).unwrap(),
+            "EXPLAIN_WRITES"
+        );
     }
 
     #[test]

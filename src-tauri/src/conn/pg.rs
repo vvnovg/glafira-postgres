@@ -29,6 +29,11 @@ pub const SESSION_OPTIONS: &str = "-c default_transaction_read_only=on -c statem
 pub const ACTION_SESSION_OPTIONS: &str =
     "-c statement_timeout=5000 -c lock_timeout=1000 -c search_path=pg_catalog -c DateStyle=ISO";
 
+/// Параметры сессии EXPLAIN (спец. P3 §8.3): без `search_path=pg_catalog` (запрос пользователя должен видеть его
+/// схемы) и без `default_transaction_read_only` (ярусы задают режим транзакции сами).
+pub const EXPLAIN_SESSION_OPTIONS: &str =
+    "-c statement_timeout=5000 -c lock_timeout=1000 -c DateStyle=ISO";
+
 /// Отсечка молчащего соединения на уровне TCP: после 60 с тишины зонды раз в 10 с. После failover
 /// полуоткрытое соединение иначе живёт в пуле, пока его не попробуют использовать.
 const KEEPALIVE_IDLE: Duration = Duration::from_secs(60);
@@ -64,7 +69,8 @@ pub struct ConnectSpec {
     pub socks: Option<SocketAddr>,
     /// Цель ssh туннеля — для сообщения о сбое проброса.
     pub ssh_target: Option<String>,
-    /// Параметры сессии (`-c …`): `SESSION_OPTIONS` у пулов, `ACTION_SESSION_OPTIONS` у действий.
+    /// Параметры сессии (`-c …`): `SESSION_OPTIONS` у пулов, `ACTION_SESSION_OPTIONS` у действий,
+    /// `EXPLAIN_SESSION_OPTIONS` у EXPLAIN.
     pub options: &'static str,
 }
 
@@ -135,6 +141,12 @@ impl ConnectSpec {
     /// То же соединение для действия (P2b): запись разрешена, пределы и `search_path` те же.
     pub fn for_action(mut self) -> Self {
         self.options = ACTION_SESSION_OPTIONS;
+        self
+    }
+
+    /// То же соединение для EXPLAIN (P3a): схемы пользователя видны, режим транзакции задаёт ярус.
+    pub fn for_explain(mut self) -> Self {
+        self.options = EXPLAIN_SESSION_OPTIONS;
         self
     }
 
@@ -340,6 +352,11 @@ mod tests {
     fn action_spec_is_read_write_with_the_same_limits() {
         let spec = loopback_spec(5432, "localhost", SslMode::Disable, None);
         assert_eq!(spec.pg_config().get_options(), Some(SESSION_OPTIONS));
+        assert_eq!(
+            spec.clone().for_explain().pg_config().get_options(),
+            Some(EXPLAIN_SESSION_OPTIONS)
+        );
+        assert!(!EXPLAIN_SESSION_OPTIONS.contains("search_path"));
         let action = spec.for_action();
         let opts = action.pg_config().get_options().map(str::to_string);
         assert_eq!(opts.as_deref(), Some(ACTION_SESSION_OPTIONS));

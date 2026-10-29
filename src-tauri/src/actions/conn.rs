@@ -21,13 +21,35 @@ impl Drop for ActionClient {
     }
 }
 
-/// Открывает соединение с участником `member` (БД `database` или БД профиля) через туннель подключения.
-/// Пул `Catalog` узла запомнил отказ во входе — возвращается он, без новой попытки входа.
+/// Соединение действия (спец. P2 §8.2): параметры `ACTION_SESSION_OPTIONS`.
 pub async fn open(
     st: &AppState,
     id: &str,
     member: &str,
     database: Option<&str>,
+) -> AppResult<ActionClient> {
+    open_with(st, id, member, database, ConnectSpec::for_action).await
+}
+
+/// Соединение EXPLAIN (спец. P3 §8.3): `EXPLAIN_SESSION_OPTIONS`, вне пулов, на один запрос.
+pub async fn open_explain(
+    st: &AppState,
+    id: &str,
+    member: &str,
+    database: Option<&str>,
+) -> AppResult<ActionClient> {
+    open_with(st, id, member, database, ConnectSpec::for_explain).await
+}
+
+/// Открывает соединение с участником `member` (БД `database` или БД профиля) через туннель подключения;
+/// `options` задаёт параметры сессии (`ConnectSpec::for_action`, `ConnectSpec::for_explain`).
+/// Пул `Catalog` узла запомнил отказ во входе — возвращается он, без новой попытки входа.
+pub async fn open_with(
+    st: &AppState,
+    id: &str,
+    member: &str,
+    database: Option<&str>,
+    options: fn(ConnectSpec) -> ConnectSpec,
 ) -> AppResult<ActionClient> {
     let (m, profile) = st.runtimes.target(id, Some(member))?;
     if !m.reachable {
@@ -53,11 +75,12 @@ pub async fn open(
     let socks = st.tunnels.route_for(&profile)?;
     let secrets = st.secrets.clone();
     let (host, port) = (m.host.clone(), m.port);
-    let spec = run_blocking(move || {
-        ConnectSpec::build_via(&profile, &host, port, &db, secrets.as_ref(), socks)
-    })
-    .await?
-    .for_action();
+    let spec = options(
+        run_blocking(move || {
+            ConnectSpec::build_via(&profile, &host, port, &db, secrets.as_ref(), socks)
+        })
+        .await?,
+    );
     let (client, abort) = spec.connect_with_handle().await?;
     Ok(ActionClient { client, abort })
 }

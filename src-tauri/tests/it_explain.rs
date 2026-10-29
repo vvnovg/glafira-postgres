@@ -1,0 +1,406 @@
+//! EXPLAIN и EXPLAIN ANALYZE на стенде (спец. P3 §8): ярусы, параметры, GENERIC_PLAN, журнал, защита read-only
+//! и prod, таймаут, вторая инструкция, реплика. `GPG_IT_PERF` — pg-perf, `GPG_IT_MATRIX` — PG 15 для отказа
+//! GENERIC_PLAN, `GPG_IT_REPLICA` — реплика пары. Запускать с `--test-threads=1`.
+//!
+//! Роли: ярус чтения на pg-perf — `glafira_diag` (`pg_read_all_data`, писать не может); ярус записи и реплика —
+//! `glafira_app` (права записи в `shop`; на паре у `glafira_diag` нет прав на `shop`). Стенд не меняется: запись всегда
+//! откатывается, а побочный эффект в ярусе чтения проверяется на `lo_creat` (транзакционен, откат его отменяет), а не
+//! на `nextval` (сдвиг последовательности откат не отменяет).
+
+mod common;
+
+use glafira_pg_lib::actions::Confirmation;
+use glafira_pg_lib::actions::journal::Outcome;
+use glafira_pg_lib::conn::profile::Environment;
+use glafira_pg_lib::error::ErrorCode;
+use glafira_pg_lib::explain::{self, ExplainRequest, Mode, Params, Tier};
+
+fn req(member: &str, database: &str, sql: &str, mode: Mode, params: Params) -> ExplainRequest {
+    ExplainRequest {
+        member: member.into(),
+        database: database.into(),
+        sql: sql.into(),
+        mode,
+        params,
+        timeout_s: 30,
+        search_path: None,
+        confirmation: Confirmation {
+            confirm: None,
+            typed_name: None,
+        },
+        force_write: false,
+    }
+}
+
+fn values(v: &[&str]) -> Params {
+    Params::Values {
+        values: v.iter().map(|s| Some((*s).to_string())).collect(),
+    }
+}
+
+async fn member_of(st: &glafira_pg_lib::state::AppState) -> String {
+    st.runtimes.view("it").topology.unwrap().members[0]
+        .name
+        .clone()
+}
+
+#[tokio::test]
+async fn plan_and_analyze_read_tier_on_perf() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st) = common::open_server_in(&perf, "perf").await;
+    let m = member_of(&st).await;
+    // Пробный план с параметром-значением: тип выводит сервер.
+    let r = explain::run::run(
+        &st,
+        "it",
+        &req(
+            &m,
+            "perf",
+            "SELECT count(*) FROM shop.orders WHERE status = $1",
+            Mode::Plan,
+            values(&["disputed"]),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!((r.mode, r.tier), (Mode::Plan, Tier::Read));
+    assert!(r.plan.root.actual.is_none());
+    assert!(
+        r.relations
+            .iter()
+            .any(|x| x.schema.as_deref() == Some("shop") && x.name == "orders"),
+        "{:?}",
+        r.relations
+    );
+    assert!(r.raw.is_array());
+    // GENERIC_PLAN на 17.
+    let r = explain::run::run(
+        &st,
+        "it",
+        &req(
+            &m,
+            "perf",
+            "SELECT * FROM shop.customers WHERE id = $1",
+            Mode::Plan,
+            Params::Generic,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(r.warnings.iter().any(|w| w == "genericPlan"));
+    assert_eq!(r.plan.root.node_type, "Index Scan");
+    assert!(
+        r.plan
+            .root
+            .index_cond
+            .as_deref()
+            .is_some_and(|c| c.contains("$1")),
+        "обобщённый план, а не по значению: {:?}",
+        r.plan.root.index_cond
+    );
+    // ANALYZE чтения — без подтверждения и без строки в журнале.
+    let r = explain::run::run(
+        &st,
+        "it",
+        &req(
+            &m,
+            "perf",
+            "SELECT count(*) FROM shop.customers WHERE id < $1",
+            Mode::Analyze,
+            values(&["100"]),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!((r.mode, r.tier), (Mode::Analyze, Tier::Read));
+    assert!(r.plan.root.actual.is_some() && r.plan.execution_ms.is_some());
+    assert!(r.plan.root.buffers.is_some(), "BUFFERS");
+    assert!(
+        st.actions.list(Some("it"), 10).is_empty(),
+        "чтение в журнал не пишется"
+    );
+    // nextval без права USAGE на последовательность: сервер проверяет права раньше READ ONLY — 42501.
+    let e = explain::run::run(
+        &st,
+        "it",
+        &req(
+            &m,
+            "perf",
+            "SELECT nextval('shop.customers_id_seq')",
+            Mode::Analyze,
+            Params::None,
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        (e.code, e.key.as_str()),
+        (ErrorCode::NotAuthorized, "errors.explain.notAuthorized")
+    );
+    // Побочный эффект в ярусе чтения: lo_creat в READ ONLY → EXPLAIN_WRITES.
+    let su = common::superuser(&perf, "perf").await;
+    let los = "SELECT count(*) FROM pg_largeobject_metadata";
+    let before: i64 = su.query_one(los, &[]).await.unwrap().get(0);
+    let e = explain::run::run(
+        &st,
+        "it",
+        &req(
+            &m,
+            "perf",
+            "SELECT lo_creat(-1)",
+            Mode::Analyze,
+            Params::None,
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        (e.code, e.key.as_str()),
+        (ErrorCode::ExplainWrites, "errors.explain.writes")
+    );
+    // «Выполнить как запись»: тот же запрос с forceWrite идёт ярусом записи (dev — без подтверждения) и пишется в журнал.
+    let mut forced = req(
+        &m,
+        "perf",
+        "SELECT lo_creat(-1)",
+        Mode::Analyze,
+        Params::None,
+    );
+    forced.force_write = true;
+    let r = explain::run::run(&st, "it", &forced).await.unwrap();
+    assert_eq!(r.tier, Tier::Write);
+    assert_eq!(
+        st.actions.list(Some("it"), 10).len(),
+        1,
+        "ярус записи — строка журнала"
+    );
+    let after: i64 = su.query_one(los, &[]).await.unwrap().get(0);
+    assert_eq!(before, after, "запись откатана");
+    // Вторая инструкция и таймаут.
+    let e = explain::run::run(
+        &st,
+        "it",
+        &req(&m, "perf", "SELECT 1; SELECT 2", Mode::Plan, Params::None),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        (e.code, e.key.as_str()),
+        (ErrorCode::InvalidInput, "errors.explain.oneStatement")
+    );
+    let mut slow = req(
+        &m,
+        "perf",
+        "SELECT pg_sleep(10)",
+        Mode::Analyze,
+        Params::None,
+    );
+    slow.timeout_s = 5;
+    let e = explain::run::run(&st, "it", &slow).await.unwrap_err();
+    assert_eq!(
+        (e.code, e.key.as_str()),
+        (ErrorCode::Timeout, "errors.explain.timeout")
+    );
+    // Синтаксическая ошибка — сообщение сервера и позиция в тексте пользователя (с ведущими пробелами, без `EXPLAIN (…)`).
+    let e = explain::run::run(
+        &st,
+        "it",
+        &req(&m, "perf", "  SELEC 1", Mode::Plan, Params::None),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        (e.code, e.key.as_str()),
+        (ErrorCode::InvalidInput, "errors.explain.server")
+    );
+    assert_eq!(e.details.as_deref(), Some("position 3"), "{e:?}");
+}
+
+#[tokio::test]
+async fn write_tier_rolls_back_journals_and_respects_guard() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st) =
+        common::open_server_as(&perf, "perf", common::APP_USER, common::APP_PASSWORD).await;
+    let m = member_of(&st).await;
+    let su = common::superuser(&perf, "perf").await;
+    let before: String = su
+        .query_one(
+            "SELECT balance::text FROM shop.balances WHERE customer_id = 1",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let sql = "UPDATE shop.balances SET balance = balance + 100 WHERE customer_id = $1";
+    // Пробный план показывает ярус записи без выполнения.
+    let r = explain::run::run(&st, "it", &req(&m, "perf", sql, Mode::Plan, values(&["1"])))
+        .await
+        .unwrap();
+    assert_eq!(r.tier, Tier::Write);
+    assert_eq!(
+        r.relations
+            .iter()
+            .map(|x| x.name.as_str())
+            .collect::<Vec<_>>(),
+        ["balances"]
+    );
+    // Dev-профиль: подтверждения не нужно; выполнено и откатано; строка журнала.
+    let r = explain::run::run(
+        &st,
+        "it",
+        &req(&m, "perf", sql, Mode::Analyze, values(&["1"])),
+    )
+    .await
+    .unwrap();
+    assert_eq!((r.mode, r.tier), (Mode::Analyze, Tier::Write));
+    assert!(r.plan.root.actual.is_some());
+    let after: String = su
+        .query_one(
+            "SELECT balance::text FROM shop.balances WHERE customer_id = 1",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(before, after, "изменения откатаны");
+    let records = st.actions.list(Some("it"), 10);
+    assert_eq!(records.len(), 1);
+    let rec = &records[0];
+    assert_eq!(
+        (rec.action.as_str(), rec.outcome, rec.member.as_deref()),
+        ("explainAnalyze", Outcome::Ok, Some(m.as_str()))
+    );
+    let ex = rec.explain.as_ref().expect("поле explain");
+    assert_eq!(
+        (ex.database.as_str(), ex.tables.as_slice(), ex.timeout_s),
+        ("perf", &["shop.balances".to_string()][..], 30)
+    );
+    assert!(ex.sql_head.starts_with("UPDATE shop.balances"));
+    // Prod без имени подключения — отказ до сервера; с именем — проходит.
+    let mut p = st.profile("it").unwrap();
+    p.environment = Environment::Prod;
+    st.connections.upsert(p.clone()).unwrap();
+    let e = explain::run::run(
+        &st,
+        "it",
+        &req(&m, "perf", sql, Mode::Analyze, values(&["1"])),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::ConfirmationRequired);
+    let mut ok = req(&m, "perf", sql, Mode::Analyze, values(&["1"]));
+    ok.confirmation.confirm = Some("it".into());
+    let r = explain::run::run(&st, "it", &ok).await.unwrap();
+    assert_eq!(r.tier, Tier::Write);
+    assert!(st.actions.list(Some("it"), 10)[0].prod_confirmed);
+    // Read-only профиль: ярус записи закрыт, ярус чтения работает.
+    p.environment = Environment::Dev;
+    p.read_only = true;
+    st.connections.upsert(p).unwrap();
+    let e = explain::run::run(
+        &st,
+        "it",
+        &req(&m, "perf", sql, Mode::Analyze, values(&["1"])),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::ReadOnly);
+    assert!(
+        explain::run::run(
+            &st,
+            "it",
+            &req(&m, "perf", "SELECT 1", Mode::Analyze, Params::None)
+        )
+        .await
+        .is_ok()
+    );
+    assert_eq!(
+        st.actions.list(Some("it"), 10).len(),
+        2,
+        "отказы guard в журнал не пишутся"
+    );
+}
+
+#[tokio::test]
+async fn generic_plan_is_refused_before_16_and_writes_are_refused_on_a_replica() {
+    if let Some(pg15) = common::matrix_addrs()
+        .into_iter()
+        .find(|a| a.ends_with(":5515"))
+    {
+        let (_dir, st) = common::open_server(&pg15).await;
+        let m = member_of(&st).await;
+        let e = explain::run::run(
+            &st,
+            "it",
+            &req(
+                &m,
+                "postgres",
+                "SELECT $1::int",
+                Mode::Plan,
+                Params::Generic,
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (
+                ErrorCode::FeatureUnavailable,
+                "errors.explain.genericUnsupported"
+            )
+        );
+        assert!(
+            explain::run::run(
+                &st,
+                "it",
+                &req(&m, "postgres", "SELECT $1::int", Mode::Plan, values(&["1"]))
+            )
+            .await
+            .is_ok()
+        );
+    }
+    if let Some(replica) = common::env("GPG_IT_REPLICA") {
+        let (_dir, st) =
+            common::open_server_as(&replica, "orders", common::APP_USER, common::APP_PASSWORD)
+                .await;
+        let m = member_of(&st).await;
+        let sql = "UPDATE shop.orders SET status = status WHERE id = 1";
+        let r = explain::run::run(&st, "it", &req(&m, "orders", sql, Mode::Plan, Params::None))
+            .await
+            .unwrap();
+        assert_eq!(r.tier, Tier::Write, "пробный план строится и на реплике");
+        let e = explain::run::run(
+            &st,
+            "it",
+            &req(&m, "orders", sql, Mode::Analyze, Params::None),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (
+                ErrorCode::FeatureUnavailable,
+                "errors.explain.writeOnReplica"
+            )
+        );
+        assert!(
+            explain::run::run(
+                &st,
+                "it",
+                &req(
+                    &m,
+                    "orders",
+                    "SELECT count(*) FROM shop.orders",
+                    Mode::Analyze,
+                    Params::None
+                )
+            )
+            .await
+            .is_ok()
+        );
+    }
+}

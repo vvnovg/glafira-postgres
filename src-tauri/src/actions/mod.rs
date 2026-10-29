@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 /// Подтверждение действия (спец. §8.1): имя подключения на prod (`confirm`) и имя объекта или число сессий
 /// (`typed_name`). Проверяется `guard` в Rust до обращения к серверу.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Confirmation {
     pub confirm: Option<String>,
