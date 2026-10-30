@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { act, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { connection, member, topology, topologyView } from "../test/fixtures";
 import { renderWithClient } from "../test/render";
@@ -28,10 +28,14 @@ describe("TabContent explain", () => {
     expect(api.listDatabases).toHaveBeenCalledWith("c");
   });
 
-  it("скрытая вкладка список баз не читает", async () => {
-    renderWithClient(<TabContent tab={{ kind: "explain", connectionId: "c", id: "explain:c" }} active={false} />);
-    await vi.waitFor(() => expect(api.getTopology).toHaveBeenCalled());
-    await Promise.resolve();
+  it("скрытая вкладка список баз не читает; при возвращении читает ровно один раз", async () => {
+    const tab = { kind: "explain", connectionId: "c", id: "explain:c" } as const;
+    const { rerender } = renderWithClient(<TabContent tab={tab} active={false} />);
+    // Топология прочитана и консоль нарисована; даём пройти макрозадаче — запрос баз, будь он разрешён, уже ушёл бы.
+    expect(await screen.findByRole("heading", { level: 2, name: "Консоль EXPLAIN" })).toBeInTheDocument();
+    await act(() => new Promise((r) => setTimeout(r, 0)));
     expect(api.listDatabases).not.toHaveBeenCalled();
+    rerender(<TabContent tab={tab} active />);
+    await vi.waitFor(() => expect(api.listDatabases).toHaveBeenCalledTimes(1));
   });
 });

@@ -1274,6 +1274,7 @@
       "allDatabases": "Все базы",
       "toplevelOnly": "Только верхний уровень",
       "limit": "Строк",
+      "openConsole": "Открыть консоль EXPLAIN",
       "sortUnavailable": "Недоступно для этой версии или режима",
       "truncated": "(обрезан)",
       "empty": "В pg_stat_statements нет строк",

@@ -1252,6 +1252,7 @@
       "allDatabases": "All databases",
       "toplevelOnly": "Top level only",
       "limit": "Rows",
+      "openConsole": "Open EXPLAIN console",
       "sortUnavailable": "Not available for this version or mode",
       "truncated": "(truncated)",
       "empty": "pg_stat_statements has no rows",

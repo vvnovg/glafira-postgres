@@ -40,7 +40,8 @@ describe("ExplainTab", () => {
     const user = userEvent.setup();
     renderWithClient(<ExplainTab connectionId="c" member={null} database={undefined} sql={undefined} active />);
     expect(await screen.findByRole("combobox", { name: "Узел" })).toHaveValue("pg-1");
-    expect(screen.getByRole("combobox", { name: "База" })).toHaveValue("postgres");
+    // База по умолчанию — первая из списка: известна, когда список прочитан.
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "База" })).toHaveValue("postgres"));
     await user.click(screen.getByRole("tab", { name: "Вставить план" }));
     await user.type(screen.getByRole("textbox", { name: "План (JSON)" }), "[[{{]");
     await user.click(screen.getByRole("button", { name: "Разобрать" }));
@@ -134,14 +135,49 @@ describe("ExplainTab", () => {
     expect(screen.queryByRole("textbox", { name: "SQL" })).toBeNull();
   });
 
-  it("скрытая вкладка список баз не читает; при возвращении читает", async () => {
-    const { rerender } = renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql={undefined} active={false} />);
-    await waitFor(() => expect(api.getTopology).toHaveBeenCalled());
-    await Promise.resolve();
+  it("скрытая вкладка список баз не читает; при возвращении читает ровно один раз", async () => {
+    const { rerender, client } = renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql={undefined} active={false} />);
+    // Топология прочитана и консоль нарисована; даём пройти макрозадаче — запрос баз, будь он разрешён, уже ушёл бы.
+    expect(await screen.findByRole("textbox", { name: "SQL" })).toBeInTheDocument();
+    await act(() => new Promise((r) => setTimeout(r, 0)));
     expect(api.listDatabases).not.toHaveBeenCalled();
     rerender(<ExplainTab connectionId="c" member="pg-1" database="perf" sql={undefined} active />);
-    expect(await screen.findByRole("combobox", { name: "База" })).toHaveValue("perf");
-    expect(api.listDatabases).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(api.listDatabases).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(client.isFetching()).toBe(0));
+    expect(screen.getByRole("combobox", { name: "База" })).toHaveValue("perf");
+  });
+
+  it("«Вставить план» работает, пока список баз не прочитан: полноэкранной загрузки нет", async () => {
+    vi.mocked(api.listDatabases).mockReturnValue(new Promise(() => {}));
+    vi.mocked(api.parsePlan).mockResolvedValue(planTree());
+    const user = userEvent.setup();
+    renderWithClient(<ExplainTab connectionId="c" member={null} database={undefined} sql={undefined} active />);
+    await user.click(await screen.findByRole("tab", { name: "Вставить план" }));
+    // Консоль на месте, загрузка (ждёт база) — только в скрытой панели запроса.
+    expect(screen.getByRole("heading", { level: 2, name: "Консоль EXPLAIN" })).toBeInTheDocument();
+    expect(screen.getByText("Загрузка…")).not.toBeVisible();
+    await user.type(screen.getByRole("textbox", { name: "План (JSON)" }), "x");
+    await user.click(screen.getByRole("button", { name: "Разобрать" }));
+    expect(await screen.findByRole("treegrid", { name: "Дерево плана" })).toBeInTheDocument();
+    // Режим запроса ждёт базу: вместо запуска — загрузка, поле SQL доступно.
+    await user.click(screen.getByRole("tab", { name: "Запрос" }));
+    expect(screen.getByText("Загрузка…")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "План" })).toBeNull();
+  });
+
+  it("повтор чтения списка баз не размонтирует запуск: показанный план остаётся", async () => {
+    vi.mocked(api.listDatabases).mockRejectedValueOnce({ code: "NODE_UNAVAILABLE", message: "down", retryable: true });
+    vi.mocked(api.explain).mockResolvedValue({ mode: "plan", tier: "read", plan: planTree(), raw: [], relations: [], elapsedMs: 3, warnings: [] });
+    const user = userEvent.setup();
+    renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql="SELECT 1" active />);
+    // База известна из спеки: запуск доступен и при ошибке чтения списка.
+    await user.click(await screen.findByRole("button", { name: "План" }));
+    expect(await screen.findByRole("treegrid", { name: "Дерево плана" })).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "Повторить" }));
+    await waitFor(() => expect(api.listDatabases).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    expect(screen.getByRole("treegrid", { name: "Дерево плана" })).toBeInTheDocument();
+    expect(api.explain).toHaveBeenCalledTimes(1);
   });
 
   it("переключение на «Вставить план» и обратно не стирает набранный SQL и показанный план запуска", async () => {
@@ -160,7 +196,7 @@ describe("ExplainTab", () => {
     expect(api.explain).toHaveBeenCalledTimes(1);
   });
 
-  it("«Скопировать для LLM» берёт SQL консоли, узел и базу; без текста кнопки нет", async () => {
+  it("«Скопировать для LLM» берёт SQL консоли, узел и базу; без текста кнопки нет; без запуска плана нет", async () => {
     vi.mocked(api.queryLlmBundle).mockRejectedValue({ code: "NOT_AUTHORIZED", key: "errors.explain.notAuthorized", message: "Not enough privileges", retryable: false });
     const user = userEvent.setup();
     renderWithClient(<ExplainTab connectionId="c" member="pg-2" database="perf" sql="" active />);
@@ -169,5 +205,51 @@ describe("ExplainTab", () => {
     await user.type(screen.getByRole("textbox", { name: "SQL" }), "SELECT 2");
     await user.click(screen.getByRole("button", { name: "Скопировать для LLM" }));
     await waitFor(() => expect(api.queryLlmBundle).toHaveBeenCalledWith("c", "pg-2", "perf", { kind: "sql", sql: "SELECT 2" }, null));
+  });
+
+  it("«Скопировать для LLM» получает план последнего запуска; правка SQL, смена узла или базы возвращают null", async () => {
+    const plan = planTree();
+    vi.mocked(api.explain).mockResolvedValue({ mode: "plan", tier: "read", plan, raw: [], relations: [], elapsedMs: 3, warnings: [] });
+    vi.mocked(api.queryLlmBundle).mockRejectedValue({ code: "NOT_AUTHORIZED", key: "errors.explain.notAuthorized", message: "Not enough privileges", retryable: false });
+    const user = userEvent.setup();
+    renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql="SELECT 1" active />);
+    await screen.findByRole("combobox", { name: "База" });
+    await user.click(screen.getByRole("button", { name: "План" }));
+    await screen.findByRole("treegrid", { name: "Дерево плана" });
+    const copy = () => user.click(screen.getByRole("button", { name: "Скопировать для LLM" }));
+    await copy();
+    await waitFor(() => expect(api.queryLlmBundle).toHaveBeenLastCalledWith("c", "pg-1", "perf", { kind: "sql", sql: "SELECT 1" }, plan));
+    // План относится к тексту запуска: после правки SQL он не уходит.
+    await user.type(screen.getByRole("textbox", { name: "SQL" }), " ");
+    await copy();
+    await waitFor(() => expect(api.queryLlmBundle).toHaveBeenLastCalledWith("c", "pg-1", "perf", { kind: "sql", sql: "SELECT 1 " }, null));
+    // Вернули текст — запуск снова актуален.
+    await user.type(screen.getByRole("textbox", { name: "SQL" }), "{Backspace}");
+    await copy();
+    await waitFor(() => expect(api.queryLlmBundle).toHaveBeenLastCalledWith("c", "pg-1", "perf", { kind: "sql", sql: "SELECT 1" }, plan));
+    // Другая база или другой узел — другой запуск.
+    await user.selectOptions(screen.getByRole("combobox", { name: "База" }), "postgres");
+    await copy();
+    await waitFor(() => expect(api.queryLlmBundle).toHaveBeenLastCalledWith("c", "pg-1", "postgres", { kind: "sql", sql: "SELECT 1" }, null));
+    await user.selectOptions(screen.getByRole("combobox", { name: "База" }), "perf");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Узел" }), "pg-2");
+    await copy();
+    await waitFor(() => expect(api.queryLlmBundle).toHaveBeenLastCalledWith("c", "pg-2", "perf", { kind: "sql", sql: "SELECT 1" }, null));
+  });
+
+  it("запуск, начатый до правки SQL, не подсовывает свой план под новый текст", async () => {
+    const plan = planTree();
+    let finish: (v: unknown) => void = () => {};
+    vi.mocked(api.explain).mockReturnValue(new Promise((r) => { finish = r; }) as never);
+    vi.mocked(api.queryLlmBundle).mockRejectedValue({ code: "NOT_AUTHORIZED", key: "errors.explain.notAuthorized", message: "Not enough privileges", retryable: false });
+    const user = userEvent.setup();
+    renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql="SELECT 1" active />);
+    await screen.findByRole("combobox", { name: "База" });
+    await user.click(screen.getByRole("button", { name: "План" }));
+    await user.type(screen.getByRole("textbox", { name: "SQL" }), " ");
+    await act(async () => finish({ mode: "plan", tier: "read", plan, raw: [], relations: [], elapsedMs: 3, warnings: [] }));
+    await screen.findByRole("treegrid", { name: "Дерево плана" });
+    await user.click(screen.getByRole("button", { name: "Скопировать для LLM" }));
+    await waitFor(() => expect(api.queryLlmBundle).toHaveBeenCalledWith("c", "pg-1", "perf", { kind: "sql", sql: "SELECT 1 " }, null));
   });
 });

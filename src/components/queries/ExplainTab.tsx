@@ -2,27 +2,26 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../api/client";
-import type { AppError, PlanNode, PlanTree } from "../../api/types";
+import type { AppError, PlanTree } from "../../api/types";
 import { useTopology } from "../../lib/useConnectionEvents";
 import { tabId, useWorkspace } from "../../state/workspace";
 import { SubTabs } from "../catalog/SubTabs";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { CopyLlmButton } from "./CopyLlmButton";
-import { PlanNodeDetails } from "./plan/PlanNodeDetails";
 import { PlanRunner } from "./plan/PlanRunner";
-import { PlanSummary } from "./plan/PlanSummary";
-import { PlanTreeView } from "./plan/PlanTree";
+import { PlanView } from "./plan/PlanView";
 
 type Source = "sql" | "paste";
 
-function findNode(root: PlanNode, id: number | null): PlanNode | null {
-  if (id === null) return null;
-  if (root.id === id) return root;
-  for (const c of root.children) {
-    const f = findNode(c, id);
-    if (f) return f;
-  }
-  return null;
+/**
+ * План последнего запуска в консоли и то, для чего он построен: текст, узел и база берутся из отрисовки, которая
+ * создала запуск (замыкание `onResult`), — к моменту ответа SQL уже могли править.
+ */
+interface LastRun {
+  plan: PlanTree;
+  sql: string;
+  node: string;
+  db: string;
 }
 
 /**
@@ -38,7 +37,9 @@ function versionNum(text: string | null | undefined): number {
  * Консоль EXPLAIN (спец. P3 §8.7): узел, база, SQL и запуск планов через `PlanRunner`; режим «Вставить план» разбирает
  * JSON (в том числе с обрамлением psql) на месте, без обращения к серверу БД. Одна на подключение: «Открыть в консоли»
  * подставляет узел, базу и текст сюда же, а открытие из дерева (без подстановки) оставляет набранное.
- * active — вкладка сейчас видна: скрытая список баз не читает, а при возвращении читает заново.
+ * active — вкладка сейчас видна: скрытая список баз не читает, а при возвращении читает заново. Список нужен только режиму
+ * «Запрос» и только пока база не известна (спека или выбор): «Вставить план» от него не зависит.
+ * «Скопировать для LLM» получает план последнего запуска, пока SQL, узел и база не менялись, иначе Rust строит пробный план сам.
  */
 export function ExplainTab({
   connectionId,
@@ -65,7 +66,7 @@ export function ExplainTab({
   const [pasted, setPasted] = useState("");
   // Разобранный план хранится одним объектом: дерево плана сбрасывает развёртку при смене объекта.
   const [parsed, setParsed] = useState<PlanTree | null>(null);
-  const [selected, setSelected] = useState<number | null>(null);
+  const [last, setLast] = useState<LastRun | null>(null);
   const [parsing, setParsing] = useState(false);
   const [parseError, setParseError] = useState<AppError | null>(null);
   // Повторное «Открыть в консоли» меняет спеку вкладки (при том же тексте — только её объект): новые узел, база и текст подставляются.
@@ -86,14 +87,6 @@ export function ExplainTab({
       </div>
     );
   }
-  if (dbs.isPending) {
-    return (
-      <div className="page">
-        <p className="empty">{t("common.loading")}</p>
-      </div>
-    );
-  }
-
   const members = topo?.members ?? [];
   // Узла нет в спеке или он исчез из топологии — лидер; у списка без primary — первый участник.
   const leader = members.find((m) => m.role === "primary")?.name ?? members[0]?.name ?? null;
@@ -105,14 +98,14 @@ export function ExplainTab({
   const memberInfo = members.find((m) => m.name === nodeName);
   const inRecovery = memberInfo ? memberInfo.role !== "primary" : false;
   const serverVersionNum = versionNum(memberInfo?.serverVersion);
-  const selectedNode = parsed ? findNode(parsed.root, selected) : null;
+  // Для «Скопировать для LLM» план идёт только пока консоль ещё в том состоянии, для которого он построен.
+  const lastPlan = last && last.sql === sql && last.node === nodeName && last.db === dbName ? last.plan : null;
 
   const parse = async () => {
     setParseError(null);
     setParsing(true);
     try {
       setParsed(await api.parsePlan(pasted));
-      setSelected(null);
     } catch (e) {
       setParseError(toAppError(e));
     } finally {
@@ -162,15 +155,27 @@ export function ExplainTab({
             {/* Обе панели остаются смонтированными: переключение на «Вставить план» не стирает историю и значения параметров запуска. */}
             <div className="explain-panel" hidden={s !== "sql"}>
               <textarea className="mono explain-sql" aria-label="SQL" rows={8} value={sql} onChange={(e) => setSql(e.target.value)} placeholder={t("diag.explain.placeholder")} />
-              {nodeName && dbName && (
+              {nodeName && dbName ? (
                 <>
-                  <PlanRunner key={`${nodeName}:${dbName}`} connectionId={connectionId} member={nodeName} database={dbName} sql={sql} serverVersionNum={serverVersionNum} inRecovery={inRecovery} />
+                  <PlanRunner
+                    key={`${nodeName}:${dbName}`}
+                    connectionId={connectionId}
+                    member={nodeName}
+                    database={dbName}
+                    sql={sql}
+                    serverVersionNum={serverVersionNum}
+                    inRecovery={inRecovery}
+                    onResult={(r) => setLast({ plan: r.plan, sql, node: nodeName, db: dbName })}
+                  />
                   {sql.trim() && (
                     <div className="toolbar">
-                      <CopyLlmButton connectionId={connectionId} member={nodeName} database={dbName} source={{ kind: "sql", sql }} plan={null} />
+                      <CopyLlmButton connectionId={connectionId} member={nodeName} database={dbName} source={{ kind: "sql", sql }} plan={lastPlan} />
                     </div>
                   )}
                 </>
+              ) : (
+                // Базы ещё не знаем (список читается): запуску нужна база, режиму «Вставить план» — нет.
+                dbs.isPending && <p className="empty">{t("common.loading")}</p>
               )}
             </div>
             <div className="explain-panel" hidden={s !== "paste"}>
@@ -181,13 +186,7 @@ export function ExplainTab({
                 </button>
               </div>
               {parseError && <ErrorBanner error={parseError} />}
-              {parsed && (
-                <>
-                  <PlanSummary tree={parsed} />
-                  <PlanTreeView tree={parsed} selectedId={selected} onSelect={setSelected} />
-                  {selectedNode && <PlanNodeDetails node={selectedNode} />}
-                </>
-              )}
+              {parsed && <PlanView tree={parsed} />}
             </div>
           </>
         )}

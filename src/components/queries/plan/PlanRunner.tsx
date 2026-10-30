@@ -1,16 +1,14 @@
 import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toAppError } from "../../../api/client";
-import type { AppError, Confirmation, ExplainMode, ExplainParams, ExplainRequest, ExplainResult, ExplainTier, Member, PlanNode, RelationRef } from "../../../api/types";
+import type { AppError, Confirmation, ExplainMode, ExplainParams, ExplainRequest, ExplainResult, ExplainTier, Member, RelationRef } from "../../../api/types";
 import { formatDuration, formatMs, formatTime } from "../../../lib/format";
 import { canAct, useConnectionProfile } from "../../../lib/useConnectionProfile";
 import { countParams, useExplain } from "../../../lib/useExplain";
 import { ErrorBanner } from "../../common/ErrorBanner";
 import { AnalyzeConfirm } from "./AnalyzeConfirm";
 import { ParamsForm } from "./ParamsForm";
-import { PlanNodeDetails } from "./PlanNodeDetails";
-import { PlanSummary } from "./PlanSummary";
-import { PlanTreeView } from "./PlanTree";
+import { PlanView } from "./PlanView";
 
 /** Сроки ANALYZE в выборе, секунды (Rust принимает 5…600); пробный план всегда идёт со своим сроком 15 с. */
 const TIMEOUTS_S = [5, 15, 30, 60, 300, 600] as const;
@@ -67,16 +65,6 @@ function errorPlace(sql: string, error: AppError | null): ErrorPlace | null {
   };
 }
 
-function findNode(root: PlanNode, id: number | null): PlanNode | null {
-  if (id === null) return null;
-  if (root.id === id) return root;
-  for (const c of root.children) {
-    const f = findNode(c, id);
-    if (f) return f;
-  }
-  return null;
-}
-
 /**
  * Запуск EXPLAIN (спец. P3 §8): параметры (`$N` → поля или GENERIC_PLAN на 16+), срок, `search_path`, «План» и «План с
  * выполнением». Ярус записи: пробный план → подтверждение со списком таблиц (всегда, и не на prod) → ANALYZE.
@@ -112,7 +100,6 @@ export function PlanRunner({
   const [searchPath, setSearchPath] = useState("");
   const [runs, setRuns] = useState<Run[]>([]);
   const [shown, setShown] = useState<number | null>(null);
-  const [selected, setSelected] = useState<number | null>(null);
   /** Открытое подтверждение яруса записи: таблицы пробного плана и `forceWrite`. */
   const [confirm, setConfirm] = useState<{ relations: RelationRef[]; force: boolean } | null>(null);
   const [error, setError] = useState<AppError | null>(null);
@@ -146,7 +133,6 @@ export function PlanRunner({
     const run: Run = { id: seq.current, at: Date.now(), result };
     setRuns((r) => [run, ...r].slice(0, HISTORY));
     setShown(run.id);
-    setSelected(null);
     onResult?.(result);
   };
 
@@ -213,7 +199,6 @@ export function PlanRunner({
   };
 
   const current = runs.find((r) => r.id === shown) ?? null;
-  const node = current ? findNode(current.result.plan.root, selected) : null;
   const place = errorPlace(sql, error);
   const busy = running || explain.isPending;
   const idle = !busy && confirm === null && sql.trim() !== "";
@@ -276,13 +261,7 @@ export function PlanRunner({
       {confirm && profile && (
         <AnalyzeConfirm connection={profile} relations={confirm.relations} busy={busy} onConfirm={(c) => void confirmed(c)} onCancel={() => setConfirm(null)} />
       )}
-      {current && (
-        <>
-          <PlanSummary tree={current.result.plan} tier={current.result.tier} warnings={current.result.warnings} raw={current.result.raw} elapsedMs={current.result.elapsedMs} />
-          <PlanTreeView tree={current.result.plan} selectedId={selected} onSelect={setSelected} />
-          {node && <PlanNodeDetails node={node} />}
-        </>
-      )}
+      {current && <PlanView tree={current.result.plan} tier={current.result.tier} warnings={current.result.warnings} raw={current.result.raw} elapsedMs={current.result.elapsedMs} />}
       {runs.length > 1 && (
         <section className="plan-history">
           <h3>{t("diag.plan.history.title")}</h3>
@@ -293,10 +272,7 @@ export function PlanRunner({
                   type="button"
                   className="link"
                   aria-current={r.id === shown}
-                  onClick={() => {
-                    setShown(r.id);
-                    setSelected(null);
-                  }}
+                  onClick={() => setShown(r.id)}
                 >
                   {t("diag.plan.history.item", { n: r.id, mode: t(MODE_KEYS[r.result.mode]), tier: t(TIER_KEYS[r.result.tier]), time: formatTime(r.at), ms: formatMs(r.result.elapsedMs) })}
                 </button>

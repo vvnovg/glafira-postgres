@@ -83,6 +83,19 @@ describe("QueriesView", () => {
     expect(useWorkspace.getState().tabs[0]).toMatchObject({ kind: "query", connectionId: "c", member: "pg-1", database: "perf", queryId: "2", title: "select 2" });
   });
 
+  it("«Открыть консоль EXPLAIN» открывает единственную консоль подключения: на закреплённом узле или «за лидером»", async () => {
+    vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport(data(), { member: "pg-1" }));
+    const user = userEvent.setup();
+    const { rerender } = renderWithClient(view("pg-2"));
+    await screen.findByRole("table", { name: "Запросы" });
+    await user.click(screen.getByRole("button", { name: "Открыть консоль EXPLAIN" }));
+    expect(useWorkspace.getState().tabs).toEqual([{ kind: "explain", connectionId: "c", member: "pg-2", id: "explain:c" }]);
+    expect(useWorkspace.getState().activeId).toBe("explain:c");
+    rerender(view(null));
+    await user.click(screen.getByRole("button", { name: "Открыть консоль EXPLAIN" }));
+    expect(useWorkspace.getState().tabs).toEqual([{ kind: "explain", connectionId: "c", member: null, id: "explain:c" }]);
+  });
+
   it("база в фильтре остаётся в списке и тогда, когда отчёт по ней пуст; переключение в окно сбрасывает недоступную сортировку", async () => {
     vi.mocked(api.runDiagnostic).mockImplementation(async (_id, req) =>
       diagReport(data({ rows: req.queries?.database ? [] : [row("1", { datname: "perf", text: "select 1" }), row("2", { datname: "shop", text: "select 2" })] }), { member: "pg-1" }),

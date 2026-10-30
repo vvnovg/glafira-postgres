@@ -199,6 +199,9 @@ export function QueriesView({
             ))}
           </select>
         </label>
+        <button type="button" onClick={() => open({ kind: "explain", connectionId, member })}>
+          {t("diag.queries.openConsole")}
+        </button>
       </div>
       {q.error && <ErrorBanner error={q.error} />}
       {sampler.error && <ErrorBanner error={sampler.error} />}
