@@ -325,7 +325,8 @@ async fn admin_function_call_moves_the_statement_to_the_write_tier() {
         common::open_server_as(&perf, "perf", common::APP_USER, common::APP_PASSWORD).await;
     let m = member_of(&st).await;
     for sql in [
-        "SELECT pg_reload_conf()",
+        // Функции, доступные любой роли: на pg_reload_conf у роли приложения нет EXECUTE, и сервер откажет ещё при планировании.
+        "SELECT pg_terminate_backend(0)",
         "SELECT pg_catalog.pg_cancel_backend(pid) FROM pg_stat_activity WHERE pid = 0",
     ] {
         let r = explain::run::run(&st, "it", &req(&m, "perf", sql, Mode::Plan, Params::None))
