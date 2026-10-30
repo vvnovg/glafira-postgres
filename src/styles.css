@@ -384,6 +384,9 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .sql-error mark { background: color-mix(in srgb, var(--danger-text) 25%, transparent); color: inherit; outline: 1px solid var(--danger-text); }
 .search-path { display: inline-flex; align-items: center; gap: 4px; }
 .search-path summary { color: var(--muted); cursor: pointer; }
+/* Консоль EXPLAIN (P3a): панели «Запрос» и «Вставить план» смонтированы обе; скрытая не должна перебивать hidden своим display. */
+.explain-panel:not([hidden]) { display: flex; flex-direction: column; gap: 12px; }
+.explain-sql { width: 100%; min-height: 120px; resize: vertical; box-sizing: border-box; }
 /* Предупреждение в тексте вида: чистый --warn на светлом фоне ниже 4,5:1, поэтому подмешивается цвет текста (как у меток находок). */
 .diag-warn { color: color-mix(in srgb, var(--warn) 55%, var(--fg)); font-weight: 600; }
 /* Вердикт и коды health: фон клетки плюс слово или код внутри — смысл не держится на одном цвете. */

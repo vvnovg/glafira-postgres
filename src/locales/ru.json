@@ -1463,6 +1463,17 @@
           "analyze": "с выполнением"
         }
       }
+    },
+    "explain": {
+      "title": "Консоль EXPLAIN",
+      "database": "База",
+      "source": "Источник",
+      "sourceSql": "Запрос",
+      "sourcePaste": "Вставить план",
+      "placeholder": "SELECT … — одна инструкция; $1, $2 станут полями параметров",
+      "pasteLabel": "План (JSON)",
+      "pastePlaceholder": "Вставьте вывод EXPLAIN (FORMAT JSON), обрамление psql не мешает",
+      "parse": "Разобрать"
     }
   },
   "findings": {

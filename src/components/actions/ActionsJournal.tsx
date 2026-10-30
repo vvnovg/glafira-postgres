@@ -22,6 +22,7 @@ const ACTION_KEYS = new Map<string, string>([
   ["cancelRestart", "actions.kind.cancelRestart"],
   ["pause", "actions.kind.pause"],
   ["resume", "actions.kind.resume"],
+  ["explainAnalyze", "actions.kind.explainAnalyze"],
 ]);
 const OUTCOME_KEYS = new Map<string, string>([
   ["ok", "actions.outcome.ok"],
@@ -29,8 +30,9 @@ const OUTCOME_KEYS = new Map<string, string>([
   ["error", "actions.outcome.error"],
 ]);
 
-/** Объект действия: слот, число сессий или адрес запроса к Patroni. */
+/** Объект действия: таблицы EXPLAIN ANALYZE (без таблиц — база), слот, число сессий или адрес запроса к Patroni. */
 function objectText(r: ActionRecord, t: TFunction): string {
+  if (r.explain) return r.explain.tables.join(", ") || r.explain.database;
   if (r.slot) return r.slot.name;
   if (r.sessions?.length) return t("actions.journal.sessions", { count: r.sessions.length });
   if (r.patroni) return r.patroni.path;

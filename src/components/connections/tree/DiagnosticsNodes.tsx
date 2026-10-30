@@ -9,7 +9,7 @@ export function DIAG_TOOLS_FOR(kind: ConnectionKind): DiagTool[] {
   return kind === "patroni" ? [...common, "failover", "health"] : common;
 }
 
-/** Группа «Диагностика» раскрытого подключения: клик по инструменту открывает его вкладку «за лидером»; последний узел — журнал действий. */
+/** Группа «Диагностика» раскрытого подключения: клик по инструменту открывает его вкладку «за лидером»; предпоследний — консоль EXPLAIN, последний — журнал действий. */
 export function DiagnosticsNodes({ connectionId, kind }: { connectionId: string; kind: ConnectionKind }) {
   const { t } = useTranslation();
   const open = useWorkspace((s) => s.open);
@@ -23,6 +23,11 @@ export function DiagnosticsNodes({ connectionId, kind }: { connectionId: string;
             </button>
           </li>
         )),
+        <li key="explain">
+          <button type="button" className="link" onClick={() => open({ kind: "explain", connectionId })}>
+            {t("diag.explain.title")}
+          </button>
+        </li>,
         <li key="actions">
           <button type="button" className="link" onClick={() => open({ kind: "actions", connectionId })}>
             {t("actions.journal.title")}

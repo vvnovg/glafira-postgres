@@ -50,6 +50,18 @@ const dropSlot: ActionRecord = {
   slot: { name: "old_slot", slotType: "logical", plugin: "pgoutput", database: "orders", retainedBytes: 1024, walStatus: "reserved" },
 };
 
+const explainAnalyze: ActionRecord = {
+  ts: new Date(2026, 9, 25, 12, 3, 0).getTime(),
+  action: "explainAnalyze",
+  connection: { id: "c", name: "billing-prod", environment: "prod" },
+  member: "pg-1",
+  prodConfirmed: true,
+  outcome: "ok",
+  code: null,
+  ms: 1500,
+  explain: { database: "perf", tables: ["shop.balances"], timeoutS: 30, sqlHead: "UPDATE …" },
+};
+
 describe("ActionsJournal", () => {
   beforeEach(() => {
     vi.mocked(api.listActions).mockReset();
@@ -114,6 +126,19 @@ describe("ActionsJournal", () => {
     expect(within(table).getAllByRole("row")[1]).toHaveTextContent("ошибка");
     await user.click(screen.getByRole("button", { name: /Удаление слота/ }));
     expect(screen.getByText(/"code": "NODE_UNAVAILABLE"/)).toBeInTheDocument();
+  });
+
+  it("EXPLAIN ANALYZE (запись): таблицы — в колонке объекта, без таблиц — база; полная запись раскрывается", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.listActions).mockResolvedValue([explainAnalyze, { ...explainAnalyze, ts: explainAnalyze.ts - 1000, explain: { ...explainAnalyze.explain!, tables: ["shop.balances", "shop.ledger"] } }, { ...explainAnalyze, ts: explainAnalyze.ts - 2000, explain: { ...explainAnalyze.explain!, tables: [] } }]);
+    renderWithClient(<ActionsJournal connectionId="c" />);
+    const table = await screen.findByRole("table", { name: "Журнал действий" });
+    const rows = within(table).getAllByRole("row").slice(1);
+    expect(within(rows[0]).getAllByRole("cell").map((c) => c.textContent)).toEqual(["2026-10-25 12:03:00.000", "EXPLAIN ANALYZE (запись)", "pg-1", "shop.balances", "выполнено"]);
+    expect(within(rows[1]).getAllByRole("cell")[3]).toHaveTextContent("shop.balances, shop.ledger");
+    expect(within(rows[2]).getAllByRole("cell")[3]).toHaveTextContent("perf");
+    await user.click(within(rows[0]).getByRole("button", { name: "EXPLAIN ANALYZE (запись)" }));
+    expect(screen.getByText(/"sqlHead": "UPDATE …"/)).toBeInTheDocument();
   });
 
   it("действие без известной подписи показывается как есть; одна сессия — форма «сессия»", async () => {

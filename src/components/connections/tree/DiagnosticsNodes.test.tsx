@@ -13,7 +13,7 @@ describe("DiagnosticsNodes", () => {
     await user.click(screen.getByRole("button", { name: "Диагностика" }));
     // Стрелка раскрытия группы — декоративный символ (aria-hidden): в имя кнопки она не входит.
     const names = screen.getAllByRole("button").map((b) => b.textContent?.replace(/^[▸▾]/, ""));
-    expect(names).toEqual(["Диагностика", "Пульс", "Сессии", "Idle in transaction", "Профиль ожиданий", "Блокировки", "Горизонт xmin", "Реплики", "Слоты репликации", "Запросы", "Журнал действий"]);
+    expect(names).toEqual(["Диагностика", "Пульс", "Сессии", "Idle in transaction", "Профиль ожиданий", "Блокировки", "Горизонт xmin", "Реплики", "Слоты репликации", "Запросы", "Консоль EXPLAIN", "Журнал действий"]);
     await user.click(screen.getByRole("button", { name: "Блокировки" }));
     expect(useWorkspace.getState().tabs[0]).toMatchObject({ kind: "diag", connectionId: "c", tool: "locks", id: "diag:c:locks" });
     expect(useWorkspace.getState().tabs[0]).not.toHaveProperty("member", "pg-1");
@@ -29,6 +29,19 @@ describe("DiagnosticsNodes", () => {
     await user.click(screen.getByRole("button", { name: "Журнал действий" }));
     expect(useWorkspace.getState().tabs).toEqual([{ kind: "actions", connectionId: "c", id: "actions:c" }]);
     expect(useWorkspace.getState().activeId).toBe("actions:c");
+  });
+
+  it("«Консоль EXPLAIN» стоит перед журналом; клик открывает единственную консоль подключения и повторный не плодит вкладки", async () => {
+    const user = userEvent.setup();
+    useWorkspace.setState({ tabs: [], activeId: null });
+    renderWithClient(<ul><DiagnosticsNodes connectionId="c" kind="server" /></ul>);
+    await user.click(screen.getByRole("button", { name: "Диагностика" }));
+    const names = screen.getAllByRole("button").map((b) => b.textContent);
+    expect(names.indexOf("Консоль EXPLAIN")).toBe(names.indexOf("Журнал действий") - 1);
+    await user.click(screen.getByRole("button", { name: "Консоль EXPLAIN" }));
+    await user.click(screen.getByRole("button", { name: "Консоль EXPLAIN" }));
+    expect(useWorkspace.getState().tabs).toEqual([{ kind: "explain", connectionId: "c", id: "explain:c" }]);
+    expect(useWorkspace.getState().activeId).toBe("explain:c");
   });
 
   it("у кластера Patroni — ещё готовность к failover и матрица health", async () => {

@@ -1441,6 +1441,17 @@
           "analyze": "with execution"
         }
       }
+    },
+    "explain": {
+      "title": "EXPLAIN console",
+      "database": "Database",
+      "source": "Source",
+      "sourceSql": "Query",
+      "sourcePaste": "Paste a plan",
+      "placeholder": "SELECT … — one statement; $1, $2 become parameter fields",
+      "pasteLabel": "Plan (JSON)",
+      "pastePlaceholder": "Paste EXPLAIN (FORMAT JSON) output, psql framing is fine",
+      "parse": "Parse"
     }
   },
   "findings": {

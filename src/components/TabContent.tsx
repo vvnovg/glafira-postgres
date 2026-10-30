@@ -11,6 +11,7 @@ import { ChunkBoundary } from "./common/ChunkBoundary";
 import { ConnectionFormTab } from "./connections/ConnectionFormTab";
 import { DiagTab } from "./diag/DiagTab";
 import { Overview } from "./overview/Overview";
+import { ExplainTab } from "./queries/ExplainTab";
 import { QueryTab } from "./queries/QueryTab";
 import { SettingsPanel } from "./settings/SettingsPanel";
 
@@ -53,7 +54,14 @@ export function TabContent({ tab, active = true }: { tab: Tab; active?: boolean 
       return <DiagTab connectionId={tab.connectionId} tool={tab.tool} member={tab.member ?? null} active={active} tabId={tab.id} />;
     case "query":
       return <QueryTab connectionId={tab.connectionId} member={tab.member} database={tab.database} queryId={tab.queryId} active={active} />;
+    case "explain":
+      return <ExplainTab connectionId={tab.connectionId} member={tab.member} database={tab.database} sql={tab.sql} active={active} />;
     case "actions":
       return <ActionsJournal connectionId={tab.connectionId} active={active} />;
+    default: {
+      // Новый вид вкладки без ветки выше не соберётся: здесь tab перестанет быть never.
+      const unreachable: never = tab;
+      return unreachable;
+    }
   }
 }
