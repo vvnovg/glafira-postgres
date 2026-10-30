@@ -3,10 +3,10 @@
 use std::future::Future;
 use std::time::{Duration, Instant};
 
+use bytes::BytesMut;
 use pg_advisor::plan::json::from_json;
 use pg_advisor::plan::{PlanTree, relations};
 use tokio_postgres::error::{ErrorPosition, SqlState};
-use tokio_postgres::types::private::BytesMut;
 use tokio_postgres::types::{Format, IsNull, ToSql, Type, to_sql_checked};
 use tokio_postgres::{Client, SimpleQueryMessage};
 
@@ -17,7 +17,7 @@ use crate::diag::caps::V16;
 use crate::diag::head;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::explain::params::first_word;
-use crate::explain::tier::{Tier, tier_of};
+use crate::explain::tier::{Tier, admin_calls, tier_of};
 use crate::explain::{ExplainRequest, ExplainResult, Mode, PROBE_TIMEOUT_S, Params, validate};
 use crate::guard::ensure_mutation_allowed;
 use crate::state::AppState;
@@ -43,8 +43,7 @@ impl From<tokio_postgres::Error> for Step {
 
 /// Значение параметра текстом: тип в Parse — `unknown`, его выводит сервер (как при выполнении приложением), и он
 /// же разбирает текст значения. `None` — NULL. Текстовый формат нужен потому, что двоичный пришлось бы кодировать под
-/// выведенный тип (`int8`, `timestamptz`, …). `BytesMut` — из `types::private`: тот же путь использует макрос
-/// `to_sql_checked!` (крейта `bytes` в зависимостях нет).
+/// выведенный тип (`int8`, `timestamptz`, …).
 #[derive(Debug)]
 struct TextParam<'a>(Option<&'a str>);
 
@@ -459,10 +458,14 @@ pub async fn run(st: &AppState, id: &str, req: &ExplainRequest) -> AppResult<Exp
         Err(Step::App(e)) => return Err(e),
     };
     let tree = parse(&raw)?;
+    // Вызов административной функции (`tier::ADMIN_FUNCTIONS`) переводит инструкцию в ярус записи: READ ONLY её не остановит.
+    if !admin_calls(&raw).is_empty() {
+        warnings.push("adminFunction".to_string());
+    }
     let tier = if req.force_write {
         Tier::Write
     } else {
-        tier_of(&tree, &sql)
+        tier_of(&tree, &sql, &raw)
     };
     if req.mode == Mode::Plan {
         return Ok(result(Mode::Plan, tier, tree, raw, started, warnings));

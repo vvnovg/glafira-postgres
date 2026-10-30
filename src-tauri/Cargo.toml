@@ -38,6 +38,9 @@ sys-locale = "0.3"
 percent-encoding = "2"
 # `with-serde_json-1`: колонка `json` ответа EXPLAIN читается как `serde_json::Value`.
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
+# `BytesMut` для `ToSql` параметров EXPLAIN (`explain::run::TextParam`): документированный путь вместо скрытого
+# `tokio_postgres::types::private`. Крейт и так в дереве зависимостей через tokio-postgres.
+bytes = "1"
 postgres-openssl = "0.5"
 openssl = { version = "0.10", features = ["vendored"] }
 # Коды X509_V_ERR_* причины отказа проверки сертификата: в крейте openssl констант для них нет.
