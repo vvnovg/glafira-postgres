@@ -108,15 +108,18 @@ P3 отвечает на вопрос дежурного и разработчи
 - `diag/queries.rs` — SQL по `PgssCaps`, режимы, тексты и их кеш, сборка `DiagData::Queries`.
 - `diag/query_detail.rs` — карточка: накопительные и оконные метрики, история, разбивка, выполняющиеся экземпляры, ожидания.
 - `explain/mod.rs` (`ExplainRequest`, `ExplainResult`), `explain/run.rs` (пробный план → ярус → выполнение), `explain/params.rs`
-  (счётчик `$N`, привязка значений), `explain/tier.rs` (определение яруса по дереву и первому слову), `explain/llm.rs` (markdown);
-  P3b: `explain/hypopg.rs`.
+  (счётчик `$N`, привязка значений), `explain/tier.rs` (определение яруса по дереву и первому слову), `explain/llm.rs` (данные
+  для «Скопировать для LLM» — `LlmBundle`, §7.4; markdown собирает фронтенд, `src/lib/llmMarkdown.ts`); P3b: `explain/hypopg.rs`.
 - P3b: `snapshots/{mod,store,compare}.rs`.
-- `commands/queries.rs`, `commands/explain.rs`; P3b: `commands/snapshots.rs`.
+- `commands/queries.rs` (`query_texts`, `start_statements_sampler`, `query_detail`, `query_llm_bundle`), `commands/explain.rs`
+  (`explain`, `parse_plan`); P3b: `commands/snapshots.rs`.
 
 **Фронтенд** (`src/components/queries/`): `QueriesView` (инструмент в `DiagTab`), `QueryTab` → `QueryOverview`, `QueryPlan`;
-`ExplainTab`; `plan/PlanTree`, `plan/PlanNodeDetails`, `plan/PlanSummary`, `plan/ParamsForm`, `plan/AnalyzeConfirm`;
-P3b: `Recommendations`, `HypoCheck`, `SnapshotsPanel`, `SnapshotCompare`. Хуки `src/lib/useStatementsSampler.ts` (по образцу
-`useSampler`), `useQueryDetail.ts`, `useExplain.ts`. Типы — `src/api/types.ts`, вызовы — `src/api/client.ts`.
+`ExplainTab`; `plan/PlanTree`, `plan/PlanView`, `plan/PlanRunner` (параметры, ярусы, подтверждение, история запусков),
+`plan/PlanNodeDetails`, `plan/PlanSummary`, `plan/ParamsForm`, `plan/AnalyzeConfirm`, `plan/planText`; `Sparkline`,
+`CopyLlmButton`; P3b: `Recommendations`, `HypoCheck`, `SnapshotsPanel`, `SnapshotCompare`. Хуки `src/lib/useStatementsSampler.ts`
+(по образцу `useSampler`), `useQueryDetail.ts`, `useExplain.ts`, `llmMarkdown.ts` (markdown из `LlmBundle`). Типы —
+`src/api/types.ts`, вызовы — `src/api/client.ts`.
 
 ### 3.2 Поток данных
 
@@ -173,8 +176,8 @@ P3b: `Recommendations`, `HypoCheck`, `SnapshotsPanel`, `SnapshotCompare`. Хук
 ### 4.1 Источник
 
 Расширение ищется в базе подключения: `SELECT extversion, nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
-WHERE extname = 'pg_stat_statements'`. Нет строки — `Unavailable{part: statements}` с подсказкой `CREATE EXTENSION pg_stat_statements`
-(пункт готовности `pgss` P1 уже красный). Функция и представление вызываются по найденной схеме.
+WHERE extname = 'pg_stat_statements'`. Нет строки — `Unavailable{part: statements}` с пометкой «pg_stat_statements не установлен в этой базе (`CREATE EXTENSION pg_stat_statements`)»
+(пункты готовности `pgssPreloaded` и `pgssInstalled` P1 уже красные). Функция и представление вызываются по найденной схеме.
 
 ```sql
 SELECT s.userid, s.dbid, s.queryid, <s.toplevel | true>, d.datname, r.rolname,
@@ -187,12 +190,14 @@ SELECT s.userid, s.dbid, s.queryid, <s.toplevel | true>, d.datname, r.rolname,
        <s.temp_blk_read_time + s.temp_blk_write_time | NULL::float8>,
        s.wal_records, s.wal_fpi, s.wal_bytes,
        <s.jit_functions | NULL::bigint>,
-       <s.jit_generation_time + s.jit_inlining_time + s.jit_optimization_time + s.jit_emission_time [+ s.jit_deform_time] | NULL::float8>,
+       <s.jit_generation_time + s.jit_inlining_time + s.jit_optimization_time + s.jit_emission_time | NULL::float8>,
        <s.parallel_workers_to_launch, s.parallel_workers_launched | NULL::bigint, NULL::bigint>
 FROM <ns>.pg_stat_statements(false) s
 LEFT JOIN pg_database d ON d.oid = s.dbid
 LEFT JOIN pg_roles r ON r.oid = s.userid
 ```
+
+`jit_deform_time` (1.11+) в сумму не входит: он уже включён в `jit_generation_time`.
 
 Отдельно: `dealloc`, `stats_reset` из `pg_stat_statements_info` (1.9+; на 1.8 — `NULL`), `current_setting('pg_stat_statements.max')`,
 `current_setting('pg_stat_statements.track_planning', true)`. Тексты не читаются (`showtext := false`): файл текстов не трогается.
@@ -205,8 +210,11 @@ pg_read_all_stats»}`.
 - **С момента сброса** — одно чтение; сортировка, обрезка до `limit` и итоги по всему набору (`totals`) — в Rust.
   `since.statsResetMs` и `since.dealloc` — в шапке.
 - **За окно 5 / 15 / 60 мин** — сумма дельт буфера сэмплера (§5) по тикам в окне `[последний тик − W, последний тик]`.
-  Покрытие `coverageS` — от первого тика с дельтами в окне (или первого тика буфера, если он моложе) до последнего;
-  `ticks` — число тиков с дельтами. Меньше одного тика с дельтами — `rows` пустые, вкладка показывает «накоплено 0 из 5 мин».
+  Покрытие `coverageS` — от первого тика окна до последнего (плюс минута самого первого тика, не больше окна); оно может
+  охватывать и промежуток, когда сбор стоял («накоплено N из 60 мин»). `ticks` — число тиков окна, у которых была база для
+  дельт: самый первый тик сэмплера — только база (`ticks: 0`), тик сразу после промежутка тоже только база и сам не считается,
+  поэтому в его событии `ticks` — число прежних тиков часа (например, `ticks: 1, changed: 0`: окно часа ещё держит прошлый
+  тик). Тиков в окне нет — `rows` пустые, `coverageS: null`, вкладка показывает «идёт первый тик сэмплера».
   Среднее — `totalExecMs / calls` за окно; **min / max / stddev за окно недоступны** (накопительные счётчики не дельтируются) —
   колонки серые, сортировки по ним выключены.
 - **Между снимками** (P3b, §9.3) — дельты между двумя файлами снимков того же подключения.
@@ -219,7 +227,8 @@ pg_read_all_stats»}`.
 `QuerySort`: `totalTime` (по умолчанию), `meanTime`, `maxTime`, `stddevTime`, `calls`, `rowsPerCall`, `sharedRead`, `hitRatio`
 (по возрастанию — худшие сверху), `tempWritten`, `walBytes`, `ioTime`, `planTime`, `jitTime`; P3b — `cpuTime`. Остальные —
 по убыванию. Сортировка, недоступная по версии pgss или режиму, в интерфейсе серая с подсказкой; запрос с такой сортировкой
-отвечает `INVALID_INPUT` (`errors.queries.sortUnavailable`).
+отвечает `INVALID_INPUT` (`errors.queries.sortUnavailable`). Времена в таблице топа и в дереве плана форматирует `formatMs`:
+`0` → «0 мс», значение между 0 и 0,01 мс → «<0,01 мс» (§8.6).
 
 ### 4.4 Модель
 
@@ -294,7 +303,8 @@ FROM <ns>.pg_stat_statements(true) WHERE queryid = ANY($1)
   или `total_exec_time`. `Delta` — аддитивные счётчики (`calls`, времена выполнения и планирования, `plans`, `rows`, 12 счётчиков
   блоков, времена I/O, WAL, JIT, параллельные воркеры; P3b — kcache). Ключ, у которого накопительные счётчики уменьшились
   (вытеснен и вернулся), получает новую базу: дельта тика равна его новому накопительному значению. Смена `stats_reset` —
-  новая база для всех ключей тем же правилом, прошлые тики остаются (их дельты верны); событие `gap` не шлётся.
+  новая база для всех ключей тем же правилом, прошлые тики остаются (их дельты верны); событие `gap` не шлётся. На тике сброса
+  `dealloc_delta` равен текущему значению `dealloc` (сброс обнулил его вместе со статистикой — то же правило, что у счётчиков).
   Хранение — 60 мин; предел — 200 000 записей `(ключ, дельта)` на узел (порядка 50 МБ), при переполнении вытесняются целые
   старые тики. Окно считается суммой дельт по тикам в `[последний − W, последний]`.
 - **Жизнь** — как у сэмплера активности (P2 §6): узел создаётся первой подпиской `start_statements_sampler(id, member, channel)`,
@@ -303,8 +313,9 @@ FROM <ns>.pg_stat_statements(true) WHERE queryid = ANY($1)
   того же узла. Перезагрузка вебвью останавливает сессии; вкладки подписываются заново при монтировании.
 - **Нагрузка и сбои.** Одно чтение в минуту на соединении пула `Sampler` (§3.4); предел запроса 5 с (`on_catalog_node_split`),
   таймаут и обрыв закрывают соединение. Ошибка — паузы 1, 2, 5, 10, 30 с и событие `error`; `AUTH_FAILED` — остановка;
-  исчезновение расширения (`Unavailable`) — событие `error` с `FEATURE_UNAVAILABLE` и остановка.
-- **Канал** `StatementsEvent`: `tick { atMs, coverageS, ticks, changed }` (`changed` — число ключей с дельтами), `gap { fromMs, toMs }`,
+  при исчезновении расширения на ходу источник повторяет `detect` и останавливает сэмплер событием `error` с `FEATURE_UNAVAILABLE`;
+  смена схемы или версии расширения — повтор чтения с новыми `PgssCaps`.
+- **Канал** `StatementsEvent`: `tick { atMs, coverageS, ticks, changed }` (`changed` — число ключей с дельтами; `ticks` и `coverageS` — как в §4.2), `gap { fromMs, toMs }`,
   `error { error }`, `stopped`.
 - **Реестр.** `SamplerRegistry<S: Sampling>`: `Sampling` задаёт `type Source`, `type Buffer`, `type Event`, `interval()`,
   `tick(buffer, sample) -> Event`. Экземпляры в `AppState`: `samplers` (активность, 1 с) и `statements` (pgss, 60 с); оба —
@@ -328,7 +339,8 @@ FROM <ns>.pg_stat_statements(true) WHERE queryid = ANY($1)
 | `queries_incomplete` | с момента сброса — `dealloc > 0`; за окно — `dealloc` вырос в окне | warning | оба |
 
 Параметры находки — цифры условия (`calls`, `sharePct`, `meanMs`, `stddevMs`, `hitRatio`, `tempMb`, `planMs`, `execMs`, `dealloc`,
-`max`); текст — во фронтенде (`findingText.ts`). Критических находок у топа нет: это подсказки «куда смотреть», а не аварии.
+`max`); текст — во фронтенде (`findingText.ts`). `query_planning_heavy` — Info: подсказка, а не предупреждение. Строка pgss с
+`datname = NULL` (база удалена) даёт цель с `database: ""`, и кнопка «Открыть запрос» у такой находки не показывается. Критических находок у топа нет: это подсказки «куда смотреть», а не аварии.
 Сортировка и слияние — `grade` / `sort` P2.
 
 ---
@@ -337,11 +349,13 @@ FROM <ns>.pg_stat_statements(true) WHERE queryid = ANY($1)
 
 ### 7.1 Вкладка
 
-`TabSpec { kind: "query", connectionId, member, database, queryId }`. Заголовок — начало текста (или `queryId`, пока текст не
-получен); вкладка сохраняется в workspace и восстанавливается при запуске; узел пропал — заглушка с выбором другого узла.
-Личность запроса — `queryid` в пределах базы: строки pgss по ролям и `toplevel` суммируются, разбивка показывается отдельной
-таблицей. Переключатель узла в шапке меняет `member` вкладки: на физических репликах `queryid` совпадает (OID реплицируются),
-и поведение запроса на primary и реплике можно сравнить.
+`TabSpec { kind: "query", connectionId, member, database, queryId, title? }`. Заголовок — `queryTitle(text, queryId)`: начало
+текста одной строкой (до 60 символов), пока текст не получен — `queryId`; вкладка живёт, как остальные вкладки, до закрытия
+приложения (workspace между запусками не сохраняется). Узел пропал из топологии — карточка показывает заглушку с выбором
+другого узла и ничего не опрашивает. Личность запроса — `queryid` в пределах базы: строки pgss по ролям и `toplevel`
+суммируются, разбивка показывается отдельной таблицей. Идентификатор вкладки содержит узел, поэтому переключатель узла в
+шапке не меняет `member` вкладки, а открывает новую вкладку `query` для выбранного узла: на физических репликах `queryid`
+совпадает (OID реплицируются), и поведение запроса на primary и реплике можно сравнить рядом.
 
 ### 7.2 Данные
 
@@ -351,7 +365,7 @@ FROM <ns>.pg_stat_statements(true) WHERE queryid = ANY($1)
 interface QueryDetail {
   text: string | null; textTruncated: boolean;
   sinceReset: QueryStat | null;                                  // сумма строк pgss с этим queryid в базе
-  windows: Record<"300" | "900" | "3600", QueryStat | null>;     // из буфера сэмплера; null — покрытия нет
+  windows: { windowS: 300 | 900 | 3600; stat: QueryStat | null }[];   // из буфера сэмплера; null — покрытия нет
   totals: { calls: number; totalExecMs: number };                // для долей и правил
   byUser: { rolname: string | null; toplevel: boolean; stat: QueryStat }[];
   history: { atMs: number; calls: number; totalExecMs: number; meanExecMs: number }[];   // по тикам за 60 мин
@@ -372,9 +386,10 @@ interface QueryWaits {
 }
 ```
 
-- `running` — `pg_stat_activity WHERE query_id = $1 AND pid <> pg_backend_pid()` (с `backend_start` для адресации сессии, как в P2).
+- `running` — `pg_stat_activity WHERE query_id = $1 AND datname = $2 AND state = 'active' AND leader_pid IS NULL` (с `backend_start`
+  для адресации сессии, как в P2; подробности отбора — §7.3).
 - `waits` — сэмплы буфера активности этого узла за 60 мин с `query_id = $1`, сгруппированные по типу и событию; активные без
-  ожидания считаются как `CPU`. Нет буфера (вкладка «Сессии» не открывалась) — `null`, карточка подсказывает открыть её.
+  ожидания считаются как `CPU`. Нет буфера (вкладка «Профиль ожиданий» не открывалась: сэмплер активности запускает только она) — `null`, карточка подсказывает открыть её.
   P3b: при установленном `pg_wait_sampling` — точный профиль (§9.5).
 - Таблицы запроса карточка берёт из последнего плана (`Schema` / `Relation Name` узлов, §8.5) и хранит в состоянии вкладки;
   до плана — кнопка «Получить план» (пробный EXPLAIN без выполнения, §8.3).
@@ -386,23 +401,49 @@ interface QueryWaits {
 min / max / stddev, строк на вызов, hit ratio, shared read / written, temp, WAL, планирование, JIT); два спарклайна истории
 (вызовы в минуту, среднее) с промежутками; находки запроса; разбивка по ролям и `toplevel`; выполняющиеся экземпляры
 (кнопка «Открыть в сессиях» — вкладка `sessions` узла); ожидания; таблицы (ссылки на вкладки таблиц). Кнопки: «План»
-(подвкладка), «Открыть в консоли» (вкладка `explain` с текстом, базой и узлом), «Скопировать для LLM». Обновление —
-по тикам сэмплера и кнопкой; `running` перечитывается каждые 5 с, пока вкладка видима.
+(подвкладка), «Открыть в консоли» (вкладка `explain` с текстом, базой и узлом), «Копировать» у текста запроса; в шапке карточки —
+переключатель узла (§7.1), «Обновить» и «Скопировать для LLM». «Получить план» (у блока таблиц) открывает подвкладку «План» и
+запускает пробный план; спарклайн рвёт линию на промежутках сбора. Обновление — по тикам сэмплера и кнопкой; `running`
+перечитывается каждые 5 с, пока вкладка видима.
+
+Выполняющиеся экземпляры — только `state = 'active'` и `leader_pid IS NULL`: без простаивающих сессий (у них сохраняется
+`query_id` прошлого запроса) и без параллельных воркеров (дубликаты лидера). `truncated` истинен при срезе по
+`track_activity_query_size` (по `pg_settings.setting`, в байтах) или по `QUERY_LIMIT` (16 384 символа). Текст запроса карточка
+читает из кеша текстов узла сэмплера pgss (§4.6); `pg_stat_statements(true)` вызывается только при промахе, после чего текст
+кладётся в кеш — опрос каждые 5 с файл текстов не читает.
 
 ### 7.4 «Скопировать для LLM»
 
-`query_llm_markdown(id, member, database, source, plan: PlanTree | null) -> { markdown, warnings }`, где `source` —
-`{ kind: "query", queryId }` (карточка) или `{ kind: "sql", sql }` (консоль), собирает в Rust:
+`query_llm_bundle(id, member, database, source, plan: PlanTree | null) -> LlmBundle`, где `source` —
+`{ kind: "query", queryId }` (карточка) или `{ kind: "sql", sql }` (консоль), собирает в Rust **данные**, а markdown с
+заголовками на языке интерфейса собирает фронтенд (`src/lib/llmMarkdown.ts`):
+
+```ts
+interface LlmBundle {
+  serverVersionNum: number; pgssVersion: string | null; inRecovery: boolean; member: string; database: string;
+  text: string | null; textTruncated: boolean;
+  stats: { sinceReset: QueryStat | null; window3600: QueryStat | null } | null;   // у источника sql — null
+  planText: string | null;                                                       // plan::to_text
+  tables: { schema: string; name: string; ddl: string; indexes: string[] }[]; tablesOmitted: number;
+  warnings: string[];                                                            // paramsNeeded, queryGone, planFailed, ddlFailed
+}
+```
+
 1. «Среда» — версия сервера, версия pgss, роль узла (primary / реплика), база.
 2. «Запрос» — нормализованный текст pgss в блоке ```sql (с `$N`; литералы выполняющихся экземпляров не включаются — это данные
    пользователей; экземпляр попадает в markdown только если пользователь выбрал его источником плана).
 3. «Статистика» — таблица: с момента сброса и за 60 мин (если есть покрытие).
-4. «План» — `plan::to_text` переданного дерева; плана нет — пробный `EXPLAIN (FORMAT JSON[, GENERIC_PLAN])` (§8.3, без выполнения);
-   на PG < 16 текст с `$N` без значений — строка «план требует параметров» в `warnings`.
+4. «План» — `plan::to_text` переданного дерева (карточка и консоль передают план последнего запуска); плана нет — пробный
+   `EXPLAIN (FORMAT JSON[, GENERIC_PLAN])` (§8.3, без выполнения); на PG < 16 текст с `$N` без значений — предупреждение
+   `paramsNeeded`. Любая ошибка пробного плана (права, ярус записи, отвергнутый текст, срок, узел) — предупреждение `planFailed`:
+   бандл остаётся с текстом и статистикой. Усечённый текст не пробуется: плана нет, предупреждения нет — об этом говорит
+   пометка усечения (`textTruncated`).
 5. «Таблицы» — для отношений плана, не больше 10: DDL (`catalog::table::get` → `ddl`) и определения индексов; общий предел
-   64 КБ, остаток — «… ещё N таблиц».
-Заголовки — на языке интерфейса; промптов и инструкций модели в тексте нет: это данные. Общий предел markdown — 256 КБ.
-Копирование — существующий `CopyButton`. Для источника `sql` (консоль, §8.7) раздела «Статистика» нет, план и таблицы — те же.
+   64 КБ, остаток — «… ещё N таблиц». Ошибка чтения DDL — предупреждение `ddlFailed`, такие таблицы входят в `tablesOmitted`.
+Заголовки — на языке интерфейса; промптов и инструкций модели в тексте нет: это данные. Пределы: текст запроса — 16 384
+символа, DDL — 64 КБ и 10 таблиц; общего предела у markdown нет (план не усекается). Копирование — `CopyLlmButton`: сборка
+данных, markdown и буфер обмена; итог показан, как у `CopyButton`. Для источника `sql` (консоль, §8.7) раздела «Статистика»
+нет, план и таблицы — те же.
 
 ---
 
@@ -418,19 +459,28 @@ interface ExplainRequest {
   timeoutS: number;                                                // analyze: 5…600, по умолчанию 30; plan — игнорируется (15 с)
   searchPath: string | null;                                       // null — серверный по умолчанию для роли
   confirmation: Confirmation;                                      // ярус записи
+  forceWrite: boolean;                                             // false по умолчанию; «Выполнить как запись» после EXPLAIN_WRITES (§8.3, п. 4)
 }
 interface ExplainResult {
   mode: "plan" | "analyze"; tier: "read" | "write";
   plan: PlanTree; raw: unknown;                                    // raw — JSON сервера как есть
   relations: { schema: string; name: string }[];
-  elapsedMs: number; warnings: string[];                           // ключи i18n: genericPlan, paramsFromRunning, truncatedText
+  elapsedMs: number; warnings: string[];                           // ключи i18n: genericPlan, probeWithoutReadOnly
   recommendations?: Recommendation[];                              // P3b
 }
 ```
 
 Проверки до сервера (`INVALID_INPUT`): пустой `sql`; `generic` при версии < 16 или `mode: analyze`; число `values` не равно
-max `$N` текста (`explain::params::count`: регулярное выражение по `\$(\d+)`; текст pgss литералов не содержит, ложных
-совпадений внутри строк нет); `timeoutS` вне 5…600.
+max `$N` текста (`explain::params::count_params`: ручной разбор, без регулярных выражений; текст pgss литералов не содержит,
+ложных совпадений внутри строк нет, а в консоли литерал с `$1` внутри строки даст лишнее поле формы, а не ошибку); `timeoutS`
+вне 5…600.
+
+**`GENERIC_PLAN` и значения параметров.** Расширенный протокол превращает `$N` в параметры самой команды EXPLAIN, и тогда
+план строился бы по переданным значениям, а не обобщённый. Поэтому при `generic` текст сначала проверяется `prepare`
+расширенным протоколом (одна инструкция; ошибка 42P18 — тип параметра не выведен, как у `$1 IS NULL` — допускается, проверка
+идёт под `SAVEPOINT`), а затем `EXPLAIN (… GENERIC_PLAN …)` выполняется простым протоколом в той же `READ ONLY` транзакции.
+Значения (`values`) передаются текстовым форматом с типом `unknown` (обёртка `TextParam`): тип выводит сервер, и он же разбирает
+текст значения.
 
 ### 8.2 Источники текста и параметры
 
@@ -441,8 +491,8 @@ max `$N` текста (`explain::params::count`: регулярное выраж
 - **Текст выполняющегося экземпляра** — список из `running` (§7.2); текст с литералами, параметров нет; обрезанный текст
   (`truncated`) предлагать нельзя — пункт серый с объяснением.
 
-Значения передаются расширенным протоколом с типом `unknown` (`prepare_typed(sql, [UNKNOWN; n])`): типы выводит сервер, как
-при выполнении приложением.
+Значения передаются расширенным протоколом с типом `unknown` (`prepare_typed(sql, [UNKNOWN; n])`) в текстовом формате: типы
+выводит сервер, как при выполнении приложением.
 
 ### 8.3 Ход и ярусы (`explain::run`)
 
@@ -450,7 +500,10 @@ max `$N` текста (`explain::params::count`: регулярное выраж
 -c DateStyle=ISO` — без `search_path=pg_catalog` (запрос пользователя должен видеть его схемы) и без
 `default_transaction_read_only`. Все шаги — внутри одной транзакции; SQL пользователя идёт отдельной командой расширенного
 протокола, поэтому вторая инструкция в тексте отклоняется сервером (`cannot insert multiple commands into a prepared statement`
-→ `INVALID_INPUT`, `errors.explain.oneStatement`).
+→ `INVALID_INPUT`, `errors.explain.oneStatement`); распознаётся она по routine `exec_parse_message` (не зависит от
+`lc_messages`), а текст сообщения — запасной признак. У каждого шага EXPLAIN есть клиентский срок — серверный плюс 5 с
+(`timeout_s + 5`, у пробного плана `PROBE_TIMEOUT_S + 5`): по его истечении соединение закрывается, а сервер откатывает
+транзакцию.
 
 1. **Пробный план.** `BEGIN READ ONLY` → `SET LOCAL statement_timeout = '15s'` → `SET LOCAL lock_timeout = '1s'` →
    `[SET LOCAL search_path = …]` → `EXPLAIN (FORMAT JSON, VERBOSE, SETTINGS[, GENERIC_PLAN]) <sql>` → `ROLLBACK`. Разбор →
@@ -458,22 +511,34 @@ max `$N` текста (`explain::params::count`: регулярное выраж
    инструкции (после комментариев) — `CREATE` (CREATE TABLE AS / CREATE MATERIALIZED VIEW AS); иначе **ярус чтения**.
    EXPLAIN без выполнения сервер считает чтением и в `READ ONLY` строит план даже для UPDATE; если же пробный план отвергнут
    25006 (инструкция вроде CREATE … AS на отдельных версиях), он повторяется в обычной транзакции `BEGIN … ROLLBACK` — только
-   чтобы определить ярус и отношения, выполнения по-прежнему нет.
+   чтобы определить ярус и отношения, выполнения по-прежнему нет. Повтор — только для первого слова `CREATE`; в результате
+   предупреждение `probeWithoutReadOnly`.
 2. `mode: plan` — результат шага 1 (одно обращение к серверу).
 3. `mode: analyze`, ярус чтения: `BEGIN READ ONLY` → `SET LOCAL statement_timeout = '<timeoutS>s'` → `SET LOCAL lock_timeout = '1s'`
    → `[search_path]` → `EXPLAIN (ANALYZE, BUFFERS, WAL, VERBOSE, SETTINGS, FORMAT JSON) <sql>` → `ROLLBACK`. Подтверждения нет
    и на prod. `READ ONLY` — предохранитель и на случай ошибки яруса: попытка записи (volatile-функция, триггер) даёт SQLSTATE
    25006 → код `EXPLAIN_WRITES` с предложением выполнить как запись. На реплике — то же (там и так read-only).
-   Если узел карточки — лидер и в топологии есть реплика, форма предлагает её по умолчанию с пометкой «план может отличаться».
+   Если узел карточки — лидер, пробный план показал ярус чтения и в топологии есть доступная реплика, ANALYZE по умолчанию
+   предлагается на реплике (поле «Выполнить на узле», пометка «на реплике план может отличаться»); лидера можно вернуть.
+   В консоли выбора узла для ANALYZE нет: он идёт на узле консоли.
 4. `mode: analyze`, ярус записи: `ensure_mutation_allowed(profile, confirmation.confirm)` (read-only профиль — `READ_ONLY`;
    prod — имя подключения); узел в recovery — `FEATURE_UNAVAILABLE` (`errors.explain.writeOnReplica`, «выберите primary»).
    Фронтенд перед вызовом показывает `ConfirmDialog`: отношения из пробного плана и предупреждение — строки изменятся и
    откатятся; побочные эффекты откат не отменяет (сработавшие триггеры, сдвиг последовательностей, NOTIFY, внешние вызовы,
    удержанные блокировки на время выполнения). Затем `BEGIN` → `SET LOCAL …` → `EXPLAIN (ANALYZE, BUFFERS, WAL, …)` → `ROLLBACK`.
-   Любая ошибка, обрыв соединения или таймаут откатывают транзакцию сервером; `ROLLBACK` явный — страховка.
+   Любая ошибка, обрыв соединения или таймаут откатывают транзакцию сервером; `ROLLBACK` явный — страховка. «Выполнить как
+   запись» (`forceWrite`, кнопка после `EXPLAIN_WRITES`, §11): `ensure_mutation_allowed` и проверка реплики выполняются **до**
+   пробного плана, а сам пробный план строится без `READ ONLY` — побочный эффект, который сервер вычисляет уже при
+   планировании, отверг бы его там; ярус результата — запись.
 5. 57014 → `TIMEOUT` (`errors.explain.timeout`, «план не получен за N с; выполнение прервано, изменений нет»); 42501 →
-   `NOT_AUTHORIZED` с подсказкой о правах чтения (`pg_read_all_data`, §9.6); 42601 и прочие ошибки разбора → `INVALID_INPUT`
-   с сообщением сервера и `details.position`.
+   `NOT_AUTHORIZED`, подсказка зависит от инструкции: для INSERT / UPDATE / DELETE / MERGE / CREATE (по первому слову или при
+   ярусе записи) — `errors.explain.notAuthorizedWrite` («для EXPLAIN записи нужны права на запись даже без выполнения»:
+   PostgreSQL проверяет их при построении плана), иначе — о правах чтения (`pg_read_all_data`, §9.6); `WITH … UPDATE` по
+   первому слову не распознаётся, и до построения плана подсказка — о правах чтения. Все ошибки классов 42 и 22 (синтаксис,
+   неизвестные объекты, значения параметров) → `INVALID_INPUT` (`errors.explain.server`) с сообщением сервера и
+   `details: "position N"`, где N — позиция в символах, с 1, относительно текста пользователя (ошибка вне его текста позиции не
+   имеет). 25006 в `READ ONLY` (пробный план, ярус чтения) → `EXPLAIN_WRITES`; вне `READ ONLY` (ярус записи, повтор `CREATE`) →
+   `READ_ONLY` (`errors.explain.serverReadOnly`): сервер в этом сеансе запись не принимает, и «как запись» ничего не изменит.
 
 Фронтенд: подвкладка «План» и консоль сначала вызывают `explain` с `mode: plan` (кнопка «План»); кнопка «План с выполнением»
 по результату пробного плана либо сразу вызывает `analyze` (ярус чтения), либо открывает подтверждение (ярус записи). Ярус
@@ -504,7 +569,7 @@ interface PlanNode {
   relation: { schema: string | null; name: string; alias: string | null } | null;
   indexName: string | null; strategy: string | null; joinType: string | null; parallelAware: boolean;
   startupCost: number; totalCost: number; planRows: number; planWidth: number;
-  actual: { startupMs: number | null; totalMs: number | null; rows: number; loops: number } | null;   // null — без ANALYZE
+  actual: { startupMs: number | null; totalMs: number | null; rows: number; loops: number } | null;   // null — без ANALYZE; времена null при TIMING OFF
   neverExecuted: boolean;
   workersPlanned: number | null; workersLaunched: number | null;
   rowsRemovedByFilter: number | null; rowsRemovedByIndexRecheck: number | null; rowsRemovedByJoinFilter: number | null;
@@ -520,12 +585,21 @@ interface PlanNode {
   ioReadMs: number | null; ioWriteMs: number | null;
   output: string[];
   extra: Record<string, unknown>;                               // всё нераспознанное — без потерь
-  inclusiveMs: number | null; exclusiveMs: number | null; sharePct: number | null;   // actual.totalMs × loops; минус дети (≥ 0); от totalMs
-  estimateRatio: number | null;                                 // actual.rows / planRows (строки на цикл, как у сервера)
-  hot: boolean; misestimated: boolean;                          // три узла с наибольшим exclusiveMs (без ANALYZE — по totalCost минус дети); ratio ≥ 10 или ≤ 0.1 при max(план, факт) ≥ 100
+  inclusiveMs: number | null; exclusiveMs: number | null; sharePct: number | null;   // actual.totalMs × loops (под Gather — см. ниже); минус дети (≥ 0); от totalMs; null при TIMING OFF
+  estimateRatio: number | null;                                 // actual.rows / planRows (строки на цикл, как у сервера); null у невыполнявшегося узла (loops = 0); бесконечность → null при misestimated: true
+  hot: boolean; misestimated: boolean;                          // три узла с наибольшим exclusiveMs (без ANALYZE и при TIMING OFF — по totalCost минус дети); ratio ≥ 10 или ≤ 0.1 при max(план, факт) ≥ 100; у невыполнявшегося узла false
   children: PlanNode[];
 }
 ```
+
+**Время под `Gather`.** Под `Gather` / `Gather Merge` сервер отдаёт в `actual.totalMs` среднее на процесс, а `loops` — число
+процессов (воркеры и ведущий), умноженное на внутренние циклы, поэтому `totalMs × loops` там — суммарное время всех процессов, а не
+время по часам. Включённое время такого узла — `actual.totalMs × loops / processes`, где `processes` — `loops` внешнего потомка
+`Gather`, делённые на `loops` самого `Gather` (при повторном запуске `Gather`, на внутренней стороне Nested Loop или под
+коррелированным SubPlan, у потомка `loops` = запуски × процессы; значение не меньше 1). InitPlan и SubPlan самого `Gather` в
+параллельную часть не входят и на процессы не делятся; вне `Gather` — `totalMs × loops`. При `TIMING OFF` времена узлов `null`,
+доли тоже, а горячие узлы определяются по стоимости. JIT: `Timing.Generation` на PG 17+ — объект `{Deform, Total}` (`Deform` уже
+входит в `Total`), берётся `Total`; раньше — число.
 
 Незнакомые типы узлов и поля не ломают разбор (`extra`). `to_text(&PlanTree) -> String` — рендер в стиле psql: заголовок узла
 (`Node Type [using idx] on schema.rel alias  (cost=… rows=… width=…) (actual time=… rows=… loops=…)`), строки условий, отсева,
@@ -534,10 +608,12 @@ interface PlanNode {
 ### 8.6 Дерево в интерфейсе
 
 `PlanTree` — таблица-дерево с отступами и развёрткой: узел (тип, отношение или индекс, стратегия, `subplanName`), время
-(включённое и собственное, полоса доли), строки (оценка → факт; `misestimated` — оранжевый при ×10, красный при ×100), loops,
-буферы (hit / read; temp отдельно), пометки (сброс на диск, lossy, heap fetches, воркеры меньше плана, `never executed`).
-Горячие узлы выделены. `PlanNodeDetails` — панель выбранного узла со всеми полями и `extra`. `PlanSummary` — планирование,
-выполнение, ярус, JIT, триггеры, settings, предупреждения. Кнопки: «JSON» (сырой, копировать), «Как текст» (копировать
+(включённое и собственное, полоса доли; у невыполнявшегося узла и при `TIMING OFF` — прочерк, без ANALYZE вместо времени
+стоимость), строки (оценка → факт; `misestimated` показана как «×N», N = max(r, 1/r), округлено: оранжевая при ×10, красная при
+×100 и при бесконечной ошибке «×∞»), loops, буферы (hit / read; temp отдельно), пометки (сброс на диск, lossy, heap fetches,
+воркеры меньше плана, параллельный узел, `never executed`). Горячие узлы выделены. Времена форматирует `formatMs` (§4.3).
+`PlanNodeDetails` — панель выбранного узла со всеми распознанными полями (пустые не показываются) и `extra`. `PlanSummary` —
+планирование, выполнение, ярус, JIT, триггеры, settings, предупреждения. Кнопки: «JSON» (сырой, копировать), «Как текст» (копировать
 `to_text`), P3b — блок рекомендаций под сводкой.
 
 ### 8.7 Консоль
@@ -639,9 +715,11 @@ Memory Usage: … kB`, `Heap Blocks: exact=… lossy=…`, `Buffers: shared hit=
 
 Факты `ReadinessFacts`: `pgss_version: Option<String>`, `pgss_track_planning: Option<String>`, `read_all_data: bool`
 (член `pg_read_all_data` или суперпользователь; на 13 роли нет — `false`). Пункты чек-листа:
-- `pgssTrackPlanning` (P3a) — info при `off`: «колонки планирования пустые; `pg_stat_statements.track_planning = on`»;
+- `pgssTrackPlanning` (P3a) — только при созданном расширении (без него настройки нет); warning при `off`: «колонки планирования
+  пустые; `pg_stat_statements.track_planning = on`»;
 - `readAllData` (P3a) — warning на 14+ без роли: «EXPLAIN запросов приложения требует права чтения таблиц: `GRANT pg_read_all_data`»;
-  на 13 — info «нужны права SELECT на таблицы запросов»;
+  на 13 — warning без команды «нужны права SELECT на таблицы запросов»; суперпользователь — ok. Роль даёт только чтение:
+  EXPLAIN запроса, который пишет, требует прав на запись и без выполнения (§8.3, п. 5);
 - P3b — подсказки к существующим пунктам расширений: hypopg — «для «Проверить гипотезу»», `pg_stat_kcache` — «CPU и диск
   в топе», `pg_wait_sampling` — «точные ожидания запроса».
 
@@ -651,7 +729,7 @@ Memory Usage: … kB`, `Heap Blocks: exact=… lossy=…`, `Buffers: shared hit=
 
 | Часть | Команды |
 |---|---|
-| P3a | `run_diagnostic(id, request)` с `tool: "queries"` и `queries: QueriesParams` → `DiagReport` (§4.5); `start_statements_sampler(id, member: Option<String>, channel: Channel<StatementsEvent>) -> SessionId` (останов — существующий `stop_session`); `query_texts(id, member, keys: QueryKey[]) -> QueryText[]`; `query_detail(id, member, database, queryId) -> QueryDetail`; `explain(id, request: ExplainRequest) -> ExplainResult`; `parse_plan(text: String) -> PlanTree`; `query_llm_markdown(id, member, database, source: LlmSource, plan: Option<PlanTree>) -> { markdown, warnings }` |
+| P3a | `run_diagnostic(id, request)` с `tool: "queries"` и `queries: QueriesParams` → `DiagReport` (§4.5); `start_statements_sampler(id, member: Option<String>, channel: Channel<StatementsEvent>) -> SessionId` (останов — существующий `stop_session`); `query_texts(id, member, keys: QueryKey[]) -> QueryText[]`; `query_detail(id, member, database, queryId) -> QueryDetail`; `explain(id, request: ExplainRequest) -> ExplainResult`; `parse_plan(text: String) -> PlanTree`; `query_llm_bundle(id, member, database, source: LlmSource, plan: Option<PlanTree>) -> LlmBundle` (данные, §7.4; markdown собирает фронтенд) |
 | P3b | `explain` возвращает `recommendations`; `parse_plan` принимает текст; `hypo_check(id, request: HypoRequest) -> HypoResult`; `snapshot_take(id, member) -> SnapshotInfo`; `snapshot_list(id) -> SnapshotInfo[]`; `snapshot_delete(id, file) -> bool`; `snapshot_compare(id, from, to) -> Comparison` |
 
 `member: None` у `start_statements_sampler` — «за лидером» на момент подписки, как у `start_sampler`. Все команды возвращают
@@ -665,12 +743,12 @@ Tauri нет: данные сэмплера идут каналом подпис
 
 | code | Причина | Поведение UI |
 |---|---|---|
-| `EXPLAIN_WRITES` (новый, P3a) | SQLSTATE 25006 в ярусе чтения: запрос, признанный чтением, пытается писать (`errors.explain.writes`) | Сообщение и кнопка «Выполнить как запись» → ярус записи с подтверждением |
+| `EXPLAIN_WRITES` (новый, P3a) | SQLSTATE 25006 в `READ ONLY` (ярус чтения или пробный план): запрос, признанный чтением, пытается писать (`errors.explain.writes`) | Сообщение и кнопка «Выполнить как запись»: повторяет запрос с `forceWrite` (§8.3, п. 4) → ярус записи с подтверждением |
 | `FEATURE_UNAVAILABLE` | Ярус записи на реплике (`errors.explain.writeOnReplica`); hypopg не установлен (`errors.hypo.notInstalled`); `GENERIC_PLAN` на < 16 (`errors.explain.genericUnsupported`); pgss исчез у сэмплера | Подсказка у кнопки; сэмплер — событие `error` и остановка |
-| `NOT_AUTHORIZED` (42501) | Нет прав на таблицы запроса при EXPLAIN (`errors.explain.notAuthorized`, подсказка `pg_read_all_data`) | Сообщение с подсказкой; пункт готовности `readAllData` |
+| `NOT_AUTHORIZED` (42501) | Нет прав на таблицы запроса при EXPLAIN (`errors.explain.notAuthorized`, подсказка `pg_read_all_data`; у INSERT / UPDATE / DELETE / MERGE / CREATE — `errors.explain.notAuthorizedWrite`, права на запись нужны и без выполнения) | Сообщение с подсказкой; пункт готовности `readAllData` |
 | `TIMEOUT` (57014) | EXPLAIN ANALYZE не уложился в срок (`errors.explain.timeout`); пробный план — в 15 с (`errors.explain.planTimeout`) | «Выполнение прервано, изменений нет»; предложить больший срок |
-| `INVALID_INPUT` | Вторая инструкция (`errors.explain.oneStatement`), число параметров (`paramsCount`), синтаксическая ошибка сервера 42601 и ошибки разбора (`errors.explain.server` с `params.message`, `details.position`), пустой запрос, срок вне 5…600, сортировка вне версии (`errors.queries.sortUnavailable`), отчёт без `queries`, `indexDdl` не `CREATE INDEX` (`errors.hypo.badDdl`), снимки разных подключений (`errors.snapshots.foreign`) | Сообщение у формы; позиция ошибки подсвечивается в консоли |
-| `READ_ONLY`, `CONFIRMATION_REQUIRED` | Guard яруса записи (как P2) | Кнопки нет / диалог подтверждения |
+| `INVALID_INPUT` | Вторая инструкция (`errors.explain.oneStatement`), число параметров (`paramsCount`), ошибки сервера классов 42 и 22 — синтаксис, неизвестные объекты, значения параметров (`errors.explain.server` с `params.message`, `details: "position N"`), пустой запрос, срок вне 5…600, сортировка вне версии (`errors.queries.sortUnavailable`), отчёт без `queries`, `indexDdl` не `CREATE INDEX` (`errors.hypo.badDdl`), снимки разных подключений (`errors.snapshots.foreign`) | Сообщение у формы; позиция ошибки подсвечивается в консоли |
+| `READ_ONLY`, `CONFIRMATION_REQUIRED` | Guard яруса записи (как P2); `READ_ONLY` также при SQLSTATE 25006 вне `READ ONLY` — сервер не принимает запись в сеансе (`errors.explain.serverReadOnly`) | Кнопки нет / диалог подтверждения; «как запись» не предлагается |
 | `NOT_FOUND` | Файл снимка исчез (`errors.snapshots.notFound`); запроса с таким `queryId` в pgss уже нет (`errors.queries.gone`) | Список перечитывается; карточка показывает последнее известное с пометкой |
 | `NODE_UNAVAILABLE` | Узел недоступен или подключение закрыто за время EXPLAIN | Как в P2 |
 | `RECOVERY_CONFLICT` | EXPLAIN ANALYZE на реплике отменён конфликтом recovery | Как в P2, `retryable` |
@@ -689,10 +767,10 @@ crates/pg-advisor/tests/fixtures/plans/{json,text}/  (PG 13–18, по прав�
 src-tauri/src/   sampler/statements.rs  diag/{queries,query_detail}.rs  explain/{mod,run,params,tier,llm}.rs
                  commands/{queries,explain}.rs   P3b: explain/hypopg.rs  snapshots/{mod,store,compare}.rs  commands/snapshots.rs
 src-tauri/tests/ it_queries.rs  it_explain.rs   P3b: it_hypopg.rs  it_snapshots.rs
-src/components/queries/  QueriesView QueryTab QueryOverview QueryPlan ExplainTab
-                         plan/{PlanTree,PlanNodeDetails,PlanSummary,ParamsForm,AnalyzeConfirm}
+src/components/queries/  QueriesView QueryTab QueryOverview QueryPlan ExplainTab Sparkline CopyLlmButton queriesText
+                         plan/{PlanTree,PlanView,PlanRunner,PlanNodeDetails,PlanSummary,ParamsForm,AnalyzeConfirm,planText}
                          P3b: Recommendations HypoCheck SnapshotsPanel SnapshotCompare
-src/lib/  useStatementsSampler.ts  useQueryDetail.ts  useExplain.ts
+src/lib/  useStatementsSampler.ts  useQueriesReport.ts  useQueryDetail.ts  useExplain.ts  llmMarkdown.ts
 dev/perf/  Dockerfile  20-init.sql  heavy.sql  README.md
 docs/guide/{en,ru}/queries.md
 ```
@@ -739,7 +817,10 @@ P3b: каждое правило — положительная и отрица�
 - `it_queries`: отчёт «с момента сброса» под нагрузкой — строки, итоги, тексты по ключам, `Unavailable{others}` под ролью без
   `pg_read_all_stats`; сэмплер — два тика, дельты, окно; `query_detail` — `running` на 14+, разбивка; на матрице 13–18 — SQL
   по версиям pgss выполняется (`pg_stat_statements` есть на `gp-pg13..18`), на 13 — `unavailable: running`.
-- `it_explain`: пробный план и отношения; `GENERIC_PLAN` на 16+ и `INVALID_INPUT` на 15; значения параметров `unknown`;
+- `it_explain` (ярус записи идёт под ролью `glafira_app`: у `glafira_diag` на `pg-perf` нет прав записи в `shop`, и EXPLAIN DML
+  под ней — `NOT_AUTHORIZED` с подсказкой о правах записи; побочные эффекты проверяются на `lo_creat` — он транзакционен, и откат
+  его отменяет, — а не на `nextval`: сдвиг последовательности откат не отменяет, а без права `USAGE` `nextval` даёт 42501):
+  пробный план и отношения; `GENERIC_PLAN` на 16+ и `INVALID_INPUT` на 15; значения параметров `unknown`;
   ANALYZE SELECT без подтверждения и без строки журнала; UPDATE — ярус записи, без `confirm` на prod → `CONFIRMATION_REQUIRED`,
   с подтверждением — выполнен и откатан (число строк не изменилось), строка журнала `explainAnalyze`; volatile-функция с записью
   в ярусе чтения → `EXPLAIN_WRITES`; две инструкции → `INVALID_INPUT`; `pg_sleep` сверх срока → `TIMEOUT`; read-only профиль →
@@ -780,13 +861,22 @@ P3b: каждое правило — положительная и отрица�
 
 1. Без `pg_query`: затронутые таблицы — из плана, число параметров — по `$N`; парсер придёт в P4.
 2. EXPLAIN ANALYZE запроса-чтения — без подтверждения и без имени подключения на prod: защищает транзакция `READ ONLY`;
-   подтверждение и имя на prod — только у яруса записи.
+   подтверждение и имя на prod — только у яруса записи. Границы этой защиты — п. 10.
 3. «Взять из текущего выполнения» — не извлечение литералов, а выбор текста выполняющегося экземпляра целиком.
 4. Текст запроса не переформатируется (нужен парсер): подсветка ключевых слов средствами CSS.
 5. Сэмплер pgss живёт, пока открыт потребитель (концепция о жизненном цикле молчит); буфер — 200 000 записей дельт, а не строк.
 6. Текстовый парсер планов и режим «между снимками» — в P3b; `pg_qualstats` — после MVP.
 7. У сэмплера pgss нет своего соединения: одно чтение в минуту делит соединение `Sampler` с сэмплером активности.
 8. Деления Free / Pro нет (§1, «Лицензия»).
+
+**На решение владельца** (открыты, реализация P3a их не решает):
+9. `TextParam` (значения параметров текстовым форматом с типом `unknown`, §8.1) опирается на скрытый модуль
+   `tokio_postgres::types::private` (`BytesMut` — тот же путь использует макрос `to_sql_checked!`). Альтернатива — прямая
+   зависимость `bytes = "1"` (крейт уже есть в `Cargo.lock`, но это новая зависимость манифеста при правиле «без новых
+   крейтов»). Нужен выбор: оставить как есть или добавить зависимость.
+10. `BEGIN READ ONLY` не останавливает нетранзакционные административные функции — `pg_terminate_backend`, `pg_cancel_backend`,
+    `pg_stat_reset*`, `pg_stat_statements_reset`, `pg_reload_conf`: EXPLAIN ANALYZE такого `SELECT` пройдёт ярусом чтения без
+    подтверждения (п. 2) и выполнит функцию. Нужно решение владельца, как закрыть этот случай.
 
 ---
 
@@ -798,7 +888,7 @@ P3b: каждое правило — положительная и отрица�
 2. На `pg-single` (без pgss) инструмент показывает `unavailable` с подсказкой; на матрице 13–18 отчёт строится по версии pgss,
    недоступные колонки серые.
 3. Карточка открывается из строки и из находки, показывает историю по тикам, разбивку, выполняющиеся экземпляры (14+) и
-   ожидания при открытой вкладке «Сессии»; после первого плана — таблицы со ссылками.
+   ожидания после открытия вкладки «Профиль ожиданий»; после первого плана — таблицы со ссылками.
 4. План параметризованного запроса — через `GENERIC_PLAN` на 17 и через форму значений на 15; план по тексту выполняющегося
    экземпляра.
 5. ANALYZE SELECT выполняется без подтверждения в `READ ONLY`; UPDATE требует подтверждения (и имени подключения на prod),

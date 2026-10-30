@@ -1167,8 +1167,9 @@ mod tests {
 
     #[test]
     fn planning_heavier_than_execution_needs_track_planning() {
-        let totals = Totals { calls: 1000, total_exec_ms: 100.0, rows: 0 };
-        let c = Counters { calls: 1000, total_exec_ms: 100.0, plans: 1000, total_plan_ms: 150.0, ..Counters::default() };
+        // 999 вызовов: при 1000 сработало бы и правило N+1 (доля 100 %, среднее 0,1 мс), а тест проверяет только планирование.
+        let totals = Totals { calls: 999, total_exec_ms: 100.0, rows: 0 };
+        let c = Counters { calls: 999, total_exec_ms: 100.0, plans: 999, total_plan_ms: 150.0, ..Counters::default() };
         let f = evaluate(None, &[row(1, c, None, &totals)], &totals, &pgss(), Mode::SinceReset);
         assert_eq!(ids(&f), ["query_planning_heavy"]);
         assert_eq!(f[0].severity, Severity::Info);
@@ -1183,7 +1184,7 @@ mod tests {
         let f = evaluate(Some("pg-1"), &[], &totals, &since, Mode::SinceReset);
         assert_eq!(ids(&f), ["queries_incomplete"]);
         assert_eq!(f[0].target, Some(FindingTarget::Member { name: "pg-1".into() }));
-        assert_eq!((f[0].params["dealloc"], f[0].params["max"]), (3.into(), 5000.into()));
+        assert_eq!((f[0].params["dealloc"].as_i64(), f[0].params["max"].as_i64()), (Some(3), Some(5000)));
         // За окно важен рост, а не накопленное значение.
         assert!(evaluate(None, &[], &totals, &since, Mode::Window).is_empty());
         let grew = PgssState { dealloc: Some(3), dealloc_grew: true, ..pgss() };
