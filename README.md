@@ -70,7 +70,7 @@ pnpm tauri dev
 
 На стенде, поднятом до P2, лаборатория запускается отдельно: `docker compose -f dev/docker-compose.yml up -d --no-recreate pg-lab`
 (образ собирается из `dev/lab/Dockerfile`); роль `glafira_app` интеграционные тесты создают сами (`common::ensure_fixtures`).
-Так же поднимается `pg-perf`: `docker compose -f dev/docker-compose.yml up -d --no-recreate pg-perf` (нагрузка — `dev/perf/README.md`).
+`pg-perf` — в профиле `perf`, общий `up` его не поднимает: `docker compose -f dev/docker-compose.yml up -d --no-recreate pg-perf`, затем `scripts/wait-perf.sh` (нагрузка — `dev/perf/README.md`).
 
 Учётные данные: PG `glafira_diag` / `glafira-secret` (роль для диагностики), роль приложения `glafira_app` / `app-secret`
 (сценарии P2: сессии, блокировки, idle in transaction; не суперпользователь), суперпользователь `postgres` / `postgres-secret`;
@@ -121,7 +121,7 @@ GPG_IT_MATRIX=localhost:5513,localhost:5514,localhost:5515,localhost:5516,localh
   cargo test --manifest-path src-tauri/Cargo.toml --tests -- --test-threads=1   # интеграционные (нужен стенд)
 ```
 Без переменной `GPG_IT_*` интеграционный тест пропускается (`it_ssh` — без `GPG_IT_BASTION` или `GPG_IT_SSH_KEYS`; он запускает
-настоящий OpenSSH 8.4+ из `PATH`; проход по матрице версий — без `GPG_IT_MATRIX`: по ней идут тесты каталога, `it_diag` (SQL каждого инструмента диагностики) и `it_sampler` (запрос сэмплера) на PG 13–18; сценарии лаборатории — без `GPG_IT_LAB`; тесты «Запросов» и EXPLAIN на `pg-perf` — без `GPG_IT_PERF`, нагрузка `heavy.sql` им не нужна, и на CI они идут вместе с остальными). `GPG_IT_DOCKER=1` разрешает тестам останавливать контейнеры,
+настоящий OpenSSH 8.4+ из `PATH`; проход по матрице версий — без `GPG_IT_MATRIX`: по ней идут тесты каталога, `it_diag` (SQL каждого инструмента диагностики) и `it_sampler` (запрос сэмплера) на PG 13–18; сценарии лаборатории — без `GPG_IT_LAB`; тесты «Запросов» и EXPLAIN на `pg-perf` — без `GPG_IT_PERF`, нагрузка `heavy.sql` им не нужна; на CI они идут в отдельном workflow `perf` — ночью и по кнопке, а не на каждый push). `GPG_IT_DOCKER=1` разрешает тестам останавливать контейнеры,
 делать switchover и promote; после них стенд возвращается в исходное состояние.
 
 Действия: `it_actions` (сессии и слоты; нужны `GPG_IT_SINGLE`, `GPG_IT_PRIMARY`, `GPG_IT_LAB`) и `it_patroni_actions` (Patroni; нужен `GPG_IT_PATRONI`). Сценарии `it_patroni_actions`, которые меняют кластер (switchover сейчас и по расписанию, restart реплики, пауза), идут только с `GPG_IT_DOCKER=1` и возвращают стенд сами: восстановление при любом выходе и ожидание, пока стенд придёт в норму. Failover останавливает PostgreSQL лидера и идёт только ещё и с `GPG_IT_FAILOVER=1`:

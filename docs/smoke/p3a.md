@@ -1,6 +1,6 @@
 # Смоук P3a «Видеть» — топ запросов, карточка, EXPLAIN, консоль
 
-Сборка: `pnpm tauri dev`. Стенд: `docker compose -f dev/docker-compose.yml up -d --no-recreate pg-perf` (`localhost:5471`, база `perf`; dev/perf/README.md),
+Сборка: `pnpm tauri dev`. Стенд: `docker compose -f dev/docker-compose.yml up -d --no-recreate pg-perf` и `scripts/wait-perf.sh` (`localhost:5471`, база `perf`; dev/perf/README.md),
 для шага 15 — матрица версий (`docker compose -f dev/docker-compose.yml --profile matrix up -d --no-recreate`, затем `scripts/wait-matrix.sh`),
 для шага 14 — одиночный сервер `localhost:5460` из основного стенда. Шаги идут по порядку: часть шагов опирается на данные предыдущих.
 

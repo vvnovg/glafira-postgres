@@ -11,9 +11,11 @@ PostgreSQL 17 (`gp-pg-perf`, `127.0.0.1:5471`) с `pg_stat_statements` (`track_p
 - `glafira_app` — `SELECT`, `INSERT`, `UPDATE`, `DELETE` на таблицы `shop` (и `USAGE`, `SELECT` на её последовательности), без `pg_monitor`:
   под ней идёт ярус записи EXPLAIN ANALYZE.
 
-Поднять на уже работающем стенде (остальные контейнеры не трогаются):
+Сервис в профиле `perf`: общий `docker compose … up` его не поднимает. Поднять на уже работающем стенде (остальные
+контейнеры не трогаются) и дождаться init-скрипта:
 
     docker compose -f dev/docker-compose.yml up -d --no-recreate pg-perf
+    scripts/wait-perf.sh
 
 Нагрузка — сценарий `pgbench` из 13 инструкций:
 

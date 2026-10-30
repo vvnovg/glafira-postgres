@@ -78,7 +78,7 @@ jobs:
           GPG_IT_REPLICA: localhost:5452
           GPG_IT_PATRONI: http://localhost:8011,http://localhost:8012,http://localhost:8013
           GPG_IT_LAB: localhost:5470
-          GPG_IT_PERF: localhost:5471
+          # Без GPG_IT_PERF: тесты на pg-perf (it_queries, it_explain) — в workflow perf (ночью и вручную).
           GPG_IT_MATRIX: localhost:5513,localhost:5514,localhost:5515,localhost:5516,localhost:5517,localhost:5518
           GPG_IT_BASTION: localhost:2222
           GPG_IT_SSH_KEYS: ${{ github.workspace }}/dev/ssh/keys

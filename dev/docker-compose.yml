@@ -140,8 +140,10 @@ services:
   # Стенд P3: тяжёлые запросы. PG 17 с pg_stat_statements (track_planning), hypopg, pg_stat_kcache и pg_wait_sampling,
   # объёмная схема perf.shop и сценарий pgbench /perf/heavy.sql (dev/perf/README.md). Параметры нарочно тесные:
   # work_mem=1MB — сортировки на диске, max_parallel_workers=2 при per_gather=4 — нехватка воркеров, низкие пороги
-  # JIT — JIT на простых запросах. Init-скрипты запечены в образ (perf/Dockerfile).
+  # JIT — JIT на простых запросах. Init-скрипты запечены в образ (perf/Dockerfile). Профиль `perf`: образ собирается из
+  # пакетов PGDG, поэтому общий `up` его не трогает; поднимается по имени сервиса или с `--profile perf` (спец. P3 §15 п. 16).
   pg-perf:
+    profiles: [perf]
     build:
       context: .
       dockerfile: perf/Dockerfile
