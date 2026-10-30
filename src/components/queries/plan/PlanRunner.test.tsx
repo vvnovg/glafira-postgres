@@ -25,18 +25,21 @@ describe("PlanRunner", () => {
     vi.mocked(api.listConnections).mockResolvedValue([connection({ id: "c", environment: "dev", readOnly: false })]);
   });
 
-  it("форма из $N, GENERIC_PLAN на 16+, «План» шлёт значения; ANALYZE чтения — без подтверждения", async () => {
+  it("форма из $N, GENERIC_PLAN на 16+ без полей значений, «План» шлёт значения; ANALYZE чтения — без подтверждения", async () => {
     vi.mocked(api.explain).mockResolvedValue(result());
     const user = userEvent.setup();
     renderWithClient(<PlanRunner connectionId="c" member="pg-1" database="perf" sql="SELECT * FROM t WHERE a = $1 AND b = $2" serverVersionNum={170_000} inRecovery={false} />);
-    expect(screen.getByRole("textbox", { name: "$1" })).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "$2" })).toBeInTheDocument();
     const generic = screen.getByRole("checkbox", { name: "GENERIC_PLAN (без значений)" });
     expect(generic).toBeChecked();
+    // GENERIC_PLAN: полей значений нет, «План с выполнением» ждёт значений — закрыт, с пояснением.
+    expect(screen.queryByRole("textbox", { name: "$1" })).toBeNull();
+    expect(screen.getByText(/снимите флажок, чтобы ввести их/)).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "План с выполнением" })).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "План" }));
     await waitFor(() => expect(api.explain).toHaveBeenCalledWith("c", expect.objectContaining({ sql: "SELECT * FROM t WHERE a = $1 AND b = $2", mode: "plan", params: { kind: "generic" }, member: "pg-1", database: "perf" })));
     expect(await screen.findByRole("treegrid", { name: "Дерево плана" })).toBeInTheDocument();
     await user.click(generic);
+    expect(screen.getByRole("textbox", { name: "$2" })).toBeInTheDocument();
     await user.type(screen.getByRole("textbox", { name: "$1" }), "7");
     vi.mocked(api.explain).mockResolvedValue(result({ mode: "analyze" }));
     await user.click(screen.getByRole("button", { name: "План с выполнением" }));
@@ -48,14 +51,19 @@ describe("PlanRunner", () => {
   it("ярус записи: подтверждение со списком таблиц, затем ANALYZE; EXPLAIN_WRITES предлагает выполнить как запись", async () => {
     vi.mocked(api.explain).mockResolvedValueOnce(result({ tier: "write", relations: [{ schema: "shop", name: "balances" }] })).mockResolvedValueOnce(result({ mode: "analyze", tier: "write" }));
     const user = userEvent.setup();
-    renderWithClient(<PlanRunner connectionId="c" member="pg-1" database="perf" sql="UPDATE shop.balances SET balance = 0" serverVersionNum={170_000} inRecovery={false} />);
+    const { client } = renderWithClient(<PlanRunner connectionId="c" member="pg-1" database="perf" sql="UPDATE shop.balances SET balance = 0" serverVersionNum={170_000} inRecovery={false} />);
+    const invalidate = vi.spyOn(client, "invalidateQueries");
     await user.click(screen.getByRole("button", { name: "План с выполнением" }));
     const dialog = await screen.findByRole("group", CONFIRM);
     expect(within(dialog).getByText("shop.balances")).toBeInTheDocument();
     expect(within(dialog).getByText(/Строки изменятся и откатятся/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/NOTIFY не доставляется/)).toBeInTheDocument();
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["actions", "c"] });
     await user.click(within(dialog).getByRole("button", { name: "Выполнить и откатить" }));
     await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("c", expect.objectContaining({ mode: "analyze", confirmation: { confirm: null, typedName: null } })));
     await waitFor(() => expect(screen.queryByRole("group", CONFIRM)).not.toBeInTheDocument());
+    // Ярус записи пишет журнал действий — его список перечитывается, как после диалогов P2.
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["actions", "c"] });
     // Запрос-чтение с побочным эффектом: сервер отвечает EXPLAIN_WRITES → кнопка «Выполнить как запись».
     vi.mocked(api.explain).mockResolvedValueOnce(result()).mockRejectedValueOnce({ code: "EXPLAIN_WRITES", message: "writes", retryable: false, key: "errors.explain.writes" });
     await user.click(screen.getByRole("button", { name: "План с выполнением" }));
@@ -147,9 +155,11 @@ describe("PlanRunner: вход пробы, реплика, загрузка пр
     let probe: (v: ExplainResult) => void = () => {};
     vi.mocked(api.explain).mockReturnValueOnce(new Promise((r) => { probe = r; }));
     const user = userEvent.setup();
-    const { rerender } = renderWithClient(runner("UPDATE t SET a = $1"));
+    // PostgreSQL 15: GENERIC_PLAN нет, поля значений на экране.
+    const v15 = { serverVersionNum: 150_000 };
+    const { rerender } = renderWithClient(runner("UPDATE t SET a = $1", v15));
     await user.click(await screen.findByRole("button", { name: "План с выполнением" }));
-    rerender(runner("UPDATE t SET a = $1 WHERE false"));
+    rerender(runner("UPDATE t SET a = $1 WHERE false", v15));
     await act(async () => probe(result({ tier: "write" })));
     expect(screen.queryByRole("group", CONFIRM)).toBeNull();
     expect(api.explain).toHaveBeenCalledTimes(1);
@@ -234,6 +244,71 @@ describe("PlanRunner: вход пробы, реплика, загрузка пр
     await user.click(await screen.findByRole("button", { name: "План" }));
     await screen.findByRole("treegrid", { name: "Дерево плана" });
     expect(screen.queryByRole("combobox", { name: "Выполнить на узле" })).toBeNull();
+  });
+
+  it("ANALYZE чтения с лидера на реплике: узел — в сводке и истории, onResult получает узел запуска", async () => {
+    const members = [member("pg-1", { role: "primary" }), member("pg-2", { role: "replica" })];
+    vi.mocked(api.explain).mockResolvedValueOnce(result()).mockResolvedValueOnce(result({ mode: "analyze" }));
+    const onResult = vi.fn();
+    const user = userEvent.setup();
+    renderWithClient(runner("SELECT 1", { members, onResult }));
+    // Сразу «План с выполнением», без «Плана»: чтение уходит на первую доступную реплику.
+    await user.click(await screen.findByRole("button", { name: "План с выполнением" }));
+    await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("c", expect.objectContaining({ mode: "analyze", member: "pg-2" })));
+    expect(await screen.findByText("Узел: pg-2")).toBeInTheDocument();
+    expect(onResult).toHaveBeenLastCalledWith(expect.objectContaining({ mode: "analyze" }), "pg-2");
+    // «План» — на узле вкладки: сводка без узла; в истории узел назван только у запуска на реплике.
+    vi.mocked(api.explain).mockResolvedValueOnce(result());
+    await user.click(screen.getByRole("button", { name: "План" }));
+    await waitFor(() => expect(onResult).toHaveBeenLastCalledWith(expect.objectContaining({ mode: "plan" }), "pg-1"));
+    expect(screen.queryByText("Узел: pg-2")).toBeNull();
+    expect(screen.getByRole("button", { name: /^#1 с выполнением, чтение, на pg-2, / })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^#2 план, чтение, \d/ })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /^#1 / }));
+    expect(screen.getByText("Узел: pg-2")).toBeInTheDocument();
+  });
+
+  it("место ошибки — в тексте упавшего запуска, даже если ответ пришёл после правки; следующая правка снимает ошибку", async () => {
+    let fail: (e: unknown) => void = () => {};
+    vi.mocked(api.explain).mockReturnValueOnce(new Promise((_, reject) => { fail = reject; }));
+    const user = userEvent.setup();
+    const { rerender } = renderWithClient(runner("SELECT 1\nFORM t"));
+    await user.click(await screen.findByRole("button", { name: "План" }));
+    rerender(runner("SELECT 12345678\nFROM t"));
+    await act(async () => fail({ code: "INVALID_INPUT", message: "syntax error", retryable: false, key: "errors.explain.server", params: { message: "syntax error at or near \"FORM\"" }, details: "position 10" }));
+    expect(await screen.findByText("Ошибка в строке 2, позиция 1")).toBeInTheDocument();
+    expect(screen.getByText("F", { selector: "mark" })).toBeInTheDocument();
+    rerender(runner("SELECT 12345678\nFROM t2"));
+    await waitFor(() => expect(screen.queryByText("Ошибка в строке 2, позиция 1")).toBeNull());
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("параметров больше 100: вместо полей — сообщение; на 16+ «План» идёт с GENERIC_PLAN, запуски со значениями закрыты", async () => {
+    const sql = `SELECT ${Array.from({ length: 101 }, (_, i) => `$${i + 1}`).join(", ")}`;
+    vi.mocked(api.explain).mockResolvedValue(result());
+    const user = userEvent.setup();
+    const first = renderWithClient(runner(sql));
+    expect(screen.getByText(/Параметров больше 100 \(всего: 101\)/)).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "$1" })).toBeNull();
+    const plan = await screen.findByRole("button", { name: "План" });
+    await waitFor(() => expect(plan).toBeEnabled());
+    expect(screen.getByRole("button", { name: "План с выполнением" })).toBeDisabled();
+    await user.click(plan);
+    await waitFor(() => expect(api.explain).toHaveBeenCalledWith("c", expect.objectContaining({ mode: "plan", params: { kind: "generic" } })));
+    // Без GENERIC_PLAN «Плану» тоже нужны значения — закрыт и он.
+    await user.click(screen.getByRole("checkbox", { name: "GENERIC_PLAN (без значений)" }));
+    expect(screen.getByRole("button", { name: "План" })).toBeDisabled();
+    expect(screen.queryByRole("textbox", { name: "$1" })).toBeNull();
+    first.unmount();
+    // PostgreSQL 15 и номер за пределом протокола: GENERIC_PLAN нет — закрыты оба запуска, «Получить план» не ждёт.
+    vi.mocked(api.explain).mockClear();
+    const onAutoRun = vi.fn();
+    renderWithClient(runner("SELECT $70000", { serverVersionNum: 150_000, autoRun: true, onAutoRun }));
+    expect(screen.getByText(/Параметров больше 100 \(всего: 65535\)/)).toBeInTheDocument();
+    await waitFor(() => expect(onAutoRun).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("button", { name: "План" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "План с выполнением" })).toBeDisabled();
+    expect(api.explain).not.toHaveBeenCalled();
   });
 
   it("ответ после размонтирования отбрасывается; autoRun запускает одну пробу и сообщает об этом", async () => {

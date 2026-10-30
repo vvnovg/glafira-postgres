@@ -74,12 +74,21 @@ export function QueriesView({
   /** Колонка, по которой щёлкнули: «Доля» и «Всего» сортируют одинаково, стрелка — только у выбранной. */
   const [sortCol, setSortCol] = useState("share");
   const [intervalS, setIntervalS] = useState<number | null>(DEFAULT_INTERVAL_S);
-  const sampler = useStatementsSampler(connectionId, member, live);
+  // Сэмплер — на разрешённом узле: закреплённом или узле отчёта «за лидером» (Rust разрешает лидера на каждом отчёте, а
+  // подписку с `null` — один раз). После смены лидера новый отчёт называет новый узел, и подписка переходит на него.
+  // Узел берётся только из настоящих данных: заглушка `keepPreviousData` после смены режима узла — отчёт прежнего узла.
+  const [resolved, setResolved] = useState<string | null>(null);
+  const sampler = useStatementsSampler(connectionId, member ?? resolved, live && (member !== null || resolved !== null));
   const q = useQueriesReport(connectionId, member, params, { active, live, intervalS, tickAtMs: sampler.live?.atMs ?? null });
   const report = q.data;
   const data = report?.data;
   const byTick = params.mode.kind === "window";
   const reportMember = report?.member ?? null;
+  const freshMember = q.isPlaceholderData ? null : reportMember;
+  useEffect(() => {
+    if (member !== null) setResolved(null);
+    else if (freshMember !== null) setResolved(freshMember);
+  }, [member, freshMember]);
 
   // Тексты и базы — по узлу отчёта: при смене подключения или узла забываются. Ответ, пришедший для прежнего узла, отбрасывается.
   const [texts, setTexts] = useState<{ owner: string; byId: ReadonlyMap<string, { text: string; truncated: boolean }> }>({ owner: "", byId: new Map() });

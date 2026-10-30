@@ -1,5 +1,6 @@
 import type { TFunction } from "i18next";
 import type { LlmBundle, QueryStat } from "../api/types";
+import { BLOCK_BYTES } from "../components/queries/queriesText";
 import { formatBytes, formatCount, formatMs, formatPercent } from "./format";
 
 /** Ключи предупреждений сборки — литералами (правило словарей); неизвестный ключ попадает в текст как есть. */
@@ -23,6 +24,10 @@ function fence(lang: string, body: string): string {
   return `${ticks}${lang}\n${body}\n${ticks}`;
 }
 
+/**
+ * Таблица метрик. Строка планирования — только если планирование учитывалось: при `track_planning = off` счётчики нулевые,
+ * и «0 мс» читалось бы как факт.
+ */
 function statsTable(s: QueryStat, t: TFunction): string {
   const rows: [string, string][] = [
     [t("llm.stats.calls"), formatCount(s.calls)],
@@ -32,11 +37,11 @@ function statsTable(s: QueryStat, t: TFunction): string {
     [t("llm.stats.stddev"), s.stddevExecMs === null ? "—" : formatMs(s.stddevExecMs)],
     [t("llm.stats.rowsPerCall"), formatCount(s.rowsPerCall, 1)],
     [t("llm.stats.hitRatio"), s.hitRatio === null ? "—" : formatPercent(s.hitRatio * 100)],
-    [t("llm.stats.read"), formatBytes(s.sharedRead * 8192)],
-    [t("llm.stats.temp"), formatBytes(s.tempWritten * 8192)],
+    [t("llm.stats.read"), formatBytes(s.sharedRead * BLOCK_BYTES)],
+    [t("llm.stats.temp"), formatBytes(s.tempWritten * BLOCK_BYTES)],
     [t("llm.stats.wal"), formatBytes(s.walBytes)],
-    [t("llm.stats.planning"), formatMs(s.totalPlanMs)],
   ];
+  if (s.plans !== 0 || s.totalPlanMs !== 0) rows.push([t("llm.stats.planning"), formatMs(s.totalPlanMs)]);
   return [`| ${t("llm.stats.metric")} | ${t("llm.stats.value")} |`, "|---|---|", ...rows.map(([k, v]) => `| ${k} | ${plain(v)} |`)].join("\n");
 }
 

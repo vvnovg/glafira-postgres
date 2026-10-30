@@ -312,9 +312,9 @@ describe("planText: имена узлов как в psql", () => {
 describe("PlanNodeDetails", () => {
   it("поля узла, непустые значения; нераспознанные поля в раскрывающемся блоке", () => {
     render(<PlanNodeDetails node={planNode({ extra: { "Mystery Field": 1 }, output: ["o.id", "o.status"] })} />);
-    expect(screen.getByRole("heading", { name: "Узел" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Подробности узла" })).toBeInTheDocument();
     expect(screen.getByText("Seq Scan on shop.orders o")).toBeInTheDocument();
-    expect(screen.getByText("0,10 мс..30,0 мс, 5 строк, циклы 1")).toBeInTheDocument();
+    expect(screen.getByText("0,10 мс..30,0 мс, строк: 5, циклов: 1")).toBeInTheDocument();
     expect(screen.getByText("(o.status = 'disputed'::text)")).toBeInTheDocument();
     expect(screen.getByText("499 995")).toBeInTheDocument();
     expect(screen.getByText("o.id, o.status")).toBeInTheDocument();
@@ -361,12 +361,12 @@ describe("PlanNodeDetails", () => {
     expect(screen.queryByText("Включённое время")).not.toBeInTheDocument();
     expect(screen.queryByText("Собственное время")).not.toBeInTheDocument();
     expect(screen.queryByText("Доля общего времени")).not.toBeInTheDocument();
-    expect(screen.queryByText(/циклы 0/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/циклов: 0/)).not.toBeInTheDocument();
   });
 
   it("TIMING OFF: время не печатается, NaN нет", () => {
     const { container } = render(<PlanNodeDetails node={planNode({ actual: { startupMs: null, totalMs: null, rows: 5, loops: 2 }, inclusiveMs: null, exclusiveMs: null, sharePct: null })} />);
-    expect(screen.getByText("5 строк, циклы 2")).toBeInTheDocument();
+    expect(screen.getByText("строк: 5, циклов: 2")).toBeInTheDocument();
     expect(screen.queryByText("Собственное время")).not.toBeInTheDocument();
     expect(container).not.toHaveTextContent("NaN");
   });

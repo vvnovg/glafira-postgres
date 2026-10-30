@@ -165,7 +165,9 @@ describe("DiagTab", () => {
     // Один запрос отчёта, и он несёт параметры: пустой запрос `{ tool: "queries" }` Rust отклонил бы.
     expect(api.runDiagnostic).toHaveBeenCalledTimes(1);
     expect(api.runDiagnostic).toHaveBeenCalledWith("c", expect.objectContaining({ tool: "queries", member: null, queries: expect.objectContaining({ sort: "totalTime", limit: 50 }) }));
-    expect(api.startStatementsSampler).toHaveBeenCalledWith("c", null, expect.any(Function));
+    // «За лидером»: сэмплер — на узле, который назвал отчёт (Rust разрешает лидера при каждом отчёте).
+    await waitFor(() => expect(api.startStatementsSampler).toHaveBeenCalledWith("c", "pg-1", expect.any(Function)));
+    expect(api.startStatementsSampler).not.toHaveBeenCalledWith("c", null, expect.any(Function));
     await user.selectOptions(screen.getByRole("combobox", { name: "Узел" }), "pg-2");
     expect(useWorkspace.getState().tabs[0]).toMatchObject({ kind: "diag", tool: "queries", member: "pg-2" });
     await waitFor(() => expect(api.startStatementsSampler).toHaveBeenLastCalledWith("c", "pg-2", expect.any(Function)));

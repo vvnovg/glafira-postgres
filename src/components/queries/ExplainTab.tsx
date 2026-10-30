@@ -168,7 +168,7 @@ export function ExplainTab({
                     sql={sql}
                     serverVersionNum={serverVersionNum}
                     inRecovery={inRecovery}
-                    onResult={(r) => setLast({ plan: r.plan, sql, node: nodeName, db: dbName })}
+                    onResult={(r, on) => setLast({ plan: r.plan, sql, node: on, db: dbName })}
                   />
                   {sql.trim() && (
                     <div className="toolbar">

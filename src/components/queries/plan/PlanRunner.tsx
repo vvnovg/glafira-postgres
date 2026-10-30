@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toAppError } from "../../../api/client";
@@ -8,7 +9,7 @@ import { canAct, useConnectionProfile } from "../../../lib/useConnectionProfile"
 import { countParams, useExplain } from "../../../lib/useExplain";
 import { ErrorBanner } from "../../common/ErrorBanner";
 import { AnalyzeConfirm } from "./AnalyzeConfirm";
-import { ParamsForm } from "./ParamsForm";
+import { PARAM_FIELDS_LIMIT, ParamsForm } from "./ParamsForm";
 import { PlanView } from "./PlanView";
 
 /** Сроки ANALYZE в выборе, секунды (Rust принимает 5…600); пробный план всегда идёт со своим сроком 15 с. */
@@ -22,11 +23,16 @@ const NO_CONFIRMATION: Confirmation = { confirm: null, typedName: null };
 const MODE_KEYS: Record<ExplainMode, string> = { plan: "diag.plan.history.modes.plan", analyze: "diag.plan.history.modes.analyze" };
 const TIER_KEYS: Record<ExplainTier, string> = { read: "diag.plan.tiers.read", write: "diag.plan.tiers.write" };
 
-/** Запуск в истории: результат хранится одним объектом — дерево плана сбрасывает развёртку при смене объекта. */
+/**
+ * Запуск в истории: результат хранится одним объектом — дерево плана сбрасывает развёртку при смене объекта. `member` —
+ * узел, на котором план получен (ANALYZE чтения с лидера уходит на реплику): история и сводка называют его, если он не узел
+ * вкладки.
+ */
 interface Run {
   id: number;
   at: number;
   result: ExplainResult;
+  member: string;
 }
 
 /** Подсказка у кнопок: `force` — после `EXPLAIN_WRITES` можно выполнить как запись; остальные закрывают ярус записи. */
@@ -42,9 +48,13 @@ interface Inputs {
   searchPath: string;
 }
 
-/** Ключ входа для сравнения: значения — только у существующих `$N` (лишние в массиве ничего не меняют). */
+/**
+ * Ключ входа для сравнения: значения — только у существующих `$N` (лишние в массиве ничего не меняют). Свыше
+ * `PARAM_FIELDS_LIMIT` полей нет, и значения во вход не входят.
+ */
 function inputsKey(i: Inputs): string {
-  return JSON.stringify([i.sql, Array.from({ length: countParams(i.sql) }, (_, k) => i.values[k] ?? null), i.searchPath.trim()]);
+  const n = countParams(i.sql);
+  return JSON.stringify([i.sql, Array.from({ length: n > PARAM_FIELDS_LIMIT ? 0 : n }, (_, k) => i.values[k] ?? null), i.searchPath.trim()]);
 }
 
 /** Место ошибки разбора в тексте: строка и колонка (с 1) и строка текста, разрезанная вокруг отмеченного символа. */
@@ -92,7 +102,10 @@ function errorPlace(sql: string, error: AppError | null): ErrorPlace | null {
  * `members` — участники топологии: если узел — лидер, а проба показала ярус чтения, форма предлагает выполнить ANALYZE
  * на реплике (спец. §8.3 п. 3; по умолчанию — первая доступная реплика, можно вернуть лидера). `autoRun` — один пробный
  * план, как только запуск доступен
- * («Получить план» карточки); `onAutoRun` сообщает, что запрос принят.
+ * («Получить план» карточки); `onAutoRun` сообщает, что запрос принят (если «План» без значений невозможен — принят без
+ * запуска). `onResult` получает результат и узел, где он получен.
+ * Значения параметров: при GENERIC_PLAN и свыше `PARAM_FIELDS_LIMIT` полей нет, и запуски, которым нужны значения, закрыты.
+ * Ярус записи пишет журнал действий — после него список журнала перечитывается, как после диалогов P2.
  */
 export function PlanRunner({
   connectionId,
@@ -113,15 +126,22 @@ export function PlanRunner({
   serverVersionNum: number;
   inRecovery: boolean;
   members?: Member[] | null;
-  onResult?: (r: ExplainResult) => void;
+  onResult?: (r: ExplainResult, member: string) => void;
   autoRun?: boolean;
   onAutoRun?: () => void;
 }) {
   const { t } = useTranslation();
+  const qc = useQueryClient();
   const profile = useConnectionProfile(connectionId);
   const count = countParams(sql);
   const canGeneric = serverVersionNum >= 160_000 && count > 0;
   const [generic, setGeneric] = useState(true);
+  // Полей значений нет (GENERIC_PLAN включён или параметров больше предела) — запуск, которому они нужны, закрыт.
+  const genericOn = canGeneric && generic;
+  const valuesHidden = genericOn || count > PARAM_FIELDS_LIMIT;
+  const needsValues = (mode: ExplainMode) => count > 0 && !(mode === "plan" && genericOn);
+  const planBlocked = valuesHidden && needsValues("plan");
+  const analyzeBlocked = valuesHidden && needsValues("analyze");
   const [values, setValues] = useState<(string | null)[]>([]);
   const [timeoutS, setTimeoutS] = useState<number>(DEFAULT_TIMEOUT_S);
   const [searchPath, setSearchPath] = useState("");
@@ -129,7 +149,8 @@ export function PlanRunner({
   const [shown, setShown] = useState<number | null>(null);
   /** Открытое подтверждение яруса записи: таблицы пробного плана, `forceWrite` и вход пробы. */
   const [confirm, setConfirm] = useState<{ relations: RelationRef[]; force: boolean; inputs: Inputs } | null>(null);
-  const [error, setError] = useState<AppError | null>(null);
+  /** Ошибка запуска и текст, для которого он шёл: место ошибки разбора отмечается в нём, а не в текущем поле. */
+  const [failed, setFailed] = useState<{ error: AppError; sql: string } | null>(null);
   const [writeHint, setWriteHint] = useState<WriteHint | null>(null);
   /** Таблицы пробного плана и вход того запуска, что получил `EXPLAIN_WRITES`: их покажет подтверждение «как запись». */
   const [forceFrom, setForceFrom] = useState<{ relations: RelationRef[]; inputs: Inputs } | null>(null);
@@ -160,6 +181,7 @@ export function PlanRunner({
     setConfirm(null);
     setWriteHint(null);
     setForceFrom(null);
+    setFailed(null);
   }, [key]);
   const stale = (from: Inputs) => !alive.current || inputsKey(from) !== liveKey.current;
 
@@ -189,24 +211,24 @@ export function PlanRunner({
     forceWrite,
   });
 
-  const remember = (result: ExplainResult) => {
+  const remember = (result: ExplainResult, on: string) => {
     if (!alive.current) return;
     seq.current += 1;
-    const run: Run = { id: seq.current, at: Date.now(), result };
+    const run: Run = { id: seq.current, at: Date.now(), result, member: on };
     setRuns((r) => [run, ...r].slice(0, HISTORY));
     setShown(run.id);
-    onResult?.(result);
+    onResult?.(result, on);
   };
 
-  /** Запуск: прошлые ошибка и подсказка снимаются, новая ошибка — баннером (после размонтирования — никуда). */
-  const guarded = async (step: () => Promise<void>) => {
-    setError(null);
+  /** Запуск входа `from`: прошлые ошибка и подсказка снимаются, новая ошибка — баннером (после размонтирования — никуда). */
+  const guarded = async (from: Inputs, step: () => Promise<void>) => {
+    setFailed(null);
     setWriteHint(null);
     setRunning(true);
     try {
       await step();
     } catch (e) {
-      if (alive.current) setError(toAppError(e));
+      if (alive.current) setFailed({ error: toAppError(e), sql: from.sql });
     } finally {
       if (alive.current) setRunning(false);
     }
@@ -228,10 +250,10 @@ export function PlanRunner({
 
   const runPlan = () => {
     const from = inputs;
-    return guarded(async () => {
+    return guarded(from, async () => {
       const r = await explain.mutateAsync(request("plan", NO_CONFIRMATION, false, from));
       if (alive.current) setReadProbe(r.tier === "read" ? inputsKey(from) : null);
-      remember(r);
+      remember(r, member);
     });
   };
 
@@ -242,7 +264,7 @@ export function PlanRunner({
   const runAnalyze = () => {
     const from = inputs;
     const on = analyzeTarget;
-    return guarded(async () => {
+    return guarded(from, async () => {
       let probe: ExplainResult;
       try {
         probe = await explain.mutateAsync(request("plan", NO_CONFIRMATION, false, from));
@@ -260,7 +282,7 @@ export function PlanRunner({
       }
       setReadProbe(inputsKey(from));
       try {
-        remember(await explain.mutateAsync(request("analyze", NO_CONFIRMATION, false, from, on)));
+        remember(await explain.mutateAsync(request("analyze", NO_CONFIRMATION, false, from, on)), on);
       } catch (e) {
         // Чтение записало (volatile-функция, триггер).
         offerForce(e, probe.relations, from);
@@ -271,7 +293,7 @@ export function PlanRunner({
 
   const runAsWrite = () => {
     if (!forceFrom) return;
-    setError(null);
+    setFailed(null);
     setWriteHint(null);
     openWrite(forceFrom.relations, true, forceFrom.inputs);
   };
@@ -280,18 +302,20 @@ export function PlanRunner({
     if (!confirm) return;
     const { force, inputs: from } = confirm;
     // Подтверждение остаётся открытым (кнопки ждут), пока ANALYZE идёт; закрывается итогом — результатом или ошибкой.
-    // Запрос — из входа пробы: подтверждали именно его.
-    return guarded(async () => {
+    // Запрос — из входа пробы: подтверждали именно его. Ярус записи — на узле вкладки; журнал действий перечитывается.
+    return guarded(from, async () => {
       try {
-        remember(await explain.mutateAsync(request("analyze", c, force, from)));
+        remember(await explain.mutateAsync(request("analyze", c, force, from)), member);
       } finally {
+        void qc.invalidateQueries({ queryKey: ["actions", connectionId] });
         if (alive.current) setConfirm(null);
       }
     });
   };
 
   const current = runs.find((r) => r.id === shown) ?? null;
-  const place = errorPlace(sql, error);
+  const error = failed?.error ?? null;
+  const place = failed ? errorPlace(failed.sql, failed.error) : null;
   const busy = running || explain.isPending;
   // Профиль ещё читается: ни подсказки read-only, ни запуска — кнопки ждут.
   const loading = profile === undefined;
@@ -299,7 +323,8 @@ export function PlanRunner({
   const idle = !busy && !loading && !confirmOpen && sql.trim() !== "";
 
   // «Получить план» карточки: одна проба, как только запуск доступен. Флаг «принято» держит одну пробу на запрос и при
-  // повторном вызове эффекта (StrictMode, новая `onAutoRun`), пока родитель не снял `autoRun`.
+  // повторном вызове эффекта (StrictMode, новая `onAutoRun`), пока родитель не снял `autoRun`. «План» без значений
+  // невозможен (параметров больше предела, GENERIC_PLAN нет) — запрос принимается без запуска.
   const runPlanRef = useRef(runPlan);
   runPlanRef.current = runPlan;
   const autoTaken = useRef(false);
@@ -311,17 +336,17 @@ export function PlanRunner({
     if (!idle || autoTaken.current) return;
     autoTaken.current = true;
     onAutoRun?.();
-    void runPlanRef.current();
-  }, [autoRun, idle, onAutoRun]);
+    if (!planBlocked) void runPlanRef.current();
+  }, [autoRun, idle, onAutoRun, planBlocked]);
 
   return (
     <div className="plan-runner">
       <ParamsForm count={count} values={values} onChange={setValues} generic={generic} canGeneric={canGeneric} onGeneric={setGeneric} />
       <div className="toolbar">
-        <button type="button" className="primary" disabled={!idle} onClick={() => void runPlan()}>
+        <button type="button" className="primary" disabled={!idle || planBlocked} onClick={() => void runPlan()}>
           {t("diag.plan.run.plan")}
         </button>
-        <button type="button" disabled={!idle} onClick={() => void runAnalyze()}>
+        <button type="button" disabled={!idle || analyzeBlocked} onClick={() => void runAnalyze()}>
           {t("diag.plan.run.analyze")}
         </button>
         {loading && <span className="muted">{t("common.loading")}</span>}
@@ -387,7 +412,16 @@ export function PlanRunner({
       {confirmOpen && profile && (
         <AnalyzeConfirm connection={profile} relations={confirm.relations} busy={busy} onConfirm={(c) => void confirmed(c)} onCancel={() => setConfirm(null)} />
       )}
-      {current && <PlanView tree={current.result.plan} tier={current.result.tier} warnings={current.result.warnings} raw={current.result.raw} elapsedMs={current.result.elapsedMs} />}
+      {current && (
+        <PlanView
+          tree={current.result.plan}
+          tier={current.result.tier}
+          warnings={current.result.warnings}
+          raw={current.result.raw}
+          elapsedMs={current.result.elapsedMs}
+          member={current.member !== member ? current.member : undefined}
+        />
+      )}
       {runs.length > 1 && (
         <section className="plan-history">
           <h3>{t("diag.plan.history.title")}</h3>
@@ -400,7 +434,9 @@ export function PlanRunner({
                   aria-current={r.id === shown}
                   onClick={() => setShown(r.id)}
                 >
-                  {t("diag.plan.history.item", { n: r.id, mode: t(MODE_KEYS[r.result.mode]), tier: t(TIER_KEYS[r.result.tier]), time: formatTime(r.at), ms: formatMs(r.result.elapsedMs) })}
+                  {r.member === member
+                    ? t("diag.plan.history.item", { n: r.id, mode: t(MODE_KEYS[r.result.mode]), tier: t(TIER_KEYS[r.result.tier]), time: formatTime(r.at), ms: formatMs(r.result.elapsedMs) })
+                    : t("diag.plan.history.itemOn", { n: r.id, mode: t(MODE_KEYS[r.result.mode]), tier: t(TIER_KEYS[r.result.tier]), member: r.member, time: formatTime(r.at), ms: formatMs(r.result.elapsedMs) })}
                 </button>
               </li>
             ))}

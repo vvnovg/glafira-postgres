@@ -4,13 +4,16 @@ import { formatCount, formatMs, formatPercent } from "../../../lib/format";
 import { KeyValue, type KeyValueItem } from "../../catalog/KeyValue";
 import { nodeLabel } from "./planText";
 
-/** Факт узла: время (если оно есть — при `TIMING OFF` его нет), строки и циклы; у невыполнявшегося узла — пометка вместо нулей. */
-function actualText(n: PlanNode, labels: { rowsUnit: string; loops: string; neverExecuted: string }): string | null {
+/**
+ * Факт узла: время (если оно есть — при `TIMING OFF` его нет), строки и циклы; у невыполнявшегося узла — пометка вместо
+ * нулей. Строки и циклы — шаблоном словаря с двоеточием: число не согласуется со словом («строк: 1»).
+ */
+function actualText(n: PlanNode, labels: { rowsLoops: (rows: string, loops: string) => string; neverExecuted: string }): string | null {
   const a = n.actual;
   if (!a) return null;
   if (n.neverExecuted) return labels.neverExecuted;
   const time = a.startupMs !== null && a.totalMs !== null ? `${formatMs(a.startupMs)}..${formatMs(a.totalMs)}, ` : "";
-  return `${time}${formatCount(a.rows)} ${labels.rowsUnit}, ${labels.loops} ${formatCount(a.loops)}`;
+  return `${time}${labels.rowsLoops(formatCount(a.rows), formatCount(a.loops))}`;
 }
 
 /** Локальные буферы (временные таблицы сессии) — в том же виде, что общие; без обращений к ним строки нет. */
@@ -35,7 +38,10 @@ export function PlanNodeDetails({ node: n }: { node: PlanNode }) {
     { label: t("diag.plan.details.parent"), value: n.parentRelationship },
     { label: t("diag.plan.details.cost"), value: `${formatCount(n.startupCost, 2)}..${formatCount(n.totalCost, 2)}` },
     { label: t("diag.plan.details.planRows"), value: `${formatCount(n.planRows)} × ${n.planWidth} B` },
-    { label: t("diag.plan.details.actual"), value: actualText(n, { rowsUnit: t("diag.plan.details.rowsUnit"), loops: t("diag.plan.details.loops"), neverExecuted: t("diag.plan.marks.neverExecuted") }) },
+    {
+      label: t("diag.plan.details.actual"),
+      value: actualText(n, { rowsLoops: (rows, loops) => t("diag.plan.details.actualRows", { rows, loops }), neverExecuted: t("diag.plan.marks.neverExecuted") }),
+    },
     { label: t("diag.plan.details.inclusive"), value: timed && n.inclusiveMs !== null ? formatMs(n.inclusiveMs) : null },
     { label: t("diag.plan.details.exclusive"), value: timed && n.exclusiveMs !== null ? formatMs(n.exclusiveMs) : null },
     { label: t("diag.plan.details.share"), value: timed && n.sharePct !== null ? formatPercent(n.sharePct) : null },

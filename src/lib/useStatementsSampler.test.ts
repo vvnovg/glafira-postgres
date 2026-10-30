@@ -60,6 +60,34 @@ describe("useStatementsSampler", () => {
   });
 });
 
+describe("useStatementsSampler: показания после остановки", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    useConnectionEpochs.setState({ epochs: {} });
+  });
+
+  it("stopped и фатальная ошибка снимают показания, временная ошибка — нет", async () => {
+    let emit: (e: StatementsEvent) => void = () => {};
+    vi.mocked(api.startStatementsSampler).mockImplementation(async (_id, _m, onEvent) => {
+      emit = onEvent;
+      return "s-1";
+    });
+    vi.mocked(api.stopSession).mockResolvedValue(true);
+    const { result } = renderHook(() => useStatementsSampler("c", "pg-1", true));
+    await waitFor(() => expect(api.startStatementsSampler).toHaveBeenCalled());
+    const live = { atMs: 5, coverageS: 120, ticks: 2 };
+    act(() => emit({ kind: "tick", ...live, changed: 1 }));
+    act(() => emit({ kind: "error", error: { code: "TIMEOUT", message: "timeout", retryable: true } }));
+    expect(result.current.live).toEqual(live);
+    act(() => emit({ kind: "error", error: authFailed }));
+    expect(result.current.live).toBeNull();
+    act(() => emit({ kind: "tick", ...live, changed: 1 }));
+    expect(result.current.live).toEqual(live);
+    act(() => emit({ kind: "stopped" }));
+    expect(result.current.live).toBeNull();
+  });
+});
+
 describe("useStatementsSampler: повторная подписка после stopped", () => {
   beforeEach(() => {
     vi.resetAllMocks();

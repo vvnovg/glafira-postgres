@@ -19,8 +19,9 @@ const window5: QueriesParams = { ...sinceReset, mode: { kind: "window", s: 300 }
 type Opts = { params: QueriesParams; active: boolean; intervalS: number | null; tickAtMs: number | null };
 
 describe("useQueriesReport", () => {
-  function setup(opts: Opts) {
-    vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport({ kind: "queries", mode: opts.params.mode, coverageS: null, ticks: null, pgss: null, totals: { calls: 0, totalExecMs: 0, rows: 0 }, rows: [] }));
+  function setup(opts: Opts, error?: unknown) {
+    if (error) vi.mocked(api.runDiagnostic).mockRejectedValue(error);
+    else vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport({ kind: "queries", mode: opts.params.mode, coverageS: null, ticks: null, pgss: null, totals: { calls: 0, totalExecMs: 0, rows: 0 }, rows: [] }));
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const wrapper = ({ children }: { children: ReactNode }) => createElement(QueryClientProvider, { client }, children);
     return renderHook((p: Opts) => useQueriesReport("c", "pg-1", p.params, { active: p.active, live: true, intervalS: p.intervalS, tickAtMs: p.tickAtMs }), { wrapper, initialProps: opts });
@@ -48,6 +49,18 @@ describe("useQueriesReport", () => {
     h.rerender({ params: window5, active: true, intervalS: 10, tickAtMs: 120_000 });
     await tick(0);
     expect(api.runDiagnostic).toHaveBeenCalledTimes(3);
+  });
+
+  it("отказ во входе: ни новый тик, ни возвращение на вкладку отчёт за окно не перечитывают", async () => {
+    const h = setup({ params: window5, active: true, intervalS: 10, tickAtMs: 60_000 }, { code: "AUTH_FAILED", message: "password authentication failed", retryable: false });
+    await tick(0);
+    expect(api.runDiagnostic).toHaveBeenCalledTimes(1);
+    h.rerender({ params: window5, active: false, intervalS: 10, tickAtMs: 60_000 });
+    h.rerender({ params: window5, active: true, intervalS: 10, tickAtMs: 60_000 });
+    await tick(0);
+    h.rerender({ params: window5, active: true, intervalS: 10, tickAtMs: 120_000 });
+    await tick(30_000);
+    expect(api.runDiagnostic).toHaveBeenCalledTimes(1);
   });
 
   it("«с момента сброса»: вкладка, снова ставшая видимой, перечитывает данные старше интервала; на паузе — нет", async () => {

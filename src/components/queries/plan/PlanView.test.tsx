@@ -21,7 +21,13 @@ describe("PlanView", () => {
   it("сводка получает ярус, предупреждения и время запуска", () => {
     render(<PlanView tree={planTree()} tier="write" warnings={["genericPlan"]} elapsedMs={7} />);
     expect(screen.getByText("Ярус: запись")).toBeInTheDocument();
-    expect(screen.getByText(/Запрос: 7,00 мс/)).toBeInTheDocument();
+    expect(screen.getByText(/Полный цикл: 7,00 мс/)).toBeInTheDocument();
     expect(screen.getByText("План общий (GENERIC_PLAN): без значений параметров")).toBeInTheDocument();
+    expect(screen.queryByText(/^Узел:/)).toBeNull();
+  });
+
+  it("план получен не на узле вкладки — сводка называет узел", () => {
+    render(<PlanView tree={planTree()} tier="read" member="pg-2" />);
+    expect(screen.getByText("Узел: pg-2")).toBeInTheDocument();
   });
 });

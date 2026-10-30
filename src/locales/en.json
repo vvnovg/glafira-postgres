@@ -1321,7 +1321,7 @@
       "duration": "Duration",
       "wait": "Wait",
       "who": "Role · application · client",
-      "openSessions": "Open in Sessions",
+      "openSessions": "Open “{{tool}}”",
       "waits": "Waits",
       "noWaitsBuffer": "Open the Wait profile tab to collect waits for this query",
       "waitEvent": "Event",
@@ -1334,7 +1334,8 @@
       "source": "Query text",
       "sourcePgss": "Normalized text (pg_stat_statements)",
       "sourceRunning": "Running instance PID {{pid}}",
-      "sourceTruncated": "truncated"
+      "sourceTruncated": "truncated",
+      "pgssTruncated": "The normalized text is truncated: a plan cannot be built from it. Choose a running instance with the full text."
     },
     "plan": {
       "tree": "Plan tree",
@@ -1365,8 +1366,7 @@
         "cost": "Cost",
         "planRows": "Plan rows × width",
         "actual": "Actual",
-        "rowsUnit": "rows",
-        "loops": "loops",
+        "actualRows": "rows: {{rows}}, loops: {{loops}}",
         "exclusive": "Own time",
         "filter": "Filter",
         "indexCond": "Index Cond",
@@ -1397,6 +1397,7 @@
         "buffersLocal": "Local buffers"
       },
       "summary": {
+        "node": "Node: {{member}}",
         "planning": "Planning: {{ms}}",
         "execution": "Execution: {{ms}}",
         "tier": "Tier: {{tier}}",
@@ -1419,6 +1420,8 @@
       "params": {
         "title": "Parameters ({{count}})",
         "generic": "GENERIC_PLAN (no values)",
+        "genericHint": "With GENERIC_PLAN the plan is built without values. “Plan with execution” needs values: clear the checkbox to enter them.",
+        "tooMany": "More than {{max}} parameters ({{count}}): value fields are not shown, and runs that need values are unavailable. On PostgreSQL 16+ “Plan” works with GENERIC_PLAN.",
         "nullPlaceholder": "NULL"
       },
       "run": {
@@ -1439,11 +1442,12 @@
         "run": "Execute and roll back",
         "rollback": "Rows will change and be rolled back.",
         "tables": "Tables:",
-        "sideEffects": "Rollback does not undo fired triggers, sequence advances, NOTIFY and external calls; locks are held while the query runs."
+        "sideEffects": "Rollback undoes the row changes, including those made by triggers, and NOTIFY is not delivered. It does not undo sequence advances, external calls (dblink, http) or non-transactional functions, including those called from triggers. Locks are held while the query runs."
       },
       "history": {
         "title": "History",
         "item": "#{{n}} {{mode}}, {{tier}}, {{time}}, {{ms}}",
+        "itemOn": "#{{n}} {{mode}}, {{tier}}, on {{member}}, {{time}}, {{ms}}",
         "modes": {
           "plan": "plan",
           "analyze": "with execution"
@@ -1624,8 +1628,8 @@
       "fix": "Use prepared statements (plan_cache_mode), touch fewer partitions or simplify the query."
     },
     "queries_incomplete": {
-      "title": "The top is incomplete: {{dealloc}} evictions from pg_stat_statements",
-      "fix": "Raise pg_stat_statements.max (now {{max}}) or reset statistics less often: rarely seen queries have been evicted."
+      "title": "The top is incomplete: pg_stat_statements evicted entries {{dealloc}} times",
+      "fix": "Raise pg_stat_statements.max (now {{max}}) or reset statistics less often: each eviction drops about 5% of the least-used entries, so rarely run queries are missing from the top."
     }
   },
   "actions": {
@@ -1809,10 +1813,10 @@
     "node": "Node",
     "database": "Database",
     "query": "Query",
-    "truncated": "The text is truncated to 16 384 characters",
+    "truncated": "The text is truncated to 16,384 characters",
     "statistics": "Statistics",
     "sinceReset": "Since reset",
-    "lastHour": "Last 60 minutes",
+    "lastHour": "Window up to 60 min (while the sampler ran)",
     "plan": "Plan",
     "tables": "Tables",
     "moreTables_one": "… {{count}} more table (over the limit or its DDL could not be read)",

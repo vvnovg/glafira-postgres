@@ -146,6 +146,55 @@ describe("QueryTab", () => {
     expect(screen.queryByRole("button", { name: "Получить план" })).toBeNull();
   });
 
+  it("«Скопировать для LLM» берёт план, только если он получен на узле вкладки: ANALYZE чтения на реплике — без плана", async () => {
+    vi.mocked(api.queryDetail).mockResolvedValue(detail());
+    const plans = await import("../../test/plans");
+    const onReplica = plans.planTree();
+    const onLeader = plans.planTree();
+    vi.mocked(api.explain)
+      .mockResolvedValueOnce({ mode: "plan", tier: "read", plan: plans.planTree(), raw: [], relations: [], elapsedMs: 5, warnings: [] })
+      .mockResolvedValueOnce({ mode: "analyze", tier: "read", plan: onReplica, raw: [], relations: [], elapsedMs: 9, warnings: [] });
+    vi.mocked(api.queryLlmBundle).mockResolvedValue({ serverVersionNum: 170_004, pgssVersion: "1.11", inRecovery: false, member: "pg-1", database: "perf", text: "SELECT 1", textTruncated: false, stats: null, planText: null, tables: [], tablesOmitted: 0, warnings: [] });
+    const user = userEvent.setup();
+    renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
+    await screen.findByText("SELECT * FROM shop.customers WHERE id = $1");
+    await user.click(screen.getByRole("tab", { name: "План" }));
+    // Текст экземпляра (без $N): «План с выполнением» сразу; лидер с доступной репликой — чтение уходит на pg-2.
+    await user.selectOptions(screen.getByRole("combobox", { name: "Текст запроса" }), "running:42");
+    await user.click(screen.getByRole("button", { name: "План с выполнением" }));
+    await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("c", expect.objectContaining({ mode: "analyze", member: "pg-2" })));
+    expect(await screen.findByText("Узел: pg-2")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Скопировать для LLM" }));
+    await waitFor(() => expect(api.queryLlmBundle).toHaveBeenLastCalledWith("c", "pg-1", "perf", { kind: "query", queryId: "7" }, null));
+    // План на узле вкладки — уходит в копию.
+    vi.mocked(api.explain).mockResolvedValueOnce({ mode: "plan", tier: "read", plan: onLeader, raw: [], relations: [], elapsedMs: 4, warnings: [] });
+    await user.click(screen.getByRole("button", { name: "План" }));
+    await waitFor(() => expect(screen.queryByText("Узел: pg-2")).toBeNull());
+    await user.click(screen.getByRole("button", { name: "Скопировать для LLM" }));
+    await waitFor(() => expect(api.queryLlmBundle).toHaveBeenLastCalledWith("c", "pg-1", "perf", { kind: "query", queryId: "7" }, onLeader));
+  });
+
+  it("без текста и с обрезанным нормализованным текстом «Получить план» нет; обрезанный pgss — пункт серый, вместо запуска пояснение", async () => {
+    vi.mocked(api.queryDetail).mockResolvedValue(detail({ text: null, sinceReset: null, byUser: [] }));
+    const first = renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
+    expect(await screen.findByText("Таблицы появятся после первого плана")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Получить план" })).toBeNull();
+    first.unmount();
+    vi.mocked(api.queryDetail).mockResolvedValue(detail({ textTruncated: true }));
+    const user = userEvent.setup();
+    renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
+    expect(await screen.findByText("Таблицы появятся после первого плана")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Получить план" })).toBeNull();
+    await user.click(screen.getByRole("tab", { name: "План" }));
+    expect(screen.getByRole("option", { name: "Нормализованный текст (pg_stat_statements) — обрезан" })).toBeDisabled();
+    expect(screen.getByText(/Нормализованный текст обрезан: план по нему не построить/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "План" })).toBeNull();
+    // Экземпляр с полным текстом — запускается.
+    await user.selectOptions(screen.getByRole("combobox", { name: "Текст запроса" }), "running:42");
+    expect(screen.getByRole("button", { name: "План" })).toBeInTheDocument();
+    expect(api.explain).not.toHaveBeenCalled();
+  });
+
   it("подключение закрыто — карточка не читает сервер", async () => {
     vi.mocked(api.getTopology).mockResolvedValue(topologyView({ state: "disconnected", topology: null }));
     renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);

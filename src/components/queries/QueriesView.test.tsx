@@ -54,7 +54,27 @@ describe("QueriesView", () => {
     expect(await screen.findByText("select 1 from t")).toBeInTheDocument();
     expect(api.runDiagnostic).toHaveBeenCalledWith("c", { tool: "queries", member: null, queries: { mode: { kind: "sinceReset" }, sort: "totalTime", limit: 50, database: null, toplevelOnly: true } });
     expect(screen.getByText(/pg_stat_statements 1\.11/)).toBeInTheDocument();
-    expect(api.startStatementsSampler).toHaveBeenCalledWith("c", null, expect.any(Function));
+    // «За лидером»: сэмплер — на узле, который назвал отчёт.
+    await waitFor(() => expect(api.startStatementsSampler).toHaveBeenCalledWith("c", "pg-1", expect.any(Function)));
+    expect(api.startStatementsSampler).not.toHaveBeenCalledWith("c", null, expect.any(Function));
+  });
+
+  it("«за лидером»: после смены лидера отчёт называет новый узел, и сэмплер переподписывается на него", async () => {
+    vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport(data(), { member: "pg-1" }));
+    const user = userEvent.setup();
+    renderWithClient(view());
+    await waitFor(() => expect(api.startStatementsSampler).toHaveBeenCalledWith("c", "pg-1", expect.any(Function)));
+    vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport(data(), { member: "pg-2" }));
+    await user.click(screen.getByRole("button", { name: "Обновить" }));
+    await waitFor(() => expect(api.startStatementsSampler).toHaveBeenLastCalledWith("c", "pg-2", expect.any(Function)));
+    expect(api.stopSession).toHaveBeenCalledWith("s-1");
+    expect(api.startStatementsSampler).toHaveBeenCalledTimes(2);
+  });
+
+  it("закреплённый узел: сэмплер — на нём сразу, без ожидания отчёта", async () => {
+    vi.mocked(api.runDiagnostic).mockReturnValue(new Promise(() => {}));
+    renderWithClient(view("pg-3"));
+    await waitFor(() => expect(api.startStatementsSampler).toHaveBeenCalledWith("c", "pg-3", expect.any(Function)));
   });
 
   it("окно: покрытие из отчёта, обновление по тику сэмплера, stddev недоступен", async () => {

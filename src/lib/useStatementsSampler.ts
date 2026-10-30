@@ -18,8 +18,10 @@ function stop(session: string) {
 
 /**
  * Подписка на сэмплер pg_stat_statements узла (спец. P3 §5): та же дисциплина, что у `useSampler` (держится, пока
- * вкладка смонтирована; после `stopped` — повтор через паузу, кроме отказа во входе и отсутствия расширения;
- * «Переподключить» перезапускает подписку). `member = null` — «за лидером»: узел выбирает Rust.
+ * вкладка смонтирована; после `stopped` и фатальной ошибки показаний нет; после `stopped` — повтор через паузу, кроме
+ * отказа во входе и отсутствия расширения; «Переподключить» перезапускает подписку). Узел фиксируется при подписке:
+ * `member = null` — «за лидером», и Rust выбирает лидера один раз, на момент подписки, — за сменой лидера он не следует.
+ * Чтобы следовать, вызывающий передаёт уже разрешённый узел (узел отчёта) и подписывается заново при его смене.
  */
 export function useStatementsSampler(connectionId: string, member: string | null, enabled: boolean): { live: StatementsLive | null; error: AppError | null } {
   const [live, setLive] = useState<StatementsLive | null>(null);
@@ -47,10 +49,13 @@ export function useStatementsSampler(connectionId: string, member: string | null
           lastError = null;
           setError(null);
         } else if (e.kind === "error") {
+          // Фатальная ошибка (отказ во входе, расширения нет) останавливает сэмплер: прежние показания — неправда.
+          if (e.error.code === "AUTH_FAILED" || e.error.code === "FEATURE_UNAVAILABLE") setLive(null);
           lastError = e.error;
           setError(e.error);
         } else if (e.kind === "stopped") {
           stopped = true;
+          setLive(null);
           if (lastError?.code !== "AUTH_FAILED" && lastError?.code !== "FEATURE_UNAVAILABLE") retry = setTimeout(() => setRound((n) => n + 1), RESUBSCRIBE_DELAY_MS);
         }
       })

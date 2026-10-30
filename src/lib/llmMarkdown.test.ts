@@ -20,8 +20,11 @@ describe("llmMarkdown", () => {
     expect(md).toContain("| Вызовов | 1 000 |");
     expect(md).toContain("## План\n\n```\nIndex Scan using customers_pkey");
     expect(md).toContain("### shop.customers\n\n```sql\nCREATE TABLE shop.customers (...);\nCREATE UNIQUE INDEX customers_pkey");
-    expect(md).toContain("… ещё 2 таблиц");
+    expect(md).toContain("_… ещё 2 таблицы (сверх лимита или DDL не прочитан)_");
     expect(md).toContain("план требует значений параметров");
+    // Планирование выключено (track_planning = off): строки «Планирование» с нулём нет — ноль читался бы как факт.
+    expect(md).not.toContain("| Планирование |");
+    expect(llmMarkdown({ ...bundle, tablesOmitted: 5 }, i18n.t.bind(i18n))).toContain("_… ещё 5 таблиц (сверх лимита или DDL не прочитан)_");
     expect(md).not.toMatch(/\{\{/);
   });
 
@@ -39,6 +42,15 @@ describe("llmMarkdown", () => {
     for (const w of ["paramsNeeded", "queryGone", "planFailed", "ddlFailed"]) expect(md).not.toContain(w);
     expect(md).toContain("DDL части таблиц прочитать не удалось");
     expect(md).not.toMatch(/\{\{| /);
+  });
+
+  it("окно — «до 60 мин за время работы сэмплера»; планирование печатается, когда оно было", () => {
+    const window3600 = { ...bundle.stats!.sinceReset!, plans: 10, totalPlanMs: 2.5, sharedRead: 2, tempWritten: 1 };
+    const md = llmMarkdown({ ...bundle, stats: { sinceReset: null, window3600 } }, i18n.t.bind(i18n));
+    expect(md).toContain("### Окно до 60 мин (за время работы сэмплера)");
+    expect(md).toContain("| Планирование | 2,50 мс |");
+    expect(md).toContain("| Прочитано с диска | 16,0 KB |");
+    expect(md).toContain("| Temp записано | 8,0 KB |");
   });
 
   it("неизвестный ключ предупреждения — как есть, без ключа словаря в тексте", () => {

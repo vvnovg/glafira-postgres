@@ -356,7 +356,7 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 /* Инструмент «Запросы»: текст запроса в ячейке — одной строкой, без разрыва таблицы. */
 .diag-query-cell { max-width: 480px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .diag-query-cell button { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
-.mono { font-family: var(--mono, ui-monospace, monospace); }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .diag-command { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .diag-facts { display: flex; flex-direction: column; gap: 2px; }
 /* Дерево плана (P3): горячие узлы жирным, выбранный — фоном, ошибка оценки — цветом и словом «×N» (цвет не единственный признак). */

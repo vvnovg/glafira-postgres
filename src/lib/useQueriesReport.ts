@@ -33,8 +33,12 @@ export function useQueriesReport(
   const { refetch, dataUpdatedAt, error } = q;
   const { active, live, intervalS, tickAtMs } = opts;
   const paused = intervalS === null;
+  // Отказ во входе (`AUTH_FAILED`) останавливает и чтение по тику — и при возвращении на вкладку: повтор входа блокирует
+  // учётную запись. Читается из ссылки, чтобы удачное чтение, снявшее отказ, не запускало ещё одно.
+  const locked = useRef(false);
+  locked.current = diagRefetchInterval(true, intervalS ?? 1, error) === false;
   useEffect(() => {
-    if (byTick && live && active && !paused && tickAtMs !== null) void refetch({ cancelRefetch: false });
+    if (byTick && live && active && !paused && tickAtMs !== null && !locked.current) void refetch({ cancelRefetch: false });
   }, [byTick, live, active, paused, tickAtMs, refetch]);
   const wasActive = useRef(active);
   useEffect(() => {

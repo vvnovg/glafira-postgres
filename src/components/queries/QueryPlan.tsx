@@ -10,9 +10,11 @@ const runningId = (pid: number) => `running:${pid}`;
 
 /**
  * Подвкладка «План» (спец. P3 §8.2). Источник текста: нормализованный pgss или текст выполняющегося экземпляра (с
- * литералами; обрезанный — нельзя, пункт серый). Текст экземпляра запоминается при выборе: экземпляры перечитываются
- * каждые 5 с, и закончившийся запрос не должен подменить текст формы под рукой у пользователя. `members` — участники
- * топологии (выбор реплики для ANALYZE чтения); `autoRun`/`onAutoRun` — «Получить план» обзора (см. `PlanRunner`).
+ * литералами). Обрезанный текст — и экземпляра, и нормализованный (`textTruncated`) — запускать нельзя: пункт серый, а
+ * вместо запуска — пояснение (сервер отверг бы обрыв синтаксической ошибкой). Текст экземпляра запоминается при выборе:
+ * экземпляры перечитываются каждые 5 с, и закончившийся запрос не должен подменить текст формы под рукой у пользователя.
+ * `members` — участники топологии (выбор реплики для ANALYZE чтения); `autoRun`/`onAutoRun` — «Получить план» обзора (см.
+ * `PlanRunner`); `onPlanResult` получает результат и узел, где он получен.
  */
 export function QueryPlan({
   connectionId,
@@ -29,7 +31,7 @@ export function QueryPlan({
   database: string;
   detail: QueryDetail;
   members: Member[] | null;
-  onPlanResult: (r: ExplainResult) => void;
+  onPlanResult: (r: ExplainResult, member: string) => void;
   autoRun?: boolean;
   onAutoRun?: () => void;
 }) {
@@ -44,6 +46,8 @@ export function QueryPlan({
     if (r && !r.truncated) setSource({ id, pid: r.pid, sql: r.query });
   };
   const sql = "sql" in source ? source.sql : detail.text;
+  // Нормализованный текст обрезан: план по нему не построить.
+  const truncatedPgss = source.id === "pgss" && detail.textTruncated;
   // Выбранный экземпляр уже закончился: пункт остаётся в списке, текст — тот, что был выбран.
   const finished = "pid" in source && !detail.running.some((r) => runningId(r.pid) === source.id) ? source : null;
   return (
@@ -51,7 +55,10 @@ export function QueryPlan({
       <label className="inline">
         <span>{t("diag.query.source")}</span>
         <select aria-label={t("diag.query.source")} value={source.id} onChange={(e) => pick(e.target.value)}>
-          <option value="pgss">{t("diag.query.sourcePgss")}</option>
+          <option value="pgss" disabled={detail.textTruncated}>
+            {t("diag.query.sourcePgss")}
+            {detail.textTruncated ? ` — ${t("diag.query.sourceTruncated")}` : ""}
+          </option>
           {detail.running.map((r) => (
             <option key={r.pid} value={runningId(r.pid)} disabled={r.truncated}>
               {t("diag.query.sourceRunning", { pid: r.pid })}
@@ -66,19 +73,25 @@ export function QueryPlan({
           <pre className="query-text" role="group" tabIndex={0} aria-label={t("diag.query.text")}>
             <code>{sql}</code>
           </pre>
-          <PlanRunner
-            key={source.id}
-            connectionId={connectionId}
-            member={member}
-            database={database}
-            sql={sql}
-            serverVersionNum={detail.serverVersionNum}
-            inRecovery={detail.inRecovery}
-            members={members}
-            onResult={onPlanResult}
-            autoRun={autoRun}
-            onAutoRun={onAutoRun}
-          />
+          {truncatedPgss ? (
+            <p className="diag-note" role="status">
+              {t("diag.query.pgssTruncated")}
+            </p>
+          ) : (
+            <PlanRunner
+              key={source.id}
+              connectionId={connectionId}
+              member={member}
+              database={database}
+              sql={sql}
+              serverVersionNum={detail.serverVersionNum}
+              inRecovery={detail.inRecovery}
+              members={members}
+              onResult={onPlanResult}
+              autoRun={autoRun}
+              onAutoRun={onAutoRun}
+            />
+          )}
         </>
       ) : (
         <p className="muted">{t("diag.query.gone")}</p>

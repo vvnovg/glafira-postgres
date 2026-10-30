@@ -17,7 +17,8 @@ type Section = "overview" | "plan";
 /**
  * Вкладка запроса (спец. P3 §7): шапка с базой, `queryId`, узлом, «Обновить» и «Скопировать для LLM», подвкладки «Обзор» и
  * «План». Подписана на сэмплер pgss узла (история копится, пока открыта хотя бы одна вкладка); таблицы запроса — из
- * последнего плана, хранятся в состоянии вкладки. Подвкладка «План» после первого открытия остаётся смонтированной
+ * последнего плана, хранятся в состоянии вкладки. «Скопировать для LLM» получает последний план, только если он получен на
+ * узле вкладки (план реплики к узлу вкладки не относится — тогда Rust строит пробный план сам). Подвкладка «План» после первого открытия остаётся смонтированной
  * (скрытой на «Обзоре»): значения параметров, история и показанный план живут, пока открыта вкладка. Заголовок вкладки,
  * открытой без текста (из находки), становится началом текста, когда тот прочитан. Узла больше нет в топологии —
  * заглушка с выбором другого узла (открывает запрос там, как и переключатель узла), карточка и сэмплер не опрашиваются.
@@ -39,7 +40,9 @@ export function QueryTab({ connectionId, member, database, queryId, active }: { 
   const q = useQueryDetail(connectionId, member, database, queryId, { active, live: live && !gone, tickAtMs: sampler.live?.atMs ?? null });
   const [section, setSection] = useState<Section>("overview");
   const [planOpened, setPlanOpened] = useState(false);
-  const [last, setLast] = useState<ExplainResult | null>(null);
+  /** Последний план вкладки и узел, где он получен (ANALYZE чтения с лидера идёт на реплику). */
+  const [last, setLast] = useState<{ result: ExplainResult; member: string } | null>(null);
+  const onPlanResult = useCallback((result: ExplainResult, on: string) => setLast({ result, member: on }), []);
   /** «Получить план»: подвкладка «План» запустит пробу, как только сможет, и снимет запрос. */
   const [autoPlan, setAutoPlan] = useState(false);
   const autoTaken = useCallback(() => setAutoPlan(false), []);
@@ -122,7 +125,7 @@ export function QueryTab({ connectionId, member, database, queryId, active }: { 
         <button type="button" onClick={() => void q.refetch()}>
           {t("diag.header.refresh")}
         </button>
-        <CopyLlmButton connectionId={connectionId} member={member} database={database} source={{ kind: "query", queryId }} plan={last?.plan ?? null} />
+        <CopyLlmButton connectionId={connectionId} member={member} database={database} source={{ kind: "query", queryId }} plan={last && last.member === member ? last.result.plan : null} />
       </div>
       {q.error && <ErrorBanner error={q.error} onRetry={() => void q.refetch()} />}
       {sampler.error && <ErrorBanner error={sampler.error} />}
@@ -144,7 +147,7 @@ export function QueryTab({ connectionId, member, database, queryId, active }: { 
                   member={member}
                   database={database}
                   detail={detail}
-                  relations={last?.relations ?? null}
+                  relations={last?.result.relations ?? null}
                   onPlan={() => show("plan")}
                   onGetPlan={getPlan}
                   onConsole={() => open({ kind: "explain", connectionId, member, database, sql: detail.text ?? "" })}
@@ -152,7 +155,7 @@ export function QueryTab({ connectionId, member, database, queryId, active }: { 
               )}
               {(s === "plan" || planOpened) && (
                 <div hidden={s !== "plan"}>
-                  <QueryPlan connectionId={connectionId} member={member} database={database} detail={detail} members={topo?.members ?? null} onPlanResult={setLast} autoRun={autoPlan} onAutoRun={autoTaken} />
+                  <QueryPlan connectionId={connectionId} member={member} database={database} detail={detail} members={topo?.members ?? null} onPlanResult={onPlanResult} autoRun={autoPlan} onAutoRun={autoTaken} />
                 </div>
               )}
             </>

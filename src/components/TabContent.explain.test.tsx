@@ -1,4 +1,4 @@
-import { act, screen } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { connection, member, topology, topologyView } from "../test/fixtures";
 import { renderWithClient } from "../test/render";
@@ -36,9 +36,9 @@ describe("TabContent explain", () => {
     await act(() => new Promise((r) => setTimeout(r, 0)));
     expect(api.listDatabases).not.toHaveBeenCalled();
     rerender(<TabContent tab={tab} active />);
-    await vi.waitFor(() => expect(api.listDatabases).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(api.listDatabases).toHaveBeenCalledTimes(1));
     // Всё успокоилось — второго чтения так и не было.
-    await vi.waitFor(() => expect(client.isFetching()).toBe(0));
+    await waitFor(() => expect(client.isFetching()).toBe(0));
     expect(api.listDatabases).toHaveBeenCalledTimes(1);
   });
 });

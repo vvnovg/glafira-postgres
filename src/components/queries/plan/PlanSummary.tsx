@@ -11,13 +11,17 @@ const WARNING_KEYS: Record<string, string> = {
   probeWithoutReadOnly: "diag.plan.warnings.probeWithoutReadOnly",
 };
 
-/** Сводка плана: планирование, выполнение, ярус, JIT, триггеры, settings, предупреждения; «JSON» и «Как текст». */
-export function PlanSummary({ tree, tier, warnings = [], raw, elapsedMs }: { tree: PlanTree; tier?: ExplainTier; warnings?: string[]; raw?: unknown; elapsedMs?: number }) {
+/**
+ * Сводка плана: узел (если план получен не на узле вкладки), планирование, выполнение, ярус, JIT, триггеры, settings,
+ * предупреждения; «JSON» и «Как текст».
+ */
+export function PlanSummary({ tree, tier, warnings = [], raw, elapsedMs, member }: { tree: PlanTree; tier?: ExplainTier; warnings?: string[]; raw?: unknown; elapsedMs?: number; member?: string }) {
   const { t } = useTranslation();
   // Текст и JSON большого плана собираются один раз на план, а не при каждой перерисовке сводки.
   const json = useMemo(() => (raw === undefined ? null : JSON.stringify(raw, null, 2)), [raw]);
   const text = useMemo(() => renderText(tree), [tree]);
   const parts = [
+    member !== undefined && t("diag.plan.summary.node", { member }),
     tree.planningMs !== null && t("diag.plan.summary.planning", { ms: formatMs(tree.planningMs) }),
     tree.executionMs !== null && t("diag.plan.summary.execution", { ms: formatMs(tree.executionMs) }),
     tier && t("diag.plan.summary.tier", { tier: t(`diag.plan.tiers.${tier}`) }),

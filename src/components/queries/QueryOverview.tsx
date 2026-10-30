@@ -187,7 +187,7 @@ export function QueryOverview({
           !runningUnavailable && <p className="muted">{t("diag.query.noRunning")}</p>
         )}
         <button type="button" className="link" onClick={() => open({ kind: "diag", connectionId, tool: "sessions", member })}>
-          {t("diag.query.openSessions")}
+          {t("diag.query.openSessions", { tool: t("diag.tools.sessions") })}
         </button>
       </section>
       <section>
@@ -225,10 +225,16 @@ export function QueryOverview({
         <h3>{t("diag.query.tables")}</h3>
         {relations === null ? (
           <p className="muted">
-            {t("diag.query.tablesAfterPlan")}{" "}
-            <button type="button" className="link" onClick={onGetPlan}>
-              {t("diag.query.getPlan")}
-            </button>
+            {t("diag.query.tablesAfterPlan")}
+            {/* Без текста (запрос ушёл из pgss) и с обрезанным текстом плана не построить: кнопка ждала бы запуска вечно. */}
+            {detail.text !== null && !detail.textTruncated && (
+              <>
+                {" "}
+                <button type="button" className="link" onClick={onGetPlan}>
+                  {t("diag.query.getPlan")}
+                </button>
+              </>
+            )}
           </p>
         ) : relations.length === 0 ? (
           <p className="muted">{t("diag.query.noTables")}</p>

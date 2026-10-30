@@ -89,7 +89,7 @@ describe("ExplainTab", () => {
     await user.click(screen.getByRole("button", { name: "Разобрать" }));
     const tree = await screen.findByRole("treegrid", { name: "Дерево плана" });
     await user.click(within(tree).getByRole("button", { name: /Seq Scan/ }));
-    expect(screen.getByText("5 строк, циклы 1")).toBeInTheDocument();
+    expect(screen.getByText("строк: 5, циклов: 1")).toBeInTheDocument();
     expect(tree).not.toHaveTextContent("NaN");
   });
 
