@@ -184,17 +184,17 @@ describe("PlanRunner: вход пробы, реплика, загрузка пр
     expect(screen.queryByText("Запись недоступна: подключение только для чтения")).toBeNull();
   });
 
-  it("лидер и ярус чтения: ANALYZE можно выполнить на реплике (по умолчанию — текущий узел)", async () => {
-    const members = [member("pg-1", { role: "primary" }), member("pg-2", { role: "replica" }), member("pg-3", { role: "replica", reachable: false })];
+  it("лидер и ярус чтения: ANALYZE по умолчанию на первой доступной реплике, лидера можно вернуть", async () => {
+    const members = [member("pg-1", { role: "primary" }), member("pg-3", { role: "replica", reachable: false }), member("pg-2", { role: "replica" })];
     vi.mocked(api.explain).mockResolvedValue(result());
     const user = userEvent.setup();
     renderWithClient(runner("SELECT 1", { members }));
     expect(screen.queryByRole("combobox", { name: "Выполнить на узле" })).toBeNull();
     await user.click(await screen.findByRole("button", { name: "План" }));
     const on = await screen.findByRole("combobox", { name: "Выполнить на узле" });
-    expect(on).toHaveValue("pg-1");
+    // Недоступная реплика не предлагается; по умолчанию — первая доступная.
     expect(within(on).getAllByRole("option").map((o) => o.textContent)).toEqual(["pg-1", "pg-2"]);
-    await user.selectOptions(on, "pg-2");
+    expect(on).toHaveValue("pg-2");
     expect(screen.getByText("на реплике план может отличаться")).toBeInTheDocument();
     vi.mocked(api.explain).mockResolvedValueOnce(result()).mockResolvedValueOnce(result({ mode: "analyze" }));
     await user.click(screen.getByRole("button", { name: "План с выполнением" }));
@@ -202,6 +202,22 @@ describe("PlanRunner: вход пробы, реплика, загрузка пр
     // Проба — на узле вкладки.
     const calls = vi.mocked(api.explain).mock.calls;
     expect(calls[calls.length - 2][1]).toMatchObject({ mode: "plan", member: "pg-1" });
+    // Вернули лидера — ANALYZE на нём, пометки нет.
+    await user.selectOptions(screen.getByRole("combobox", { name: "Выполнить на узле" }), "pg-1");
+    expect(screen.queryByText("на реплике план может отличаться")).toBeNull();
+    vi.mocked(api.explain).mockResolvedValueOnce(result()).mockResolvedValueOnce(result({ mode: "analyze" }));
+    await user.click(screen.getByRole("button", { name: "План с выполнением" }));
+    await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("c", expect.objectContaining({ mode: "analyze", member: "pg-1" })));
+  });
+
+  it("без доступных реплик ANALYZE чтения — на узле вкладки, выбора нет", async () => {
+    const members = [member("pg-1", { role: "primary" }), member("pg-2", { role: "replica", reachable: false })];
+    vi.mocked(api.explain).mockResolvedValueOnce(result()).mockResolvedValueOnce(result({ mode: "analyze" }));
+    const user = userEvent.setup();
+    renderWithClient(runner("SELECT 1", { members }));
+    await user.click(await screen.findByRole("button", { name: "План с выполнением" }));
+    await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("c", expect.objectContaining({ mode: "analyze", member: "pg-1" })));
+    expect(screen.queryByRole("combobox", { name: "Выполнить на узле" })).toBeNull();
   });
 
   it("реплику не предлагают: узел — сама реплика или проба показала запись", async () => {

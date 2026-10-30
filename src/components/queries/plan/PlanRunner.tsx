@@ -90,7 +90,8 @@ function errorPlace(sql: string, error: AppError | null): ErrorPlace | null {
  * открытый диалог и снимает подсказку. История запусков — в пределах компонента; ответ, пришедший после размонтирования
  * (смена источника текста, узла или базы), отбрасывается.
  * `members` — участники топологии: если узел — лидер, а проба показала ярус чтения, форма предлагает выполнить ANALYZE
- * на реплике (спец. §8.3 п. 3; по умолчанию — текущий узел). `autoRun` — один пробный план, как только запуск доступен
+ * на реплике (спец. §8.3 п. 3; по умолчанию — первая доступная реплика, можно вернуть лидера). `autoRun` — один пробный
+ * план, как только запуск доступен
  * («Получить план» карточки); `onAutoRun` сообщает, что запрос принят.
  */
 export function PlanRunner({
@@ -134,7 +135,8 @@ export function PlanRunner({
   const [forceFrom, setForceFrom] = useState<{ relations: RelationRef[]; inputs: Inputs } | null>(null);
   /** Ключ входа, чья проба показала ярус чтения: для него предлагается узел ANALYZE. */
   const [readProbe, setReadProbe] = useState<string | null>(null);
-  const [analyzeOn, setAnalyzeOn] = useState(member);
+  /** Узел ANALYZE чтения, выбранный пользователем; `null` — по умолчанию (первая доступная реплика). */
+  const [analyzeOn, setAnalyzeOn] = useState<string | null>(null);
   // Запуск из двух вызовов (пробный план и ANALYZE) — одна операция: кнопки ждут её целиком.
   const [running, setRunning] = useState(false);
   const explain = useExplain(connectionId);
@@ -164,7 +166,10 @@ export function PlanRunner({
   const leader = !inRecovery && members?.find((m) => m.name === member)?.role === "primary";
   const replicas = leader ? (members ?? []).filter((m) => m.name !== member && m.reachable && isStandby(m.role)) : [];
   const offerReplica = replicas.length > 0 && readProbe === key;
-  const analyzeTarget = offerReplica && replicas.some((m) => m.name === analyzeOn) ? analyzeOn : member;
+  // Узел ANALYZE чтения: выбор пользователя, пока он доступен (лидер или реплика из списка), иначе первая доступная
+  // реплика; без реплик (или узел — не лидер) — узел вкладки.
+  const analyzeTarget =
+    replicas.length === 0 ? member : analyzeOn !== null && (analyzeOn === member || replicas.some((m) => m.name === analyzeOn)) ? analyzeOn : replicas[0].name;
 
   const params = (mode: ExplainMode, from: Inputs): ExplainParams => {
     const n = countParams(from.sql);
@@ -230,7 +235,10 @@ export function PlanRunner({
     });
   };
 
-  /** ANALYZE: ярус определяет пробный план; чтение выполняется сразу (на выбранном узле), запись — после подтверждения. */
+  /**
+   * ANALYZE: ярус определяет пробный план; чтение выполняется сразу — на выбранном узле, по умолчанию на реплике (выбор
+   * появляется после пробы чтения), запись — после подтверждения и всегда на узле вкладки.
+   */
   const runAnalyze = () => {
     const from = inputs;
     const on = analyzeTarget;
