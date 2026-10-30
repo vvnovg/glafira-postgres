@@ -188,7 +188,7 @@ impl PlanTree {
         let with_time = self.root.actual.is_some_and(|a| a.total_ms.is_some());
         let mut weights: Vec<(f64, u32)> = Vec::new();
         collect_weights(&self.root, with_time, &mut weights);
-        weights.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        weights.sort_by(|a, b| b.0.total_cmp(&a.0));
         let hot: Vec<u32> = weights
             .iter()
             .take(HOT_NODES)

@@ -8,7 +8,7 @@ use pg_advisor::ash::Sample;
 use pg_advisor::findings::Finding;
 use pg_advisor::pgss::PgssCaps;
 use pg_advisor::queries::rules::{self, Mode, PgssState};
-use pg_advisor::queries::{Counters, Cumulative, QueryKey, QueryStat, Totals, stat, totals};
+use pg_advisor::queries::{Counters, Cumulative, QueryKey, QueryStat, Totals, stat};
 use serde::Serialize;
 use tokio_postgres::Client;
 
@@ -21,7 +21,7 @@ use crate::diag::sessions::QUERY_LIMIT;
 use crate::diag::sql::BACKEND_START_US;
 use crate::diag::{Head, Unavailable, WINDOWS_S, head, on_member};
 use crate::error::{AppResult, ErrorCode};
-use crate::sampler::statements::{HistoryPoint, StatementsBuffer, WindowSum};
+use crate::sampler::statements::{HistoryPoint, KeysWindow, StatementsBuffer};
 use crate::state::AppState;
 use crate::sync::MutexExt;
 
@@ -112,7 +112,7 @@ pub struct QueryDetail {
     pub history: Vec<HistoryPoint>,
     pub gaps: Vec<Gap>,
     pub running: Vec<RunningInstance>,
-    /// `None` — буфера сэмплера активности на узле нет (вкладка «Сессии» не открывалась).
+    /// `None` — буфера сэмплера активности на узле нет (вкладка «Профиль ожиданий» не открывалась).
     pub waits: Option<QueryWaits>,
     pub findings: Vec<Finding>,
     pub unavailable: Vec<Unavailable>,
@@ -178,22 +178,9 @@ pub fn aggregate(rows: &[Cumulative]) -> Option<(Counters, (f64, f64, f64))> {
     Some((c, (min, max, busiest.stddev_exec_ms)))
 }
 
-/// Строка окна по ключам запроса; доля — от всего окна. `None` — дельт у этих ключей в окне нет.
-pub fn window_stat(w: &WindowSum, keys: &[QueryKey]) -> Option<QueryStat> {
-    let mut sum = Counters::default();
-    let mut any = false;
-    for k in keys {
-        if let Some(c) = w.sums.get(k) {
-            sum.add(c);
-            any = true;
-        }
-    }
-    if !any {
-        return None;
-    }
-    let t = totals(w.sums.values());
-    let key = keys[0];
-    Some(stat(key, None, None, &sum, None, &t))
+/// Строка окна по ключам запроса (`StatementsBuffer::window_for`); доля — от всего окна.
+pub fn window_stat(w: &KeysWindow, key: QueryKey) -> QueryStat {
+    stat(key, None, None, &w.sum, None, &w.totals)
 }
 
 /// Ожидания запроса из сэмплов активности: группировка по типу и событию; активные без ожидания — `CPU`.
@@ -256,19 +243,49 @@ pub fn running_sql() -> String {
     )
 }
 
-/// Текст запроса с ключом строки, у которой он прочитан: по ключу текст кладётся в кеш узла.
+/// Текст запроса с ключом строки, у которой он прочитан: по ключу текст кладётся в кеш узла. Строки с текстом — первыми:
+/// NULL в ответе значит, что текста нет ни у одной строки запроса в базе.
 fn text_sql(ns: &str, caps: PgssCaps) -> String {
     let toplevel = if caps.toplevel { "s.toplevel" } else { "true" };
     format!(
         "SELECT s.dbid, s.userid, {toplevel}, left(s.query, {QUERY_LIMIT}), length(s.query) > {QUERY_LIMIT} \
          FROM {ns}.pg_stat_statements(true) s JOIN pg_database d ON d.oid = s.dbid \
-         WHERE s.queryid = $1 AND d.datname = $2 LIMIT 1"
+         WHERE s.queryid = $1 AND d.datname = $2 ORDER BY s.query IS NULL LIMIT 1"
     )
 }
 
+/// Откуда карточка берёт текст. `pg_stat_statements(true)` читает весь файл текстов, а карточка опрашивается каждые 5 с
+/// (спец. §7.3): с сервера текст читается только при промахе кеша узла.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TextSource {
+    /// Из кеша текстов узла.
+    Cached(String, bool),
+    /// Не читать: запроса нет в pgss (строк нет) или уже известно, что текста у него нет (NULL).
+    Skip,
+    /// Промах кеша — чтение с сервера.
+    Read,
+}
+
+/// Решение о тексте по ключам строк запроса: кеш (`cached`), отметки «текста нет» (`missing`).
+pub fn text_source(
+    keys: &[QueryKey],
+    cached: impl Fn(&QueryKey) -> Option<(Arc<str>, bool)>,
+    missing: impl Fn(&QueryKey) -> bool,
+) -> TextSource {
+    if keys.is_empty() {
+        return TextSource::Skip;
+    }
+    if let Some((text, truncated)) = text_from_cache(keys, cached) {
+        return TextSource::Cached(text, truncated);
+    }
+    if keys.iter().all(missing) {
+        return TextSource::Skip;
+    }
+    TextSource::Read
+}
+
 /// Текст карточки из кеша текстов узла (буфер сэмплера pgss, спец. §4.6): первый ключ запроса, чей текст там уже есть.
-/// `None` — промах, и текст читается с сервера: `pg_stat_statements(true)` читает файл текстов, а карточка опрашивается
-/// каждые 5 с.
+/// `None` — промах.
 pub fn text_from_cache(
     keys: &[QueryKey],
     lookup: impl Fn(&QueryKey) -> Option<(Arc<str>, bool)>,
@@ -324,33 +341,45 @@ async fn fetch(
                 .map_err(pg)?;
             let rows: Vec<Cumulative> = raw.iter().filter_map(row_from).collect();
             let keys: Vec<QueryKey> = rows.iter().map(|r| r.key).collect();
-            let cached = cache.and_then(|b| {
-                let b = b.lock_safe();
-                text_from_cache(&keys, |k| b.text(k))
-            });
-            let text = match cached {
-                Some(t) => Some(t),
-                None => {
+            let source = match cache {
+                Some(b) => {
+                    let b = b.lock_safe();
+                    text_source(&keys, |k| b.text(k), |k| b.text_missing(k))
+                }
+                None => text_source(&keys, |_| None, |_| false),
+            };
+            let text = match source {
+                TextSource::Cached(text, truncated) => Some((text, truncated)),
+                TextSource::Skip => None,
+                TextSource::Read => {
                     let read = c
                         .query_opt(&text_sql(&pgss.schema, pgss.caps), &[&query_id, &database])
                         .await
                         .map_err(pg)?
-                        .and_then(|r| {
+                        .map(|r| {
                             let key = QueryKey {
                                 query_id,
                                 dbid: r.get(0),
                                 userid: r.get(1),
                                 toplevel: r.get::<_, Option<bool>>(2).unwrap_or(true),
                             };
-                            let text = r.get::<_, Option<String>>(3)?;
-                            Some((key, text, r.get::<_, Option<bool>>(4).unwrap_or(false)))
+                            let text = r.get::<_, Option<String>>(3);
+                            (key, text, r.get::<_, Option<bool>>(4).unwrap_or(false))
                         });
-                    // Прочитанный текст — в кеш узла: следующий опрос карточки и отчёты возьмут его оттуда.
-                    if let (Some(b), Some((key, text, truncated))) = (cache, &read) {
-                        b.lock_safe()
-                            .remember_texts([(*key, text.clone(), *truncated)]);
+                    // Прочитанное — в кеш узла: следующий опрос карточки и отчёты возьмут текст оттуда. Строка без текста
+                    // (NULL у всех строк запроса) — отметка «текста нет» для ключей, иначе каждый опрос читал бы файл
+                    // текстов. Строки не нашлось (вытеснена между запросами) — не запоминается ничего.
+                    if let Some(b) = cache {
+                        match &read {
+                            Some((key, Some(text), truncated)) => {
+                                b.lock_safe()
+                                    .remember_texts([(*key, text.clone(), *truncated)])
+                            }
+                            Some((_, None, _)) => b.lock_safe().remember_no_text(&keys),
+                            None => {}
+                        }
                     }
-                    read.map(|(_, text, truncated)| (text, truncated))
+                    read.and_then(|(_, text, truncated)| text.map(|t| (t, truncated)))
                 }
             };
             let tr = c
@@ -510,7 +539,7 @@ pub async fn detail(
             .iter()
             .map(|w| WindowStat {
                 window_s: *w,
-                stat: b.window(*w).and_then(|sum| window_stat(&sum, &keys)),
+                stat: b.window_for(&keys, *w).map(|kw| window_stat(&kw, keys[0])),
             })
             .collect();
         d.history = b.history(&keys, now_ms - LOOKBACK_MS);
@@ -595,48 +624,61 @@ mod tests {
     }
 
     #[test]
-    fn window_stat_sums_only_the_query_keys() {
-        let mut sums = std::collections::HashMap::new();
-        sums.insert(
-            key(7, 1, true),
-            Counters {
-                calls: 3,
-                total_exec_ms: 30.0,
+    fn window_stat_shares_the_whole_window() {
+        let w = KeysWindow {
+            sum: Counters {
+                calls: 4,
+                total_exec_ms: 40.0,
                 ..Counters::default()
             },
-        );
-        sums.insert(
-            key(7, 2, true),
-            Counters {
-                calls: 1,
-                total_exec_ms: 10.0,
-                ..Counters::default()
+            totals: Totals {
+                calls: 104,
+                total_exec_ms: 1040.0,
+                rows: 0,
             },
-        );
-        sums.insert(
-            key(8, 1, true),
-            Counters {
-                calls: 100,
-                total_exec_ms: 1000.0,
-                ..Counters::default()
-            },
-        );
-        let w = crate::sampler::statements::WindowSum {
-            since_ms: 0,
-            until_ms: 60_000,
-            ticks: 1,
-            coverage_s: 60,
-            dealloc_grew: false,
-            sums,
         };
-        let s = window_stat(&w, &[key(7, 1, true), key(7, 2, true)]).unwrap();
+        let s = window_stat(&w, key(7, 1, true));
         assert_eq!((s.calls, s.total_exec_ms, s.mean_exec_ms), (4, 40.0, 10.0));
         assert_eq!(s.stddev_exec_ms, None);
         assert!(
             (s.share_pct - 40.0 / 1040.0 * 100.0).abs() < 1e-9,
             "доля — от всего окна"
         );
-        assert!(window_stat(&w, &[key(9, 1, true)]).is_none());
+    }
+
+    #[test]
+    fn text_is_read_only_on_a_cache_miss_of_a_present_query() {
+        let keys = [key(7, 1, true), key(7, 2, false)];
+        let never = |_: &QueryKey| -> Option<(Arc<str>, bool)> { panic!("кеш не нужен") };
+        assert_eq!(
+            text_source(&[], never, |_| panic!("отметки не нужны")),
+            TextSource::Skip,
+            "строк нет — запроса нет в pgss, файл текстов не читается"
+        );
+        assert_eq!(
+            text_source(&keys, |_| None, |_| false),
+            TextSource::Read,
+            "промах — чтение с сервера"
+        );
+        assert_eq!(
+            text_source(
+                &keys,
+                |k| (k.userid == 2).then(|| (Arc::<str>::from("SELECT $1"), false)),
+                |_| true
+            ),
+            TextSource::Cached("SELECT $1".into(), false),
+            "текст из кеша важнее отметок"
+        );
+        assert_eq!(
+            text_source(&keys, |_| None, |_| true),
+            TextSource::Skip,
+            "у всех ключей отмечено «текста нет»"
+        );
+        assert_eq!(
+            text_source(&keys, |_| None, |k| k.userid == 1),
+            TextSource::Read,
+            "отмечен не каждый ключ — чтение"
+        );
     }
 
     #[test]
@@ -731,7 +773,8 @@ mod tests {
         let new = text_sql("public", PgssCaps::from_version("1.10").unwrap());
         assert!(
             new.starts_with("SELECT s.dbid, s.userid, s.toplevel,")
-                && new.contains("pg_stat_statements(true)"),
+                && new.contains("pg_stat_statements(true)")
+                && new.contains("ORDER BY s.query IS NULL LIMIT 1"),
             "{new}"
         );
         let old = text_sql("public", PgssCaps::from_version("1.8").unwrap());

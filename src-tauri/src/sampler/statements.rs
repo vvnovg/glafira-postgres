@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::future::BoxFuture;
-use pg_advisor::queries::{Counters, Cumulative, QueryKey};
+use pg_advisor::queries::{Counters, Cumulative, QueryKey, Totals};
 use serde::Serialize;
 use tokio_postgres::Client;
 
@@ -28,7 +28,7 @@ pub const MAX_ENTRIES: usize = 200_000;
 pub const MAX_AGE_MS: i64 = 3_600_000;
 /// Пауза между тиками дольше — промежуток: сэмплер стоял (вкладка была закрыта), и следующий тик — новая база.
 pub const GAP_AFTER_MS: i64 = 150_000;
-/// Кеш текстов узла; при переполнении очищается целиком.
+/// Кеш текстов узла (вместе с отметками «текста нет»); при переполнении очищается целиком.
 pub const MAX_TEXTS: usize = 2000;
 
 /// Сэмпл: шапка узла, установленное расширение и строки pgss.
@@ -87,6 +87,13 @@ pub struct WindowSum {
     pub sums: HashMap<QueryKey, Counters>,
 }
 
+/// Окно для карточки запроса: сумма дельт только его ключей и итог окна по всем ключам — знаменатель доли.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KeysWindow {
+    pub sum: Counters,
+    pub totals: Totals,
+}
+
 pub struct StatementsBuffer {
     latest: HashMap<QueryKey, Cumulative>,
     ticks: VecDeque<Tick>,
@@ -97,7 +104,8 @@ pub struct StatementsBuffer {
     info: Option<PgssInfo>,
     pgss: Option<PgssInstalled>,
     hidden: bool,
-    texts: HashMap<QueryKey, (Arc<str>, bool)>,
+    /// Текст и признак обрезки по ключу; `None` — текст уже читался, и у строки pgss его нет (NULL).
+    texts: HashMap<QueryKey, Option<(Arc<str>, bool)>>,
     max_entries: usize,
     max_age_ms: i64,
 }
@@ -185,9 +193,10 @@ impl StatementsBuffer {
             });
         }
         self.evict(at_ms);
-        let (coverage_s, ticks) = self
-            .window((self.max_age_ms / 1000) as u32)
-            .map_or((0, 0), |w| (w.coverage_s, w.ticks));
+        // Покрытие часового окна — без карты сумм: она нужна отчётам, а не событию тика.
+        let (ticks, coverage_s) = self
+            .coverage((self.max_age_ms / 1000) as u32)
+            .unwrap_or((0, 0));
         out.push(StatementsEvent::Tick {
             at_ms,
             coverage_s,
@@ -208,14 +217,39 @@ impl StatementsBuffer {
         self.gaps.retain(|(_, to)| now_ms - to <= self.max_age_ms);
     }
 
-    /// Сумма дельт по тикам в `(последний − window_s, последний]`; `None` — тиков с дельтами в окне нет.
-    /// Покрытие — от первого тика окна до последнего плюс минута первого тика, не больше окна.
-    pub fn window(&self, window_s: u32) -> Option<WindowSum> {
+    /// Тики с дельтами в окне `(последний − window_s, последний]` (по времени) и границы окна; `None` — тиков ещё не было.
+    fn in_window(&self, window_s: u32) -> Option<(i64, i64, impl Iterator<Item = &Tick>)> {
         let until_ms = self.last_at_ms?;
         let since_ms = until_ms - i64::from(window_s) * 1000;
+        Some((
+            since_ms,
+            until_ms,
+            self.ticks.iter().filter(move |t| t.at_ms > since_ms),
+        ))
+    }
+
+    /// Покрытие — от первого тика окна до последнего плюс минута первого тика, не больше окна.
+    fn span_s(until_ms: i64, first_at: i64, window_s: u32) -> u32 {
+        (((until_ms - first_at) / 1000) as u32 + INTERVAL.as_secs() as u32).min(window_s)
+    }
+
+    /// Тиков с дельтами в окне и покрытие окна; `None` — тиков с дельтами в окне нет.
+    fn coverage(&self, window_s: u32) -> Option<(u32, u32)> {
+        let (_, until_ms, ticks) = self.in_window(window_s)?;
+        let (mut n, mut first_at) = (0u32, None);
+        for t in ticks {
+            n += 1;
+            first_at.get_or_insert(t.at_ms);
+        }
+        Some((n, Self::span_s(until_ms, first_at?, window_s)))
+    }
+
+    /// Сумма дельт по тикам в `(последний − window_s, последний]`; `None` — тиков с дельтами в окне нет.
+    pub fn window(&self, window_s: u32) -> Option<WindowSum> {
+        let (since_ms, until_ms, in_window) = self.in_window(window_s)?;
         let mut sums: HashMap<QueryKey, Counters> = HashMap::new();
         let (mut ticks, mut first_at, mut dealloc_grew) = (0u32, None, false);
-        for t in self.ticks.iter().filter(|t| t.at_ms > since_ms) {
+        for t in in_window {
             ticks += 1;
             first_at.get_or_insert(t.at_ms);
             dealloc_grew |= t.dealloc_delta > 0;
@@ -224,15 +258,33 @@ impl StatementsBuffer {
             }
         }
         let first_at = first_at?;
-        let span_s = ((until_ms - first_at) / 1000) as u32 + INTERVAL.as_secs() as u32;
         Some(WindowSum {
             since_ms,
             until_ms,
             ticks,
-            coverage_s: span_s.min(window_s),
+            coverage_s: Self::span_s(until_ms, first_at, window_s),
             dealloc_grew,
             sums,
         })
+    }
+
+    /// Окно для ключей одного запроса за один проход, без карты сумм всех ключей: суммы — только по `keys`, итог — по
+    /// всем дельтам окна. `None` — у этих ключей в окне дельт нет (или тиков нет).
+    pub fn window_for(&self, keys: &[QueryKey], window_s: u32) -> Option<KeysWindow> {
+        let (_, _, in_window) = self.in_window(window_s)?;
+        let (mut sum, mut totals, mut any) = (Counters::default(), Totals::default(), false);
+        for t in in_window {
+            for (k, d) in &t.deltas {
+                totals.calls += d.calls;
+                totals.total_exec_ms += d.total_exec_ms;
+                totals.rows += d.rows;
+                if keys.contains(k) {
+                    sum.add(d);
+                    any = true;
+                }
+            }
+        }
+        any.then_some(KeysWindow { sum, totals })
     }
 
     pub fn names(&self, key: &QueryKey) -> (Option<String>, Option<String>) {
@@ -240,17 +292,6 @@ impl StatementsBuffer {
             .get(key)
             .map(|c| (c.datname.clone(), c.rolname.clone()))
             .unwrap_or_default()
-    }
-
-    /// Накопительные строки запроса в базе (по ролям и `toplevel`).
-    pub fn latest_for(&self, query_id: i64, dbid: u32) -> Vec<&Cumulative> {
-        let mut v: Vec<&Cumulative> = self
-            .latest
-            .values()
-            .filter(|c| c.key.query_id == query_id && c.key.dbid == dbid)
-            .collect();
-        v.sort_by_key(|c| (c.key.userid, !c.key.toplevel));
-        v
     }
 
     /// История по тикам с `from_ms`: сумма дельт ключей `keys` в каждом тике, где они были.
@@ -306,16 +347,35 @@ impl StatementsBuffer {
     }
 
     pub fn text(&self, key: &QueryKey) -> Option<(Arc<str>, bool)> {
-        self.texts.get(key).cloned()
+        self.texts.get(key).cloned().flatten()
+    }
+
+    /// Текст ключа уже читался, и его нет (NULL в pgss): карточка не перечитывает файл текстов на каждом опросе.
+    pub fn text_missing(&self, key: &QueryKey) -> bool {
+        matches!(self.texts.get(key), Some(None))
+    }
+
+    /// Переполнение очищает кеш целиком: и тексты, и отметки «текста нет».
+    fn make_room(&mut self, adding: usize) {
+        if self.texts.len() + adding > MAX_TEXTS {
+            self.texts.clear();
+        }
     }
 
     pub fn remember_texts(&mut self, items: impl IntoIterator<Item = (QueryKey, String, bool)>) {
         let items: Vec<(QueryKey, String, bool)> = items.into_iter().collect();
-        if self.texts.len() + items.len() > MAX_TEXTS {
-            self.texts.clear();
-        }
+        self.make_room(items.len());
         for (k, t, truncated) in items {
-            self.texts.insert(k, (Arc::from(t.as_str()), truncated));
+            self.texts
+                .insert(k, Some((Arc::from(t.as_str()), truncated)));
+        }
+    }
+
+    /// Отметка «текста нет» для ключей; известный текст она не затирает.
+    pub fn remember_no_text(&mut self, keys: &[QueryKey]) {
+        self.make_room(keys.len());
+        for k in keys {
+            self.texts.entry(*k).or_insert(None);
         }
     }
 }
@@ -763,6 +823,81 @@ mod tests {
             b.text(&key(MAX_TEXTS as i64 + 1)).is_some(),
             "новые тексты записаны"
         );
+    }
+
+    #[test]
+    fn missing_text_is_remembered_and_a_text_replaces_it() {
+        let mut b = StatementsBuffer::default();
+        assert!(
+            !b.text_missing(&key(1)),
+            "ничего не известно — не «нет текста»"
+        );
+        b.remember_no_text(&[key(1), key(2)]);
+        assert!(b.text_missing(&key(1)) && b.text_missing(&key(2)));
+        assert!(b.text(&key(1)).is_none());
+        b.remember_texts([(key(1), "SELECT 1".to_string(), false)]);
+        assert!(
+            !b.text_missing(&key(1)),
+            "прочитанный текст заменяет отметку"
+        );
+        assert!(b.text(&key(1)).is_some());
+        // Отметка не затирает уже известный текст.
+        b.remember_no_text(&[key(1)]);
+        assert!(b.text(&key(1)).is_some() && !b.text_missing(&key(1)));
+        // Отметки входят в предел кеша: переполнение очищает и их.
+        b.remember_no_text(&(3..=(MAX_TEXTS as i64 + 2)).map(key).collect::<Vec<_>>());
+        assert!(!b.text_missing(&key(2)) && b.text(&key(1)).is_none());
+        assert!(b.text_missing(&key(MAX_TEXTS as i64 + 2)));
+    }
+
+    /// `window_for` — то же, что `window` с суммированием по ключам: суммы только ключей запроса, итог — по всему окну.
+    #[test]
+    fn window_for_equals_the_full_window_restricted_to_the_keys() {
+        let mut b = StatementsBuffer::default();
+        for i in 0..8i64 {
+            b.push(
+                (i + 1) * M,
+                sample(
+                    vec![
+                        row(1, 10 * (i + 1), 100.0 * (i + 1) as f64),
+                        row(2, 3 * (i + 1) * (i % 2), 8.0 * (i + 1) as f64),
+                        row(3, 7 * (i + 1), 50.0 * (i + 1) as f64),
+                    ],
+                    1,
+                    0,
+                ),
+            );
+        }
+        for w in [60, 300, 900, 3600] {
+            let full = b.window(w).unwrap();
+            for keys in [vec![key(1)], vec![key(1), key(2)], vec![key(2), key(3)]] {
+                let mut sum = Counters::default();
+                let mut any = false;
+                for k in &keys {
+                    if let Some(c) = full.sums.get(k) {
+                        sum.add(c);
+                        any = true;
+                    }
+                }
+                let got = b
+                    .window_for(&keys, w)
+                    .unwrap_or_else(|| panic!("{w} {keys:?}"));
+                assert!(any);
+                assert_eq!(got.sum, sum, "{w} {keys:?}");
+                assert_eq!(
+                    got.totals,
+                    pg_advisor::queries::totals(full.sums.values()),
+                    "{w}"
+                );
+            }
+            assert!(
+                b.window_for(&[key(9)], w).is_none(),
+                "у ключа нет дельт в окне"
+            );
+            assert!(b.window_for(&[], w).is_none());
+        }
+        let empty = StatementsBuffer::default();
+        assert!(empty.window_for(&[key(1)], 300).is_none(), "тиков нет");
     }
 
     fn installed(version: &str, schema: &str) -> PgssInstalled {

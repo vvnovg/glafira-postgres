@@ -324,17 +324,29 @@ impl QuerySort {
     }
 }
 
-/// Сортировка и обрезка до `limit`; строки без значения — в конце в исходном порядке (сортировка устойчива).
+/// Ключ строки для сравнения: порядок равных строк не зависит от порядка чтения с сервера.
+fn key_order(k: &QueryKey) -> (i64, u32, u32, bool) {
+    (k.query_id, k.dbid, k.userid, k.toplevel)
+}
+
+/// Сортировка и обрезка до `limit`; строки без значения — в конце. Равные по значению строки — по общему времени (по
+/// убыванию), затем по ключу: состав и порядок топа не меняются между обновлениями. Сравнение — `total_cmp` (NaN не
+/// ломает сортировку).
 pub fn top(rows: &mut Vec<QueryStat>, sort: QuerySort, limit: usize) {
     use std::cmp::Ordering;
-    rows.sort_by(|a, b| match (sort.value(a), sort.value(b)) {
-        (Some(x), Some(y)) => {
-            let o = x.partial_cmp(&y).unwrap_or(Ordering::Equal);
-            if sort.ascending() { o } else { o.reverse() }
-        }
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => Ordering::Equal,
+    rows.sort_by(|a, b| {
+        let primary = match (sort.value(a), sort.value(b)) {
+            (Some(x), Some(y)) => {
+                let o = x.total_cmp(&y);
+                if sort.ascending() { o } else { o.reverse() }
+            }
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        };
+        primary
+            .then_with(|| b.total_exec_ms.total_cmp(&a.total_exec_ms))
+            .then_with(|| key_order(&a.key).cmp(&key_order(&b.key)))
     });
     rows.truncate(limit);
 }
@@ -496,7 +508,7 @@ mod tests {
             rows.iter().map(|r| r.key.query_id).collect::<Vec<_>>(),
             [2, 3, 1]
         );
-        // В режиме окна stddev недоступен → строки без значения остаются в исходном порядке.
+        // В режиме окна stddev недоступен → строки без значения в конце, равные — по ключу.
         let mut rows = vec![
             stat(key(1), None, None, &counters(1, 1.0, 0, 0, 0), None, &t),
             stat(key(2), None, None, &counters(1, 1.0, 0, 0, 0), None, &t),
@@ -506,6 +518,48 @@ mod tests {
             rows.iter().map(|r| r.key.query_id).collect::<Vec<_>>(),
             [1, 2]
         );
+    }
+
+    /// Равные значения сортировки не перемешиваются между обновлениями: дальше — общее время по убыванию, затем ключ.
+    #[test]
+    fn top_breaks_ties_by_total_time_then_key() {
+        let t = Totals {
+            calls: 10,
+            total_exec_ms: 100.0,
+            rows: 0,
+        };
+        let k = |id: i64, userid: u32| QueryKey {
+            query_id: id,
+            dbid: 5,
+            userid,
+            toplevel: true,
+        };
+        let row = |key: QueryKey, calls: i64, ms: f64| {
+            stat(key, None, None, &counters(calls, ms, 0, 0, 0), None, &t)
+        };
+        let ids = |rows: &[QueryStat]| {
+            rows.iter()
+                .map(|r| (r.key.query_id, r.key.userid))
+                .collect::<Vec<_>>()
+        };
+        let input = vec![
+            row(k(3, 1), 5, 10.0),
+            row(k(2, 2), 5, 10.0),
+            row(k(2, 1), 5, 10.0),
+            row(k(9, 1), 5, 30.0),
+            row(k(1, 1), 7, 1.0),
+        ];
+        let mut a = input.clone();
+        top(&mut a, QuerySort::Calls, 10);
+        assert_eq!(ids(&a), [(1, 1), (9, 1), (2, 1), (2, 2), (3, 1)]);
+        // Другой исходный порядок — тот же результат.
+        let mut b: Vec<QueryStat> = input.into_iter().rev().collect();
+        top(&mut b, QuerySort::Calls, 10);
+        assert_eq!(ids(&a), ids(&b));
+        // NaN не роняет сортировку (`total_cmp`).
+        let mut c = vec![row(k(1, 1), 1, f64::NAN), row(k(2, 1), 1, 5.0)];
+        top(&mut c, QuerySort::MeanTime, 10);
+        assert_eq!(c.len(), 2);
     }
 
     #[test]

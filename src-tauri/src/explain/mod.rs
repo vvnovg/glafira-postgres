@@ -107,6 +107,15 @@ pub fn validate(req: &ExplainRequest) -> AppResult<String> {
             got = got
         ));
     }
+    // «Выполнить как запись» — только с ANALYZE: ярус записи (ограда, журнал) идёт с выполнением, а проба в режиме
+    // «план» с `force_write` строилась бы вне READ ONLY без журнала.
+    if req.force_write && req.mode != Mode::Analyze {
+        return Err(app_err!(
+            ErrorCode::InvalidInput,
+            "errors.explain.forceWritePlan",
+            "Running as a write applies only to the plan with execution"
+        ));
+    }
     if req.params == Params::Generic && req.mode == Mode::Analyze {
         return Err(app_err!(
             ErrorCode::InvalidInput,
@@ -237,6 +246,21 @@ mod tests {
             "errors.explain.badSearchPath"
         );
         r.search_path = Some("public".into());
+        assert!(validate(&r).is_ok());
+    }
+
+    /// «Выполнить как запись» строит пробу вне READ ONLY и пишет журнал только с ANALYZE: в режиме «план» без
+    /// журнала такой запрос был бы пробой вне READ ONLY — отказ до сервера.
+    #[test]
+    fn force_write_needs_analyze() {
+        let mut r = req("SELECT 1", Mode::Plan, Params::None);
+        r.force_write = true;
+        let e = validate(&r).unwrap_err();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (ErrorCode::InvalidInput, "errors.explain.forceWritePlan")
+        );
+        r.mode = Mode::Analyze;
         assert!(validate(&r).is_ok());
     }
 

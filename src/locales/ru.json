@@ -215,6 +215,7 @@
       "sqlTooLong": "Запрос длиннее {{max}} байт",
       "paramsCount": "В запросе {{expected}} параметров, значений передано {{got}}",
       "genericAnalyze": "GENERIC_PLAN несовместим с ANALYZE: введите значения параметров",
+      "forceWritePlan": "«Выполнить как запись» — только для плана с выполнением",
       "badTimeout": "Срок — от 5 до 600 секунд",
       "badSearchPath": "search_path — только идентификаторы, кавычки, запятые и пробелы",
       "genericUnsupported": "GENERIC_PLAN требует PostgreSQL 16 и новее: введите значения параметров",

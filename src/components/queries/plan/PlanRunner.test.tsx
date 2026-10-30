@@ -252,10 +252,41 @@ describe("PlanRunner: вход пробы, реплика, загрузка пр
 });
 
 describe("countParams", () => {
-  it("наибольший номер $N, как в Rust: $$ — не параметр, номер ограничен", () => {
+  it("наибольший номер $N, как в Rust", () => {
     expect(countParams("SELECT 1")).toBe(0);
     expect(countParams("SELECT $2, $1, $10")).toBe(10);
+    expect(countParams("SELECT $1::int, ($2)")).toBe(2);
+    expect(countParams("SELECT $")).toBe(0);
+  });
+
+  // Те же случаи, что у `explain::params::count_params` в Rust.
+  it("пропускает строки, идентификаторы, комментарии и долларовые кавычки", () => {
+    expect(countParams("SELECT '$5', $1")).toBe(1);
+    expect(countParams("SELECT 'it''s $5', $1")).toBe(1);
+    expect(countParams(String.raw`SELECT E'\'$5', $1`)).toBe(1);
+    expect(countParams(String.raw`SELECT some_e'\', $2`)).toBe(2);
+    expect(countParams('SELECT "col$5", $1')).toBe(1);
+    expect(countParams('SELECT "a""$5", $1')).toBe(1);
+    expect(countParams("SELECT a$1, b$2x, $1")).toBe(1);
+    expect(countParams("SELECT x_$3, y9$4")).toBe(0);
+    expect(countParams("SELECT $1 -- $5")).toBe(1);
+    expect(countParams("SELECT 1 -- $5\n + $2")).toBe(2);
+    expect(countParams("SELECT /* $5 /* $6 */ $7 */ $1")).toBe(1);
     expect(countParams("DO $$ BEGIN END $$")).toBe(0);
-    expect(countParams("SELECT $1234567")).toBe(123_456);
+    expect(countParams("SELECT $$text $5$$, $1")).toBe(1);
+    expect(countParams("SELECT $f$ $5 $$ $6 $f$, $2")).toBe(2);
+    expect(countParams("SELECT $_x1$ $5 $_x1$, $1")).toBe(1);
+    expect(countParams("SELECT $1$, $2")).toBe(2);
+    expect(countParams("SELECT 'open $5")).toBe(0);
+    expect(countParams("SELECT $q$ open $5")).toBe(0);
+    expect(countParams("SELECT /* open $5")).toBe(0);
+    expect(countParams("SELECT 'é$5', таблица$6, $1")).toBe(1);
+  });
+
+  it("номер ограничен пределом протокола 65 535", () => {
+    expect(countParams("SELECT $65535")).toBe(65_535);
+    expect(countParams("SELECT $70000")).toBe(65_535);
+    expect(countParams("SELECT $1234567")).toBe(65_535);
+    expect(countParams("SELECT $99999999999999999999999, $1")).toBe(65_535);
   });
 });

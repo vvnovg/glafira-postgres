@@ -203,6 +203,8 @@ function renderNode(n: PlanNode, indent: number, lines: string[]): void {
 export function renderText(t: PlanTree): string {
   const lines: string[] = [];
   renderNode(t.root, 0, lines);
+  // `SETTINGS`: параметры, отличные от значений по умолчанию, — одной строкой после дерева (`ExplainPrintSettings`).
+  if (t.settings.length) lines.push(`Settings: ${t.settings.map((s) => `${s.name} = '${s.value}'`).join(", ")}`);
   if (t.planningMs !== null) lines.push(`Planning Time: ${f3(t.planningMs)} ms`);
   for (const tr of t.triggers) lines.push(`Trigger ${tr.name}: time=${f3(tr.timeMs)} calls=${tr.calls}`);
   if (t.jit) {

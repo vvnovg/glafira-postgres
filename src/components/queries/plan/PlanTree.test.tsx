@@ -289,6 +289,15 @@ describe("planText: имена узлов как в psql", () => {
     expect(renderText(tree).endsWith("Execution Time: 2.000 ms\n")).toBe(true);
   });
 
+  it("SETTINGS — одной строкой после дерева и до времени планирования, как в Rust-рендере; без них строки нет", () => {
+    const root = bare({ nodeType: "Result" });
+    const lines = renderText({ root, planningMs: 0.1, executionMs: null, triggers: [], jit: null, settings: [{ name: "search_path", value: "shop, public" }, { name: "work_mem", value: "64MB" }], totalMs: null })
+      .trimEnd()
+      .split("\n");
+    expect(lines).toEqual(["Result  (cost=1.00..2.00 rows=3 width=4)", "Settings: search_path = 'shop, public', work_mem = '64MB'", "Planning Time: 0.100 ms"]);
+    expect(renderText({ root, planningMs: null, executionMs: null, triggers: [], jit: null, settings: [], totalMs: null })).not.toContain("Settings");
+  });
+
   it("flatten пропускает детей свёрнутых узлов, marks собирает ключи пометок", () => {
     const tree = planTree();
     expect(flatten(tree.root, new Set()).map((r) => [r.node.id, r.depth])).toEqual([[0, 0], [1, 1], [2, 1]]);

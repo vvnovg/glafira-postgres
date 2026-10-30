@@ -213,6 +213,7 @@
       "sqlTooLong": "The query is longer than {{max}} bytes",
       "paramsCount": "The query has {{expected}} parameters, {{got}} values given",
       "genericAnalyze": "GENERIC_PLAN cannot be combined with ANALYZE: enter parameter values",
+      "forceWritePlan": "Running as a write applies only to the plan with execution",
       "badTimeout": "The timeout must be between 5 and 600 seconds",
       "badSearchPath": "search_path may contain only identifiers, quotes, commas and spaces",
       "genericUnsupported": "GENERIC_PLAN needs PostgreSQL 16 or newer: enter parameter values",

@@ -1,6 +1,7 @@
 //! Инструмент «Запросы» на стенде: топ «с момента сброса» на pg-perf (`GPG_IT_PERF`), SQL pgss на матрице
 //! 13–18 (`GPG_IT_MATRIX`), отсутствие расширения на pg-single, скрытые строки под ролью без pg_read_all_stats.
-//! Запускать с `--test-threads=1`; перед тестами pg-perf должен был поработать под `heavy.sql` (dev/perf/README.md).
+//! Запускать с `--test-threads=1`. Нагрузка `heavy.sql` не нужна: строки pgss дают запросы самих тестов (и стенда), а
+//! нужные тестам запросы тесты выполняют сами.
 
 mod common;
 
@@ -462,7 +463,8 @@ async fn query_detail_lists_running_instances() {
             .await
             .unwrap()
             .get(0);
-        let sql = format!("SELECT pg_sleep(3), '{literal}'");
+        // Запрос держится 30 с — проверки успевают и на медленном CI; затем он отменяется (57014 в задаче ожидаем).
+        let sql = format!("SELECT pg_sleep(30), '{literal}'");
         let job = tokio::spawn(async move { sleeper.batch_execute(&sql).await });
         common::wait_until("запрос сессии выполняется", Duration::from_secs(5), async || {
             probe
@@ -517,6 +519,75 @@ async fn query_detail_lists_running_instances() {
             "длина текста — {} символов",
             r.query.chars().count()
         );
-        job.await.unwrap().unwrap();
+        probe
+            .execute("SELECT pg_cancel_backend($1)", &[&pid])
+            .await
+            .unwrap();
+        match job.await.unwrap() {
+            Ok(()) => {}
+            Err(e) => assert_eq!(
+                e.code(),
+                Some(&tokio_postgres::error::SqlState::QUERY_CANCELED),
+                "{e:?}"
+            ),
+        }
     }
+}
+
+/// Карточка запроса, которого нет в pgss, файл текстов (`pg_stat_statements(true)`) не читает ни при первом, ни при
+/// повторном опросе: строк нет — и текста нет (спец. §7.3). Чтения текста считаются по строке самого запроса текста в
+/// pgss; что счётчик живой, показывает карточка существующего запроса без кеша (сэмплер не запущен — каждый вызов читает).
+#[tokio::test]
+async fn query_detail_of_a_missing_query_does_not_read_texts() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st) = common::open_server_in(&perf, "perf").await;
+    let member = st.runtimes.view("it").topology.unwrap().members[0]
+        .name
+        .clone();
+    let probe = common::superuser(&perf, "perf").await;
+    let text_reads = async || -> i64 {
+        probe
+            .query_one(
+                "SELECT COALESCE(sum(calls), 0)::bigint FROM pg_stat_statements \
+                 WHERE query LIKE 'SELECT s.dbid, s.userid, %JOIN pg_database d ON d.oid = s.dbid WHERE s.queryid = $1%'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0)
+    };
+    let r = diag::run(&st, "it", request(since_reset(QuerySort::Calls)))
+        .await
+        .unwrap();
+    let DiagData::Queries(d) = &r.data else {
+        unreachable!()
+    };
+    let top = d
+        .rows
+        .iter()
+        .find(|x| x.datname.as_deref() == Some("perf"))
+        .expect("строка pgss в perf");
+    let before = text_reads().await;
+    let present = query_detail::detail(&st, "it", &member, "perf", top.key.query_id)
+        .await
+        .unwrap();
+    assert!(present.text.is_some());
+    let after_present = text_reads().await;
+    assert!(
+        after_present > before,
+        "карточка существующего запроса без кеша читает текст: {before} → {after_present}"
+    );
+    for _ in 0..2 {
+        let gone = query_detail::detail(&st, "it", &member, "perf", 1)
+            .await
+            .unwrap();
+        assert!(gone.text.is_none() && gone.since_reset.is_none());
+    }
+    assert_eq!(
+        text_reads().await,
+        after_present,
+        "карточка отсутствующего запроса файл текстов не читает"
+    );
 }

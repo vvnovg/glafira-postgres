@@ -9,6 +9,15 @@ use crate::plan::{PlanNode, PlanTree};
 pub fn to_text(t: &PlanTree) -> String {
     let mut out = String::new();
     node(&t.root, 0, &mut out);
+    // `SETTINGS`: параметры, отличные от значений по умолчанию, — одной строкой после дерева (`ExplainPrintSettings`).
+    if !t.settings.is_empty() {
+        let list: Vec<String> = t
+            .settings
+            .iter()
+            .map(|s| format!("{} = '{}'", s.name, s.value))
+            .collect();
+        let _ = writeln!(out, "Settings: {}", list.join(", "));
+    }
     if let Some(p) = t.planning_ms {
         let _ = writeln!(out, "Planning Time: {p:.3} ms");
     }
@@ -532,6 +541,25 @@ mod tests {
                 "  Workers Planned: 2"
             ]
         );
+    }
+
+    /// `SETTINGS`: изменённые параметры — одной строкой после дерева и до времени планирования, как в psql; без них
+    /// строки нет.
+    #[test]
+    fn settings_are_printed_like_psql() {
+        let v = json!({"Plan": n("Result", json!({}), vec![]), "Settings": {"work_mem": "64MB", "search_path": "shop, public"}, "Planning Time": 0.1});
+        let text = to_text(&from_json(&v).unwrap());
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3, "{text}");
+        assert!(lines[0].starts_with("Result  (cost="), "{text}");
+        assert!(
+            lines[1] == "Settings: search_path = 'shop, public', work_mem = '64MB'"
+                || lines[1] == "Settings: work_mem = '64MB', search_path = 'shop, public'",
+            "{text}"
+        );
+        assert_eq!(lines[2], "Planning Time: 0.100 ms");
+        let v = json!({"Plan": n("Result", json!({}), vec![]), "Settings": {}});
+        assert!(!to_text(&from_json(&v).unwrap()).contains("Settings"));
     }
 
     #[test]

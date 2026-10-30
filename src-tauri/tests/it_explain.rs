@@ -421,9 +421,10 @@ async fn write_tier_rolls_back_journals_and_respects_guard() {
     );
 }
 
-/// «Выполнить как запись» (`forceWrite`): ограда проверяется до пробного плана, а сам он строится вне READ ONLY —
-/// побочный эффект планирования (25006 уже в пробе) больше не тупик. Режим транзакции пробы виден по оценке строк
-/// `LIMIT`: планировщик вычисляет в ней стабильную `current_setting('transaction_read_only')`. Стенд не меняется.
+/// «Выполнить как запись» (`forceWrite`) — только с ANALYZE (в режиме «план» — отказ до сервера): ограда проверяется до
+/// пробного плана, а проба и ANALYZE идут вне READ ONLY — побочный эффект планирования (25006 уже в пробе) больше не
+/// тупик. Режим транзакции виден по оценке и факту строк `LIMIT`: планировщик вычисляет в ней стабильную
+/// `current_setting('transaction_read_only')`. Стенд не меняется.
 #[tokio::test]
 async fn force_write_checks_the_guard_first_and_probes_outside_read_only() {
     let Some(perf) = common::perf_addr() else {
@@ -441,19 +442,15 @@ async fn force_write_checks_the_guard_first_and_probes_outside_read_only() {
         (Tier::Read, 1.0),
         "без forceWrite проба — в READ ONLY"
     );
+    // forceWrite в режиме «план» — отказ до сервера: проба вне READ ONLY без ANALYZE и журнала не строится.
     let mut forced = req(&m, "perf", sql, Mode::Plan, Params::None);
     forced.force_write = true;
-    let r = explain::run::run(&st, "it", &forced).await.unwrap();
+    let e = explain::run::run(&st, "it", &forced).await.unwrap_err();
     assert_eq!(
-        (r.mode, r.tier, r.plan.root.plan_rows),
-        (Mode::Plan, Tier::Write, 2.0),
-        "с forceWrite проба — вне READ ONLY, ярус записи"
+        (e.code, e.key.as_str()),
+        (ErrorCode::InvalidInput, "errors.explain.forceWritePlan")
     );
-    assert!(
-        r.warnings.iter().all(|w| w != "probeWithoutReadOnly"),
-        "{:?}",
-        r.warnings
-    );
+    assert!(st.actions.list(Some("it"), 10).is_empty());
     // Prod без подтверждения: отказ ограды раньше пробы — даже ошибка разбора до сервера не доходит.
     let mut p = st.profile("it").unwrap();
     p.environment = Environment::Prod;
@@ -481,9 +478,17 @@ async fn force_write_checks_the_guard_first_and_probes_outside_read_only() {
     let r = explain::run::run(&st, "it", &confirmed).await.unwrap();
     assert_eq!((r.mode, r.tier), (Mode::Analyze, Tier::Write));
     assert_eq!(
-        r.plan.root.actual.as_ref().map(|a| a.rows),
-        Some(2.0),
-        "ANALYZE — вне READ ONLY"
+        (
+            r.plan.root.plan_rows,
+            r.plan.root.actual.as_ref().map(|a| a.rows)
+        ),
+        (2.0, Some(2.0)),
+        "ANALYZE с forceWrite — вне READ ONLY"
+    );
+    assert!(
+        r.warnings.iter().all(|w| w != "probeWithoutReadOnly"),
+        "{:?}",
+        r.warnings
     );
     let records = st.actions.list(Some("it"), 10);
     assert_eq!(records.len(), 1, "ярус записи — строка журнала");
@@ -499,7 +504,7 @@ async fn force_write_checks_the_guard_first_and_probes_outside_read_only() {
     p.environment = Environment::Dev;
     p.read_only = true;
     st.connections.upsert(p).unwrap();
-    let mut ro = req(&m, "perf", sql, Mode::Plan, Params::None);
+    let mut ro = req(&m, "perf", sql, Mode::Analyze, Params::None);
     ro.force_write = true;
     let e = explain::run::run(&st, "it", &ro).await.unwrap_err();
     assert_eq!(e.code, ErrorCode::ReadOnly);
@@ -592,10 +597,13 @@ async fn generic_plan_is_refused_before_16_and_writes_are_refused_on_a_replica()
                 "errors.explain.writeOnReplica"
             )
         );
-        // Пробный план с forceWrite шёл бы вне READ ONLY — на реплике он отказан до сервера и в режиме «план».
+        // forceWrite в режиме «план» отказан ещё раньше — проверкой запроса, до соединения с сервером.
         forced.mode = Mode::Plan;
         let e = explain::run::run(&st, "it", &forced).await.unwrap_err();
-        assert_eq!(e.key.as_str(), "errors.explain.writeOnReplica");
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (ErrorCode::InvalidInput, "errors.explain.forceWritePlan")
+        );
         assert!(
             st.actions.list(Some("it"), 10).is_empty(),
             "отказ до сервера в журнал не пишется"
@@ -625,7 +633,15 @@ async fn llm_bundle_has_text_stats_plan_and_ddl() {
     };
     let (_dir, st) = common::open_server_in(&perf, "perf").await;
     let m = member_of(&st).await;
-    // Самый частый запрос pgbench — точечный выбор покупателя с $1.
+    // Строка pgss — от самого теста, `heavy.sql` не нужен: суперпользователь выполняет точечный выбор с литералами
+    // простым протоколом, pgss нормализует его в `id = $1`. Выбор с одним `$1` строится GENERIC_PLAN (у `$1 + $2` с типом
+    // `unknown` у обоих параметров — «operator is not unique»).
+    let seed = common::superuser(&perf, "perf").await;
+    for i in 1..=50 {
+        seed.batch_execute(&format!("SELECT * FROM shop.customers WHERE id = {i}"))
+            .await
+            .unwrap();
+    }
     let r = diag::run(
         &st,
         "it",
@@ -636,7 +652,7 @@ async fn llm_bundle_has_text_stats_plan_and_ddl() {
             queries: Some(QueriesParams {
                 mode: QueriesMode::SinceReset,
                 sort: QuerySort::Calls,
-                limit: 50,
+                limit: 200,
                 database: None,
                 toplevel_only: true,
             }),
@@ -647,8 +663,6 @@ async fn llm_bundle_has_text_stats_plan_and_ddl() {
     let DiagData::Queries(d) = &r.data else {
         unreachable!()
     };
-    // Самый частый на стенде — `id = $1 + $2`: с типом `unknown` у обоих параметров GENERIC_PLAN его не строит
-    // («operator is not unique»), поэтому берётся именно точечный выбор с одним `$1`.
     let keys: Vec<_> = d
         .rows
         .iter()
@@ -661,7 +675,7 @@ async fn llm_bundle_has_text_stats_plan_and_ddl() {
         .into_iter()
         .find(|t| t.text.as_deref() == Some("SELECT * FROM shop.customers WHERE id = $1"))
         .map(|t| t.key.query_id)
-        .expect("точечный выбор покупателя в строках pgbench");
+        .expect("точечный выбор покупателя в строках pgss");
     let b = llm::bundle(
         &st,
         "it",
