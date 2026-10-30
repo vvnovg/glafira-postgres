@@ -1420,7 +1420,7 @@
       "params": {
         "title": "Parameters ({{count}})",
         "generic": "GENERIC_PLAN (no values)",
-        "genericHint": "With GENERIC_PLAN the plan is built without values. “Plan with execution” needs values: clear the checkbox to enter them.",
+        "genericHint": "GENERIC_PLAN applies to “Plan” only; “Plan with execution” takes the values from the fields below (an empty field is NULL).",
         "tooMany": "More than {{max}} parameters ({{count}}): value fields are not shown, and runs that need values are unavailable. On PostgreSQL 16+ “Plan” works with GENERIC_PLAN.",
         "nullPlaceholder": "NULL"
       },

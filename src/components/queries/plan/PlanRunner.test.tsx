@@ -25,25 +25,33 @@ describe("PlanRunner", () => {
     vi.mocked(api.listConnections).mockResolvedValue([connection({ id: "c", environment: "dev", readOnly: false })]);
   });
 
-  it("форма из $N, GENERIC_PLAN на 16+ без полей значений, «План» шлёт значения; ANALYZE чтения — без подтверждения", async () => {
+  it("форма из $N, GENERIC_PLAN на 16+ только для «Плана», «План» шлёт значения; ANALYZE чтения — без подтверждения", async () => {
     vi.mocked(api.explain).mockResolvedValue(result());
     const user = userEvent.setup();
     renderWithClient(<PlanRunner connectionId="c" member="pg-1" database="perf" sql="SELECT * FROM t WHERE a = $1 AND b = $2" serverVersionNum={170_000} inRecovery={false} />);
     const generic = screen.getByRole("checkbox", { name: "GENERIC_PLAN (без значений)" });
     expect(generic).toBeChecked();
-    // GENERIC_PLAN: полей значений нет, «План с выполнением» ждёт значений — закрыт, с пояснением.
-    expect(screen.queryByRole("textbox", { name: "$1" })).toBeNull();
-    expect(screen.getByText(/снимите флажок, чтобы ввести их/)).toBeInTheDocument();
-    expect(await screen.findByRole("button", { name: "План с выполнением" })).toBeDisabled();
+    // Поля значений видны и при GENERIC_PLAN: «План с выполнением» берёт их без снятия флажка.
+    expect(screen.getByRole("textbox", { name: "$1" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "$2" })).toBeInTheDocument();
+    expect(screen.getByText(/«План с выполнением» берёт значения из полей ниже/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "План с выполнением" })).toBeEnabled());
     await user.click(screen.getByRole("button", { name: "План" }));
     await waitFor(() => expect(api.explain).toHaveBeenCalledWith("c", expect.objectContaining({ sql: "SELECT * FROM t WHERE a = $1 AND b = $2", mode: "plan", params: { kind: "generic" }, member: "pg-1", database: "perf" })));
     expect(await screen.findByRole("treegrid", { name: "Дерево плана" })).toBeInTheDocument();
-    await user.click(generic);
-    expect(screen.getByRole("textbox", { name: "$2" })).toBeInTheDocument();
+    // ANALYZE прямо при поставленном флажке: значения из полей, пустое поле — NULL.
     await user.type(screen.getByRole("textbox", { name: "$1" }), "7");
     vi.mocked(api.explain).mockResolvedValue(result({ mode: "analyze" }));
     await user.click(screen.getByRole("button", { name: "План с выполнением" }));
     await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("c", expect.objectContaining({ mode: "analyze", params: { kind: "values", values: ["7", null] }, timeoutS: 30, forceWrite: false })));
+    // Проба яруса перед ANALYZE — «План» по флажку (GENERIC_PLAN, без значений); значения уходят в само выполнение.
+    const calls = vi.mocked(api.explain).mock.calls;
+    expect(calls[calls.length - 2][1]).toMatchObject({ mode: "plan", params: { kind: "generic" } });
+    // Флажок снят — «План» тоже со значениями.
+    await user.click(generic);
+    await user.click(screen.getByRole("button", { name: "План" }));
+    await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("c", expect.objectContaining({ mode: "plan", params: { kind: "values", values: ["7", null] } })));
+    expect(screen.queryByText(/«План с выполнением» берёт значения из полей ниже/)).toBeNull();
     expect(screen.queryByRole("group", CONFIRM)).not.toBeInTheDocument();
     expect(screen.getByText(/История/)).toBeInTheDocument();
   });
@@ -155,11 +163,9 @@ describe("PlanRunner: вход пробы, реплика, загрузка пр
     let probe: (v: ExplainResult) => void = () => {};
     vi.mocked(api.explain).mockReturnValueOnce(new Promise((r) => { probe = r; }));
     const user = userEvent.setup();
-    // PostgreSQL 15: GENERIC_PLAN нет, поля значений на экране.
-    const v15 = { serverVersionNum: 150_000 };
-    const { rerender } = renderWithClient(runner("UPDATE t SET a = $1", v15));
+    const { rerender } = renderWithClient(runner("UPDATE t SET a = $1"));
     await user.click(await screen.findByRole("button", { name: "План с выполнением" }));
-    rerender(runner("UPDATE t SET a = $1 WHERE false", v15));
+    rerender(runner("UPDATE t SET a = $1 WHERE false"));
     await act(async () => probe(result({ tier: "write" })));
     expect(screen.queryByRole("group", CONFIRM)).toBeNull();
     expect(api.explain).toHaveBeenCalledTimes(1);

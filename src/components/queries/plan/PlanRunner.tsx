@@ -104,7 +104,8 @@ function errorPlace(sql: string, error: AppError | null): ErrorPlace | null {
  * план, как только запуск доступен
  * («Получить план» карточки); `onAutoRun` сообщает, что запрос принят (если «План» без значений невозможен — принят без
  * запуска). `onResult` получает результат и узел, где он получен.
- * Значения параметров: при GENERIC_PLAN и свыше `PARAM_FIELDS_LIMIT` полей нет, и запуски, которым нужны значения, закрыты.
+ * Значения параметров: свыше `PARAM_FIELDS_LIMIT` полей нет, и запуски, которым нужны значения, закрыты; GENERIC_PLAN
+ * влияет только на «План», поля значений для «Плана с выполнением» видны и при нём.
  * Ярус записи пишет журнал действий — после него список журнала перечитывается, как после диалогов P2.
  */
 export function PlanRunner({
@@ -136,12 +137,13 @@ export function PlanRunner({
   const count = countParams(sql);
   const canGeneric = serverVersionNum >= 160_000 && count > 0;
   const [generic, setGeneric] = useState(true);
-  // Полей значений нет (GENERIC_PLAN включён или параметров больше предела) — запуск, которому они нужны, закрыт.
+  // Параметров больше предела — полей значений нет, и запуск, которому они нужны, закрыт; «План» с GENERIC_PLAN (16+)
+  // значений не требует.
   const genericOn = canGeneric && generic;
-  const valuesHidden = genericOn || count > PARAM_FIELDS_LIMIT;
+  const tooMany = count > PARAM_FIELDS_LIMIT;
   const needsValues = (mode: ExplainMode) => count > 0 && !(mode === "plan" && genericOn);
-  const planBlocked = valuesHidden && needsValues("plan");
-  const analyzeBlocked = valuesHidden && needsValues("analyze");
+  const planBlocked = tooMany && needsValues("plan");
+  const analyzeBlocked = tooMany && needsValues("analyze");
   const [values, setValues] = useState<(string | null)[]>([]);
   const [timeoutS, setTimeoutS] = useState<number>(DEFAULT_TIMEOUT_S);
   const [searchPath, setSearchPath] = useState("");
