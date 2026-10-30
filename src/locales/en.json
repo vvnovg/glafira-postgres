@@ -1322,7 +1322,7 @@
       "who": "Role · application · client",
       "openSessions": "Open in Sessions",
       "waits": "Waits",
-      "noWaitsBuffer": "Open the Sessions tab to collect waits for this query",
+      "noWaitsBuffer": "Open the Wait profile tab to collect waits for this query",
       "waitEvent": "Event",
       "share": "Share",
       "samples": "Samples",

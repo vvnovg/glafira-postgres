@@ -746,7 +746,7 @@ Tauri нет: данные сэмплера идут каналом подпис
 | `EXPLAIN_WRITES` (новый, P3a) | SQLSTATE 25006 в `READ ONLY` (ярус чтения или пробный план): запрос, признанный чтением, пытается писать (`errors.explain.writes`) | Сообщение и кнопка «Выполнить как запись»: повторяет запрос с `forceWrite` (§8.3, п. 4) → ярус записи с подтверждением |
 | `FEATURE_UNAVAILABLE` | Ярус записи на реплике (`errors.explain.writeOnReplica`); hypopg не установлен (`errors.hypo.notInstalled`); `GENERIC_PLAN` на < 16 (`errors.explain.genericUnsupported`); pgss исчез у сэмплера | Подсказка у кнопки; сэмплер — событие `error` и остановка |
 | `NOT_AUTHORIZED` (42501) | Нет прав на таблицы запроса при EXPLAIN (`errors.explain.notAuthorized`, подсказка `pg_read_all_data`; у INSERT / UPDATE / DELETE / MERGE / CREATE — `errors.explain.notAuthorizedWrite`, права на запись нужны и без выполнения) | Сообщение с подсказкой; пункт готовности `readAllData` |
-| `TIMEOUT` (57014) | EXPLAIN ANALYZE не уложился в срок (`errors.explain.timeout`); пробный план — в 15 с (`errors.explain.planTimeout`) | «Выполнение прервано, изменений нет»; предложить больший срок |
+| `TIMEOUT` (57014) | EXPLAIN ANALYZE не уложился в срок (`errors.explain.timeout`); пробный план — в 15 с (тот же `errors.explain.timeout`) | «План не получен за отведённое время; выполнение прервано, изменений нет» |
 | `INVALID_INPUT` | Вторая инструкция (`errors.explain.oneStatement`), число параметров (`paramsCount`), ошибки сервера классов 42 и 22 — синтаксис, неизвестные объекты, значения параметров (`errors.explain.server` с `params.message`, `details: "position N"`), пустой запрос, срок вне 5…600, сортировка вне версии (`errors.queries.sortUnavailable`), отчёт без `queries`, `indexDdl` не `CREATE INDEX` (`errors.hypo.badDdl`), снимки разных подключений (`errors.snapshots.foreign`) | Сообщение у формы; позиция ошибки подсвечивается в консоли |
 | `READ_ONLY`, `CONFIRMATION_REQUIRED` | Guard яруса записи (как P2); `READ_ONLY` также при SQLSTATE 25006 вне `READ ONLY` — сервер не принимает запись в сеансе (`errors.explain.serverReadOnly`) | Кнопки нет / диалог подтверждения; «как запись» не предлагается |
 | `NOT_FOUND` | Файл снимка исчез (`errors.snapshots.notFound`); запроса с таким `queryId` в pgss уже нет (`errors.queries.gone`) | Список перечитывается; карточка показывает последнее известное с пометкой |
@@ -792,7 +792,8 @@ docs/guide/{en,ru}/queries.md
 база `perf` с расширениями; схема `shop`: `customers` (200 тыс.), `orders` (1 млн, `status` без индекса), `order_items`
 (3 млн), `events` — партиционирована по месяцам (24 партиции, 2 млн строк), `audit` с `autovacuum_enabled = off` и скошенными
 данными (ошибка оценки), `balances` с миллионом обновлённых строк без VACUUM (heap fetches). `heavy.sql` — сценарий `pgbench`
-с `\set` случайных параметров: точечный выбор клиента (N+1), фильтр по `orders.status` (seq scan с отсевом), соединение с
+с `\set` случайных параметров: точечный выбор клиента (шаблон N+1: три инструкции прохода из двенадцати дают два `queryid`, `id = $1` и `id = $1 + $2`, и доля вызовов
+остаётся ниже порога 20 % правила `query_n_plus_one`), фильтр по `orders.status` (seq scan с отсевом), соединение с
 `audit` (nested loop по неверной оценке), сортировка заказов без индекса (сброс), `ORDER BY … LIMIT` без индекса, Index Only
 Scan по `balances`, коррелированный подзапрос на строку, выбор из `events` без ключа партиционирования, тяжёлая агрегация
 (параллельность и JIT), запрос с temp-файлами. Запуск (в `dev/perf/README.md`):
@@ -810,7 +811,7 @@ P3b: каждое правило — положительная и отрица�
 
 **`src-tauri` (unit):** `StatementsBuffer` — дельты, первый тик без дельт, вытеснение ключа, смена `stats_reset`, предел записей
 (вытеснение целыми тиками), суммы по окнам и покрытие; `explain::tier` — `ModifyTable` в корне и в CTE, `CREATE`, комментарии
-перед первым словом; `explain::params::count`; `llm` — состав markdown и пределы; SQL по `PgssCaps` — снимки текста запросов
+перед первым словом; `explain::params::count_params`; `llm` — состав markdown и пределы; SQL по `PgssCaps` — снимки текста запросов
 (`snapshots/diag-sql/`, как P2); `ActionRecord` с `explain`; P3b: формат файла снимка, права 0600, листинг, удаление.
 
 **Интеграция** (`GPG_IT_PERF=localhost:5471`, по умолчанию `#[ignore]`, как матрица `GPG_IT_MATRIX`):
@@ -884,7 +885,9 @@ P3b: каждое правило — положительная и отрица�
 
 **P3a:**
 1. На `pg-perf` под `heavy.sql` топ показывает режим «с момента сброса» сразу и «за окно 5 мин» через пять минут с верным
-   покрытием; находки `query_n_plus_one`, `query_temp`, `query_low_hit_ratio` появляются на своих запросах сценария.
+   покрытием; на первой строке по числу вызовов — `… id = $1 + $2`; находки `query_temp` и `query_low_hit_ratio` появляются на своих
+   запросах сценария. `query_n_plus_one` на `heavy.sql` не срабатывает (доля вызовов самого частого запроса — около 16,7 % при пороге
+   20 %); его проверяют отдельно: одна инструкция в цикле (`pgbench` с файлом из одного запроса) или тест правила на границе порога.
 2. На `pg-single` (без pgss) инструмент показывает `unavailable` с подсказкой; на матрице 13–18 отчёт строится по версии pgss,
    недоступные колонки серые.
 3. Карточка открывается из строки и из находки, показывает историю по тикам, разбивку, выполняющиеся экземпляры (14+) и
