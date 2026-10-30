@@ -136,7 +136,7 @@ pub fn validate(req: &ExplainRequest) -> AppResult<String> {
         return Err(app_err!(
             ErrorCode::InvalidInput,
             "errors.explain.badSearchPath",
-            "search_path may contain only identifiers, quotes, commas and spaces"
+            "search_path may contain only identifiers (letters, digits, _ $ . -), double quotes, commas and spaces"
         ));
     }
     Ok(sql)

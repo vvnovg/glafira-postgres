@@ -215,7 +215,7 @@
       "genericAnalyze": "GENERIC_PLAN cannot be combined with ANALYZE: enter parameter values",
       "forceWritePlan": "Running as a write applies only to the plan with execution",
       "badTimeout": "The timeout must be between 5 and 600 seconds",
-      "badSearchPath": "search_path may contain only identifiers, quotes, commas and spaces",
+      "badSearchPath": "search_path may contain only identifiers (letters, digits, _ $ . -), double quotes, commas and spaces",
       "genericUnsupported": "GENERIC_PLAN needs PostgreSQL 16 or newer: enter parameter values",
       "oneStatement": "Enter exactly one statement",
       "server": "The server rejected the query: {{message}}",
