@@ -12,7 +12,7 @@ use tokio_postgres::{Client, SimpleQueryMessage};
 
 use crate::actions::journal::{self, ActionRecord, ExplainRecord, RecordConnection};
 use crate::conn::errors::from_pg;
-use crate::conn::profile::Environment;
+use crate::conn::profile::{ConnectionProfile, Environment};
 use crate::diag::caps::V16;
 use crate::diag::head;
 use crate::error::{AppError, AppResult, ErrorCode};
@@ -334,6 +334,34 @@ async fn explain_query(c: &Client, text: &str, params: &Params) -> Result<serde_
     })
 }
 
+/// Контекст пробного плана. Обычно — `READ ONLY` (побочный эффект ловит сервер), подсказка 42501 — по первому слову.
+/// «Выполнить как запись» (`force_write`, ограда уже пройдена) строит его вне `READ ONLY` и ярусом записи, как повтор
+/// у CREATE … AS: иначе побочный эффект, вычисленный при планировании (25006 уже в пробе), был бы тупиком.
+fn probe_context(force_write: bool, options: &str, original: &str, sql: &str) -> Context {
+    Context {
+        origin: Some(Origin::new(options, original)),
+        write: is_write_statement(force_write.then_some(Tier::Write), sql),
+        read_only: !force_write,
+    }
+}
+
+/// Ограда яруса записи до сервера: профиль (read-only, подтверждение prod) и реплика (запись не примет).
+fn ensure_write_allowed(
+    profile: &ConnectionProfile,
+    req: &ExplainRequest,
+    in_recovery: bool,
+) -> AppResult<()> {
+    ensure_mutation_allowed(profile, req.confirmation.confirm.as_deref())?;
+    if in_recovery {
+        return Err(app_err!(
+            ErrorCode::FeatureUnavailable,
+            "errors.explain.writeOnReplica",
+            "A write cannot be executed on a replica: choose the primary"
+        ));
+    }
+    Ok(())
+}
+
 fn probe_options(params: &Params) -> String {
     match params {
         Params::Generic => format!("{PROBE_OPTIONS}, GENERIC_PLAN"),
@@ -393,15 +421,16 @@ pub async fn run(st: &AppState, id: &str, req: &ExplainRequest) -> AppResult<Exp
         warnings.push("genericPlan".to_string());
     }
     let sp = req.search_path.as_deref();
-    // 1. Пробный план в READ ONLY. CREATE … AS, отвергнутый 25006 (на отдельных версиях), повторяется без READ ONLY —
-    //    только ради яруса, выполнения всё равно нет (уточнение 12 плана). Прочие 25006 — `EXPLAIN_WRITES`: побочный
-    //    эффект, вычисленный при планировании, в запросе «план» не выполняется.
+    // «Выполнить как запись»: ограда и реплика — до пробного плана, потому что он идёт уже вне READ ONLY.
+    if req.force_write {
+        ensure_write_allowed(&profile, req, h.in_recovery)?;
+    }
+    // 1. Пробный план в READ ONLY (с `force_write` — вне его, см. `probe_context`). CREATE … AS, отвергнутый 25006
+    //    (на отдельных версиях), повторяется без READ ONLY — только ради яруса, выполнения всё равно нет (уточнение 12
+    //    плана). Прочие 25006 в READ ONLY — `EXPLAIN_WRITES`: побочный эффект, вычисленный при планировании, в запросе
+    //    «план» не выполняется; повтор с `force_write` строит план вне READ ONLY.
     let probe_opts = probe_options(&req.params);
-    let probe_ctx = Context {
-        origin: Some(Origin::new(&probe_opts, &req.sql)),
-        write: is_write_statement(None, &sql),
-        read_only: true,
-    };
+    let probe_ctx = probe_context(req.force_write, &probe_opts, &req.sql, &sql);
     let probe = |ctx| {
         within(
             PROBE_TIMEOUT_S,
@@ -411,7 +440,9 @@ pub async fn run(st: &AppState, id: &str, req: &ExplainRequest) -> AppResult<Exp
     let raw = match probe(probe_ctx).await {
         Ok(v) => v,
         Err(Step::Pg(e))
-            if is_read_only_violation(&e) && first_word(&sql).eq_ignore_ascii_case("create") =>
+            if probe_ctx.read_only
+                && is_read_only_violation(&e)
+                && first_word(&sql).eq_ignore_ascii_case("create") =>
         {
             warnings.push("probeWithoutReadOnly".to_string());
             let ctx = Context {
@@ -436,16 +467,9 @@ pub async fn run(st: &AppState, id: &str, req: &ExplainRequest) -> AppResult<Exp
     if req.mode == Mode::Plan {
         return Ok(result(Mode::Plan, tier, tree, raw, started, warnings));
     }
-    // 3–4. ANALYZE.
-    if tier == Tier::Write {
-        ensure_mutation_allowed(&profile, req.confirmation.confirm.as_deref())?;
-        if h.in_recovery {
-            return Err(app_err!(
-                ErrorCode::FeatureUnavailable,
-                "errors.explain.writeOnReplica",
-                "A write cannot be executed on a replica: choose the primary"
-            ));
-        }
+    // 3–4. ANALYZE. С `force_write` ограда уже пройдена до пробного плана.
+    if tier == Tier::Write && !req.force_write {
+        ensure_write_allowed(&profile, req, h.in_recovery)?;
     }
     let analyze_ctx = Context {
         origin: Some(Origin::new(ANALYZE_OPTIONS, &req.sql)),
@@ -553,6 +577,47 @@ mod tests {
         assert!(
             !is_write_statement(None, "with d as (delete from t returning *) select 1"),
             "до плана — только по первому слову"
+        );
+    }
+
+    #[test]
+    fn force_write_probes_outside_read_only_as_a_write() {
+        let plain = probe_context(
+            false,
+            PROBE_OPTIONS,
+            "SELECT lo_creat(-1)",
+            "SELECT lo_creat(-1)",
+        );
+        assert!(
+            plain.read_only && !plain.write,
+            "без force_write — READ ONLY"
+        );
+        assert!(
+            probe_context(
+                false,
+                PROBE_OPTIONS,
+                "update t set a = 1",
+                "update t set a = 1"
+            )
+            .write,
+            "подсказка 42501 по первому слову"
+        );
+        let forced = probe_context(
+            true,
+            PROBE_OPTIONS,
+            " SELECT lo_creat(-1)",
+            "SELECT lo_creat(-1)",
+        );
+        assert!(
+            !forced.read_only && forced.write,
+            "force_write — вне READ ONLY, подсказка записи"
+        );
+        assert_eq!(
+            forced
+                .origin
+                .and_then(|o| o.position(explain_prefix(PROBE_OPTIONS).chars().count() as u32 + 1)),
+            Some(2),
+            "позиция — относительно текста пользователя"
         );
     }
 

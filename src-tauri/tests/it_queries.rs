@@ -312,6 +312,60 @@ async fn statements_sampler_fills_the_window_and_caches_texts() {
     );
 }
 
+/// Текст карточки — из кеша текстов узла (буфер сэмплера pgss): первый вызов читает его с сервера и кладёт в кеш,
+/// следующий берёт из кеша и `pg_stat_statements(true)` не читает (подложенный в кеш текст возвращается как есть).
+#[tokio::test]
+async fn query_detail_text_goes_through_the_sampler_cache() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st) = common::open_server_in(&perf, "perf").await;
+    let events = Arc::new(Events::default());
+    let sid = statements::start(&st, "it", None, events.clone()).unwrap();
+    let member = st.runtimes.view("it").topology.unwrap().members[0]
+        .name
+        .clone();
+    let r = diag::run(&st, "it", request(since_reset(QuerySort::Calls)))
+        .await
+        .unwrap();
+    let DiagData::Queries(d) = &r.data else {
+        unreachable!()
+    };
+    let query_id = d.rows[0].key.query_id;
+    let buffer = st.statements.buffer("it", &member).expect("буфер узла");
+    let first = query_detail::detail(&st, "it", &member, "perf", query_id)
+        .await
+        .unwrap();
+    let text = first.text.clone().expect("текст прочитан с сервера");
+    let keys: Vec<_> = first.by_user.iter().map(|u| u.stat.key).collect();
+    assert!(!keys.is_empty());
+    assert!(
+        keys.iter().any(|k| buffer
+            .lock()
+            .unwrap()
+            .text(k)
+            .is_some_and(|(t, _)| *t == *text)),
+        "прочитанный текст — в кеше узла"
+    );
+    buffer
+        .lock()
+        .unwrap()
+        .remember_texts(keys.iter().map(|k| (*k, "-- из кеша".to_string(), false)));
+    let second = query_detail::detail(&st, "it", &member, "perf", query_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        second.text.as_deref(),
+        Some("-- из кеша"),
+        "второй вызов берёт текст из кеша, а не с сервера"
+    );
+    assert!(
+        second.since_reset.is_some(),
+        "статистика читается как прежде"
+    );
+    assert!(st.sessions.stop(&sid));
+}
+
 /// Карточка запроса на pg-perf (PG 17: экземпляры читаются) и на PG 13 (экземпляров нет — пометка).
 #[tokio::test]
 async fn query_detail_on_perf_and_on_pg13() {

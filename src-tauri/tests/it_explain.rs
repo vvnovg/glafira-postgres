@@ -421,6 +421,91 @@ async fn write_tier_rolls_back_journals_and_respects_guard() {
     );
 }
 
+/// «Выполнить как запись» (`forceWrite`): ограда проверяется до пробного плана, а сам он строится вне READ ONLY —
+/// побочный эффект планирования (25006 уже в пробе) больше не тупик. Режим транзакции пробы виден по оценке строк
+/// `LIMIT`: планировщик вычисляет в ней стабильную `current_setting('transaction_read_only')`. Стенд не меняется.
+#[tokio::test]
+async fn force_write_checks_the_guard_first_and_probes_outside_read_only() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st) = common::open_server_in(&perf, "perf").await;
+    let m = member_of(&st).await;
+    let sql = "SELECT g FROM generate_series(1, 100) g \
+               LIMIT CASE WHEN current_setting('transaction_read_only') = 'on' THEN 1 ELSE 2 END";
+    let plain = explain::run::run(&st, "it", &req(&m, "perf", sql, Mode::Plan, Params::None))
+        .await
+        .unwrap();
+    assert_eq!(
+        (plain.tier, plain.plan.root.plan_rows),
+        (Tier::Read, 1.0),
+        "без forceWrite проба — в READ ONLY"
+    );
+    let mut forced = req(&m, "perf", sql, Mode::Plan, Params::None);
+    forced.force_write = true;
+    let r = explain::run::run(&st, "it", &forced).await.unwrap();
+    assert_eq!(
+        (r.mode, r.tier, r.plan.root.plan_rows),
+        (Mode::Plan, Tier::Write, 2.0),
+        "с forceWrite проба — вне READ ONLY, ярус записи"
+    );
+    assert!(
+        r.warnings.iter().all(|w| w != "probeWithoutReadOnly"),
+        "{:?}",
+        r.warnings
+    );
+    // Prod без подтверждения: отказ ограды раньше пробы — даже ошибка разбора до сервера не доходит.
+    let mut p = st.profile("it").unwrap();
+    p.environment = Environment::Prod;
+    st.connections.upsert(p.clone()).unwrap();
+    let mut broken = req(
+        &m,
+        "perf",
+        "SELEC lo_creat(-1)",
+        Mode::Analyze,
+        Params::None,
+    );
+    let e = explain::run::run(&st, "it", &broken).await.unwrap_err();
+    assert_eq!(
+        e.code,
+        ErrorCode::InvalidInput,
+        "без forceWrite — сначала проба"
+    );
+    broken.force_write = true;
+    let e = explain::run::run(&st, "it", &broken).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::ConfirmationRequired, "{e:?}");
+    // С подтверждением: проба и ANALYZE вне READ ONLY, ярус записи, строка журнала.
+    let mut confirmed = req(&m, "perf", sql, Mode::Analyze, Params::None);
+    confirmed.force_write = true;
+    confirmed.confirmation.confirm = Some("it".into());
+    let r = explain::run::run(&st, "it", &confirmed).await.unwrap();
+    assert_eq!((r.mode, r.tier), (Mode::Analyze, Tier::Write));
+    assert_eq!(
+        r.plan.root.actual.as_ref().map(|a| a.rows),
+        Some(2.0),
+        "ANALYZE — вне READ ONLY"
+    );
+    let records = st.actions.list(Some("it"), 10);
+    assert_eq!(records.len(), 1, "ярус записи — строка журнала");
+    assert_eq!(
+        (
+            records[0].action.as_str(),
+            records[0].outcome,
+            records[0].prod_confirmed
+        ),
+        ("explainAnalyze", Outcome::Ok, true)
+    );
+    // Read-only профиль: forceWrite отказан до сервера и в журнал не пишется.
+    p.environment = Environment::Dev;
+    p.read_only = true;
+    st.connections.upsert(p).unwrap();
+    let mut ro = req(&m, "perf", sql, Mode::Plan, Params::None);
+    ro.force_write = true;
+    let e = explain::run::run(&st, "it", &ro).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::ReadOnly);
+    assert_eq!(st.actions.list(Some("it"), 10).len(), 1);
+}
+
 #[tokio::test]
 async fn generic_plan_is_refused_before_16_and_writes_are_refused_on_a_replica() {
     if let Some(pg15) = common::matrix_addrs()
@@ -507,6 +592,10 @@ async fn generic_plan_is_refused_before_16_and_writes_are_refused_on_a_replica()
                 "errors.explain.writeOnReplica"
             )
         );
+        // Пробный план с forceWrite шёл бы вне READ ONLY — на реплике он отказан до сервера и в режиме «план».
+        forced.mode = Mode::Plan;
+        let e = explain::run::run(&st, "it", &forced).await.unwrap_err();
+        assert_eq!(e.key.as_str(), "errors.explain.writeOnReplica");
         assert!(
             st.actions.list(Some("it"), 10).is_empty(),
             "отказ до сервера в журнал не пишется"

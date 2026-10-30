@@ -2,9 +2,11 @@
 //! сэмплера pgss, выполняющиеся экземпляры из `pg_stat_activity` (14+), ожидания из буфера сэмплера активности.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use pg_advisor::ash::Sample;
 use pg_advisor::findings::Finding;
+use pg_advisor::pgss::PgssCaps;
 use pg_advisor::queries::rules::{self, Mode, PgssState};
 use pg_advisor::queries::{Counters, Cumulative, QueryKey, QueryStat, Totals, stat, totals};
 use serde::Serialize;
@@ -19,7 +21,7 @@ use crate::diag::sessions::QUERY_LIMIT;
 use crate::diag::sql::BACKEND_START_US;
 use crate::diag::{Head, Unavailable, WINDOWS_S, head, on_member};
 use crate::error::{AppResult, ErrorCode};
-use crate::sampler::statements::{HistoryPoint, WindowSum};
+use crate::sampler::statements::{HistoryPoint, StatementsBuffer, WindowSum};
 use crate::state::AppState;
 use crate::sync::MutexExt;
 
@@ -254,11 +256,26 @@ pub fn running_sql() -> String {
     )
 }
 
-fn text_sql(ns: &str) -> String {
+/// Текст запроса с ключом строки, у которой он прочитан: по ключу текст кладётся в кеш узла.
+fn text_sql(ns: &str, caps: PgssCaps) -> String {
+    let toplevel = if caps.toplevel { "s.toplevel" } else { "true" };
     format!(
-        "SELECT left(s.query, {QUERY_LIMIT}), length(s.query) > {QUERY_LIMIT} FROM {ns}.pg_stat_statements(true) s \
-         JOIN pg_database d ON d.oid = s.dbid WHERE s.queryid = $1 AND d.datname = $2 LIMIT 1"
+        "SELECT s.dbid, s.userid, {toplevel}, left(s.query, {QUERY_LIMIT}), length(s.query) > {QUERY_LIMIT} \
+         FROM {ns}.pg_stat_statements(true) s JOIN pg_database d ON d.oid = s.dbid \
+         WHERE s.queryid = $1 AND d.datname = $2 LIMIT 1"
     )
+}
+
+/// Текст карточки из кеша текстов узла (буфер сэмплера pgss, спец. §4.6): первый ключ запроса, чей текст там уже есть.
+/// `None` — промах, и текст читается с сервера: `pg_stat_statements(true)` читает файл текстов, а карточка опрашивается
+/// каждые 5 с.
+pub fn text_from_cache(
+    keys: &[QueryKey],
+    lookup: impl Fn(&QueryKey) -> Option<(Arc<str>, bool)>,
+) -> Option<(String, bool)> {
+    keys.iter()
+        .find_map(lookup)
+        .map(|(text, truncated)| (text.to_string(), truncated))
 }
 
 fn totals_sql(ns: &str) -> String {
@@ -280,7 +297,14 @@ struct Fetched {
     unavailable: Vec<Unavailable>,
 }
 
-async fn fetch(c: &Client, database: &str, query_id: i64) -> AppResult<Fetched> {
+/// `cache` — буфер сэмплера pgss узла (если сэмплер на узле запускался): из него берётся текст, в него же кладётся
+/// прочитанный с сервера. Блокировка короткая и никогда не держится через `await`.
+async fn fetch(
+    c: &Client,
+    database: &str,
+    query_id: i64,
+    cache: Option<&Mutex<StatementsBuffer>>,
+) -> AppResult<Fetched> {
     let pg = |e: tokio_postgres::Error| from_pg(&e);
     let h = head(c).await?;
     let caps = Caps::new(h.version_num);
@@ -299,16 +323,36 @@ async fn fetch(c: &Client, database: &str, query_id: i64) -> AppResult<Fetched> 
                 .await
                 .map_err(pg)?;
             let rows: Vec<Cumulative> = raw.iter().filter_map(row_from).collect();
-            let text = c
-                .query_opt(&text_sql(&pgss.schema), &[&query_id, &database])
-                .await
-                .map_err(pg)?
-                .map(|r| {
-                    (
-                        r.get::<_, String>(0),
-                        r.get::<_, Option<bool>>(1).unwrap_or(false),
-                    )
-                });
+            let keys: Vec<QueryKey> = rows.iter().map(|r| r.key).collect();
+            let cached = cache.and_then(|b| {
+                let b = b.lock_safe();
+                text_from_cache(&keys, |k| b.text(k))
+            });
+            let text = match cached {
+                Some(t) => Some(t),
+                None => {
+                    let read = c
+                        .query_opt(&text_sql(&pgss.schema, pgss.caps), &[&query_id, &database])
+                        .await
+                        .map_err(pg)?
+                        .and_then(|r| {
+                            let key = QueryKey {
+                                query_id,
+                                dbid: r.get(0),
+                                userid: r.get(1),
+                                toplevel: r.get::<_, Option<bool>>(2).unwrap_or(true),
+                            };
+                            let text = r.get::<_, Option<String>>(3)?;
+                            Some((key, text, r.get::<_, Option<bool>>(4).unwrap_or(false)))
+                        });
+                    // Прочитанный текст — в кеш узла: следующий опрос карточки и отчёты возьмут его оттуда.
+                    if let (Some(b), Some((key, text, truncated))) = (cache, &read) {
+                        b.lock_safe()
+                            .remember_texts([(*key, text.clone(), *truncated)]);
+                    }
+                    read.map(|(_, text, truncated)| (text, truncated))
+                }
+            };
             let tr = c
                 .query_one(&totals_sql(&pgss.schema), &[])
                 .await
@@ -395,10 +439,11 @@ pub async fn detail(
     query_id: i64,
 ) -> AppResult<QueryDetail> {
     let target = st.runtimes.diag_target(id, Some(member), false)?;
-    // Замыкание отдаёт будущее на любое время жизни соединения, поэтому база уходит в него владеемой строкой.
+    // Замыкание отдаёт будущее на любое время жизни соединения, поэтому база и буфер уходят в него владеемыми.
     let database = database.to_string();
+    let cache = st.statements.buffer(id, member);
     let f = on_member(st, id, &target, |c| {
-        Box::pin(async move { fetch(c, &database, query_id).await })
+        Box::pin(async move { fetch(c, &database, query_id, cache.as_deref()).await })
     })
     .await?;
     let mut d = QueryDetail::empty(&f.head);
@@ -657,6 +702,42 @@ mod tests {
         assert!(
             sql.contains(&format!("OR length(a.query) > {QUERY_LIMIT})")),
             "truncated учитывает срез QUERY_LIMIT: {sql}"
+        );
+    }
+
+    #[test]
+    fn text_comes_from_the_cache_by_the_first_cached_key() {
+        let keys = [key(7, 1, true), key(7, 2, false)];
+        assert_eq!(
+            text_from_cache(&keys, |_| None),
+            None,
+            "промах — чтение с сервера"
+        );
+        assert_eq!(
+            text_from_cache(&[], |_| Some((Arc::from("x"), false))),
+            None
+        );
+        let seen = std::cell::RefCell::new(Vec::new());
+        let hit = text_from_cache(&keys, |k| {
+            seen.borrow_mut().push(k.userid);
+            (k.userid == 2).then(|| (Arc::<str>::from("SELECT $1"), true))
+        });
+        assert_eq!(hit, Some(("SELECT $1".to_string(), true)));
+        assert_eq!(*seen.borrow(), [1, 2], "ключи — по порядку строк");
+    }
+
+    #[test]
+    fn text_sql_returns_the_key_of_the_text() {
+        let new = text_sql("public", PgssCaps::from_version("1.10").unwrap());
+        assert!(
+            new.starts_with("SELECT s.dbid, s.userid, s.toplevel,")
+                && new.contains("pg_stat_statements(true)"),
+            "{new}"
+        );
+        let old = text_sql("public", PgssCaps::from_version("1.8").unwrap());
+        assert!(
+            old.starts_with("SELECT s.dbid, s.userid, true,"),
+            "toplevel — с 1.9: {old}"
         );
     }
 
