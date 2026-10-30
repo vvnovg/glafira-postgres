@@ -150,7 +150,7 @@ export function PlanRunner({
   const [runs, setRuns] = useState<Run[]>([]);
   const [shown, setShown] = useState<number | null>(null);
   /** Открытое подтверждение яруса записи: таблицы пробного плана, `forceWrite` и вход пробы. */
-  const [confirm, setConfirm] = useState<{ relations: RelationRef[]; force: boolean; inputs: Inputs } | null>(null);
+  const [confirm, setConfirm] = useState<{ relations: RelationRef[]; force: boolean; inputs: Inputs; admin?: boolean } | null>(null);
   /** Ошибка запуска и текст, для которого он шёл: место ошибки разбора отмечается в нём, а не в текущем поле. */
   const [failed, setFailed] = useState<{ error: AppError; sql: string } | null>(null);
   const [writeHint, setWriteHint] = useState<WriteHint | null>(null);
@@ -237,10 +237,10 @@ export function PlanRunner({
   };
 
   /** Ярус записи: read-only профиль и реплика закрыты подсказкой (Rust проверит и сам), иначе — подтверждение. */
-  const openWrite = (relations: RelationRef[], force: boolean, from: Inputs) => {
+  const openWrite = (relations: RelationRef[], force: boolean, from: Inputs, admin = false) => {
     if (!canAct(profile)) setWriteHint("readOnly");
     else if (inRecovery) setWriteHint("replica");
-    else setConfirm({ relations, force, inputs: from });
+    else setConfirm({ relations, force, inputs: from, admin });
   };
 
   /** `EXPLAIN_WRITES`: повтор «как запись» пойдёт ярусом записи с подтверждением (таблицы — какие известны). */
@@ -279,7 +279,7 @@ export function PlanRunner({
       if (stale(from)) return;
       if (probe.tier === "write") {
         setReadProbe(null);
-        openWrite(probe.relations, false, from);
+        openWrite(probe.relations, false, from, probe.warnings.includes("adminFunction"));
         return;
       }
       setReadProbe(inputsKey(from));
@@ -412,7 +412,7 @@ export function PlanRunner({
         </p>
       )}
       {confirmOpen && profile && (
-        <AnalyzeConfirm connection={profile} relations={confirm.relations} busy={busy} onConfirm={(c) => void confirmed(c)} onCancel={() => setConfirm(null)} />
+        <AnalyzeConfirm connection={profile} relations={confirm.relations} admin={confirm.admin} busy={busy} onConfirm={(c) => void confirmed(c)} onCancel={() => setConfirm(null)} />
       )}
       {current && (
         <PlanView

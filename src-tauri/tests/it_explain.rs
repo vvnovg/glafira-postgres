@@ -314,6 +314,47 @@ async fn plan_and_analyze_read_tier_on_perf() {
     assert_eq!(e.details.as_deref(), Some("position 3"), "{e:?}");
 }
 
+/// Административная функция (спец. §15 п. 10): READ ONLY её не остановит, поэтому вызов в VERBOSE-плане пробы —
+/// ярус записи с предупреждением `adminFunction`. План без ANALYZE функцию не выполняет.
+#[tokio::test]
+async fn admin_function_call_moves_the_statement_to_the_write_tier() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st) =
+        common::open_server_as(&perf, "perf", common::APP_USER, common::APP_PASSWORD).await;
+    let m = member_of(&st).await;
+    for sql in [
+        "SELECT pg_reload_conf()",
+        "SELECT pg_catalog.pg_cancel_backend(pid) FROM pg_stat_activity WHERE pid = 0",
+    ] {
+        let r = explain::run::run(&st, "it", &req(&m, "perf", sql, Mode::Plan, Params::None))
+            .await
+            .unwrap();
+        assert_eq!(r.tier, Tier::Write, "{sql}");
+        assert!(
+            r.warnings.iter().any(|w| w == "adminFunction"),
+            "{sql}: {:?}",
+            r.warnings
+        );
+    }
+    let r = explain::run::run(
+        &st,
+        "it",
+        &req(
+            &m,
+            "perf",
+            "SELECT count(*) FROM pg_stat_activity",
+            Mode::Plan,
+            Params::None,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.tier, Tier::Read);
+    assert!(r.warnings.iter().all(|w| w != "adminFunction"));
+}
+
 #[tokio::test]
 async fn write_tier_rolls_back_journals_and_respects_guard() {
     let Some(perf) = common::perf_addr() else {

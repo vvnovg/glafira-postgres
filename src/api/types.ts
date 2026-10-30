@@ -893,7 +893,7 @@ export interface ExplainResult {
   raw: unknown;
   relations: RelationRef[];
   elapsedMs: number;
-  /** Ключи предупреждений: `genericPlan`, `probeWithoutReadOnly`. */
+  /** Ключи предупреждений: `genericPlan`, `probeWithoutReadOnly`, `adminFunction`. */
   warnings: string[];
 }
 

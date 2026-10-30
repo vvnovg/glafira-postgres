@@ -1410,7 +1410,8 @@
       },
       "warnings": {
         "genericPlan": "Generic plan (GENERIC_PLAN): no parameter values",
-        "probeWithoutReadOnly": "The probe plan was built outside READ ONLY (the server refused it there)"
+        "probeWithoutReadOnly": "The probe plan was built outside READ ONLY (the server refused it there)",
+        "adminFunction": "The statement calls an administrative function (terminating sessions, resetting statistics, slots, WAL, external calls): write tier"
       },
       "copyJson": "Copy JSON",
       "copyText": "Copy as text",
@@ -1439,6 +1440,7 @@
       },
       "confirm": {
         "title": "Execute the query and roll back",
+        "admin": "The statement calls an administrative function: terminating sessions, resetting statistics, slots, WAL or an external call. EXPLAIN ANALYZE will run it, and the rollback does not undo it.",
         "run": "Execute and roll back",
         "rollback": "Rows will change and be rolled back.",
         "tables": "Tables:",

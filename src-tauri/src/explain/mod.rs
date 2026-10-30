@@ -70,7 +70,7 @@ pub struct ExplainResult {
     pub raw: serde_json::Value,
     pub relations: Vec<RelationRef>,
     pub elapsed_ms: u64,
-    /// Ключи предупреждений интерфейса: `genericPlan`, `probeWithoutReadOnly`.
+    /// Ключи предупреждений интерфейса: `genericPlan`, `probeWithoutReadOnly`, `adminFunction`.
     pub warnings: Vec<String>,
 }
 

@@ -56,6 +56,25 @@ describe("PlanRunner", () => {
     expect(screen.getByText(/История/)).toBeInTheDocument();
   });
 
+  it("административная функция в плане пробы: ярус записи, окно подтверждения называет причину", async () => {
+    vi.mocked(api.explain).mockResolvedValueOnce(result({ tier: "write", warnings: ["adminFunction"] }));
+    const user = userEvent.setup();
+    renderWithClient(<PlanRunner connectionId="c" member="pg-1" database="perf" sql="SELECT pg_terminate_backend(pid) FROM pg_stat_activity" serverVersionNum={170_000} inRecovery={false} />);
+    await user.click(screen.getByRole("button", { name: "План с выполнением" }));
+    const dialog = await screen.findByRole("group", CONFIRM);
+    expect(within(dialog).getByText(/Запрос вызывает административную функцию/)).toBeInTheDocument();
+    expect(api.explain).toHaveBeenCalledTimes(1);
+  });
+
+  it("ярус записи без административной функции: строки о ней нет", async () => {
+    vi.mocked(api.explain).mockResolvedValueOnce(result({ tier: "write" }));
+    const user = userEvent.setup();
+    renderWithClient(<PlanRunner connectionId="c" member="pg-1" database="perf" sql="UPDATE t SET a = 1" serverVersionNum={170_000} inRecovery={false} />);
+    await user.click(screen.getByRole("button", { name: "План с выполнением" }));
+    const dialog = await screen.findByRole("group", CONFIRM);
+    expect(within(dialog).queryByText(/административную функцию/)).not.toBeInTheDocument();
+  });
+
   it("ярус записи: подтверждение со списком таблиц, затем ANALYZE; EXPLAIN_WRITES предлагает выполнить как запись", async () => {
     vi.mocked(api.explain).mockResolvedValueOnce(result({ tier: "write", relations: [{ schema: "shop", name: "balances" }] })).mockResolvedValueOnce(result({ mode: "analyze", tier: "write" }));
     const user = userEvent.setup();

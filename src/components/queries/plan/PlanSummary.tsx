@@ -9,6 +9,7 @@ import { renderText } from "./planText";
 const WARNING_KEYS: Record<string, string> = {
   genericPlan: "diag.plan.warnings.genericPlan",
   probeWithoutReadOnly: "diag.plan.warnings.probeWithoutReadOnly",
+  adminFunction: "diag.plan.warnings.adminFunction",
 };
 
 /**
