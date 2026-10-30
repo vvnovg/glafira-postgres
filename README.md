@@ -84,7 +84,7 @@ REST API Patroni `patroni` / `patroni-secret`. Демо-база `orders`, сх�
 `docker compose up --build`. Подробности — `dev/ssh/README.md`.
 
 ### Матрица версий (профиль `matrix`)
-Шесть одиночных серверов PostgreSQL 13…18 с той же демо-схемой `shop` (роль `glafira_diag`, база `orders`, `pg_stat_statements`);
+Шесть одиночных серверов PostgreSQL 13…18 с той же демо-схемой `shop` (роль `glafira_diag`, база `orders`; `pg_stat_statements` создан в базе `postgres`);
 порт — `55` и номер версии (`gp-pg13` — `localhost:5513`, …, `gp-pg18` — `localhost:5518`). В обычный `up` они не входят:
 ```bash
 docker compose -f dev/docker-compose.yml --profile matrix up -d --no-recreate
@@ -115,13 +115,13 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib    # Rust unit
 cargo deny --manifest-path src-tauri/Cargo.toml --config deny.toml check licenses   # лицензии зависимостей
 cargo deny --manifest-path crates/pg-advisor/Cargo.toml --config deny.toml check licenses
 GPG_IT_SINGLE=localhost:5460 GPG_IT_PRIMARY=localhost:5451 GPG_IT_REPLICA=localhost:5452 \
-GPG_IT_PATRONI=http://localhost:8011,http://localhost:8012,http://localhost:8013 GPG_IT_LAB=localhost:5470 GPG_IT_DOCKER=1 \
+GPG_IT_PATRONI=http://localhost:8011,http://localhost:8012,http://localhost:8013 GPG_IT_LAB=localhost:5470 GPG_IT_PERF=localhost:5471 GPG_IT_DOCKER=1 \
 GPG_IT_BASTION=localhost:2222 GPG_IT_SSH_KEYS=$PWD/dev/ssh/keys \
 GPG_IT_MATRIX=localhost:5513,localhost:5514,localhost:5515,localhost:5516,localhost:5517,localhost:5518 \
   cargo test --manifest-path src-tauri/Cargo.toml --tests -- --test-threads=1   # интеграционные (нужен стенд)
 ```
 Без переменной `GPG_IT_*` интеграционный тест пропускается (`it_ssh` — без `GPG_IT_BASTION` или `GPG_IT_SSH_KEYS`; он запускает
-настоящий OpenSSH 8.4+ из `PATH`; проход по матрице версий — без `GPG_IT_MATRIX`: по ней идут тесты каталога, `it_diag` (SQL каждого инструмента диагностики) и `it_sampler` (запрос сэмплера) на PG 13–18; сценарии лаборатории — без `GPG_IT_LAB`). `GPG_IT_DOCKER=1` разрешает тестам останавливать контейнеры,
+настоящий OpenSSH 8.4+ из `PATH`; проход по матрице версий — без `GPG_IT_MATRIX`: по ней идут тесты каталога, `it_diag` (SQL каждого инструмента диагностики) и `it_sampler` (запрос сэмплера) на PG 13–18; сценарии лаборатории — без `GPG_IT_LAB`; тесты «Запросов» и EXPLAIN на `pg-perf` — без `GPG_IT_PERF`, нагрузка `heavy.sql` им не нужна, и на CI они идут вместе с остальными). `GPG_IT_DOCKER=1` разрешает тестам останавливать контейнеры,
 делать switchover и promote; после них стенд возвращается в исходное состояние.
 
 Действия: `it_actions` (сессии и слоты; нужны `GPG_IT_SINGLE`, `GPG_IT_PRIMARY`, `GPG_IT_LAB`) и `it_patroni_actions` (Patroni; нужен `GPG_IT_PATRONI`). Сценарии `it_patroni_actions`, которые меняют кластер (switchover сейчас и по расписанию, restart реплики, пауза), идут только с `GPG_IT_DOCKER=1` и возвращают стенд сами: восстановление при любом выходе и ожидание, пока стенд придёт в норму. Failover останавливает PostgreSQL лидера и идёт только ещё и с `GPG_IT_FAILOVER=1`:
