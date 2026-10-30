@@ -1,5 +1,8 @@
 import type { PgssMeta, QueryKey, QuerySort } from "../../api/types";
 
+/** Размер блока PostgreSQL, байты: счётчики блоков pgss переводятся в байты по нему. */
+export const BLOCK_BYTES = 8192;
+
 /** Заголовок вкладки и первая строка таблицы: начало текста одной строкой; без текста — queryId. */
 export function queryTitle(text: string | null, queryId: string, max = 60): string {
   if (!text) return queryId;

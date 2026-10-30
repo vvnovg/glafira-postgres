@@ -1,8 +1,9 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toAppError } from "../../../api/client";
 import type { AppError, Confirmation, ExplainMode, ExplainParams, ExplainRequest, ExplainResult, ExplainTier, Member, RelationRef } from "../../../api/types";
 import { formatDuration, formatMs, formatTime } from "../../../lib/format";
+import { isStandby } from "../../../lib/topology";
 import { canAct, useConnectionProfile } from "../../../lib/useConnectionProfile";
 import { countParams, useExplain } from "../../../lib/useExplain";
 import { ErrorBanner } from "../../common/ErrorBanner";
@@ -30,6 +31,21 @@ interface Run {
 
 /** Подсказка у кнопок: `force` — после `EXPLAIN_WRITES` можно выполнить как запись; остальные закрывают ярус записи. */
 type WriteHint = "force" | "replica" | "readOnly";
+
+/**
+ * То, для чего получена проба: текст, значения параметров и `search_path`. Подтверждение яруса записи и «Выполнить как
+ * запись» относятся только к ним — запрос после подтверждения собирается отсюда, а не из текущих полей.
+ */
+interface Inputs {
+  sql: string;
+  values: (string | null)[];
+  searchPath: string;
+}
+
+/** Ключ входа для сравнения: значения — только у существующих `$N` (лишние в массиве ничего не меняют). */
+function inputsKey(i: Inputs): string {
+  return JSON.stringify([i.sql, Array.from({ length: countParams(i.sql) }, (_, k) => i.values[k] ?? null), i.searchPath.trim()]);
+}
 
 /** Место ошибки разбора в тексте: строка и колонка (с 1) и строка текста, разрезанная вокруг отмеченного символа. */
 interface ErrorPlace {
@@ -68,9 +84,14 @@ function errorPlace(sql: string, error: AppError | null): ErrorPlace | null {
 /**
  * Запуск EXPLAIN (спец. P3 §8): параметры (`$N` → поля или GENERIC_PLAN на 16+), срок, `search_path`, «План» и «План с
  * выполнением». Ярус записи: пробный план → подтверждение со списком таблиц (всегда, и не на prod) → ANALYZE.
- * `EXPLAIN_WRITES` после ANALYZE чтения даёт кнопку «Выполнить как запись» (`forceWrite`, тот же путь подтверждения);
- * `READ_ONLY` её не даёт — сервер запись не примет. История запусков — в пределах компонента.
- * `members` — участники топологии (резерв: выбор реплики для ANALYZE чтения, спец. §8.3 п. 3, в P3a не используется).
+ * `EXPLAIN_WRITES` — от ANALYZE чтения или уже от пробного плана — даёт кнопку «Выполнить как запись» (`forceWrite`, тот же
+ * путь подтверждения; Rust тогда проверяет ограду до пробы и строит её вне READ ONLY); `READ_ONLY` её не даёт — сервер
+ * запись не примет. Подтверждение и подсказки относятся к тексту, параметрам и `search_path` пробы: их правка закрывает
+ * открытый диалог и снимает подсказку. История запусков — в пределах компонента; ответ, пришедший после размонтирования
+ * (смена источника текста, узла или базы), отбрасывается.
+ * `members` — участники топологии: если узел — лидер, а проба показала ярус чтения, форма предлагает выполнить ANALYZE
+ * на реплике (спец. §8.3 п. 3; по умолчанию — текущий узел). `autoRun` — один пробный план, как только запуск доступен
+ * («Получить план» карточки); `onAutoRun` сообщает, что запрос принят.
  */
 export function PlanRunner({
   connectionId,
@@ -79,7 +100,10 @@ export function PlanRunner({
   sql,
   serverVersionNum,
   inRecovery,
+  members,
   onResult,
+  autoRun,
+  onAutoRun,
 }: {
   connectionId: string;
   member: string;
@@ -89,6 +113,8 @@ export function PlanRunner({
   inRecovery: boolean;
   members?: Member[] | null;
   onResult?: (r: ExplainResult) => void;
+  autoRun?: boolean;
+  onAutoRun?: () => void;
 }) {
   const { t } = useTranslation();
   const profile = useConnectionProfile(connectionId);
@@ -100,35 +126,66 @@ export function PlanRunner({
   const [searchPath, setSearchPath] = useState("");
   const [runs, setRuns] = useState<Run[]>([]);
   const [shown, setShown] = useState<number | null>(null);
-  /** Открытое подтверждение яруса записи: таблицы пробного плана и `forceWrite`. */
-  const [confirm, setConfirm] = useState<{ relations: RelationRef[]; force: boolean } | null>(null);
+  /** Открытое подтверждение яруса записи: таблицы пробного плана, `forceWrite` и вход пробы. */
+  const [confirm, setConfirm] = useState<{ relations: RelationRef[]; force: boolean; inputs: Inputs } | null>(null);
   const [error, setError] = useState<AppError | null>(null);
   const [writeHint, setWriteHint] = useState<WriteHint | null>(null);
-  /** Таблицы пробного плана того ANALYZE, что получил `EXPLAIN_WRITES`: их покажет подтверждение «как запись». */
-  const [forceRelations, setForceRelations] = useState<RelationRef[]>([]);
+  /** Таблицы пробного плана и вход того запуска, что получил `EXPLAIN_WRITES`: их покажет подтверждение «как запись». */
+  const [forceFrom, setForceFrom] = useState<{ relations: RelationRef[]; inputs: Inputs } | null>(null);
+  /** Ключ входа, чья проба показала ярус чтения: для него предлагается узел ANALYZE. */
+  const [readProbe, setReadProbe] = useState<string | null>(null);
+  const [analyzeOn, setAnalyzeOn] = useState(member);
   // Запуск из двух вызовов (пробный план и ANALYZE) — одна операция: кнопки ждут её целиком.
   const [running, setRunning] = useState(false);
   const explain = useExplain(connectionId);
   const seq = useRef(0);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
 
-  const params = (mode: ExplainMode): ExplainParams => {
-    if (count === 0) return { kind: "none" };
-    if (mode === "plan" && generic && canGeneric) return { kind: "generic" };
-    return { kind: "values", values: Array.from({ length: count }, (_, i) => values[i] ?? null) };
+  const inputs: Inputs = { sql, values, searchPath };
+  const key = inputsKey(inputs);
+  // Правка текста, значений или search_path: подтверждение и подсказки прошлой пробы к новому входу не относятся.
+  // `liveKey` читают продолжения запусков: проба, вернувшаяся после правки, диалог уже не открывает.
+  const liveKey = useRef(key);
+  useEffect(() => {
+    if (liveKey.current === key) return;
+    liveKey.current = key;
+    setConfirm(null);
+    setWriteHint(null);
+    setForceFrom(null);
+  }, [key]);
+  const stale = (from: Inputs) => !alive.current || inputsKey(from) !== liveKey.current;
+
+  const leader = !inRecovery && members?.find((m) => m.name === member)?.role === "primary";
+  const replicas = leader ? (members ?? []).filter((m) => m.name !== member && m.reachable && isStandby(m.role)) : [];
+  const offerReplica = replicas.length > 0 && readProbe === key;
+  const analyzeTarget = offerReplica && replicas.some((m) => m.name === analyzeOn) ? analyzeOn : member;
+
+  const params = (mode: ExplainMode, from: Inputs): ExplainParams => {
+    const n = countParams(from.sql);
+    if (n === 0) return { kind: "none" };
+    if (mode === "plan" && generic && serverVersionNum >= 160_000) return { kind: "generic" };
+    return { kind: "values", values: Array.from({ length: n }, (_, i) => from.values[i] ?? null) };
   };
-  const request = (mode: ExplainMode, confirmation: Confirmation, forceWrite: boolean): ExplainRequest => ({
-    member,
+  const request = (mode: ExplainMode, confirmation: Confirmation, forceWrite: boolean, from: Inputs, on = member): ExplainRequest => ({
+    member: on,
     database,
-    sql,
+    sql: from.sql,
     mode,
-    params: params(mode),
+    params: params(mode, from),
     timeoutS,
-    searchPath: searchPath.trim() || null,
+    searchPath: from.searchPath.trim() || null,
     confirmation,
     forceWrite,
   });
 
   const remember = (result: ExplainResult) => {
+    if (!alive.current) return;
     seq.current += 1;
     const run: Run = { id: seq.current, at: Date.now(), result };
     setRuns((r) => [run, ...r].slice(0, HISTORY));
@@ -136,7 +193,7 @@ export function PlanRunner({
     onResult?.(result);
   };
 
-  /** Запуск: прошлые ошибка и подсказка снимаются, новая ошибка — баннером. */
+  /** Запуск: прошлые ошибка и подсказка снимаются, новая ошибка — баннером (после размонтирования — никуда). */
   const guarded = async (step: () => Promise<void>) => {
     setError(null);
     setWriteHint(null);
@@ -144,56 +201,83 @@ export function PlanRunner({
     try {
       await step();
     } catch (e) {
-      setError(toAppError(e));
+      if (alive.current) setError(toAppError(e));
     } finally {
-      setRunning(false);
+      if (alive.current) setRunning(false);
     }
   };
 
   /** Ярус записи: read-only профиль и реплика закрыты подсказкой (Rust проверит и сам), иначе — подтверждение. */
-  const openWrite = (relations: RelationRef[], force: boolean) => {
+  const openWrite = (relations: RelationRef[], force: boolean, from: Inputs) => {
     if (!canAct(profile)) setWriteHint("readOnly");
     else if (inRecovery) setWriteHint("replica");
-    else setConfirm({ relations, force });
+    else setConfirm({ relations, force, inputs: from });
   };
 
-  const runPlan = () => guarded(async () => remember(await explain.mutateAsync(request("plan", NO_CONFIRMATION, false))));
+  /** `EXPLAIN_WRITES`: повтор «как запись» пойдёт ярусом записи с подтверждением (таблицы — какие известны). */
+  const offerForce = (e: unknown, relations: RelationRef[], from: Inputs) => {
+    if (toAppError(e).code !== "EXPLAIN_WRITES" || stale(from)) return;
+    setForceFrom({ relations, inputs: from });
+    setWriteHint("force");
+  };
 
-  /** ANALYZE: ярус определяет пробный план; чтение выполняется сразу, запись — только после подтверждения. */
-  const runAnalyze = () =>
-    guarded(async () => {
-      const probe = await explain.mutateAsync(request("plan", NO_CONFIRMATION, false));
+  const runPlan = () => {
+    const from = inputs;
+    return guarded(async () => {
+      const r = await explain.mutateAsync(request("plan", NO_CONFIRMATION, false, from));
+      if (alive.current) setReadProbe(r.tier === "read" ? inputsKey(from) : null);
+      remember(r);
+    });
+  };
+
+  /** ANALYZE: ярус определяет пробный план; чтение выполняется сразу (на выбранном узле), запись — после подтверждения. */
+  const runAnalyze = () => {
+    const from = inputs;
+    const on = analyzeTarget;
+    return guarded(async () => {
+      let probe: ExplainResult;
+      try {
+        probe = await explain.mutateAsync(request("plan", NO_CONFIRMATION, false, from));
+      } catch (e) {
+        // Побочный эффект уже при планировании: проба отказала в READ ONLY, таблиц не знаем.
+        offerForce(e, [], from);
+        throw e;
+      }
+      // Вход изменился, пока шла проба (или запуск размонтирован): ни подтверждения, ни ANALYZE прежнего текста.
+      if (stale(from)) return;
       if (probe.tier === "write") {
-        openWrite(probe.relations, false);
+        setReadProbe(null);
+        openWrite(probe.relations, false, from);
         return;
       }
+      setReadProbe(inputsKey(from));
       try {
-        remember(await explain.mutateAsync(request("analyze", NO_CONFIRMATION, false)));
+        remember(await explain.mutateAsync(request("analyze", NO_CONFIRMATION, false, from, on)));
       } catch (e) {
-        // Чтение записало (volatile-функция, триггер): повтор «как запись» пойдёт ярусом записи с подтверждением.
-        // Отказ самого пробного плана повтором не лечится — Rust снова построит его в READ ONLY, — поэтому только здесь.
-        if (toAppError(e).code === "EXPLAIN_WRITES") {
-          setForceRelations(probe.relations);
-          setWriteHint("force");
-        }
+        // Чтение записало (volatile-функция, триггер).
+        offerForce(e, probe.relations, from);
         throw e;
       }
     });
+  };
 
   const runAsWrite = () => {
+    if (!forceFrom) return;
     setError(null);
     setWriteHint(null);
-    openWrite(forceRelations, true);
+    openWrite(forceFrom.relations, true, forceFrom.inputs);
   };
 
   const confirmed = (c: Confirmation) => {
-    const force = confirm?.force ?? false;
+    if (!confirm) return;
+    const { force, inputs: from } = confirm;
     // Подтверждение остаётся открытым (кнопки ждут), пока ANALYZE идёт; закрывается итогом — результатом или ошибкой.
+    // Запрос — из входа пробы: подтверждали именно его.
     return guarded(async () => {
       try {
-        remember(await explain.mutateAsync(request("analyze", c, force)));
+        remember(await explain.mutateAsync(request("analyze", c, force, from)));
       } finally {
-        setConfirm(null);
+        if (alive.current) setConfirm(null);
       }
     });
   };
@@ -201,7 +285,27 @@ export function PlanRunner({
   const current = runs.find((r) => r.id === shown) ?? null;
   const place = errorPlace(sql, error);
   const busy = running || explain.isPending;
-  const idle = !busy && confirm === null && sql.trim() !== "";
+  // Профиль ещё читается: ни подсказки read-only, ни запуска — кнопки ждут.
+  const loading = profile === undefined;
+  const confirmOpen = confirm !== null && inputsKey(confirm.inputs) === key;
+  const idle = !busy && !loading && !confirmOpen && sql.trim() !== "";
+
+  // «Получить план» карточки: одна проба, как только запуск доступен. Флаг «принято» держит одну пробу на запрос и при
+  // повторном вызове эффекта (StrictMode, новая `onAutoRun`), пока родитель не снял `autoRun`.
+  const runPlanRef = useRef(runPlan);
+  runPlanRef.current = runPlan;
+  const autoTaken = useRef(false);
+  useEffect(() => {
+    if (!autoRun) {
+      autoTaken.current = false;
+      return;
+    }
+    if (!idle || autoTaken.current) return;
+    autoTaken.current = true;
+    onAutoRun?.();
+    void runPlanRef.current();
+  }, [autoRun, idle, onAutoRun]);
+
   return (
     <div className="plan-runner">
       <ParamsForm count={count} values={values} onChange={setValues} generic={generic} canGeneric={canGeneric} onGeneric={setGeneric} />
@@ -212,6 +316,7 @@ export function PlanRunner({
         <button type="button" disabled={!idle} onClick={() => void runAnalyze()}>
           {t("diag.plan.run.analyze")}
         </button>
+        {loading && <span className="muted">{t("common.loading")}</span>}
         <label className="inline">
           <span>{t("diag.plan.run.timeout")}</span>
           <select aria-label={t("diag.plan.run.timeout")} value={timeoutS} onChange={(e) => setTimeoutS(Number(e.target.value))}>
@@ -222,6 +327,19 @@ export function PlanRunner({
             ))}
           </select>
         </label>
+        {offerReplica && (
+          <label className="inline">
+            <span>{t("diag.plan.run.analyzeOn")}</span>
+            <select aria-label={t("diag.plan.run.analyzeOn")} value={analyzeTarget} disabled={busy} onChange={(e) => setAnalyzeOn(e.target.value)}>
+              {[member, ...replicas.map((m) => m.name)].map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+            {analyzeTarget !== member && <span className="muted">{t("diag.plan.run.replicaPlanDiffers")}</span>}
+          </label>
+        )}
         <details className="search-path">
           <summary>search_path</summary>
           <input type="text" aria-label="search_path" value={searchPath} placeholder={t("diag.plan.run.searchPathDefault")} onChange={(e) => setSearchPath(e.target.value)} />
@@ -240,7 +358,7 @@ export function PlanRunner({
           </pre>
         </div>
       )}
-      {writeHint === "force" && (
+      {writeHint === "force" && forceFrom && (
         <p className="diag-note" role="status">
           {t("diag.plan.run.writesHint")}{" "}
           <button type="button" disabled={!idle} onClick={runAsWrite}>
@@ -258,7 +376,7 @@ export function PlanRunner({
           {t("diag.plan.run.writeReadOnly")}
         </p>
       )}
-      {confirm && profile && (
+      {confirmOpen && profile && (
         <AnalyzeConfirm connection={profile} relations={confirm.relations} busy={busy} onConfirm={(c) => void confirmed(c)} onCancel={() => setConfirm(null)} />
       )}
       {current && <PlanView tree={current.result.plan} tier={current.result.tier} warnings={current.result.warnings} raw={current.result.raw} elapsedMs={current.result.elapsedMs} />}

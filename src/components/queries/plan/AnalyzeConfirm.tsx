@@ -12,6 +12,8 @@ export function AnalyzeConfirm({ connection, relations, busy, onConfirm, onCance
   return (
     <ConfirmDialog connection={connection} title={t("diag.plan.confirm.title")} confirmLabel={t("diag.plan.confirm.run")} danger busy={busy} onConfirm={onConfirm} onCancel={onCancel}>
       <p>{t("diag.plan.confirm.rollback")}</p>
+      {/* Таблиц нет («как запись» после отказа самой пробы — плана нет): строки «Таблицы:» тоже нет. */}
+      {relations.length > 0 && <p>{t("diag.plan.confirm.tables")}</p>}
       {relations.length > 0 && (
         <ul className="plain-list">
           {relations.map((r) => (

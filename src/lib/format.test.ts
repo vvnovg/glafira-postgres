@@ -151,10 +151,29 @@ describe("форматы по языку", () => {
 describe("formatMs", () => {
   it("миллисекунды с точностью по порядку, секунды от 1000 мс, длительность от минуты", () => {
     expect(formatMs(0.004)).toBe("<0,01 мс");
+    expect(formatMs(0.01)).toBe("0,01 мс");
     expect(formatMs(0.42)).toBe("0,42 мс");
     expect(formatMs(12.34)).toBe("12,3 мс");
     expect(formatMs(999)).toBe("999 мс");
+    expect(formatMs(1000)).toBe("1,00 с");
     expect(formatMs(1250)).toBe("1,25 с");
     expect(formatMs(90_000)).toBe("1 мин 30 с");
+  });
+
+  it("ноль — «0 мс», а не «<0,01 мс»; отрицательное — тоже ноль", () => {
+    expect(formatMs(0)).toBe("0 мс");
+    expect(formatMs(-0.001)).toBe("0 мс");
+  });
+
+  it("значение, округлившееся до границы, показывается следующей ступенью", () => {
+    expect(formatMs(9.994)).toBe("9,99 мс");
+    expect(formatMs(9.996)).toBe("10,0 мс");
+    expect(formatMs(99.94)).toBe("99,9 мс");
+    expect(formatMs(99.96)).toBe("100 мс");
+    expect(formatMs(999.4)).toBe("999 мс");
+    expect(formatMs(999.6)).toBe("1,00 с");
+    expect(formatMs(59_994)).toBe("59,99 с");
+    expect(formatMs(59_999.9)).toBe("1 мин");
+    expect(formatMs(90_600)).toBe("1 мин 31 с");
   });
 });

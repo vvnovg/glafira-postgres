@@ -79,8 +79,9 @@ export function PlanTreeView({ tree, selectedId, onSelect }: { tree: PlanTree; s
                   </div>
                 </td>
                 <td className="num">
+                  {/* Не выполнявшийся узел — прочерк, а не «<0,01 мс» и пустая полоса: времени у него нет. */}
                   {withActual ? (
-                    n.inclusiveMs !== null && n.exclusiveMs !== null ? (
+                    !n.neverExecuted && n.inclusiveMs !== null && n.exclusiveMs !== null ? (
                       <>
                         <span title={t("diag.plan.inclusive")}>{formatMs(n.inclusiveMs)}</span>
                         <span className="muted"> / {formatMs(n.exclusiveMs)}</span>

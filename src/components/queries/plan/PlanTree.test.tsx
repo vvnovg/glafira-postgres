@@ -61,6 +61,15 @@ describe("PlanTreeView", () => {
     await user.click(screen.getByRole("button", { name: "Свернуть" }));
     expect(screen.getAllByRole("row")).toHaveLength(2);
   });
+
+  it("не выполнявшийся узел: в колонке времени прочерк, без «<0,01 мс» и полосы доли", () => {
+    const tree = planTree();
+    tree.root.children[1] = planNode({ ...tree.root.children[1], neverExecuted: true, actual: { startupMs: 0, totalMs: 0, rows: 0, loops: 0 }, inclusiveMs: 0, exclusiveMs: 0, sharePct: 0 });
+    render(<PlanTreeView tree={tree} selectedId={null} onSelect={() => {}} />);
+    const time = screen.getAllByRole("row")[3].querySelectorAll("td")[1];
+    expect(time).toHaveTextContent(/^—$/);
+    expect(within(time).queryByRole("img")).toBeNull();
+  });
 });
 
 describe("PlanSummary и текст", () => {

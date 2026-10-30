@@ -1,21 +1,22 @@
-import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
 import type { ConnectionKind, Member, QueriesParams, QuerySort, QueryStat } from "../../api/types";
 import { formatBytes, formatCount, formatMs, formatPercent, formatTimestamp } from "../../lib/format";
-import { type QueriesReport, useQueriesReport } from "../../lib/useQueriesReport";
+import { useQueriesReport } from "../../lib/useQueriesReport";
 import { useStatementsSampler } from "../../lib/useStatementsSampler";
 import { useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { DiagHeader } from "../diag/DiagHeader";
 import { FindingsPanel } from "../diag/FindingsPanel";
 import { unavailableText } from "../diag/unavailable";
-import { QUERY_KEY_ID, queryTitle, sortAvailable } from "./queriesText";
+import { BLOCK_BYTES, QUERY_KEY_ID, queryTitle, sortAvailable } from "./queriesText";
 
 /** Интервал обновления режима «с момента сброса» по умолчанию, с. */
 const DEFAULT_INTERVAL_S = 10;
 const LIMITS = [50, 100, 200] as const;
+/** Ключи, тексты которых не удалось получить, перезапрашиваются не чаще этого, мс: постоянная ошибка не повторяется на каждом обновлении. */
+const TEXT_RETRY_MS = 60_000;
 
 interface Col {
   id: string;
@@ -31,8 +32,8 @@ const COLS: Col[] = [
   { id: "calls", sort: "calls", labelKey: "diag.queries.columns.calls", cell: (r) => formatCount(r.calls) },
   { id: "rowsPerCall", sort: "rowsPerCall", labelKey: "diag.queries.columns.rowsPerCall", cell: (r) => formatCount(r.rowsPerCall, 1) },
   { id: "hit", sort: "hitRatio", labelKey: "diag.queries.columns.hitRatio", cell: (r) => (r.hitRatio === null ? "—" : formatPercent(r.hitRatio * 100)) },
-  { id: "read", sort: "sharedRead", labelKey: "diag.queries.columns.read", cell: (r) => formatBytes(r.sharedRead * 8192) },
-  { id: "temp", sort: "tempWritten", labelKey: "diag.queries.columns.temp", cell: (r) => formatBytes(r.tempWritten * 8192) },
+  { id: "read", sort: "sharedRead", labelKey: "diag.queries.columns.read", cell: (r) => formatBytes(r.sharedRead * BLOCK_BYTES) },
+  { id: "temp", sort: "tempWritten", labelKey: "diag.queries.columns.temp", cell: (r) => formatBytes(r.tempWritten * BLOCK_BYTES) },
   { id: "wal", sort: "walBytes", labelKey: "diag.queries.columns.wal", cell: (r) => formatBytes(r.walBytes) },
   { id: "io", sort: "ioTime", labelKey: "diag.queries.columns.io", cell: (r) => formatMs(r.ioReadMs + r.ioWriteMs) },
   { id: "plan", sort: "planTime", labelKey: "diag.queries.columns.plan", cell: (r) => formatMs(r.totalPlanMs) },
@@ -46,8 +47,9 @@ const parseMode = (v: string): QueriesParams["mode"] => (v.startsWith("window:")
 
 /**
  * Инструмент «Запросы» (спец. P3 §4.7): общая шапка диагностики, режим и фильтры, таблица топа, находки. Отчёт «за
- * окно» обновляется по тику сэмплера pgss, на который вкладка подписана, пока смонтирована; тексты строк подгружаются
- * по ключам один раз на набор строк.
+ * окно» обновляется по тику сэмплера pgss, на который вкладка подписана, пока смонтирована. Тексты строк подгружаются по
+ * ключам один раз и хранятся здесь же (по ключу строки), а к строкам отчёта подмешиваются при отрисовке: обновление
+ * отчёта, ушедшее раньше ответа с текстами, их не затирает. Список баз копится из всех прочитанных отчётов узла.
  */
 export function QueriesView({
   connectionId,
@@ -67,66 +69,108 @@ export function QueriesView({
   onSelectMember: (m: string | null) => void;
 }) {
   const { t } = useTranslation();
-  const qc = useQueryClient();
   const open = useWorkspace((s) => s.open);
   const [params, setParams] = useState<QueriesParams>({ mode: { kind: "sinceReset" }, sort: "totalTime", limit: 50, database: null, toplevelOnly: true });
+  /** Колонка, по которой щёлкнули: «Доля» и «Всего» сортируют одинаково, стрелка — только у выбранной. */
+  const [sortCol, setSortCol] = useState("share");
   const [intervalS, setIntervalS] = useState<number | null>(DEFAULT_INTERVAL_S);
   const sampler = useStatementsSampler(connectionId, member, live);
   const q = useQueriesReport(connectionId, member, params, { active, live, intervalS, tickAtMs: sampler.live?.atMs ?? null });
   const report = q.data;
   const data = report?.data;
-  const window = params.mode.kind === "window";
+  const byTick = params.mode.kind === "window";
   const reportMember = report?.member ?? null;
 
-  // Тексты — по ключам без текста, один запрос на ключ; при смене узла набор запрошенных ключей сбрасывается.
+  // Тексты и базы — по узлу отчёта: при смене подключения или узла забываются. Ответ, пришедший для прежнего узла, отбрасывается.
+  const [texts, setTexts] = useState<{ owner: string; byId: ReadonlyMap<string, { text: string; truncated: boolean }> }>({ owner: "", byId: new Map() });
+  const [seenDbs, setSeenDbs] = useState<{ owner: string; names: ReadonlySet<string> }>({ owner: "", names: new Set() });
+  const owner = JSON.stringify([connectionId, reportMember]);
   const requested = useRef(new Set<string>());
+  const failedAt = useRef(new Map<string, number>());
+  const ownerRef = useRef(owner);
   useEffect(() => {
+    if (ownerRef.current === owner) return;
+    ownerRef.current = owner;
     requested.current.clear();
-  }, [connectionId, reportMember]);
+    failedAt.current.clear();
+  }, [owner]);
   useEffect(() => {
     if (!data || reportMember === null) return;
-    const keys = data.rows.filter((r) => r.text === null && !requested.current.has(QUERY_KEY_ID(r.key))).map((r) => r.key);
+    const now = Date.now();
+    const known = texts.owner === owner ? texts.byId : null;
+    const keys = data.rows
+      .filter((r) => {
+        const id = QUERY_KEY_ID(r.key);
+        if (r.text !== null || known?.has(id) || requested.current.has(id)) return false;
+        const failed = failedAt.current.get(id);
+        return failed === undefined || now - failed >= TEXT_RETRY_MS;
+      })
+      .map((r) => r.key);
     if (keys.length === 0) return;
-    keys.forEach((k) => requested.current.add(QUERY_KEY_ID(k)));
+    const ids = keys.map(QUERY_KEY_ID);
+    ids.forEach((id) => requested.current.add(id));
+    const asked = owner;
     api
       .queryTexts(connectionId, reportMember, keys)
-      .then((texts) => {
-        const byKey = new Map(texts.map((x) => [QUERY_KEY_ID(x.key), x]));
-        qc.setQueriesData<QueriesReport>({ queryKey: ["diag", connectionId, "queries"] }, (old) =>
-          old
-            ? {
-                ...old,
-                data: {
-                  ...old.data,
-                  rows: old.data.rows.map((r) => {
-                    const x = byKey.get(QUERY_KEY_ID(r.key));
-                    return x && x.text !== null ? { ...r, text: x.text, textTruncated: x.truncated } : r;
-                  }),
-                },
-              }
-            : old,
-        );
+      .then((got) => {
+        if (ownerRef.current !== asked) return;
+        setTexts((prev) => {
+          const byId = new Map(prev.owner === asked ? prev.byId : []);
+          for (const x of got) if (x.text !== null) byId.set(QUERY_KEY_ID(x.key), { text: x.text, truncated: x.truncated });
+          return { owner: asked, byId };
+        });
       })
-      // Тексты — украшение строк: при сбое остаётся queryId, а ключи освобождаются для следующего отчёта.
-      .catch(() => keys.forEach((k) => requested.current.delete(QUERY_KEY_ID(k))));
-  }, [data, connectionId, reportMember, qc]);
+      // Тексты — украшение строк: при сбое остаётся queryId, а ключи перезапрашиваются не раньше чем через TEXT_RETRY_MS.
+      .catch(() => {
+        if (ownerRef.current !== asked) return;
+        const at = Date.now();
+        ids.forEach((id) => {
+          requested.current.delete(id);
+          failedAt.current.set(id, at);
+        });
+      });
+  }, [data, connectionId, reportMember, owner, texts]);
+  useEffect(() => {
+    const names = (data?.rows ?? []).map((r) => r.datname).filter((d): d is string => d !== null);
+    setSeenDbs((prev) => {
+      const base = prev.owner === owner ? prev.names : new Set<string>();
+      if (prev.owner === owner && names.every((n) => base.has(n))) return prev;
+      return { owner, names: new Set([...base, ...names]) };
+    });
+  }, [data, owner]);
 
-  // Базы выбираются из строк отчёта; выбранная база остаётся в списке и тогда, когда в её отчёте строк нет.
-  const databases = useMemo(
-    () => Array.from(new Set([...(params.database ? [params.database] : []), ...(data?.rows ?? []).map((r) => r.datname).filter((d): d is string => d !== null)])).sort(),
-    [data, params.database],
-  );
-  const setSort = (sort: QuerySort) => setParams((p) => ({ ...p, sort }));
+  // Строки с подмешанными текстами: объект строки меняется только у тех, кому текст подставлен.
+  const rows = useMemo(() => {
+    const byId = texts.owner === owner ? texts.byId : null;
+    return (data?.rows ?? []).map((r) => {
+      const x = r.text === null ? byId?.get(QUERY_KEY_ID(r.key)) : undefined;
+      return x ? { ...r, text: x.text, textTruncated: x.truncated } : r;
+    });
+  }, [data, texts, owner]);
+  // Базы выбираются из всех прочитанных отчётов узла; выбранная база остаётся в списке и тогда, когда в её отчёте строк нет.
+  const databases = useMemo(() => {
+    const names = new Set(seenDbs.owner === owner ? seenDbs.names : []);
+    if (params.database) names.add(params.database);
+    return Array.from(names).sort();
+  }, [seenDbs, owner, params.database]);
+  const setSort = (col: Col) => {
+    if (!col.sort) return;
+    const sort = col.sort;
+    setSortCol(col.id);
+    setParams((p) => ({ ...p, sort }));
+  };
+  // Стрелка — у колонки, по которой щёлкнули, если её сортировка ещё действует; иначе (сброс сортировки сменой режима) — у первой подходящей.
+  const activeCol = COLS.find((c) => c.id === sortCol && c.sort === params.sort) ?? COLS.find((c) => c.sort === params.sort);
   const openQuery = (r: QueryStat) => {
     if (reportMember === null || r.datname === null) return;
     open({ kind: "query", connectionId, member: reportMember, database: r.datname, queryId: r.key.queryId, title: queryTitle(r.text, r.key.queryId) });
   };
-  const coverage = () => {
-    if (!window || !data) return null;
-    const want = params.mode.kind === "window" ? params.mode.s / 60 : 0;
+  // Покрытие — по режиму самого отчёта: при переключении в окно на экране ещё может быть отчёт «с момента сброса».
+  const coverage = (() => {
+    if (!data || data.mode.kind !== "window") return null;
     if (data.coverageS === null) return t("diag.queries.firstTick");
-    return t("diag.queries.coverage", { have: Math.round(data.coverageS / 60), want });
-  };
+    return t("diag.queries.coverage", { have: Math.round(data.coverageS / 60), want: data.mode.s / 60 });
+  })();
 
   return (
     <>
@@ -169,9 +213,9 @@ export function QueriesView({
             ))}
           </select>
         </label>
-        {coverage() && (
+        {coverage && (
           <span className="kind-badge" role="status">
-            {coverage()}
+            {coverage}
           </span>
         )}
         <label className="inline">
@@ -224,13 +268,15 @@ export function QueriesView({
                   <tr>
                     <th scope="col">{t("diag.queries.columns.query")}</th>
                     {COLS.map((c) => {
-                      const enabled = c.sort !== null && sortAvailable(c.sort, data.pgss, window);
-                      const current = c.sort === params.sort;
+                      const enabled = c.sort !== null && sortAvailable(c.sort, data.pgss, byTick);
+                      const current = c === activeCol;
+                      // Hit % сортируется по возрастанию (худшие сверху), остальные — по убыванию.
+                      const ascending = params.sort === "hitRatio";
                       return (
-                        <th key={c.id} scope="col" className="num" aria-sort={current ? (params.sort === "hitRatio" ? "ascending" : "descending") : undefined}>
-                          <button type="button" className="link" disabled={!enabled} title={enabled ? undefined : t("diag.queries.sortUnavailable")} onClick={() => c.sort && setSort(c.sort)}>
+                        <th key={c.id} scope="col" className="num" aria-sort={current ? (ascending ? "ascending" : "descending") : undefined}>
+                          <button type="button" className="link" disabled={!enabled} title={enabled ? undefined : t("diag.queries.sortUnavailable")} onClick={() => setSort(c)}>
                             {t(c.labelKey)}
-                            {current ? " ▾" : ""}
+                            {current ? (ascending ? " ▴" : " ▾") : ""}
                           </button>
                         </th>
                       );
@@ -238,7 +284,7 @@ export function QueriesView({
                   </tr>
                 </thead>
                 <tbody>
-                  {data.rows.map((r) => (
+                  {rows.map((r) => (
                     <tr key={QUERY_KEY_ID(r.key)}>
                       <td className="diag-query-cell" title={r.text ?? undefined}>
                         <button type="button" className="link mono" onClick={() => openQuery(r)} disabled={reportMember === null || r.datname === null}>
@@ -255,7 +301,7 @@ export function QueriesView({
                   ))}
                 </tbody>
               </table>
-              {data.rows.length === 0 && <p className="empty">{window ? t("diag.queries.emptyWindow") : t("diag.queries.empty")}</p>}
+              {data.rows.length === 0 && <p className="empty">{byTick ? t("diag.queries.emptyWindow") : t("diag.queries.empty")}</p>}
             </div>
           )}
           {data.pgss && (

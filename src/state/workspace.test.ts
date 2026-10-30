@@ -132,4 +132,20 @@ describe("workspace", () => {
     closeForConnection("a");
     expect(useWorkspace.getState().tabs.map((t) => t.id)).toEqual(["diag:b:pulse"]);
   });
+
+  it("retitle меняет заголовок вкладки запроса, не трогая активную и вкладки других видов", () => {
+    const { open, retitle } = useWorkspace.getState();
+    open({ kind: "query", connectionId: "c", member: "pg-1", database: "perf", queryId: "7" });
+    open({ kind: "settings" });
+    const id = "query:c:pg-1:perf:7";
+    retitle(id, "SELECT 1");
+    expect(useWorkspace.getState().tabs[0]).toMatchObject({ id, kind: "query", queryId: "7", title: "SELECT 1" });
+    expect(useWorkspace.getState().activeId).toBe("settings");
+    // Тот же заголовок — состояние не меняется (подписчики вкладок не перерисовываются).
+    const before = useWorkspace.getState().tabs;
+    retitle(id, "SELECT 1");
+    expect(useWorkspace.getState().tabs).toBe(before);
+    retitle("settings", "x");
+    expect(useWorkspace.getState().tabs[1]).toEqual({ kind: "settings", id: "settings" });
+  });
 });

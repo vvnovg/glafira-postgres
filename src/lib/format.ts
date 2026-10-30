@@ -106,12 +106,30 @@ export function formatDuration(seconds: number | null): string {
   return parts.join(" ");
 }
 
-/** Миллисекунды: до 10 — два знака, до 1000 — один, дальше секунды с двумя знаками, от минуты — длительность. */
+/** Ступени миллисекунд: знаков после запятой и верхняя граница ступени (не включая). */
+const MS_TIERS: [number, number][] = [
+  [2, 10],
+  [1, 100],
+  [0, 1000],
+];
+
+/**
+ * Миллисекунды; точность — по величине (около трёх значащих цифр), одно правило для всех мест:
+ * - ровно 0 (и отрицательное — сервер может отдать −0,001) — «0 мс»; больше 0, но меньше 0,01 — «<0,01 мс», а не ноль;
+ * - меньше 10 мс — два знака («0,42 мс»), меньше 100 — один («12,3 мс»), меньше 1000 — целые («999 мс»);
+ * - от 1000 мс — секунды с двумя знаками («1,00 с» ровно на 1000, «1,25 с»); от минуты — длительность («1 мин 30 с»).
+ * Ступень выбирается по уже округлённому значению: число, которое при показе округлилось бы до границы, показывается
+ * следующей ступенью (9,996 → «10,0 мс», 999,6 → «1,00 с», 59 999,9 → «1 мин»), а не «10,00 мс», «1 000 мс», «60,00 с».
+ */
 export function formatMs(ms: number): string {
-  if (ms >= 60_000) return formatDuration(ms / 1000);
-  if (ms >= 1000) return `${num(ms / 1000, 2)} ${i18n.t("diag.duration.secShort")}`;
-  if (ms >= 100) return `${num(ms, 0)} ${i18n.t("diag.duration.msShort")}`;
-  if (ms >= 10) return `${num(ms, 1)} ${i18n.t("diag.duration.msShort")}`;
-  if (ms >= 0.01) return `${num(ms, 2)} ${i18n.t("diag.duration.msShort")}`;
-  return `<${num(0.01, 2)} ${i18n.t("diag.duration.msShort")}`;
+  const msShort = i18n.t("diag.duration.msShort");
+  if (ms <= 0) return `0 ${msShort}`;
+  if (ms < 0.01) return `<${num(0.01, 2)} ${msShort}`;
+  for (const [digits, below] of MS_TIERS) {
+    if (Number(ms.toFixed(digits)) < below) return `${num(ms, digits)} ${msShort}`;
+  }
+  const s = ms / 1000;
+  if (Number(s.toFixed(2)) < 60) return `${num(s, 2)} ${i18n.t("diag.duration.secShort")}`;
+  // Длительность считает целые секунды: округление, а не отбрасывание, — как у ступеней выше.
+  return formatDuration(Math.round(s));
 }

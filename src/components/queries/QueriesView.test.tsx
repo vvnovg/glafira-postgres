@@ -113,13 +113,81 @@ describe("QueriesView", () => {
     await waitFor(() => expect(api.runDiagnostic).toHaveBeenLastCalledWith("c", expect.objectContaining({ queries: expect.objectContaining({ mode: { kind: "window", s: 900 }, sort: "totalTime" }) })));
   });
 
-  it("тексты, которые не удалось получить, таблицу не ломают: остаётся queryId", async () => {
-    vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport(data(), { member: "pg-1" }));
+  it("тексты, которые не удалось получить, таблицу не ломают: остаётся queryId; ошибка не повторяется на каждом обновлении", async () => {
+    // Каждый отчёт — новый (счётчики растут): строки без текста приходят снова.
+    let n = 0;
+    vi.mocked(api.runDiagnostic).mockImplementation(async () => diagReport(data({ rows: [row("1", { calls: 100 + n++ }), row("2", { text: "select 2" })] }), { member: "pg-1" }));
     vi.mocked(api.queryTexts).mockRejectedValue({ code: "TIMEOUT", message: "x", retryable: true });
+    const user = userEvent.setup();
     renderWithClient(view());
     await waitFor(() => expect(api.queryTexts).toHaveBeenCalledTimes(1));
     expect(screen.getByRole("button", { name: "1" })).toBeInTheDocument();
     expect(screen.getByText("select 2")).toBeInTheDocument();
+    // Новый отчёт (ручное обновление) с той же строкой без текста: ключ после сбоя сразу не перезапрашивается.
+    const reads = vi.mocked(api.runDiagnostic).mock.calls.length;
+    await user.click(screen.getByRole("button", { name: "Обновить" }));
+    await waitFor(() => expect(vi.mocked(api.runDiagnostic).mock.calls.length).toBeGreaterThan(reads));
+    await waitFor(() => expect(screen.getByRole("table", { name: "Запросы" })).toHaveTextContent("101"));
+    await act(() => new Promise((r) => setTimeout(r, 0)));
+    expect(api.queryTexts).toHaveBeenCalledTimes(1);
+  });
+
+  it("текст, полученный по ключу, переживает обновление отчёта, ушедшее раньше ответа с текстами", async () => {
+    let answer: (v: unknown) => void = () => {};
+    vi.mocked(api.queryTexts).mockReturnValue(new Promise((r) => { answer = r; }) as never);
+    let refreshed: (v: unknown) => void = () => {};
+    vi.mocked(api.runDiagnostic)
+      .mockResolvedValueOnce(diagReport(data(), { member: "pg-1" }))
+      .mockReturnValueOnce(new Promise((r) => { refreshed = r; }) as never);
+    const user = userEvent.setup();
+    renderWithClient(view());
+    await waitFor(() => expect(api.queryTexts).toHaveBeenCalledTimes(1));
+    // Обновление уходит, пока тексты ещё читаются, а приходит после них; его строки — снова без текста.
+    await user.click(screen.getByRole("button", { name: "Обновить" }));
+    await waitFor(() => expect(api.runDiagnostic).toHaveBeenCalledTimes(2));
+    await act(async () => answer([{ key: { queryId: "1", dbid: 5, userid: 10, toplevel: true }, text: "select 1 from t", truncated: false }]));
+    expect(await screen.findByText("select 1 from t")).toBeInTheDocument();
+    await act(async () => refreshed(diagReport(data({ rows: [row("1", { calls: 101 })] }), { member: "pg-1" })));
+    await waitFor(() => expect(screen.queryByText("select 2")).toBeNull());
+    expect(screen.getByText("select 1 from t")).toBeInTheDocument();
+    expect(api.queryTexts).toHaveBeenCalledTimes(1);
+  });
+
+  it("список баз копится по отчётам; стрелка сортировки — только у выбранной колонки, Hit % — по возрастанию", async () => {
+    vi.mocked(api.runDiagnostic).mockImplementation(async (_id, req) =>
+      diagReport(data({ rows: req.queries?.database === "shop" ? [row("2", { datname: "shop", text: "select 2" })] : [row("1", { datname: "perf", text: "select 1" }), row("2", { datname: "shop", text: "select 2" })] }), { member: "pg-1" }),
+    );
+    const user = userEvent.setup();
+    renderWithClient(view());
+    await screen.findByText("select 2");
+    await user.selectOptions(screen.getByRole("combobox", { name: "База" }), "shop");
+    await waitFor(() => expect(api.runDiagnostic).toHaveBeenLastCalledWith("c", expect.objectContaining({ queries: expect.objectContaining({ database: "shop" }) })));
+    await waitFor(() => expect(screen.queryByText("select 1")).toBeNull());
+    // Отчёт по shop не содержит perf, но база, уже встречавшаяся на узле, остаётся в выборе.
+    expect(within(screen.getByRole("combobox", { name: "База" })).getAllByRole("option").map((o) => o.textContent)).toEqual(["Все базы", "perf", "shop"]);
+    // По умолчанию — «Доля»; «Всего» сортирует так же, но стрелка — только у той, по которой щёлкнули.
+    const sorted = () => screen.getAllByRole("columnheader").filter((h) => h.hasAttribute("aria-sort"));
+    expect(sorted().map((h) => h.textContent)).toEqual(["Доля ▾"]);
+    await user.click(within(screen.getByRole("columnheader", { name: /Всего/ })).getByRole("button"));
+    expect(sorted().map((h) => [h.textContent, h.getAttribute("aria-sort")])).toEqual([["Всего ▾", "descending"]]);
+    await user.click(within(screen.getByRole("columnheader", { name: /Hit %/ })).getByRole("button"));
+    expect(sorted().map((h) => [h.textContent, h.getAttribute("aria-sort")])).toEqual([["Hit % ▴", "ascending"]]);
+  });
+
+  it("покрытие окна — по режиму показанного отчёта: отчёт «с момента сброса» на месте окна пометки не даёт", async () => {
+    let finish: (v: unknown) => void = () => {};
+    vi.mocked(api.runDiagnostic).mockImplementation(async (_id, req) =>
+      req.queries?.mode.kind === "window" ? (new Promise((r) => { finish = r; }) as never) : diagReport(data(), { member: "pg-1" }),
+    );
+    const user = userEvent.setup();
+    renderWithClient(view());
+    await screen.findByText("select 2");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Режим" }), "window:300");
+    // Пока окно читается, на экране прежний отчёт — «Идёт первый тик…» не мелькает.
+    await waitFor(() => expect(api.runDiagnostic).toHaveBeenLastCalledWith("c", expect.objectContaining({ queries: expect.objectContaining({ mode: { kind: "window", s: 300 } }) })));
+    expect(screen.queryByText("Идёт первый тик сэмплера…")).toBeNull();
+    await act(async () => finish(diagReport(data({ mode: { kind: "window", s: 300 }, coverageS: null, ticks: 0, rows: [] }), { member: "pg-1" })));
+    expect(await screen.findByText("Идёт первый тик сэмплера…")).toBeInTheDocument();
   });
 
   it("без pg_stat_statements — строка «недоступно», таблицы нет", async () => {

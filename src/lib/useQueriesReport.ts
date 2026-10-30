@@ -1,5 +1,5 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { api } from "../api/client";
 import type { DiagReport, QueriesData, QueriesParams } from "../api/types";
 import { diagRefetchInterval } from "./useDiagnostic";
@@ -11,7 +11,9 @@ export const queriesKey = (connectionId: string, member: string | null, params: 
 
 /**
  * Отчёт «Запросы» (спец. P3 §3.2): «с момента сброса» перечитывается по интервалу шапки, «за окно» — по тику сэмплера
- * (`tickAtMs`), потому что без нового тика буфер не меняется.
+ * (`tickAtMs`), потому что без нового тика буфер не меняется. «Пауза» (`intervalS === null`) останавливает оба: и
+ * интервал, и тики. Вкладка, снова ставшая видимой, догоняет: окно — по последнему тику (эффект тика зависит от
+ * `active`), «с момента сброса» — если данные устарели больше чем на интервал, как у `useDiagnostic`.
  */
 export function useQueriesReport(
   connectionId: string,
@@ -19,18 +21,30 @@ export function useQueriesReport(
   params: QueriesParams,
   opts: { active: boolean; live: boolean; intervalS: number | null; tickAtMs: number | null },
 ) {
-  const window = params.mode.kind === "window";
+  const byTick = params.mode.kind === "window";
   const q = useQuery({
     queryKey: queriesKey(connectionId, member, params),
     queryFn: async () => (await api.runDiagnostic(connectionId, { tool: "queries", member, queries: params })) as QueriesReport,
     enabled: opts.live,
     // Прошлый ответ остаётся на экране, пока идёт новый и если новый упал («устарело»).
     placeholderData: keepPreviousData,
-    refetchInterval: (query) => (window ? false : diagRefetchInterval(opts.active, opts.intervalS, query.state.error)),
+    refetchInterval: (query) => (byTick ? false : diagRefetchInterval(opts.active, opts.intervalS, query.state.error)),
   });
-  const { refetch } = q;
+  const { refetch, dataUpdatedAt, error } = q;
+  const { active, live, intervalS, tickAtMs } = opts;
+  const paused = intervalS === null;
   useEffect(() => {
-    if (window && opts.live && opts.active && opts.tickAtMs !== null) void refetch({ cancelRefetch: false });
-  }, [window, opts.live, opts.active, opts.tickAtMs, refetch]);
+    if (byTick && live && active && !paused && tickAtMs !== null) void refetch({ cancelRefetch: false });
+  }, [byTick, live, active, paused, tickAtMs, refetch]);
+  const wasActive = useRef(active);
+  useEffect(() => {
+    const shown = active && !wasActive.current;
+    wasActive.current = active;
+    // Пауза, закрытое подключение и отказ во входе отчёт не обновляют; без данных читать нечего — это дело первого запроса.
+    const ms = diagRefetchInterval(true, intervalS, error);
+    if (byTick || !shown || !live || dataUpdatedAt === 0 || ms === false) return;
+    // Идущий запрос не отменяется: он и принесёт свежие данные.
+    if (Date.now() - dataUpdatedAt > ms) void refetch({ cancelRefetch: false });
+  }, [byTick, active, intervalS, live, dataUpdatedAt, error, refetch]);
   return q;
 }

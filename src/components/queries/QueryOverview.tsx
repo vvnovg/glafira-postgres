@@ -2,9 +2,11 @@ import { useTranslation } from "react-i18next";
 import type { QueryDetail, QueryStat, RelationRef } from "../../api/types";
 import { formatBytes, formatCount, formatDuration, formatMs, formatPercent } from "../../lib/format";
 import { useWorkspace } from "../../state/workspace";
+import { CopyButton } from "../common/CopyButton";
 import { FindingsPanel } from "../diag/FindingsPanel";
 import { unavailableText } from "../diag/unavailable";
 import { Sparkline } from "./Sparkline";
+import { BLOCK_BYTES } from "./queriesText";
 
 /** Строки метрик: ключ подписи — литералом (правило словарей), значение — из строки pgss. */
 const METRICS: { id: string; labelKey: string; of: (s: QueryStat) => string }[] = [
@@ -15,16 +17,17 @@ const METRICS: { id: string; labelKey: string; of: (s: QueryStat) => string }[] 
   { id: "stddev", labelKey: "diag.query.metric.stddev", of: (s) => (s.stddevExecMs === null ? "—" : formatMs(s.stddevExecMs)) },
   { id: "rowsPerCall", labelKey: "diag.query.metric.rowsPerCall", of: (s) => formatCount(s.rowsPerCall, 1) },
   { id: "hitRatio", labelKey: "diag.query.metric.hitRatio", of: (s) => (s.hitRatio === null ? "—" : formatPercent(s.hitRatio * 100)) },
-  { id: "read", labelKey: "diag.query.metric.read", of: (s) => `${formatBytes(s.sharedRead * 8192)} / ${formatBytes(s.sharedWritten * 8192)}` },
-  { id: "temp", labelKey: "diag.query.metric.temp", of: (s) => formatBytes(s.tempWritten * 8192) },
+  { id: "read", labelKey: "diag.query.metric.read", of: (s) => `${formatBytes(s.sharedRead * BLOCK_BYTES)} / ${formatBytes(s.sharedWritten * BLOCK_BYTES)}` },
+  { id: "temp", labelKey: "diag.query.metric.temp", of: (s) => formatBytes(s.tempWritten * BLOCK_BYTES) },
   { id: "wal", labelKey: "diag.query.metric.wal", of: (s) => formatBytes(s.walBytes) },
   { id: "planning", labelKey: "diag.query.metric.planning", of: (s) => formatMs(s.totalPlanMs) },
   { id: "jit", labelKey: "diag.query.metric.jit", of: (s) => (s.jitMs === null ? "—" : formatMs(s.jitMs)) },
 ];
 
 /**
- * Обзор карточки (спец. P3 §7.3): текст, метрики (с момента сброса и за час), история, находки, разбивка, экземпляры,
- * ожидания, таблицы (из последнего плана вкладки; `null` — плана ещё не было).
+ * Обзор карточки (спец. P3 §7.3): текст (с копированием), метрики (с момента сброса и за час), история (промежутки
+ * сэмплера рвут линию), находки, разбивка, экземпляры, ожидания, таблицы (из последнего плана вкладки; `null` — плана ещё
+ * не было: «Получить план» строит пробный план). `onPlan` только открывает подвкладку «План», `onGetPlan` — и запускает пробу.
  */
 export function QueryOverview({
   connectionId,
@@ -33,6 +36,7 @@ export function QueryOverview({
   detail,
   relations,
   onPlan,
+  onGetPlan,
   onConsole,
 }: {
   connectionId: string;
@@ -41,6 +45,7 @@ export function QueryOverview({
   detail: QueryDetail;
   relations: RelationRef[] | null;
   onPlan: () => void;
+  onGetPlan: () => void;
   onConsole: () => void;
 }) {
   const { t } = useTranslation();
@@ -68,6 +73,7 @@ export function QueryOverview({
           <button type="button" disabled={detail.text === null} onClick={onConsole}>
             {t("diag.query.openConsole")}
           </button>
+          {detail.text !== null && <CopyButton text={detail.text} label={t("diag.query.copyText")} />}
         </div>
       </section>
       <FindingsPanel connectionId={connectionId} findings={findings} member={member} />
@@ -107,8 +113,8 @@ export function QueryOverview({
       )}
       <section className="query-history">
         <h3>{t("diag.query.history")}</h3>
-        <Sparkline points={detail.history.map((p) => ({ atMs: p.atMs, value: p.calls }))} label={t("diag.query.historyCalls")} />
-        <Sparkline points={detail.history.map((p) => ({ atMs: p.atMs, value: p.meanExecMs }))} label={t("diag.query.historyMean")} />
+        <Sparkline points={detail.history.map((p) => ({ atMs: p.atMs, value: p.calls }))} gaps={detail.gaps} label={t("diag.query.historyCalls")} />
+        <Sparkline points={detail.history.map((p) => ({ atMs: p.atMs, value: p.meanExecMs }))} gaps={detail.gaps} label={t("diag.query.historyMean")} />
         {detail.history.length === 0 && <p className="muted">{t("diag.query.noHistory")}</p>}
         {detail.gaps.length > 0 && <p className="muted">{t("diag.query.gaps", { count: detail.gaps.length })}</p>}
       </section>
@@ -220,7 +226,7 @@ export function QueryOverview({
         {relations === null ? (
           <p className="muted">
             {t("diag.query.tablesAfterPlan")}{" "}
-            <button type="button" className="link" onClick={onPlan}>
+            <button type="button" className="link" onClick={onGetPlan}>
               {t("diag.query.getPlan")}
             </button>
           </p>

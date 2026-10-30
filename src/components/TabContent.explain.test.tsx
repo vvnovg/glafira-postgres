@@ -30,12 +30,15 @@ describe("TabContent explain", () => {
 
   it("скрытая вкладка список баз не читает; при возвращении читает ровно один раз", async () => {
     const tab = { kind: "explain", connectionId: "c", id: "explain:c" } as const;
-    const { rerender } = renderWithClient(<TabContent tab={tab} active={false} />);
+    const { rerender, client } = renderWithClient(<TabContent tab={tab} active={false} />);
     // Топология прочитана и консоль нарисована; даём пройти макрозадаче — запрос баз, будь он разрешён, уже ушёл бы.
     expect(await screen.findByRole("heading", { level: 2, name: "Консоль EXPLAIN" })).toBeInTheDocument();
     await act(() => new Promise((r) => setTimeout(r, 0)));
     expect(api.listDatabases).not.toHaveBeenCalled();
     rerender(<TabContent tab={tab} active />);
     await vi.waitFor(() => expect(api.listDatabases).toHaveBeenCalledTimes(1));
+    // Всё успокоилось — второго чтения так и не было.
+    await vi.waitFor(() => expect(client.isFetching()).toBe(0));
+    expect(api.listDatabases).toHaveBeenCalledTimes(1);
   });
 });

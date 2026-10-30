@@ -98,6 +98,9 @@ export function ExplainTab({
   const memberInfo = members.find((m) => m.name === nodeName);
   const inRecovery = memberInfo ? memberInfo.role !== "primary" : false;
   const serverVersionNum = versionNum(memberInfo?.serverVersion);
+  // Смена узла или базы забывает прошлый запуск совсем (его история ушла вместе с запуском прежнего узла и базы), и
+  // возврат к ним план не воскрешает: сброс при отрисовке, без эффекта.
+  if (last && (last.node !== nodeName || last.db !== dbName)) setLast(null);
   // Для «Скопировать для LLM» план идёт только пока консоль ещё в том состоянии, для которого он построен.
   const lastPlan = last && last.sql === sql && last.node === nodeName && last.db === dbName ? last.plan : null;
 

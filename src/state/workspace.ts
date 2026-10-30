@@ -65,6 +65,11 @@ interface WorkspaceState {
   /** Закрывает все вкладки подключения (например, после его удаления). */
   closeForConnection: (connectionId: string) => void;
   activate: (id: string) => void;
+  /**
+   * Заголовок вкладки запроса (начало текста): карточка ставит его, когда текст прочитан, а вкладка открыта без него
+   * (из находки — только queryId). Тот же заголовок и вкладки других видов не трогаются.
+   */
+  retitle: (id: string, title: string) => void;
 }
 
 export const useWorkspace = create<WorkspaceState>((set) => ({
@@ -97,4 +102,10 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
       return { tabs, activeId };
     }),
   activate: (id) => set({ activeId: id }),
+  retitle: (id, title) =>
+    set((s) => {
+      const tab = s.tabs.find((t) => t.id === id);
+      if (!tab || tab.kind !== "query" || tab.title === title) return s;
+      return { tabs: s.tabs.map((t) => (t.id === id ? { ...tab, title } : t)) };
+    }),
 }));

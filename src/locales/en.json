@@ -1279,6 +1279,8 @@
     },
     "query": {
       "heading": "Query",
+      "memberGone": "Node {{member}} is no longer in the connection's topology",
+      "openOn": "Open on node",
       "sections": "Query sections",
       "overview": "Overview",
       "plan": "Plan",
@@ -1286,6 +1288,7 @@
       "gone": "The query is no longer in pg_stat_statements",
       "openConsole": "Open in console",
       "copyLlm": "Copy for LLM",
+      "copyText": "Copy the query text",
       "metrics": "Metrics",
       "sinceReset": "Since reset",
       "lastHour": "Last 60 min",
@@ -1421,6 +1424,8 @@
         "plan": "Plan",
         "analyze": "Plan with execution",
         "timeout": "Timeout",
+        "analyzeOn": "Run on node",
+        "replicaPlanDiffers": "the plan on a replica may differ",
         "searchPathDefault": "server default",
         "writesHint": "The query writes data in a read-only transaction.",
         "asWrite": "Run as a write",
@@ -1431,7 +1436,8 @@
       "confirm": {
         "title": "Execute the query and roll back",
         "run": "Execute and roll back",
-        "rollback": "Rows will change and be rolled back. Tables:",
+        "rollback": "Rows will change and be rolled back.",
+        "tables": "Tables:",
         "sideEffects": "Rollback does not undo fired triggers, sequence advances, NOTIFY and external calls; locks are held while the query runs."
       },
       "history": {

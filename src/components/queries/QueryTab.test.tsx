@@ -100,6 +100,52 @@ describe("QueryTab", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
+  it("вкладка, открытая без текста, получает заголовок по тексту; свой заголовок не трогается", async () => {
+    vi.mocked(api.queryDetail).mockResolvedValue(detail());
+    useWorkspace.getState().open({ kind: "query", connectionId: "c", member: "pg-1", database: "perf", queryId: "7" });
+    useWorkspace.getState().open({ kind: "query", connectionId: "c", member: "pg-2", database: "perf", queryId: "7", title: "мой заголовок" });
+    const first = renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
+    await waitFor(() => expect(useWorkspace.getState().tabs[0]).toMatchObject({ title: "SELECT * FROM shop.customers WHERE id = $1" }));
+    first.unmount();
+    renderWithClient(<QueryTab connectionId="c" member="pg-2" database="perf" queryId="7" active />);
+    await screen.findByText("SELECT * FROM shop.customers WHERE id = $1");
+    expect(useWorkspace.getState().tabs[1]).toMatchObject({ title: "мой заголовок" });
+  });
+
+  it("узла больше нет в топологии — заглушка с выбором другого узла, карточка не читается", async () => {
+    vi.mocked(api.queryDetail).mockResolvedValue(detail());
+    const user = userEvent.setup();
+    renderWithClient(<QueryTab connectionId="c" member="pg-9" database="perf" queryId="7" active />);
+    expect(await screen.findByText("Узла pg-9 больше нет в топологии подключения")).toBeInTheDocument();
+    expect(api.queryDetail).not.toHaveBeenCalled();
+    expect(api.startStatementsSampler).not.toHaveBeenCalled();
+    await user.selectOptions(screen.getByRole("combobox", { name: "Открыть на узле" }), "pg-2");
+    const tabs = useWorkspace.getState().tabs;
+    expect(tabs[tabs.length - 1]).toMatchObject({ kind: "query", connectionId: "c", member: "pg-2", database: "perf", queryId: "7" });
+  });
+
+  it("«Копировать текст запроса», «Обновить» и «Получить план», который сразу строит пробный план", async () => {
+    vi.mocked(api.queryDetail).mockResolvedValue(detail());
+    const plan = (await import("../../test/plans")).planTree();
+    vi.mocked(api.explain).mockResolvedValue({ mode: "plan", tier: "read", plan, raw: [], relations: [{ schema: "shop", name: "customers" }], elapsedMs: 5, warnings: [] });
+    const user = userEvent.setup();
+    renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
+    await screen.findByText("SELECT * FROM shop.customers WHERE id = $1");
+    await user.click(screen.getByRole("button", { name: "Копировать текст запроса" }));
+    expect(await navigator.clipboard.readText()).toBe("SELECT * FROM shop.customers WHERE id = $1");
+    const reads = vi.mocked(api.queryDetail).mock.calls.length;
+    await user.click(screen.getByRole("button", { name: "Обновить" }));
+    await waitFor(() => expect(vi.mocked(api.queryDetail).mock.calls.length).toBeGreaterThan(reads));
+    await user.click(screen.getByRole("button", { name: "Получить план" }));
+    await waitFor(() => expect(api.explain).toHaveBeenCalledWith("c", expect.objectContaining({ mode: "plan", sql: "SELECT * FROM shop.customers WHERE id = $1", member: "pg-1" })));
+    expect(await screen.findByRole("treegrid", { name: "Дерево плана" })).toBeVisible();
+    expect(api.explain).toHaveBeenCalledTimes(1);
+    // Таблицы из пробы — в обзоре; «Получить план» больше не нужен.
+    await user.click(screen.getByRole("tab", { name: "Обзор" }));
+    expect(await screen.findByRole("button", { name: "shop.customers" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Получить план" })).toBeNull();
+  });
+
   it("подключение закрыто — карточка не читает сервер", async () => {
     vi.mocked(api.getTopology).mockResolvedValue(topologyView({ state: "disconnected", topology: null }));
     renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);

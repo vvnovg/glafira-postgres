@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { ExplainResult, QueryDetail } from "../../api/types";
+import type { ExplainResult, Member, QueryDetail } from "../../api/types";
 import { PlanRunner } from "./plan/PlanRunner";
 
 /** Выбранный источник текста: нормализованный pgss или выполняющийся экземпляр (его текст запоминается при выборе). */
@@ -11,9 +11,28 @@ const runningId = (pid: number) => `running:${pid}`;
 /**
  * Подвкладка «План» (спец. P3 §8.2). Источник текста: нормализованный pgss или текст выполняющегося экземпляра (с
  * литералами; обрезанный — нельзя, пункт серый). Текст экземпляра запоминается при выборе: экземпляры перечитываются
- * каждые 5 с, и закончившийся запрос не должен подменить текст формы под рукой у пользователя.
+ * каждые 5 с, и закончившийся запрос не должен подменить текст формы под рукой у пользователя. `members` — участники
+ * топологии (выбор реплики для ANALYZE чтения); `autoRun`/`onAutoRun` — «Получить план» обзора (см. `PlanRunner`).
  */
-export function QueryPlan({ connectionId, member, database, detail, onPlanResult }: { connectionId: string; member: string; database: string; detail: QueryDetail; onPlanResult: (r: ExplainResult) => void }) {
+export function QueryPlan({
+  connectionId,
+  member,
+  database,
+  detail,
+  members,
+  onPlanResult,
+  autoRun,
+  onAutoRun,
+}: {
+  connectionId: string;
+  member: string;
+  database: string;
+  detail: QueryDetail;
+  members: Member[] | null;
+  onPlanResult: (r: ExplainResult) => void;
+  autoRun?: boolean;
+  onAutoRun?: () => void;
+}) {
   const { t } = useTranslation();
   const [source, setSource] = useState<Source>({ id: "pgss" });
   const pick = (id: string) => {
@@ -47,7 +66,19 @@ export function QueryPlan({ connectionId, member, database, detail, onPlanResult
           <pre className="query-text" role="group" tabIndex={0} aria-label={t("diag.query.text")}>
             <code>{sql}</code>
           </pre>
-          <PlanRunner key={source.id} connectionId={connectionId} member={member} database={database} sql={sql} serverVersionNum={detail.serverVersionNum} inRecovery={detail.inRecovery} onResult={onPlanResult} />
+          <PlanRunner
+            key={source.id}
+            connectionId={connectionId}
+            member={member}
+            database={database}
+            sql={sql}
+            serverVersionNum={detail.serverVersionNum}
+            inRecovery={detail.inRecovery}
+            members={members}
+            onResult={onPlanResult}
+            autoRun={autoRun}
+            onAutoRun={onAutoRun}
+          />
         </>
       ) : (
         <p className="muted">{t("diag.query.gone")}</p>

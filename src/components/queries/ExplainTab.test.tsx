@@ -128,6 +128,20 @@ describe("ExplainTab", () => {
     expect(screen.queryByRole("checkbox")).toBeNull();
   });
 
+  it("правка SQL при открытом подтверждении яруса записи закрывает его: запуск с подтверждением не уходит", async () => {
+    vi.mocked(api.explain).mockResolvedValue({ mode: "plan", tier: "write", plan: planTree(), raw: [], relations: [{ schema: "shop", name: "balances" }], elapsedMs: 3, warnings: [] });
+    const user = userEvent.setup();
+    renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql="UPDATE shop.balances SET balance = 0" active />);
+    await screen.findByRole("combobox", { name: "База" });
+    await user.click(screen.getByRole("button", { name: "План с выполнением" }));
+    const dialog = await screen.findByRole("group", { name: "Выполнить запрос и откатить" });
+    expect(within(dialog).getByText("shop.balances")).toBeInTheDocument();
+    await user.type(screen.getByRole("textbox", { name: "SQL" }), " WHERE false");
+    expect(screen.queryByRole("group", { name: "Выполнить запрос и откатить" })).toBeNull();
+    expect(api.explain).toHaveBeenCalledTimes(1);
+    expect(api.explain).not.toHaveBeenCalledWith("c", expect.objectContaining({ mode: "analyze" }));
+  });
+
   it("закрытое подключение — сообщение вместо консоли", async () => {
     vi.mocked(api.getTopology).mockResolvedValue(topologyView({ state: "disconnected", topology: null }));
     renderWithClient(<ExplainTab connectionId="c" member={null} database={undefined} sql={undefined} active />);
@@ -144,6 +158,8 @@ describe("ExplainTab", () => {
     rerender(<ExplainTab connectionId="c" member="pg-1" database="perf" sql={undefined} active />);
     await waitFor(() => expect(api.listDatabases).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(client.isFetching()).toBe(0));
+    // Всё успокоилось — второго чтения так и не было.
+    expect(api.listDatabases).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("combobox", { name: "База" })).toHaveValue("perf");
   });
 
@@ -231,7 +247,11 @@ describe("ExplainTab", () => {
     await user.selectOptions(screen.getByRole("combobox", { name: "База" }), "postgres");
     await copy();
     await waitFor(() => expect(api.queryLlmBundle).toHaveBeenLastCalledWith("c", "pg-1", "postgres", { kind: "sql", sql: "SELECT 1" }, null));
+    // Возврат к прежней базе план не воскрешает: запуск остался в истории размонтированного запуска.
     await user.selectOptions(screen.getByRole("combobox", { name: "База" }), "perf");
+    await copy();
+    await waitFor(() => expect(api.queryLlmBundle).toHaveBeenLastCalledWith("c", "pg-1", "perf", { kind: "sql", sql: "SELECT 1" }, null));
+    expect(screen.queryByRole("treegrid", { name: "Дерево плана" })).toBeNull();
     await user.selectOptions(screen.getByRole("combobox", { name: "Узел" }), "pg-2");
     await copy();
     await waitFor(() => expect(api.queryLlmBundle).toHaveBeenLastCalledWith("c", "pg-2", "perf", { kind: "sql", sql: "SELECT 1" }, null));
