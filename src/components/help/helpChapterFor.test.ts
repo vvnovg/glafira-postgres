@@ -2,13 +2,11 @@ import { describe, expect, it } from "vitest";
 import type { DiagTool } from "../../api/types";
 import { loadGuide } from "../../guide/chapters";
 import { parseChapter } from "../../guide/parse";
+import type { TabSpec } from "../../state/workspace";
 import { helpAnchorFor, helpChapterFor } from "./helpChapterFor";
 
 /** Все инструменты диагностики: тип `Record` не даст добавить инструмент, не внеся его сюда (а значит, и в проверку якорей). */
 const DIAG_TOOLS: Record<DiagTool, true> = { pulse: true, sessions: true, idleTx: true, waits: true, locks: true, horizon: true, replication: true, slots: true, failover: true, health: true, queries: true };
-
-/** Инструменты, чьего раздела в руководстве ещё нет: глава «Запросы» и якорь появятся в задаче 16 (тогда список опустеет). */
-const NO_GUIDE_SECTION_YET: DiagTool[] = ["queries"];
 
 describe("helpChapterFor", () => {
   it("для null, настроек и обзора — «Начало работы»", () => {
@@ -43,12 +41,16 @@ describe("helpChapterFor", () => {
     expect(helpAnchorFor(null)).toBeUndefined();
   });
 
-  it("карточка запроса и консоль EXPLAIN — глава «Диагностика» (до главы «Запросы»), якорь queries", () => {
+  it("инструмент «Запросы», карточка запроса и консоль EXPLAIN — глава «Запросы» с якорями top, card и console", () => {
+    const tool = { kind: "diag", connectionId: "c", tool: "queries" } as const;
     const query = { kind: "query", connectionId: "c", member: "pg-1", database: "perf", queryId: "1" } as const;
-    expect(helpChapterFor(query)).toBe("diagnostics");
-    expect(helpChapterFor({ kind: "explain", connectionId: "c" })).toBe("diagnostics");
-    expect(helpAnchorFor(query)).toBe("queries");
-    expect(helpAnchorFor({ kind: "explain", connectionId: "c" })).toBe("queries");
+    const explain = { kind: "explain", connectionId: "c" } as const;
+    expect(helpChapterFor(tool)).toBe("queries");
+    expect(helpChapterFor(query)).toBe("queries");
+    expect(helpChapterFor(explain)).toBe("queries");
+    expect(helpAnchorFor(tool)).toBe("top");
+    expect(helpAnchorFor(query)).toBe("card");
+    expect(helpAnchorFor(explain)).toBe("console");
   });
 
   it("вкладка «Журнал действий» — глава «Диагностика», якорь journal", () => {
@@ -56,14 +58,22 @@ describe("helpChapterFor", () => {
     expect(helpAnchorFor({ kind: "actions", connectionId: "c" })).toBe("journal");
   });
 
-  it("якорь F1 каждого инструмента — раздел {#id} главы «Диагностика» на обоих языках (справка при отсутствии якоря молча прокручивает наверх)", async () => {
+  it("F1 каждого инструмента и вкладок запроса, консоли и журнала ведёт в раздел {#id} своей главы на обоих языках (справка при отсутствии якоря молча прокручивает наверх)", async () => {
+    const tabs: TabSpec[] = [
+      ...(Object.keys(DIAG_TOOLS) as DiagTool[]).map((tool): TabSpec => ({ kind: "diag", connectionId: "c", tool })),
+      { kind: "query", connectionId: "c", member: "pg-1", database: "perf", queryId: "1" },
+      { kind: "explain", connectionId: "c" },
+      { kind: "actions", connectionId: "c" },
+    ];
     for (const lang of ["en", "ru"]) {
-      const chapter = (await loadGuide(lang)).diagnostics;
-      const anchors = parseChapter("diagnostics", chapter, (key) => key).sections.map((s) => s.id);
-      for (const tool of (Object.keys(DIAG_TOOLS) as DiagTool[]).filter((t) => !NO_GUIDE_SECTION_YET.includes(t))) {
-        const anchor = helpAnchorFor({ kind: "diag", connectionId: "c", tool });
-        expect(anchor, `${lang}: ${tool}`).toBeDefined();
-        expect(anchors, `${lang}: якорь ${anchor} инструмента ${tool}`).toContain(anchor);
+      const guide = await loadGuide(lang);
+      for (const tab of tabs) {
+        const chapter = helpChapterFor(tab);
+        const anchor = helpAnchorFor(tab);
+        const label = tab.kind === "diag" ? `${tab.kind}:${tab.tool}` : tab.kind;
+        const anchors = parseChapter(chapter, guide[chapter], (key) => key).sections.map((x) => x.id);
+        expect(anchor, `${lang}: ${label}`).toBeDefined();
+        expect(anchors, `${lang}: якорь ${anchor} вкладки ${label} в главе ${chapter}`).toContain(anchor);
       }
     }
   });

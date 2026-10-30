@@ -3,9 +3,8 @@ import type { TabSpec } from "../../state/workspace";
 
 /**
  * Глава руководства для экрана (F1): форма подключения → «Подключения», вкладки объектов → «Дерево и объекты»,
- * инструменты диагностики, журнал действий, карточка запроса и консоль EXPLAIN → «Диагностика» (глава «Запросы» появится
- * вместе с руководством и переключит две последние вкладки на `queries`), «О программе» → «Обновления и диагностика»,
- * остальное — «Начало работы».
+ * инструмент «Запросы», карточка запроса и консоль EXPLAIN → «Запросы», остальные инструменты диагностики и журнал
+ * действий → «Диагностика», «О программе» → «Обновления и диагностика», остальное — «Начало работы».
  */
 export function helpChapterFor(tab: TabSpec | null): ChapterId {
   switch (tab?.kind) {
@@ -14,9 +13,11 @@ export function helpChapterFor(tab: TabSpec | null): ChapterId {
     case "connection-form":
       return "connections";
     case "diag":
-    case "actions":
+      return tab.tool === "queries" ? "queries" : "diagnostics";
     case "query":
     case "explain":
+      return "queries";
+    case "actions":
       return "diagnostics";
     case "table":
     case "view":
@@ -29,12 +30,14 @@ export function helpChapterFor(tab: TabSpec | null): ChapterId {
 }
 
 /**
- * Якорь главы для вкладки (F1): у инструмента диагностики — его раздел («Idle in transaction» описан в «Сессиях»),
- * у журнала действий — `journal`, у карточки запроса и консоли EXPLAIN — `queries`.
+ * Якорь главы для вкладки (F1): у инструмента диагностики — его раздел («Idle in transaction» описан в «Сессиях»;
+ * «Запросы» — `top` главы «Запросы»), у журнала действий — `journal`, у карточки запроса — `card`, у консоли EXPLAIN — `console`.
  */
 export function helpAnchorFor(tab: TabSpec | null): string | undefined {
   if (tab?.kind === "actions") return "journal";
-  if (tab?.kind === "query" || tab?.kind === "explain") return "queries";
+  if (tab?.kind === "query") return "card";
+  if (tab?.kind === "explain") return "console";
   if (tab?.kind !== "diag") return undefined;
+  if (tab.tool === "queries") return "top";
   return tab.tool === "idleTx" ? "sessions" : tab.tool;
 }
