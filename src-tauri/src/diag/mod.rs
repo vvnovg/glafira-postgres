@@ -278,6 +278,14 @@ pub(crate) fn make_report(
 
 /// `run_diagnostic`: узел инструмента, проверка запроса, сбор и правила.
 pub async fn run(st: &AppState, id: &str, req: DiagRequest) -> AppResult<DiagReport> {
+    // «Между снимками» — из файлов: подключение может быть закрыто, узел отчёта — узел снимков.
+    if req.tool == Tool::Queries
+        && let Some(p) = &req.queries
+        && let queries::QueriesMode::Between { from, to } = &p.mode
+    {
+        validate(&req, st.profile(id)?.kind)?;
+        return queries::report_between(st, id, p, from, to).await;
+    }
     let target = st
         .runtimes
         .diag_target(id, req.member.as_deref(), req.tool.is_cluster())?;

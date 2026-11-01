@@ -3,7 +3,8 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use serde::Serialize;
+use serde::de::{IgnoredAny, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use time::OffsetDateTime;
 
 use crate::error::{AppError, AppResult, ErrorCode};
@@ -66,6 +67,74 @@ pub(crate) fn bad_file() -> AppError {
     )
 }
 
+/// Предел размера файла снимка при чтении: больше — файл не наш или повреждён (pgss.max строк по ~1 КБ и тексты).
+pub const MAX_SNAPSHOT_BYTES: u64 = 128 * 1024 * 1024;
+
+fn too_large() -> AppError {
+    app_err!(
+        ErrorCode::InvalidInput,
+        "errors.snapshots.tooLarge",
+        "The snapshot file is too large (over {{count}} MiB)",
+        count = MAX_SNAPSHOT_BYTES / (1024 * 1024)
+    )
+}
+
+fn already_exists() -> AppError {
+    app_err!(
+        ErrorCode::InvalidInput,
+        "errors.snapshots.exists",
+        "A snapshot of this node was taken this second: wait a second and try again"
+    )
+}
+
+/// Права только для владельца на каталог, в том числе уже существовавший.
+fn restrict_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
+}
+
+/// Шапка файла для списка: время, узел и число строк без разбора самих строк и текстов. `rowCount` нет (файл
+/// ранней сборки) — строки считаются без выделения памяти.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Header {
+    member: String,
+    taken_at_ms: i64,
+    #[serde(default)]
+    row_count: Option<usize>,
+    #[serde(default)]
+    rows: RowCount,
+}
+
+#[derive(Default)]
+struct RowCount(usize);
+
+impl<'de> Deserialize<'de> for RowCount {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Count;
+        impl<'de> Visitor<'de> for Count {
+            type Value = RowCount;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("an array")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<RowCount, A::Error> {
+                let mut n = 0;
+                while seq.next_element::<IgnoredAny>()?.is_some() {
+                    n += 1;
+                }
+                Ok(RowCount(n))
+            }
+        }
+        d.deserialize_seq(Count)
+    }
+}
+
 fn not_found() -> AppError {
     app_err!(
         ErrorCode::NotFound,
@@ -89,26 +158,42 @@ impl SnapshotStore {
         Ok(self.dir.join(connection_id))
     }
 
-    /// Каталог подключения и узла; на unix создаётся с правами 0700.
+    /// Каталог подключения и узла; на unix — 0700 у `snapshots/`, каталога подключения и узла, даже если они уже были.
     fn ensure_dir(&self, connection_id: &str, member: &str) -> AppResult<PathBuf> {
         if !single_component(member) {
             return Err(bad_file());
         }
-        let dir = self.connection_dir(connection_id)?.join(member);
+        let conn = self.connection_dir(connection_id)?;
+        let dir = conn.join(member);
         let mut b = std::fs::DirBuilder::new();
         b.recursive(true);
         #[cfg(unix)]
         std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
         b.create(&dir)?;
+        for d in [&self.dir, &conn, &dir] {
+            restrict_dir(d)?;
+        }
         Ok(dir)
     }
 
-    /// Запись снимка (временный файл 0600 → rename). Снимок того же узла в ту же секунду заменяет прежний.
+    /// Запись снимка (временный файл 0600 → rename). Снимок того же узла в ту же секунду уже есть — отказ: имя файла
+    /// с точностью до секунды, а молча заменять снимок нельзя.
     pub fn write(&self, connection_id: &str, snap: &Snapshot) -> AppResult<SnapshotInfo> {
         let dir = self.ensure_dir(connection_id, &snap.member)?;
         let name = file_name(snap.taken_at_ms);
-        let bytes = serde_json::to_vec(snap)?;
-        atomic_write(&dir.join(&name), &bytes)?;
+        let path = dir.join(&name);
+        if path.exists() {
+            return Err(already_exists());
+        }
+        let bytes = if snap.row_count == snap.rows.len() {
+            serde_json::to_vec(snap)?
+        } else {
+            serde_json::to_vec(&Snapshot {
+                row_count: snap.rows.len(),
+                ..snap.clone()
+            })?
+        };
+        atomic_write(&path, &bytes)?;
         Ok(SnapshotInfo {
             file: format!("{}/{name}", snap.member),
             member: snap.member.clone(),
@@ -118,8 +203,8 @@ impl SnapshotStore {
         })
     }
 
-    /// Снимки подключения, новые первыми. Каждый файл читается целиком (время и число строк — из содержимого, имя
-    /// файла — только адрес); нечитаемые файлы пропускаются.
+    /// Снимки подключения, новые первыми. Из файла читается шапка (`Header`: время, узел, число строк — из
+    /// содержимого, имя файла — только адрес); нечитаемые и слишком большие файлы пропускаются.
     pub fn list(&self, connection_id: &str) -> AppResult<Vec<SnapshotInfo>> {
         let root = self.connection_dir(connection_id)?;
         let mut out = Vec::new();
@@ -140,14 +225,14 @@ impl SnapshotStore {
                     continue;
                 }
                 let Ok(meta) = f.metadata() else { continue };
-                let Ok(snap) = read_file::<Snapshot>(&f.path()) else {
+                let Ok(h) = read_file::<Header>(&f.path()) else {
                     continue;
                 };
                 out.push(SnapshotInfo {
                     file,
-                    member: snap.member,
-                    taken_at_ms: snap.taken_at_ms,
-                    rows: snap.rows.len(),
+                    member: h.member,
+                    taken_at_ms: h.taken_at_ms,
+                    rows: h.row_count.unwrap_or(h.rows.0),
                     bytes: meta.len(),
                 });
             }
@@ -194,9 +279,21 @@ impl SnapshotStore {
             Err(e) => Err(e.into()),
         }
     }
+
+    /// Все снимки подключения — при его удалении; каталога нет — не ошибка.
+    pub fn remove_connection(&self, connection_id: &str) -> AppResult<()> {
+        match std::fs::remove_dir_all(self.connection_dir(connection_id)?) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
 }
 
 fn read_file<T: serde::de::DeserializeOwned>(path: &Path) -> AppResult<T> {
+    if std::fs::metadata(path)?.len() > MAX_SNAPSHOT_BYTES {
+        return Err(too_large());
+    }
     let bytes = std::fs::read(path)?;
     Ok(serde_json::from_slice(&bytes)?)
 }
@@ -223,6 +320,7 @@ mod tests {
             max: 5000,
             track_planning: false,
             hidden: false,
+            row_count: 0,
             rows: vec![],
             texts: Default::default(),
             truncated: Default::default(),
@@ -276,6 +374,11 @@ mod tests {
                 );
             }
         }
+        assert_eq!(
+            store.write("c1", &snap).unwrap_err().key,
+            "errors.snapshots.exists",
+            "та же секунда — отказ, а не замена"
+        );
         let later = store
             .write("c1", &snapshot("pg-1", 1_761_735_660_000))
             .unwrap();
@@ -325,5 +428,111 @@ mod tests {
         std::fs::write(member_dir.join("2025-10-29T12-00-00.json"), b"{").unwrap();
         std::fs::write(member_dir.join("notes.txt"), b"x").unwrap();
         assert_eq!(store.list("c1").unwrap().len(), 1);
+    }
+
+    /// Список берёт число строк из `rowCount`, а у файла без него — считает массив `rows`.
+    #[test]
+    fn list_reads_the_row_count_from_the_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SnapshotStore::new(dir.path());
+        let mut snap = snapshot("pg-1", 1_761_735_600_000);
+        snap.rows = vec![
+            pg_advisor::queries::Cumulative {
+                key: pg_advisor::queries::QueryKey {
+                    query_id: 1,
+                    dbid: 1,
+                    userid: 1,
+                    toplevel: true,
+                },
+                datname: None,
+                rolname: None,
+                counters: Default::default(),
+                min_exec_ms: 0.0,
+                max_exec_ms: 0.0,
+                stddev_exec_ms: 0.0,
+            };
+            3
+        ];
+        let info = store.write("c1", &snap).unwrap();
+        assert_eq!(info.rows, 3, "rowCount выставляется при записи");
+        assert_eq!(store.read("c1", &info.file).unwrap().row_count, 3);
+        let mut v = serde_json::to_value(&snap).unwrap();
+        v.as_object_mut().unwrap().remove("rowCount");
+        v["takenAtMs"] = 1_761_735_660_000_i64.into();
+        let member_dir = dir.path().join("snapshots/c1/pg-1");
+        std::fs::write(
+            member_dir.join("2025-10-29T11-01-00.json"),
+            serde_json::to_vec(&v).unwrap(),
+        )
+        .unwrap();
+        let list = store.list("c1").unwrap();
+        assert_eq!(list.iter().map(|i| i.rows).collect::<Vec<_>>(), [3, 3]);
+    }
+
+    #[test]
+    fn oversized_files_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SnapshotStore::new(dir.path());
+        let info = store
+            .write("c1", &snapshot("pg-1", 1_761_735_600_000))
+            .unwrap();
+        let path = dir.path().join("snapshots/c1").join(&info.file);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(MAX_SNAPSHOT_BYTES + 1)
+            .unwrap();
+        assert_eq!(
+            store.read("c1", &info.file).unwrap_err().key,
+            "errors.snapshots.tooLarge"
+        );
+        assert!(store.list("c1").unwrap().is_empty());
+    }
+
+    /// Каталоги, созданные раньше с другими правами, получают 0700; удаление подключения убирает его снимки.
+    #[test]
+    fn existing_dirs_are_restricted_and_connection_removal_clears_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SnapshotStore::new(dir.path());
+        let member_dir = dir.path().join("snapshots/c1/pg-1");
+        std::fs::create_dir_all(&member_dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for d in ["snapshots", "snapshots/c1", "snapshots/c1/pg-1"] {
+                std::fs::set_permissions(
+                    dir.path().join(d),
+                    std::fs::Permissions::from_mode(0o755),
+                )
+                .unwrap();
+            }
+            store
+                .write("c1", &snapshot("pg-1", 1_761_735_600_000))
+                .unwrap();
+            for d in ["snapshots", "snapshots/c1", "snapshots/c1/pg-1"] {
+                assert_eq!(
+                    std::fs::metadata(dir.path().join(d))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o700,
+                    "{d}"
+                );
+            }
+        }
+        #[cfg(not(unix))]
+        store
+            .write("c1", &snapshot("pg-1", 1_761_735_600_000))
+            .unwrap();
+        store
+            .write("c2", &snapshot("pg-1", 1_761_735_600_000))
+            .unwrap();
+        store.remove_connection("c1").unwrap();
+        assert!(!dir.path().join("snapshots/c1").exists());
+        assert_eq!(store.list("c2").unwrap().len(), 1, "чужие снимки на месте");
+        store.remove_connection("c1").unwrap();
+        assert!(store.remove_connection("..").is_err());
     }
 }

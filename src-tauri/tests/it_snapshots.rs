@@ -114,6 +114,19 @@ async fn take_compare_and_between_mode() {
             .as_deref()
             .is_some_and(|t| t.to_lowercase().contains("status = $1"))
     }));
+    // Подключение закрыто — режим «между снимками» читает только файлы; пара — в любом порядке.
+    st.runtimes.disconnect("it");
+    let mut p = params(None);
+    p.mode = QueriesMode::Between {
+        from: b.file.clone(),
+        to: a.file.clone(),
+    };
+    let r = run(p).await;
+    let DiagData::Queries(d) = &r.data else {
+        unreachable!()
+    };
+    assert!(d.rows.iter().any(|x| x.calls >= 30));
+    assert_eq!(r.member.as_deref(), Some(member.as_str()));
     // min / max / stddev между снимками нет.
     let mut p = params(None);
     p.sort = QuerySort::StddevTime;

@@ -164,7 +164,12 @@ impl AppState {
             self.secrets
                 .delete(&crate::secrets::secret_key(id, field))?;
         }
-        self.connections.delete(id)
+        self.connections.delete(id)?;
+        // Профиля уже нет: снимки, которые не удалось убрать, — только предупреждение в логе.
+        if let Err(e) = self.snapshots.remove_connection(id) {
+            tracing::warn!(connection = %id, "snapshots of the deleted connection not removed: {}", e.message);
+        }
+        Ok(())
     }
 
     /// Политика администратора (читается при запуске в lib.rs).
@@ -223,6 +228,23 @@ pub(crate) mod tests {
             .unwrap();
         state.delete_connection_full("a").unwrap();
         assert_eq!(*closed.0.lock().unwrap(), vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn deleting_a_connection_removes_its_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(dir.path(), Arc::new(MemoryStore::default())).unwrap();
+        state
+            .connections
+            .upsert(crate::conn::profile::sample_profile("a"))
+            .unwrap();
+        let snaps = dir.path().join("snapshots/a/pg-1");
+        std::fs::create_dir_all(&snaps).unwrap();
+        std::fs::write(snaps.join("2025-10-29T11-00-00.json"), "{}").unwrap();
+        std::fs::create_dir_all(dir.path().join("snapshots/b")).unwrap();
+        state.delete_connection_full("a").unwrap();
+        assert!(!dir.path().join("snapshots/a").exists());
+        assert!(dir.path().join("snapshots/b").exists());
     }
 
     #[tokio::test]

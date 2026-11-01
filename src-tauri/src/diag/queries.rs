@@ -370,11 +370,12 @@ pub fn validate(p: &QueriesParams) -> AppResult<()> {
             "The window must be 300, 900 or 3600 seconds"
         )),
         QueriesMode::Between { from, to }
-            if crate::snapshots::valid_file(from) && crate::snapshots::valid_file(to) =>
+            if !crate::snapshots::valid_file(from) || !crate::snapshots::valid_file(to) =>
         {
-            Ok(())
+            Err(crate::snapshots::store::bad_file())
         }
-        QueriesMode::Between { .. } => Err(crate::snapshots::store::bad_file()),
+        QueriesMode::Between { from, to } if from == to => Err(crate::snapshots::same_snapshot()),
+        QueriesMode::Between { .. } => Ok(()),
     }
 }
 
@@ -674,7 +675,7 @@ pub async fn report(
     match &p.mode {
         QueriesMode::SinceReset => report_since_reset(st, id, target, p).await,
         QueriesMode::Window { s } => report_window(st, id, target, p, *s).await,
-        QueriesMode::Between { from, to } => report_between(st, id, target, p, from, to).await,
+        QueriesMode::Between { from, to } => report_between(st, id, p, from, to).await,
     }
 }
 
@@ -952,17 +953,32 @@ fn between_reset() -> Unavailable {
     }
 }
 
-/// Между снимками (спец. §9.3, уточнение 6): дельты `to − from` без обращения к серверу; узел, шапка и состояние
-/// расширения — из снимка `to`, покрытие — разница времён снятия. Свои запросы Глафиры и поиск — по текстам снимков
-/// (у строк без текста в снимках поиск не находит, и они не считаются своими).
-async fn report_between(
+/// Покрытие «между снимками», с: разница времён снятия; после сброса статистики — от сброса до снятия `to` (дельты
+/// тогда — значения `to` целиком, накопленные с момента сброса).
+pub fn between_coverage_s(
+    a: &crate::snapshots::Snapshot,
+    b: &crate::snapshots::Snapshot,
+    reset: bool,
+) -> u32 {
+    let since = match (reset, b.stats_reset_ms) {
+        (true, Some(r)) => r.max(a.taken_at_ms),
+        _ => a.taken_at_ms,
+    };
+    u32::try_from((b.taken_at_ms - since).max(0) / 1000).unwrap_or(u32::MAX)
+}
+
+/// Между снимками (спец. §9.3, уточнение 6): дельты `to − from` из файлов, без обращения к серверу и без открытого
+/// подключения (`diag::run` идёт сюда до выбора узла); пара упорядочивается «старший → младший». Узел, шапка и
+/// состояние расширения — из снимка `to`, покрытие — `between_coverage_s`. Свои запросы Глафиры и поиск — по
+/// текстам снимков (у строк без текста в снимках поиск не находит, и они не считаются своими).
+pub async fn report_between(
     st: &AppState,
     id: &str,
-    target: &DiagTarget,
     p: &QueriesParams,
     from: &str,
     to: &str,
 ) -> AppResult<DiagReport> {
+    validate(p)?;
     let (a, b) = crate::snapshots::read_pair(st, id, from, to).await?;
     let caps = PgssCaps::from_version(&b.pgss_version)
         .ok_or_else(|| AppError::internal_with("snapshot pgss version"))?;
@@ -1008,15 +1024,19 @@ async fn report_between(
         version: b.pgss_version.clone(),
         caps,
     };
-    let mut report = make_report(
-        Tool::Queries,
-        target,
-        Some(&h),
-        DiagData::Queries(QueriesData {
+    let mut findings = findings;
+    pg_advisor::findings::sort(&mut findings);
+    // Узел отчёта — узел снимков, а не выбранный во вкладке.
+    Ok(DiagReport {
+        tool: Tool::Queries,
+        member: Some(b.member.clone()),
+        follows_leader: false,
+        observed_at_ms: h.now_ms,
+        server_version_num: Some(h.version_num),
+        in_recovery: Some(h.in_recovery),
+        data: DiagData::Queries(QueriesData {
             mode: p.mode.clone(),
-            coverage_s: Some(
-                u32::try_from((b.taken_at_ms - a.taken_at_ms).max(0) / 1000).unwrap_or(u32::MAX),
-            ),
+            coverage_s: Some(between_coverage_s(&a, &b, reset)),
             ticks: None,
             pgss: Some(PgssMeta::of(&pgss, &info)),
             totals: t,
@@ -1024,11 +1044,7 @@ async fn report_between(
         }),
         findings,
         unavailable,
-    );
-    // Узел отчёта — узел снимков, а не выбранный во вкладке.
-    report.member = Some(b.member.clone());
-    report.follows_leader = false;
-    Ok(report)
+    })
 }
 
 /// Текст из кеша узла (буфер сэмплера pgss, спец. §4.6).
@@ -1462,6 +1478,15 @@ mod tests {
             validate(&between).unwrap_err().key,
             "errors.snapshots.badFile"
         );
+        let same = params(QueriesMode::Between {
+            from: "pg-1/2025-10-29T11-00-00.json".into(),
+            to: "pg-1/2025-10-29T11-00-00.json".into(),
+        });
+        let e = validate(&same).unwrap_err();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (ErrorCode::InvalidInput, "errors.snapshots.samePair")
+        );
     }
 
     fn snapshot(rows: Vec<Cumulative>) -> crate::snapshots::Snapshot {
@@ -1482,6 +1507,7 @@ mod tests {
             max: 5000,
             track_planning: false,
             hidden: false,
+            row_count: 0,
             rows,
             texts: Default::default(),
             truncated: Default::default(),
@@ -1534,6 +1560,96 @@ mod tests {
         // После сброса — значения `to` целиком, и неизменившиеся тоже.
         let entries = entries_between(&a, &b, true, &p);
         assert_eq!(entries.len(), 4);
+        // Без сброса уменьшившийся счётчик (строка вытеснена и вернулась) — значение `to` целиком.
+        let a = snapshot(vec![cumulative(1, true, "perf", 100, 1000.0)]);
+        let b = snapshot(vec![cumulative(1, true, "perf", 7, 70.0)]);
+        let entries = entries_between(&a, &b, false, &p);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| (e.counters.calls, e.counters.total_exec_ms))
+                .collect::<Vec<_>>(),
+            [(7, 70.0)]
+        );
+    }
+
+    #[test]
+    fn between_coverage_is_the_time_between_snapshots_or_since_the_reset() {
+        let mut a = snapshot(vec![]);
+        let mut b = snapshot(vec![]);
+        a.taken_at_ms = 1_000_000;
+        b.taken_at_ms = 1_600_000;
+        b.stats_reset_ms = Some(1_300_000);
+        assert_eq!(between_coverage_s(&a, &b, false), 600);
+        assert_eq!(between_coverage_s(&a, &b, true), 300, "от сброса до `to`");
+        b.stats_reset_ms = Some(10);
+        assert_eq!(
+            between_coverage_s(&a, &b, true),
+            600,
+            "сброс раньше `from` — не дольше пары"
+        );
+        b.stats_reset_ms = None;
+        assert_eq!(between_coverage_s(&a, &b, true), 600);
+    }
+
+    /// Режим «между снимками» работает без открытого подключения и принимает пару в любом порядке.
+    #[tokio::test]
+    async fn between_report_needs_no_open_connection_and_orders_the_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let st =
+            AppState::new(dir.path(), Arc::new(crate::secrets::MemoryStore::default())).unwrap();
+        st.connections
+            .upsert(crate::conn::profile::sample_profile("c1"))
+            .unwrap();
+        let mut a = snapshot(vec![cumulative(1, true, "perf", 100, 1000.0)]);
+        a.taken_at_ms = 1_761_735_600_000;
+        a.dealloc = Some(1);
+        let mut b = snapshot(vec![cumulative(1, true, "perf", 160, 1300.0)]);
+        b.taken_at_ms = 1_761_735_660_000;
+        b.dealloc = Some(1);
+        let fa = st.snapshots.write("c1", &a).unwrap().file;
+        let fb = st.snapshots.write("c1", &b).unwrap().file;
+        let run = |from: &str, to: &str| {
+            let st = st.clone();
+            let req = crate::diag::DiagRequest {
+                tool: Tool::Queries,
+                member: None,
+                window_s: None,
+                queries: Some(params(QueriesMode::Between {
+                    from: from.into(),
+                    to: to.into(),
+                })),
+            };
+            async move { crate::diag::run(&st, "c1", req).await }
+        };
+        for (from, to) in [(&fa, &fb), (&fb, &fa)] {
+            let r = run(from, to).await.unwrap();
+            let DiagData::Queries(d) = &r.data else {
+                unreachable!()
+            };
+            assert_eq!(
+                d.rows.iter().map(|x| x.calls).collect::<Vec<_>>(),
+                [60],
+                "дельта старший → младший"
+            );
+            assert_eq!(d.coverage_s, Some(60));
+            assert_eq!(
+                (r.member.as_deref(), r.observed_at_ms),
+                (Some("pg-1"), b.taken_at_ms)
+            );
+            assert!(r.unavailable.is_empty());
+        }
+        assert_eq!(
+            run(&fa, &fa).await.unwrap_err().key,
+            "errors.snapshots.samePair"
+        );
+        assert_eq!(
+            run(&fa, "pg-1/2000-01-01T00-00-00.json")
+                .await
+                .unwrap_err()
+                .key,
+            "errors.snapshots.notFound"
+        );
     }
 
     #[test]

@@ -45,6 +45,9 @@ pub struct Snapshot {
     pub track_planning: bool,
     /// Были строки со скрытым `queryid` (чужие без `pg_read_all_stats`).
     pub hidden: bool,
+    /// Число строк — для списка без разбора `rows` (`store::Header`); выставляется при записи.
+    #[serde(default)]
+    pub row_count: usize,
     /// Все строки pgss накопительно, без текстов.
     pub rows: Vec<Cumulative>,
     /// `queryId` → текст (не длиннее `QUERY_LIMIT`) для верхних запросов (`TEXTS_IN_SNAPSHOT`).
@@ -131,6 +134,7 @@ pub async fn take(st: &AppState, id: &str, member: &str) -> AppResult<SnapshotIn
                 max: snap.info.max,
                 track_planning: snap.info.track_planning,
                 hidden: snap.hidden,
+                row_count: snap.rows.len(),
                 rows: snap.rows,
                 texts,
                 truncated,
@@ -151,14 +155,34 @@ fn different_members() -> AppError {
     )
 }
 
-/// Пара снимков подключения (чтение файлов — в блокирующем потоке). Снимки разных узлов не сравниваются: их
-/// счётчики независимы.
+pub(crate) fn same_snapshot() -> AppError {
+    app_err!(
+        ErrorCode::InvalidInput,
+        "errors.snapshots.samePair",
+        "Choose two different snapshots"
+    )
+}
+
+/// Пара в порядке «старший → младший»: порядок аргументов не важен.
+pub fn ordered(a: Snapshot, b: Snapshot) -> (Snapshot, Snapshot) {
+    if a.taken_at_ms > b.taken_at_ms {
+        (b, a)
+    } else {
+        (a, b)
+    }
+}
+
+/// Пара снимков подключения, старший первым (чтение файлов — в блокирующем потоке). Один и тот же файл и снимки
+/// разных узлов не сравниваются: счётчики разных узлов независимы.
 pub async fn read_pair(
     st: &AppState,
     id: &str,
     from: &str,
     to: &str,
 ) -> AppResult<(Snapshot, Snapshot)> {
+    if from == to {
+        return Err(same_snapshot());
+    }
     let store = st.snapshots.clone();
     let (cid, from, to) = (id.to_string(), from.to_string(), to.to_string());
     let (a, b) =
@@ -167,7 +191,7 @@ pub async fn read_pair(
     if a.member != b.member {
         return Err(different_members());
     }
-    Ok((a, b))
+    Ok(ordered(a, b))
 }
 
 /// Текст запроса из любого из двух снимков (сначала `to`) и признак обрезки.
@@ -275,6 +299,7 @@ mod tests {
             max: 0,
             track_planning: false,
             hidden: false,
+            row_count: 0,
             rows: vec![],
             texts: BTreeMap::new(),
             truncated: BTreeSet::new(),

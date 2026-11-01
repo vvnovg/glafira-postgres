@@ -265,7 +265,10 @@
     "snapshots": {
       "badFile": "Bad snapshot file name",
       "notFound": "The snapshot file is gone",
-      "differentMembers": "Snapshots of different nodes cannot be compared"
+      "differentMembers": "Snapshots of different nodes cannot be compared",
+      "samePair": "Choose two different snapshots",
+      "exists": "A snapshot of this node was taken this second: wait a second and try again",
+      "tooLarge": "The snapshot file is too large (over {{count}} MiB)"
     }
   },
   "connections": {
