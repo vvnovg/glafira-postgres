@@ -12,6 +12,8 @@ import type {
   DiagRequest,
   ExplainRequest,
   ExplainResult,
+  HypoRequest,
+  HypoResult,
   ExportSummary,
   ExtensionInfo,
   FunctionDetails,
@@ -155,6 +157,8 @@ export const api = {
   },
   queryDetail: (id: string, member: string, database: string, queryId: string) => call<QueryDetail>("query_detail", { id, member, database, queryId }),
   explain: (id: string, request: ExplainRequest) => call<ExplainResult>("explain", { id, request }),
+  /** Проверка гипотезы hypopg: виртуальный индекс в READ ONLY-транзакции, без следа на сервере. */
+  hypoCheck: (id: string, request: HypoRequest) => call<HypoResult>("hypo_check", { id, request }),
   parsePlan: (text: string) => call<PlanTree>("parse_plan", { text }),
   queryLlmBundle: (id: string, member: string, database: string, source: LlmSource, plan: PlanTree | null) =>
     call<LlmBundle>("query_llm_bundle", { id, member, database, source, plan }),

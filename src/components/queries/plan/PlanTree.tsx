@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { PlanTree } from "../../../api/types";
+import type { PlanNode, PlanTree } from "../../../api/types";
 import { formatCount, formatMs, formatPercent } from "../../../lib/format";
 import { estimateLabel, estimateSeverity, flatten, marks, nodeLabel } from "./planText";
 
@@ -23,13 +23,25 @@ interface Collapsed {
 }
 const NONE: ReadonlySet<number> = new Set();
 
+/** Номера предков узла `id` (от корня), `null` — узла в дереве нет. */
+function ancestors(n: PlanNode, id: number): number[] | null {
+  if (n.id === id) return [];
+  for (const c of n.children) {
+    const path = ancestors(c, id);
+    if (path) return [n.id, ...path];
+  }
+  return null;
+}
+
 /**
  * Дерево плана (спец. P3 §8.6): таблица-дерево с отступами и развёрткой; колонки — узел, время (включённое и
  * собственное с полосой доли), строки (оценка → факт, ошибка ×N подсвечена), циклы, буферы, пометки. Горячие узлы
  * выделены классом `plan-hot`; клик по узлу выбирает его для панели деталей. Без ANALYZE вместо времени — стоимость;
  * при `TIMING OFF` (ANALYZE без времён) в колонке времени прочерк, горячие узлы определены по стоимости.
+ * `reveal` — новый объект на каждый переход к узлу извне («Показать узел» рекомендации): свёрнутые предки выбранного узла
+ * раскрываются, строка прокручивается в видимую часть, фокус — на её названии.
  */
-export function PlanTreeView({ tree, selectedId, onSelect }: { tree: PlanTree; selectedId: number | null; onSelect: (id: number) => void }) {
+export function PlanTreeView({ tree, selectedId, onSelect, reveal }: { tree: PlanTree; selectedId: number | null; onSelect: (id: number) => void; reveal?: object | null }) {
   const { t } = useTranslation();
   // Развёртка сбрасывается при смене плана (номера узлов нового плана — другие): состояние хранит план, к которому относится.
   const [state, setState] = useState<Collapsed>(() => ({ tree, ids: NONE }));
@@ -43,9 +55,34 @@ export function PlanTreeView({ tree, selectedId, onSelect }: { tree: PlanTree; s
       return { tree, ids: next };
     });
   const withActual = tree.root.actual !== null;
+  const tableRef = useRef<HTMLTableElement>(null);
+  const pendingScroll = useRef<number | null>(null);
+  useEffect(() => {
+    if (!reveal || selectedId === null) return;
+    const path = ancestors(tree.root, selectedId);
+    if (!path) return;
+    pendingScroll.current = selectedId;
+    setState((prev) => {
+      const ids = prev.tree === tree ? prev.ids : NONE;
+      if (!path.some((id) => ids.has(id))) return prev;
+      const next = new Set(ids);
+      path.forEach((id) => next.delete(id));
+      return { tree, ids: next };
+    });
+  }, [reveal, selectedId, tree]);
+  // После раскрытия строка уже в DOM: прокрутка и фокус — один раз на переход.
+  useEffect(() => {
+    const id = pendingScroll.current;
+    if (id === null) return;
+    const row = tableRef.current?.querySelector<HTMLElement>(`tr[data-node-id="${id}"]`);
+    if (!row) return;
+    pendingScroll.current = null;
+    row.scrollIntoView?.({ block: "nearest" });
+    row.querySelector<HTMLButtonElement>("button.link")?.focus({ preventScroll: true });
+  });
   return (
     <div className="table-scroll">
-      <table className="diag-table plan-tree" role="treegrid" aria-label={t("diag.plan.tree")}>
+      <table ref={tableRef} className="diag-table plan-tree" role="treegrid" aria-label={t("diag.plan.tree")}>
         <thead>
           <tr>
             <th scope="col">{t("diag.plan.columns.node")}</th>
@@ -63,7 +100,7 @@ export function PlanTreeView({ tree, selectedId, onSelect }: { tree: PlanTree; s
             const isCollapsed = collapsed.has(n.id);
             const classes = [n.hot ? "plan-hot" : "", n.id === selectedId ? "plan-selected" : ""].filter(Boolean).join(" ") || undefined;
             return (
-              <tr key={n.id} className={classes} aria-level={depth + 1} aria-expanded={n.children.length ? !isCollapsed : undefined} aria-selected={n.id === selectedId}>
+              <tr key={n.id} data-node-id={n.id} className={classes} aria-level={depth + 1} aria-expanded={n.children.length ? !isCollapsed : undefined} aria-selected={n.id === selectedId}>
                 <td style={{ paddingLeft: `${8 + depth * 18}px` }}>
                   {/* Стрелка и название — в одной строке-flex: длинное название переносится внутри себя, а не под стрелку. */}
                   <div className="plan-node">

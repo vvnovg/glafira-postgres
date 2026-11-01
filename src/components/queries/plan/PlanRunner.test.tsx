@@ -1,21 +1,21 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ExplainResult } from "../../../api/types";
+import type { ExplainResult, Recommendation } from "../../../api/types";
 import { connection, member } from "../../../test/fixtures";
 import { planTree } from "../../../test/plans";
 import { renderWithClient } from "../../../test/render";
 
 vi.mock("../../../api/client", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../../../api/client")>();
-  return { ...orig, api: { explain: vi.fn(), listConnections: vi.fn() } };
+  return { ...orig, api: { explain: vi.fn(), listConnections: vi.fn(), hypoCheck: vi.fn() } };
 });
 
 import { api } from "../../../api/client";
 import { countParams } from "../../../lib/useExplain";
 import { PlanRunner } from "./PlanRunner";
 
-const result = (patch: Partial<ExplainResult> = {}): ExplainResult => ({ mode: "plan", tier: "read", plan: planTree(), raw: [], relations: [{ schema: "shop", name: "orders" }], elapsedMs: 12, warnings: [], ...patch });
+const result = (patch: Partial<ExplainResult> = {}): ExplainResult => ({ mode: "plan", tier: "read", plan: planTree(), raw: [], relations: [{ schema: "shop", name: "orders" }], elapsedMs: 12, warnings: [], recommendations: [], recommendationsSkipped: [], ...patch });
 /** Подтверждение яруса записи — `ConfirmDialog` P2 (группа с именем-заголовком). */
 const CONFIRM = { name: "Выполнить запрос и откатить" };
 
@@ -486,5 +486,41 @@ describe("countParams", () => {
     expect(countParams("SELECT $70000")).toBe(65_535);
     expect(countParams("SELECT $1234567")).toBe(65_535);
     expect(countParams("SELECT $99999999999999999999999, $1")).toBe(65_535);
+  });
+
+  it("рекомендации под сводкой: «Показать узел» раскрывает свёрнутого предка и выбирает узел; гипотеза — на входе запуска, не текущих полях", async () => {
+    const rec: Recommendation = {
+      id: "plan_seq_scan_filter", severity: "warning", nodeIds: [1], params: { table: "shop.orders", rowsRead: 500_000, rowsReturned: 500, loops: 1, columns: "status" },
+      command: "CREATE INDEX CONCURRENTLY ON \"shop\".\"orders\" (\"status\");", hypo: { indexDdl: "CREATE INDEX ON \"shop\".\"orders\" (\"status\")" },
+    };
+    vi.mocked(api.explain).mockResolvedValue(result({ recommendations: [rec], recommendationsSkipped: ["plan_spill"] }));
+    vi.mocked(api.hypoCheck).mockResolvedValue({ indexName: "<1>btree_orders_status", estimatedBytes: 8192, costBefore: 100, costAfter: 10, used: true, planAfter: planTree() });
+    const user = userEvent.setup();
+    renderWithClient(<PlanRunner connectionId="c" member="pg-1" database="perf" sql="SELECT * FROM orders" serverVersionNum={170_000} inRecovery={false} />);
+    await user.click(screen.getByText("search_path"));
+    await user.type(screen.getByRole("textbox", { name: "search_path" }), "shop");
+    await waitFor(() => expect(screen.getByRole("button", { name: "План" })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "План" }));
+    const block = await screen.findByRole("region", { name: "Рекомендации" });
+    expect(within(block).getByRole("heading", { name: "Индекс по колонкам фильтра: shop.orders" })).toBeInTheDocument();
+    expect(within(block).getByText("Выполните план с выполнением, чтобы проверить ещё 1 правило")).toBeInTheDocument();
+    // Свернуть корень: узел 1 скрыт; «Показать узел» раскрывает и выбирает его.
+    const tree = screen.getByRole("treegrid", { name: "Дерево плана" });
+    await user.click(within(tree).getAllByRole("button", { name: "Свернуть" })[0]);
+    expect(within(tree).getAllByRole("row")).toHaveLength(2);
+    await user.click(within(block).getByRole("button", { name: "Показать узел" }));
+    const selected = within(tree).getAllByRole("row").find((r) => r.getAttribute("aria-selected") === "true");
+    expect(selected).toHaveAttribute("data-node-id", "1");
+    expect(within(tree).getAllByRole("row")).toHaveLength(4);
+    // Поле search_path правится после запуска — гипотеза идёт с тем, что было у запуска.
+    await user.clear(screen.getByRole("textbox", { name: "search_path" }));
+    await user.click(within(block).getByRole("button", { name: "Проверить гипотезу" }));
+    await waitFor(() =>
+      expect(api.hypoCheck).toHaveBeenCalledWith("c", { member: "pg-1", database: "perf", sql: "SELECT * FROM orders", params: { kind: "none" }, searchPath: "shop", indexDdl: rec.hypo!.indexDdl }),
+    );
+    const dialog = await screen.findByRole("dialog", { name: "Проверка гипотезы" });
+    expect(await within(dialog).findByText("Индекс использован")).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });

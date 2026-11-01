@@ -18,10 +18,32 @@ function findNode(root: PlanNode, id: number | null): PlanNode | null {
  * Показ одного плана: сводка, дерево и панель выбранного узла. Выбор живёт здесь и относится к плану, для которого сделан:
  * при смене объекта `tree` (новый запуск, другой план истории, новый разбор) он сбрасывается — номера узлов другого плана другие.
  * Один и тот же объект `tree` между перерисовками обязателен: дерево по его смене сбрасывает и развёртку. `member` — узел,
- * где план получен, если он не узел вкладки (сводка его называет).
+ * где план получен, если он не узел вкладки (сводка его называет). `afterSummary` — блок между сводкой и деревом (рекомендации);
+ * он получает `showNode`, выбирающий узел этого плана (дерево раскрывает его предков и прокручивает к нему).
  */
-export function PlanView({ tree, tier, mode, warnings, raw, elapsedMs, member, extraActions }: { tree: PlanTree; tier?: ExplainTier; mode?: ExplainMode; warnings?: string[]; raw?: unknown; elapsedMs?: number; member?: string; extraActions?: ReactNode }) {
-  const [pick, setPick] = useState<{ tree: PlanTree; id: number } | null>(null);
+export function PlanView({
+  tree,
+  tier,
+  mode,
+  warnings,
+  raw,
+  elapsedMs,
+  member,
+  extraActions,
+  afterSummary,
+}: {
+  tree: PlanTree;
+  tier?: ExplainTier;
+  mode?: ExplainMode;
+  warnings?: string[];
+  raw?: unknown;
+  elapsedMs?: number;
+  member?: string;
+  extraActions?: ReactNode;
+  afterSummary?: (showNode: (id: number) => void) => ReactNode;
+}) {
+  // `reveal` — выбор пришёл не кликом по строке (а «Показать узел»): дерево раскроет предков и прокрутит к узлу.
+  const [pick, setPick] = useState<{ tree: PlanTree; id: number; reveal?: boolean } | null>(null);
   // Другой план — выбор забыт совсем (возврат к прежнему плану истории не воскрешает его): сброс при отрисовке, без эффекта.
   if (pick && pick.tree !== tree) setPick(null);
   const selectedId = pick && pick.tree === tree ? pick.id : null;
@@ -29,7 +51,8 @@ export function PlanView({ tree, tier, mode, warnings, raw, elapsedMs, member, e
   return (
     <>
       <PlanSummary tree={tree} tier={tier} mode={mode} warnings={warnings} raw={raw} elapsedMs={elapsedMs} member={member} extraActions={extraActions} />
-      <PlanTreeView tree={tree} selectedId={selectedId} onSelect={(id) => setPick({ tree, id })} />
+      {afterSummary?.((id) => setPick({ tree, id, reveal: true }))}
+      <PlanTreeView tree={tree} selectedId={selectedId} reveal={pick?.reveal ? pick : null} onSelect={(id) => setPick({ tree, id })} />
       {node && <PlanNodeDetails node={node} />}
     </>
   );

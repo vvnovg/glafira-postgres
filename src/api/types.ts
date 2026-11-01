@@ -906,6 +906,45 @@ export interface ExplainResult {
   elapsedMs: number;
   /** Ключи предупреждений: `genericPlan`, `probeWithoutReadOnly`, `adminFunction`. */
   warnings: string[];
+  /** Рекомендации по плану (P3b): от высокой важности к низкой. */
+  recommendations: Recommendation[];
+  /** Правила, которым нужен факт (ANALYZE): без него пропущены. */
+  recommendationsSkipped: string[];
+}
+
+/** Виртуальный индекс для hypopg: `CREATE INDEX` без `CONCURRENTLY`. */
+export interface HypoIndex {
+  indexDdl: string;
+}
+/**
+ * Рекомендация по плану (спец. P3 §9.1). Команду приложение не выполняет — только показывает и копирует; `<…>` в ней —
+ * шаблон для пользователя.
+ */
+export interface Recommendation {
+  /** Ключ текстов `recommend.<id>.{title,evidence,effect,risks}`. */
+  id: string;
+  severity: Severity;
+  nodeIds: number[];
+  params: Record<string, string | number | boolean | null>;
+  command: string | null;
+  hypo: HypoIndex | null;
+}
+/** Проверка гипотезы hypopg: план запроса без индекса и с виртуальным индексом (`searchPath` — тот же, что у запроса). */
+export interface HypoRequest {
+  member: string;
+  database: string;
+  sql: string;
+  params: ExplainParams;
+  searchPath: string | null;
+  indexDdl: string;
+}
+export interface HypoResult {
+  indexName: string;
+  estimatedBytes: number;
+  costBefore: number;
+  costAfter: number;
+  used: boolean;
+  planAfter: PlanTree;
 }
 
 // «Скопировать для LLM».

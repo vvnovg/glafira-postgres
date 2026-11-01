@@ -379,6 +379,18 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .plan-summary-part + .plan-summary-part::before { content: " · "; color: var(--muted); }
 .plan-setting { margin-right: 8px; }
 .plan-details pre { max-height: 240px; overflow: auto; }
+/* Рекомендации по плану (P3b): карточки как у находок (полоса важности и метка), команда — моноширинным блоком. */
+.recommendations { display: flex; flex-direction: column; gap: 6px; }
+.recommendations h3 { margin: 0; font-size: 13px; }
+.recommendations > p { margin: 0; }
+.recommend-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.recommend h4 { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.recommend p { margin: 0; overflow-wrap: anywhere; }
+.recommend .diag-command pre { flex: 1 1 320px; min-width: 0; }
+.hypo-check { width: min(900px, 100%); }
+.hypo-check h4 { margin: 0; font-size: 13px; }
+/* «Индекс использован»: цвет с подмешанным текстом (контраст) и жирное слово — смысл не держится на одном цвете. */
+.hypo-used { color: color-mix(in srgb, var(--ok) 55%, var(--fg)); font-weight: 600; }
 /* Карточка запроса и запуск плана (P3a). */
 .query-text { margin: 0; max-height: 200px; overflow: auto; white-space: pre-wrap; }
 .query-overview, .plan-runner, .query-plan { display: flex; flex-direction: column; gap: 12px; }

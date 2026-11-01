@@ -24,7 +24,7 @@ describe("ExplainTab", () => {
   });
 
   it("узел и база из спеки, SQL подставлен, «План» уходит на выбранный узел и базу", async () => {
-    vi.mocked(api.explain).mockResolvedValue({ mode: "plan", tier: "read", plan: planTree(), raw: [], relations: [], elapsedMs: 3, warnings: [] });
+    vi.mocked(api.explain).mockResolvedValue({ mode: "plan", tier: "read", plan: planTree(), raw: [], relations: [], elapsedMs: 3, warnings: [], recommendations: [], recommendationsSkipped: [] });
     const user = userEvent.setup();
     renderWithClient(<ExplainTab connectionId="c" member="pg-2" database="perf" sql="SELECT 1" active />);
     expect(await screen.findByRole("combobox", { name: "База" })).toHaveValue("perf");
@@ -138,7 +138,7 @@ describe("ExplainTab", () => {
   });
 
   it("правка SQL при открытом подтверждении яруса записи закрывает его: запуск с подтверждением не уходит", async () => {
-    vi.mocked(api.explain).mockResolvedValue({ mode: "plan", tier: "write", plan: planTree(), raw: [], relations: [{ schema: "shop", name: "balances" }], elapsedMs: 3, warnings: [] });
+    vi.mocked(api.explain).mockResolvedValue({ mode: "plan", tier: "write", plan: planTree(), raw: [], relations: [{ schema: "shop", name: "balances" }], elapsedMs: 3, warnings: [], recommendations: [], recommendationsSkipped: [] });
     const user = userEvent.setup();
     renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql="UPDATE shop.balances SET balance = 0" active />);
     await screen.findByRole("combobox", { name: "База" });
@@ -192,7 +192,7 @@ describe("ExplainTab", () => {
 
   it("повтор чтения списка баз не размонтирует запуск: показанный план остаётся", async () => {
     vi.mocked(api.listDatabases).mockRejectedValueOnce({ code: "NODE_UNAVAILABLE", message: "down", retryable: true });
-    vi.mocked(api.explain).mockResolvedValue({ mode: "plan", tier: "read", plan: planTree(), raw: [], relations: [], elapsedMs: 3, warnings: [] });
+    vi.mocked(api.explain).mockResolvedValue({ mode: "plan", tier: "read", plan: planTree(), raw: [], relations: [], elapsedMs: 3, warnings: [], recommendations: [], recommendationsSkipped: [] });
     const user = userEvent.setup();
     renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql="SELECT 1" active />);
     // База известна из спеки: запуск доступен и при ошибке чтения списка.
@@ -206,7 +206,7 @@ describe("ExplainTab", () => {
   });
 
   it("переключение на «Вставить план» и обратно не стирает набранный SQL и показанный план запуска", async () => {
-    vi.mocked(api.explain).mockResolvedValue({ mode: "plan", tier: "read", plan: planTree(), raw: [], relations: [], elapsedMs: 3, warnings: [] });
+    vi.mocked(api.explain).mockResolvedValue({ mode: "plan", tier: "read", plan: planTree(), raw: [], relations: [], elapsedMs: 3, warnings: [], recommendations: [], recommendationsSkipped: [] });
     const user = userEvent.setup();
     renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql="SELECT 1" active />);
     await screen.findByRole("combobox", { name: "База" });
@@ -234,7 +234,7 @@ describe("ExplainTab", () => {
 
   it("«Скопировать для LLM» получает план последнего запуска; правка SQL, смена узла или базы возвращают null", async () => {
     const plan = planTree();
-    vi.mocked(api.explain).mockResolvedValue({ mode: "plan", tier: "read", plan, raw: [], relations: [], elapsedMs: 3, warnings: [] });
+    vi.mocked(api.explain).mockResolvedValue({ mode: "plan", tier: "read", plan, raw: [], relations: [], elapsedMs: 3, warnings: [], recommendations: [], recommendationsSkipped: [] });
     vi.mocked(api.queryLlmBundle).mockRejectedValue({ code: "NOT_AUTHORIZED", key: "errors.explain.notAuthorized", message: "Not enough privileges", retryable: false });
     const user = userEvent.setup();
     renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql="SELECT 1" active />);
@@ -276,14 +276,14 @@ describe("ExplainTab", () => {
     await screen.findByRole("combobox", { name: "База" });
     await user.click(screen.getByRole("button", { name: "План" }));
     await user.type(screen.getByRole("textbox", { name: "SQL" }), " ");
-    await act(async () => finish({ mode: "plan", tier: "read", plan, raw: [], relations: [], elapsedMs: 3, warnings: [] }));
+    await act(async () => finish({ mode: "plan", tier: "read", plan, raw: [], relations: [], elapsedMs: 3, warnings: [], recommendations: [], recommendationsSkipped: [] }));
     await screen.findByRole("treegrid", { name: "Дерево плана" });
     await user.click(screen.getByRole("button", { name: "Скопировать для LLM" }));
     await waitFor(() => expect(api.queryLlmBundle).toHaveBeenCalledWith("c", "pg-1", "perf", { kind: "sql", sql: "SELECT 1 " }, null));
   });
 
   it("«Скопировать для LLM» после запуска — в ряду копирования результата, рядом с «JSON» и «Как текст»", async () => {
-    vi.mocked(api.explain).mockResolvedValue({ mode: "plan", tier: "read", plan: planTree(), raw: [], relations: [], elapsedMs: 3, warnings: [] });
+    vi.mocked(api.explain).mockResolvedValue({ mode: "plan", tier: "read", plan: planTree(), raw: [], relations: [], elapsedMs: 3, warnings: [], recommendations: [], recommendationsSkipped: [] });
     const user = userEvent.setup();
     renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql="SELECT 1" active />);
     await screen.findByRole("combobox", { name: "База" });

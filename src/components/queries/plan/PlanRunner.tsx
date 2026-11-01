@@ -11,6 +11,7 @@ import { ErrorBanner } from "../../common/ErrorBanner";
 import { AnalyzeConfirm } from "./AnalyzeConfirm";
 import { PARAM_FIELDS_LIMIT, ParamsForm } from "./ParamsForm";
 import { PlanView } from "./PlanView";
+import { Recommendations } from "./Recommendations";
 
 /** Сроки ANALYZE в выборе, секунды (Rust принимает 5…600); пробный план всегда идёт со своим сроком 15 с. */
 const TIMEOUTS_S = [5, 15, 30, 60, 300, 600] as const;
@@ -26,13 +27,15 @@ const TIER_KEYS: Record<ExplainTier, string> = { read: "diag.plan.tiers.read", w
 /**
  * Запуск в истории: результат хранится одним объектом — дерево плана сбрасывает развёртку при смене объекта. `member` —
  * узел, на котором план получен (ANALYZE чтения с лидера уходит на реплику): история и сводка называют его, если он не узел
- * вкладки.
+ * вкладки. `request` — запрос, давший результат: проверка гипотезы рекомендации идёт с его текстом, параметрами и
+ * `search_path`, а не с текущими полями.
  */
 interface Run {
   id: number;
   at: number;
   result: ExplainResult;
   member: string;
+  request: ExplainRequest;
 }
 
 /** Подсказка у кнопок: `force` — после `EXPLAIN_WRITES` можно выполнить как запись; остальные закрывают ярус записи. */
@@ -222,10 +225,17 @@ export function PlanRunner({
     writeConfirmed: false,
   });
 
-  const remember = (result: ExplainResult, on: string) => {
+  /** Запуск запроса `req` и запоминание результата (после размонтирования — никуда). */
+  const runAndRemember = async (req: ExplainRequest) => {
+    const result = await explain.mutateAsync(req);
+    remember(result, req);
+    return result;
+  };
+  const remember = (result: ExplainResult, req: ExplainRequest) => {
     if (!alive.current) return;
     seq.current += 1;
-    const run: Run = { id: seq.current, at: Date.now(), result, member: on };
+    const on = req.member;
+    const run: Run = { id: seq.current, at: Date.now(), result, member: on, request: req };
     setRuns((r) => [run, ...r].slice(0, HISTORY));
     setShown(run.id);
     setResultHidden(false);
@@ -267,9 +277,10 @@ export function PlanRunner({
   const runPlan = () => {
     const from = inputs;
     return guarded(from, async () => {
-      const r = await explain.mutateAsync(request("plan", NO_CONFIRMATION, false, from));
+      const req = request("plan", NO_CONFIRMATION, false, from);
+      const r = await explain.mutateAsync(req);
       if (alive.current) setReadProbe(r.tier === "read" ? inputsKey(from) : null);
-      remember(r, member);
+      remember(r, req);
     });
   };
 
@@ -298,7 +309,7 @@ export function PlanRunner({
       }
       setReadProbe(inputsKey(from));
       try {
-        remember(await explain.mutateAsync(request("analyze", NO_CONFIRMATION, false, from, on)), on);
+        await runAndRemember(request("analyze", NO_CONFIRMATION, false, from, on));
       } catch (e) {
         // Чтение записало (volatile-функция, триггер).
         offerForce(e, probe.relations, from);
@@ -322,7 +333,7 @@ export function PlanRunner({
     // узле вкладки; журнал действий перечитывается.
     return guarded(from, async () => {
       try {
-        remember(await explain.mutateAsync({ ...request("analyze", c, force, from), writeConfirmed: true }), member);
+        await runAndRemember({ ...request("analyze", c, force, from), writeConfirmed: true });
       } finally {
         void qc.invalidateQueries({ queryKey: ["actions", connectionId] });
         if (alive.current) setConfirm(null);
@@ -442,6 +453,18 @@ export function PlanRunner({
           elapsedMs={current.result.elapsedMs}
           member={current.member !== member ? current.member : undefined}
           extraActions={extraActions}
+          afterSummary={(showNode) => (
+            <Recommendations
+              connectionId={connectionId}
+              member={current.request.member}
+              database={current.request.database}
+              sql={current.request.sql}
+              params={current.request.params}
+              searchPath={current.request.searchPath}
+              result={current.result}
+              onShowNode={showNode}
+            />
+          )}
         />
       )}
       {(!current || refused) && extraActions && <div className="toolbar">{extraActions}</div>}

@@ -57,7 +57,7 @@ describe("QueryTab", () => {
   it("подвкладка «План»: источник — текст экземпляра, пробный план даёт таблицы в обзоре", async () => {
     vi.mocked(api.queryDetail).mockResolvedValue(detail());
     const plan = (await import("../../test/plans")).planTree();
-    vi.mocked(api.explain).mockResolvedValue({ mode: "plan", tier: "read", plan, raw: [], relations: [{ schema: "shop", name: "customers" }], elapsedMs: 5, warnings: [] });
+    vi.mocked(api.explain).mockResolvedValue({ mode: "plan", tier: "read", plan, raw: [], relations: [{ schema: "shop", name: "customers" }], elapsedMs: 5, warnings: [], recommendations: [], recommendationsSkipped: [] });
     const user = userEvent.setup();
     renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
     await screen.findByText("SELECT * FROM shop.customers WHERE id = $1");
@@ -131,7 +131,7 @@ describe("QueryTab", () => {
   it("«Копировать запрос», «Обновить» и «Получить план», который сразу строит пробный план", async () => {
     vi.mocked(api.queryDetail).mockResolvedValue(detail());
     const plan = (await import("../../test/plans")).planTree();
-    vi.mocked(api.explain).mockResolvedValue({ mode: "plan", tier: "read", plan, raw: [], relations: [{ schema: "shop", name: "customers" }], elapsedMs: 5, warnings: [] });
+    vi.mocked(api.explain).mockResolvedValue({ mode: "plan", tier: "read", plan, raw: [], relations: [{ schema: "shop", name: "customers" }], elapsedMs: 5, warnings: [], recommendations: [], recommendationsSkipped: [] });
     const user = userEvent.setup();
     renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
     await screen.findByText("SELECT * FROM shop.customers WHERE id = $1");
@@ -156,8 +156,8 @@ describe("QueryTab", () => {
     const onReplica = plans.planTree();
     const onLeader = plans.planTree();
     vi.mocked(api.explain)
-      .mockResolvedValueOnce({ mode: "plan", tier: "read", plan: plans.planTree(), raw: [], relations: [], elapsedMs: 5, warnings: [] })
-      .mockResolvedValueOnce({ mode: "analyze", tier: "read", plan: onReplica, raw: [], relations: [], elapsedMs: 9, warnings: [] });
+      .mockResolvedValueOnce({ mode: "plan", tier: "read", plan: plans.planTree(), raw: [], relations: [], elapsedMs: 5, warnings: [], recommendations: [], recommendationsSkipped: [] })
+      .mockResolvedValueOnce({ mode: "analyze", tier: "read", plan: onReplica, raw: [], relations: [], elapsedMs: 9, warnings: [], recommendations: [], recommendationsSkipped: [] });
     vi.mocked(api.queryLlmBundle).mockResolvedValue({ serverVersionNum: 170_004, pgssVersion: "1.11", inRecovery: false, member: "pg-1", database: "perf", text: "SELECT 1", textTruncated: false, stats: null, planText: null, tables: [], tablesOmitted: 0, warnings: [] });
     const user = userEvent.setup();
     renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
@@ -172,7 +172,7 @@ describe("QueryTab", () => {
     await user.click(screen.getByRole("button", { name: "Скопировать для LLM" }));
     await waitFor(() => expect(api.queryLlmBundle).toHaveBeenLastCalledWith("c", "pg-1", "perf", { kind: "query", queryId: "7" }, null));
     // План на узле вкладки — уходит в копию.
-    vi.mocked(api.explain).mockResolvedValueOnce({ mode: "plan", tier: "read", plan: onLeader, raw: [], relations: [], elapsedMs: 4, warnings: [] });
+    vi.mocked(api.explain).mockResolvedValueOnce({ mode: "plan", tier: "read", plan: onLeader, raw: [], relations: [], elapsedMs: 4, warnings: [], recommendations: [], recommendationsSkipped: [] });
     await user.click(screen.getByRole("tab", { name: "План" }));
     await user.click(screen.getByRole("button", { name: "План" }));
     await waitFor(() => expect(screen.queryByText("Узел: pg-2")).toBeNull());

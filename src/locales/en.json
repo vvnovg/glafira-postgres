@@ -1898,5 +1898,109 @@
       "lastEnd": "When the replica last reported a new WAL position to the primary. If nothing is written to the cluster, the position stays put and this time grows; that is normal.",
       "queries": "Top queries from pg_stat_statements: since the last reset or over the last 5, 15 or 60 minutes (the sampler reads the statistics once a minute while the tab is open). Click a row for the query card."
     }
+  },
+  "recommend": {
+    "title": "Recommendations",
+    "none": "No advice",
+    "skipped_one": "Run the plan with execution to check {{count}} more rule",
+    "skipped_other": "Run the plan with execution to check {{count}} more rules",
+    "copyCommand": "Copy command",
+    "notRun": "The app does not run this command: copy it and run it yourself",
+    "template": "Replace <…> with your values before running",
+    "effect": "Effect",
+    "risks": "Risks",
+    "showNode": "Show node",
+    "direction": {
+      "under": "underestimated",
+      "over": "overestimated"
+    },
+    "spillKinds": {
+      "sort": "Sort",
+      "hash": "Hash",
+      "bitmap": "Bitmap"
+    },
+    "hypo": {
+      "title": "Hypothesis check",
+      "check": "Check hypothesis",
+      "intro": "A virtual index (hypopg) exists only in this check's session: nothing is created on the server",
+      "cost": "Cost: {{before}} → {{after}}",
+      "used": "Index used",
+      "notUsed": "Index not used",
+      "size": "estimated size {{size}}",
+      "planAfter": "Plan with the virtual index"
+    },
+    "plan_seq_scan_filter": {
+      "title": "Index on filter columns: {{table}}",
+      "titlePartitions": "Index on filter columns in {{partitions}} partitions: {{table}} and others",
+      "evidence": "Seq Scan read {{rowsRead}} rows and returned {{rowsReturned}} ({{loops}} loops)",
+      "evidencePartitions": "Seq Scans of {{tables}} read {{rowsRead}} rows and returned {{rowsReturned}}",
+      "effect": "An index turns the full scan into an index scan of the matching rows",
+      "risks": "The index costs disk space and slows writes; CONCURRENTLY avoids blocking but takes longer"
+    },
+    "plan_index_filter": {
+      "title": "Composite index for {{table}}",
+      "evidence": "{{index}} returned {{rowsReturned}} rows after removing {{rowsRemoved}} by filter",
+      "effect": "Adding the filter columns to the index avoids reading rows that are discarded",
+      "risks": "A wider index is larger; put equality columns first"
+    },
+    "plan_nested_loop_seq": {
+      "title": "Index on the join key: {{table}}",
+      "evidence": "Seq Scan on {{table}} ran {{loops}} times, {{rowsPerLoop}} rows per loop",
+      "effect": "The inner side becomes an index lookup per outer row",
+      "risks": "Check that the planner's row estimate is right: a wrong estimate may still choose a nested loop"
+    },
+    "plan_misestimate": {
+      "title": "Row estimate {{directionLabel}} ×{{ratio}}: {{table}}",
+      "evidence": "Planned {{planRows}} rows, got {{actualRows}}",
+      "effect": "Fresh statistics (ANALYZE, higher statistics target, extended statistics for correlated columns) fix the estimate and the join strategy",
+      "risks": "ANALYZE reads a sample of the table; extended statistics need PostgreSQL 10+ and are refreshed by ANALYZE"
+    },
+    "plan_spill": {
+      "title": "{{kindLabel}} spills to disk",
+      "titleBitmap": "Bitmap became lossy: work_mem is too small",
+      "evidence": "{{spaceKb}} used on disk; work_mem for the session or role: {{workMemKb}}",
+      "evidenceBitmap": "{{lossyBlocks}} lossy and {{exactBlocks}} exact heap blocks: rows on lossy pages are rechecked",
+      "effect": "Enough work_mem keeps the sort or hash in memory; an index on {{keys}} removes the sort",
+      "effectMemory": "Enough work_mem keeps the operation in memory",
+      "risks": "work_mem is per operation and per session: raise it for the session or role, not globally"
+    },
+    "plan_sort_limit": {
+      "title": "Index for ORDER BY … LIMIT: {{table}}",
+      "evidence": "{{inputRows}} rows sorted to return {{limitRows}}",
+      "effect": "An index on {{keys}} lets the server read the first rows without sorting everything",
+      "risks": "The index must match the sort order and direction"
+    },
+    "plan_heap_fetches": {
+      "title": "VACUUM {{table}}: visibility map is stale",
+      "evidence": "Index Only Scan fetched {{heapFetches}} of {{rows}} rows from the heap",
+      "effect": "VACUUM marks pages all-visible and the scan stops touching the heap",
+      "risks": "Check autovacuum settings for the table"
+    },
+    "plan_no_pruning": {
+      "title": "Partition pruning did not work",
+      "evidence": "{{children}} partitions scanned, {{emptyChildren}} returned nothing",
+      "evidencePlan": "The plan scans all {{children}} partitions",
+      "effect": "A condition on the partition key lets the planner skip partitions",
+      "risks": "Pruning needs a constant or a parameter on the key, not an expression; check enable_partition_pruning"
+    },
+    "plan_workers_short": {
+      "title": "Fewer parallel workers than planned",
+      "evidence": "{{launched}} of {{planned}} workers launched",
+      "effect": "Raising max_parallel_workers and max_worker_processes gives the query its planned parallelism",
+      "risks": "Workers are shared by all sessions; more workers mean more CPU and memory"
+    },
+    "plan_subplan_per_row": {
+      "title": "Subquery runs per row",
+      "evidence": "{{name}} executed {{loops}} times",
+      "effect": "Rewriting as JOIN or LATERAL lets the planner choose a hash or merge strategy",
+      "risks": "The rewrite must keep NULL semantics (NOT IN vs NOT EXISTS)"
+    },
+    "plan_jit_heavy": {
+      "title": "JIT takes longer than the query",
+      "evidence": "JIT {{jitMs}} ({{functions}} functions) against execution {{execMs}}",
+      "evidenceParallel": "JIT {{jitMs}} in {{processes}} processes ({{functions}} functions) against execution {{execMs}}",
+      "effect": "jit = off for the session or role, or a higher jit_above_cost, removes the compilation cost",
+      "risks": "Long analytical queries may benefit from JIT: disable it selectively"
+    }
   }
 }
