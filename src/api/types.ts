@@ -627,7 +627,7 @@ export type QuerySort =
   | "ioTime"
   | "planTime"
   | "jitTime";
-/** Режим отчёта; `between` (сравнение снимков) — P3b, в P3a Rust его отклоняет. */
+/** Режим отчёта; `between` — дельты между двумя снимками (файлы снимков, порядок любой, Rust упорядочит). */
 export type QueriesMode = { kind: "sinceReset" } | { kind: "window"; s: 300 | 900 | 3600 } | { kind: "between"; from: string; to: string };
 export interface QueriesParams {
   mode: QueriesMode;
@@ -700,6 +700,35 @@ export interface QueriesData {
   pgss: PgssMeta | null;
   totals: { calls: number; totalExecMs: number; rows: number };
   rows: QueryStat[];
+}
+/** Снимок pgss на диске (`snapshot_list`, новые первыми). `rows: null` и `unreadable` — файл не читается: его можно только удалить. */
+export interface SnapshotInfo {
+  /** Путь относительно каталога снимков подключения: `<member>/<yyyy-mm-ddThh-mm-ss>.json`. */
+  file: string;
+  member: string;
+  takenAtMs: number;
+  rows: number | null;
+  bytes: number;
+  unreadable?: "tooLarge" | "corrupt";
+}
+/** Запрос, среднее время которого изменилось: `before` — накопительный в `from`, `after` — дельта (без min/max/stddev). */
+export interface Change {
+  key: QueryKey;
+  datname: string | null;
+  rolname: string | null;
+  before: QueryStat;
+  after: QueryStat;
+  ratio: number;
+}
+/** Сравнение двух снимков (`snapshot_compare`); строки несут `text` и `own` из снимков. */
+export interface Comparison {
+  new: QueryStat[];
+  gone: QueryStat[];
+  degraded: Change[];
+  improved: Change[];
+  totalsFrom: { calls: number; totalExecMs: number; rows: number };
+  totalsTo: { calls: number; totalExecMs: number; rows: number };
+  reset: boolean;
 }
 export interface QueryText {
   key: QueryKey;

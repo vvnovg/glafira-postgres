@@ -11,6 +11,7 @@ import { DiagHeader } from "../diag/DiagHeader";
 import { FindingsPanel } from "../diag/FindingsPanel";
 import { unavailableText } from "../diag/unavailable";
 import { BLOCK_BYTES, QUERY_KEY_ID, queryTitle, sortAvailable } from "./queriesText";
+import { SnapshotsPanel } from "./SnapshotsPanel";
 
 /** Интервал обновления режима «с момента сброса» по умолчанию, с. */
 const DEFAULT_INTERVAL_S = 10;
@@ -45,7 +46,14 @@ const COLS: Col[] = [
 ];
 
 const modeValue = (m: QueriesParams["mode"]) => (m.kind === "window" ? `window:${m.s}` : m.kind);
-const parseMode = (v: string): QueriesParams["mode"] => (v.startsWith("window:") ? { kind: "window", s: Number(v.slice(7)) as 300 | 900 | 3600 } : { kind: "sinceReset" });
+/** Режим из списка; «Между снимками» в списке — только текущий (пара выбирается в панели снимков), выбор другого его сбрасывает. */
+const parseMode = (v: string, current: QueriesParams["mode"]): QueriesParams["mode"] => {
+  if (v.startsWith("window:")) return { kind: "window", s: Number(v.slice(7)) as 300 | 900 | 3600 };
+  if (v === "between" && current.kind === "between") return current;
+  return { kind: "sinceReset" };
+};
+/** Подпись снимка в шапке режима: имя файла без `.json` (`<member>/<время>`). */
+const snapshotLabel = (file: string) => file.replace(/\.json$/, "");
 
 /**
  * Инструмент «Запросы» (спец. P3 §4.7): общая шапка диагностики, режим и фильтры, таблица топа, находки. Отчёт «за
@@ -92,8 +100,13 @@ export function QueriesView({
   const report = q.data;
   const data = report?.data;
   const byTick = params.mode.kind === "window";
+  const between = params.mode.kind === "between";
+  // min/max/stddev есть только у накопительного отчёта: в окне и между снимками строки — дельты.
+  const deltas = params.mode.kind !== "sinceReset";
+  const [showSnapshots, setShowSnapshots] = useState(false);
   const reportMember = report?.member ?? null;
-  const freshMember = q.isPlaceholderData ? null : reportMember;
+  // Узел отчёта «между снимками» — узел снимка, а не лидер: сэмплер за ним не переходит.
+  const freshMember = q.isPlaceholderData || data?.mode.kind === "between" ? null : reportMember;
   useEffect(() => {
     if (member !== null) setResolved(null);
     else if (freshMember !== null) setResolved(freshMember);
@@ -113,7 +126,8 @@ export function QueriesView({
     failedAt.current.clear();
   }, [owner]);
   useEffect(() => {
-    if (!data || reportMember === null) return;
+    // Между снимками тексты — из самих снимков: запрос без текста на сервере не ищется (подключение может быть закрыто).
+    if (!data || reportMember === null || data.mode.kind === "between") return;
     const now = Date.now();
     const known = texts.owner === owner ? texts.byId : null;
     const keys = data.rows
@@ -181,12 +195,14 @@ export function QueriesView({
   };
   // Стрелка — у колонки, по которой щёлкнули, если её сортировка ещё действует; иначе (сброс сортировки сменой режима) — у первой подходящей.
   const activeCol = COLS.find((c) => c.id === sortCol && c.sort === params.sort) ?? COLS.find((c) => c.sort === params.sort);
+  const exitBetween = () => setParams((p) => (p.mode.kind === "between" ? { ...p, mode: { kind: "sinceReset" } } : p));
   const openQuery = (r: QueryStat) => {
     if (reportMember === null || r.datname === null) return;
     open({ kind: "query", connectionId, member: reportMember, database: r.datname, queryId: r.key.queryId, title: queryTitle(r.text, r.key.queryId) });
   };
   // Покрытие — по режиму самого отчёта: при переключении в окно на экране ещё может быть отчёт «с момента сброса».
   const coverage = (() => {
+    if (data?.mode.kind === "between") return data.coverageS === null ? null : t("diag.queries.betweenCoverage", { min: Math.round(data.coverageS / 60) });
     if (!data || data.mode.kind !== "window") return null;
     if (data.coverageS === null) return t("diag.queries.firstTick");
     return t("diag.queries.coverage", { have: Math.round(data.coverageS / 60), want: data.mode.s / 60 });
@@ -220,8 +236,8 @@ export function QueriesView({
             onChange={(e) =>
               setParams((p) => ({
                 ...p,
-                mode: parseMode(e.target.value),
-                sort: sortAvailable(p.sort, data?.pgss ?? null, e.target.value.startsWith("window:")) ? p.sort : "totalTime",
+                mode: parseMode(e.target.value, p.mode),
+                sort: sortAvailable(p.sort, data?.pgss ?? null, e.target.value !== "sinceReset") ? p.sort : "totalTime",
               }))
             }
           >
@@ -231,6 +247,7 @@ export function QueriesView({
                 {t("diag.queries.modes.window", { min: s / 60 })}
               </option>
             ))}
+            {between && <option value="between">{t("diag.queries.modes.between")}</option>}
           </select>
         </label>
         {coverage && (
@@ -267,10 +284,34 @@ export function QueriesView({
             ))}
           </select>
         </label>
+        <button type="button" aria-expanded={showSnapshots} onClick={() => setShowSnapshots((v) => !v)}>
+          {t("diag.queries.snapshots")}
+        </button>
         <button type="button" onClick={() => open({ kind: "explain", connectionId, member })}>
           {t("diag.queries.openConsole")}
         </button>
       </div>
+      {params.mode.kind === "between" && (
+        <div className="toolbar snapshots-between">
+          <strong>{t("diag.queries.betweenLabel", { from: snapshotLabel(params.mode.from), to: snapshotLabel(params.mode.to) })}</strong>
+          <button type="button" onClick={exitBetween}>
+            {t("diag.queries.betweenExit")}
+          </button>
+        </div>
+      )}
+      {showSnapshots && (
+        <SnapshotsPanel
+          connectionId={connectionId}
+          member={member ?? resolved}
+          onBetween={(from, to) => {
+            setParams((p) => ({ ...p, mode: { kind: "between", from, to }, sort: sortAvailable(p.sort, data?.pgss ?? null, true) ? p.sort : "totalTime" }));
+            setShowSnapshots(false);
+          }}
+          onDeleted={(file) => {
+            if (params.mode.kind === "between" && (params.mode.from === file || params.mode.to === file)) exitBetween();
+          }}
+        />
+      )}
       {q.error && <ErrorBanner error={q.error} />}
       {sampler.error && <ErrorBanner error={sampler.error} />}
       {report && data ? (
@@ -292,7 +333,7 @@ export function QueriesView({
                   <tr>
                     <th scope="col">{t("diag.queries.columns.query")}</th>
                     {COLS.map((c) => {
-                      const enabled = c.sort !== null && sortAvailable(c.sort, data.pgss, byTick);
+                      const enabled = c.sort !== null && sortAvailable(c.sort, data.pgss, deltas);
                       const current = c === activeCol;
                       // Hit % сортируется по возрастанию (худшие сверху), остальные — по убыванию.
                       const ascending = params.sort === "hitRatio";
@@ -337,7 +378,13 @@ export function QueriesView({
                 </tbody>
               </table>
               {data.rows.length === 0 && (
-                <p className="empty">{params.search ? t("diag.queries.noMatch", { q: params.search }) : byTick ? t("diag.queries.emptyWindow") : t("diag.queries.empty")}</p>
+                <p className="empty">{params.search
+                    ? t("diag.queries.noMatch", { q: params.search })
+                    : between
+                      ? t("diag.queries.emptyBetween")
+                      : byTick
+                        ? t("diag.queries.emptyWindow")
+                        : t("diag.queries.empty")}</p>
               )}
             </div>
           )}

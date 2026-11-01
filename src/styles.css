@@ -357,6 +357,13 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 /* Инструмент «Запросы»: текст запроса в ячейке — одной строкой, без разрыва таблицы. */
 .diag-query-cell { max-width: 480px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .diag-query-cell button { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+/* Снимки pgss (P3b): панель под фильтрами «Запросов», итог сравнения, подпись режима «между снимками». */
+.snapshots-panel { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
+.snapshots-panel h3 { margin: 0; font-size: 1em; }
+.snapshot-compare { display: flex; flex-direction: column; gap: 6px; }
+.snapshot-compare h4 { margin: 6px 0 2px; }
+.snapshot-own, .snapshot-unreadable td:nth-child(2), .snapshot-unreadable td:nth-child(3) { opacity: 0.6; }
+.snapshots-between { margin: 4px 0; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .diag-command { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .diag-facts { display: flex; flex-direction: column; gap: 2px; }

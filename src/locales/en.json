@@ -1260,7 +1260,8 @@
       "mode": "Mode",
       "modes": {
         "sinceReset": "Since reset",
-        "window": "Last {{min}} min"
+        "window": "Last {{min}} min",
+        "between": "Between snapshots"
       },
       "coverage": "{{have}} of {{want}} min collected",
       "firstTick": "Waiting for the first tick of the sampler…",
@@ -1298,7 +1299,12 @@
         "jit": "JIT",
         "stddev": "Stddev",
         "max": "Max"
-      }
+      },
+      "betweenCoverage": "{{min}} min between snapshots",
+      "snapshots": "Snapshots",
+      "betweenLabel": "Between snapshots: {{from}} → {{to}}",
+      "betweenExit": "Exit snapshot mode",
+      "emptyBetween": "No changes between the snapshots"
     },
     "query": {
       "heading": "Query",
@@ -1495,6 +1501,37 @@
       "pastePlaceholder": "Paste EXPLAIN output: text or FORMAT JSON, with or without the psql header",
       "parse": "Parse",
       "pasteHint": "A plan obtained outside Glafira: from psql, auto_explain or a colleague. The server is not used."
+    },
+    "snapshots": {
+      "title": "Snapshots",
+      "take": "Take snapshot",
+      "compare": "Compare",
+      "empty": "No snapshots yet",
+      "takenAt": "Taken",
+      "rows": "Rows",
+      "size": "Size",
+      "pick": "Select snapshot {{at}}",
+      "deleteTitle": "Delete snapshot",
+      "deleteQuestion": "Delete the snapshot taken {{at}}?",
+      "deleteConfirm": "Delete snapshot",
+      "mixedMembers": "The snapshots are from different nodes: select two snapshots of one node",
+      "reset": "Statistics were reset between the snapshots: only new and gone queries are reliable",
+      "totals": "Calls: {{from}} → {{to}}",
+      "between": "Top between snapshots",
+      "degraded": "Degraded",
+      "improved": "Improved",
+      "new": "New",
+      "gone": "Gone",
+      "before": "Mean before",
+      "after": "Mean after",
+      "ratio": "Ratio",
+      "hint": "Snapshots of pg_stat_statements are stored only on this computer",
+      "unreadable": {
+        "tooLarge": "Too large to read",
+        "corrupt": "Damaged file"
+      },
+      "unreadableHint": "This snapshot cannot be read: it can only be deleted",
+      "compared": "Comparison {{from}} → {{to}}"
     }
   },
   "findings": {

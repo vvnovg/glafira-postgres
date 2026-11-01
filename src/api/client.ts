@@ -6,6 +6,7 @@ import type {
   AppInfo,
   Confirmation,
   ConnectionFolder,
+  Comparison,
   ConnectionProfile,
   DatabaseInfo,
   DiagReport,
@@ -43,6 +44,7 @@ import type {
   SessionActionPreview,
   SessionActionRequest,
   SessionActionResult,
+  SnapshotInfo,
   SlotDropPreview,
   SlotDropRequest,
   StatementsEvent,
@@ -162,6 +164,14 @@ export const api = {
   parsePlan: (text: string) => call<PlanTree>("parse_plan", { text }),
   queryLlmBundle: (id: string, member: string, database: string, source: LlmSource, plan: PlanTree | null) =>
     call<LlmBundle>("query_llm_bundle", { id, member, database, source, plan }),
+
+  /** Снимок pgss узла на диск пользователя; второй снимок узла в ту же секунду — `errors.snapshots.exists`. */
+  snapshotTake: (id: string, member: string) => call<SnapshotInfo>("snapshot_take", { id, member }),
+  /** Снимки подключения, новые первыми; подключение может быть закрыто. */
+  snapshotList: (id: string) => call<SnapshotInfo[]>("snapshot_list", { id }),
+  /** `false` — файла уже не было. */
+  snapshotDelete: (id: string, file: string) => call<boolean>("snapshot_delete", { id, file }),
+  snapshotCompare: (id: string, from: string, to: string) => call<Comparison>("snapshot_compare", { id, from, to }),
 
   previewSessionAction: (id: string, request: SessionActionRequest) =>
     call<SessionActionPreview>("preview_session_action", { id, request }),

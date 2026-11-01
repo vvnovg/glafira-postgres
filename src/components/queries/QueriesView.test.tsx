@@ -8,7 +8,7 @@ import { renderWithClient } from "../../test/render";
 
 vi.mock("../../api/client", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../../api/client")>();
-  return { ...orig, api: { runDiagnostic: vi.fn(), queryTexts: vi.fn(), startStatementsSampler: vi.fn(), stopSession: vi.fn() } };
+  return { ...orig, api: { runDiagnostic: vi.fn(), queryTexts: vi.fn(), startStatementsSampler: vi.fn(), stopSession: vi.fn(), snapshotList: vi.fn(), snapshotCompare: vi.fn(), snapshotDelete: vi.fn() } };
 });
 
 import { api } from "../../api/client";
@@ -269,5 +269,45 @@ describe("QueriesView", () => {
     expect(screen.queryByText(/сброс статистики/)).toBeNull();
     const col = screen.getAllByRole("columnheader").findIndex((h) => /Планирование/.test(h.textContent ?? ""));
     expect(within(screen.getByText("select 1").closest("tr")!).getAllByRole("cell")[col].textContent).toBe("—");
+  });
+
+  it("«между снимками»: пара из панели снимков, без открытого подключения; подпись, покрытие, без stddev и без запроса текстов; выход", async () => {
+    const a = { file: "pg-1/2026-10-29T10-00-00.json", member: "pg-1", takenAtMs: 1_761_732_000_000, rows: 120, bytes: 40_000 };
+    const b = { file: "pg-1/2026-10-29T11-00-00.json", member: "pg-1", takenAtMs: 1_761_735_600_000, rows: 130, bytes: 42_000 };
+    vi.mocked(api.snapshotList).mockResolvedValue([b, a]);
+    vi.mocked(api.snapshotCompare).mockResolvedValue({ new: [], gone: [], degraded: [], improved: [], totalsFrom: { calls: 1, totalExecMs: 1, rows: 0 }, totalsTo: { calls: 2, totalExecMs: 2, rows: 0 }, reset: false });
+    vi.mocked(api.runDiagnostic).mockResolvedValue(
+      diagReport(data({ mode: { kind: "between", from: a.file, to: b.file }, coverageS: 3600, rows: [row("1", { own: true, text: "/* glafira */ select 1", stddevExecMs: null, maxExecMs: null, minExecMs: null }), row("2")] }), {
+        member: "pg-1",
+        followsLeader: false,
+        unavailable: [{ part: "between", reason: { key: "diag.unavailable.betweenReset", params: { part: "between" }, text: "between: statistics were reset between the snapshots" } }],
+      }),
+    );
+    const user = userEvent.setup();
+    renderWithClient(<QueriesView connectionId="c" member={null} active live={false} members={null} kind="server" onSelectMember={() => {}} />);
+    const toggle = screen.getByRole("button", { name: "Снимки" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await user.click(toggle);
+    const rows = await screen.findAllByRole("row");
+    await user.click(within(rows[1]).getByRole("checkbox"));
+    await user.click(within(rows[2]).getByRole("checkbox"));
+    await user.click(screen.getByRole("button", { name: "Сравнить" }));
+    await user.click(await screen.findByRole("button", { name: "Топ между снимками" }));
+    await waitFor(() =>
+      expect(api.runDiagnostic).toHaveBeenCalledWith("c", { tool: "queries", member: null, queries: { mode: { kind: "between", from: a.file, to: b.file }, sort: "totalTime", limit: 50, database: null, toplevelOnly: true } }),
+    );
+    expect(api.runDiagnostic).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("region", { name: /Сравнение/ })).not.toBeInTheDocument();
+    expect(screen.getByText("Между снимками: pg-1/2026-10-29T10-00-00 → pg-1/2026-10-29T11-00-00")).toBeInTheDocument();
+    expect(await screen.findByRole("status")).toHaveTextContent("60 мин между снимками");
+    expect(screen.getByRole("combobox", { name: "Режим" })).toHaveValue("between");
+    expect(screen.getByText("Сравнение: статистика сбрасывалась между снимками")).toBeInTheDocument();
+    expect(screen.getByText("Глафира")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stddev" })).toBeDisabled();
+    expect(api.queryTexts).not.toHaveBeenCalled();
+    expect(api.startStatementsSampler).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Выйти из режима снимков" }));
+    expect(screen.getByRole("combobox", { name: "Режим" })).toHaveValue("sinceReset");
+    expect(screen.queryByText(/Между снимками:/)).not.toBeInTheDocument();
   });
 });
