@@ -384,6 +384,38 @@ describe("PlanRunner: отказы и режим", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
+  it("после ошибки правка текста или значений не возвращает прошлый результат; новый успешный запуск и история — возвращают", async () => {
+    vi.mocked(api.explain).mockResolvedValueOnce(result()).mockResolvedValueOnce(result());
+    const user = userEvent.setup();
+    const { rerender } = renderWithClient(<PlanRunner connectionId="c" member="pg-1" database="perf" sql="SELECT $1" serverVersionNum={150_000} inRecovery={false} />);
+    await user.type(screen.getByRole("textbox", { name: "$1" }), "1");
+    await user.click(screen.getByRole("button", { name: "План" }));
+    await user.click(screen.getByRole("button", { name: "План" }));
+    expect(await screen.findByRole("treegrid", { name: "Дерево плана" })).toBeInTheDocument();
+    vi.mocked(api.explain).mockRejectedValueOnce({ code: "INVALID_INPUT", message: "x", retryable: false, key: "errors.explain.oneStatement" });
+    await user.click(screen.getByRole("button", { name: "План" }));
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    // Правка значения и текста снимает баннер, но прошлый результат к новому входу не относится.
+    await user.type(screen.getByRole("textbox", { name: "$1" }), "2");
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("treegrid", { name: "Дерево плана" })).toBeNull();
+    rerender(<PlanRunner connectionId="c" member="pg-1" database="perf" sql="SELECT $1 + 1" serverVersionNum={150_000} inRecovery={false} />);
+    expect(screen.queryByRole("treegrid", { name: "Дерево плана" })).toBeNull();
+    expect(screen.getByText(/История/)).toBeInTheDocument();
+    await user.click(screen.getAllByRole("button", { name: /^#\d/ })[0]);
+    expect(screen.getByRole("treegrid", { name: "Дерево плана" })).toBeInTheDocument();
+  });
+
+  it("после отказа новый успешный запуск показывает результат", async () => {
+    vi.mocked(api.explain).mockRejectedValueOnce({ code: "INVALID_INPUT", message: "x", retryable: false, key: "errors.explain.oneStatement" }).mockResolvedValueOnce(result());
+    const user = userEvent.setup();
+    renderWithClient(<PlanRunner connectionId="c" member="pg-1" database="perf" sql="SELECT 1" serverVersionNum={170_000} inRecovery={false} />);
+    await user.click(screen.getByRole("button", { name: "План" }));
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "План" }));
+    expect(await screen.findByRole("treegrid", { name: "Дерево плана" })).toBeInTheDocument();
+  });
+
   it("отказ в записи — красным баннером, прошлый результат скрыт", async () => {
     vi.mocked(api.listConnections).mockResolvedValue([connection({ id: "c", readOnly: true })]);
     vi.mocked(api.explain).mockResolvedValueOnce(result()).mockResolvedValueOnce(result({ tier: "write" }));

@@ -157,6 +157,11 @@ export function PlanRunner({
   /** Ошибка запуска и текст, для которого он шёл: место ошибки разбора отмечается в нём, а не в текущем поле. */
   const [failed, setFailed] = useState<{ error: AppError; sql: string } | null>(null);
   const [writeHint, setWriteHint] = useState<WriteHint | null>(null);
+  /**
+   * Был отказ или ошибка запуска: прошлый результат скрыт до нового успешного запуска или выбора в истории. Правка входа
+   * снимает баннер, но не этот флаг — иначе прошлый результат вернулся бы как результат нового входа.
+   */
+  const [resultHidden, setResultHidden] = useState(false);
   /** Таблицы пробного плана и вход того запуска, что получил `EXPLAIN_WRITES`: их покажет подтверждение «как запись». */
   const [forceFrom, setForceFrom] = useState<{ relations: RelationRef[]; inputs: Inputs } | null>(null);
   /** Ключ входа, чья проба показала ярус чтения: для него предлагается узел ANALYZE. */
@@ -222,6 +227,7 @@ export function PlanRunner({
     const run: Run = { id: seq.current, at: Date.now(), result, member: on };
     setRuns((r) => [run, ...r].slice(0, HISTORY));
     setShown(run.id);
+    setResultHidden(false);
     onResult?.(result, on);
   };
 
@@ -233,7 +239,10 @@ export function PlanRunner({
     try {
       await step();
     } catch (e) {
-      if (alive.current) setFailed({ error: toAppError(e), sql: from.sql });
+      if (alive.current) {
+        setFailed({ error: toAppError(e), sql: from.sql });
+        setResultHidden(true);
+      }
     } finally {
       if (alive.current) setRunning(false);
     }
@@ -241,9 +250,10 @@ export function PlanRunner({
 
   /** Ярус записи: read-only профиль и реплика закрыты подсказкой (Rust проверит и сам), иначе — подтверждение. */
   const openWrite = (relations: RelationRef[], force: boolean, from: Inputs, admin = false) => {
-    if (!canAct(profile)) setWriteHint("readOnly");
-    else if (inRecovery) setWriteHint("replica");
-    else setConfirm({ relations, force, inputs: from, admin });
+    if (!canAct(profile) || inRecovery) {
+      setWriteHint(canAct(profile) ? "replica" : "readOnly");
+      setResultHidden(true);
+    } else setConfirm({ relations, force, inputs: from, admin });
   };
 
   /** `EXPLAIN_WRITES`: повтор «как запись» пойдёт ярусом записи с подтверждением (таблицы — какие известны). */
@@ -322,7 +332,7 @@ export function PlanRunner({
   const error = failed?.error ?? null;
   const place = failed ? errorPlace(failed.sql, failed.error) : null;
   // Отказ или ошибка последнего запуска: на экране не должно остаться прежнего результата, похожего на текущий.
-  const refused = failed !== null || writeHint === "replica" || writeHint === "readOnly";
+  const refused = resultHidden || failed !== null || writeHint === "replica" || writeHint === "readOnly";
   const busy = running || explain.isPending;
   // Профиль ещё читается: ни подсказки read-only, ни запуска — кнопки ждут.
   const loading = profile === undefined;
@@ -447,6 +457,7 @@ export function PlanRunner({
                     // Выбор запуска из истории снимает прежний отказ: показывается выбранный результат.
                     setFailed(null);
                     setWriteHint(null);
+                    setResultHidden(false);
                     setShown(r.id);
                   }}
                 >
