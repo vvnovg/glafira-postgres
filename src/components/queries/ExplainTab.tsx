@@ -35,7 +35,7 @@ function versionNum(text: string | null | undefined): number {
 
 /**
  * Консоль EXPLAIN (спец. P3 §8.7): узел, база, SQL и запуск планов через `PlanRunner`; режим «Вставить план» разбирает
- * JSON (в том числе с обрамлением psql) на месте, без обращения к серверу БД. Одна на подключение: «Открыть в консоли»
+ * текстовый план или JSON (в том числе с обрамлением psql) на месте, без обращения к серверу БД. Одна на подключение: «Открыть в консоли»
  * подставляет узел, базу и текст сюда же, а открытие из дерева (без подстановки) оставляет набранное.
  * active — вкладка сейчас видна: скрытая список баз не читает, а при возвращении читает заново. Список нужен только режиму
  * «Запрос» и только пока база не известна (спека или выбор): «Вставить план» от него не зависит.
@@ -178,6 +178,7 @@ export function ExplainTab({
               )}
             </div>
             <div className="explain-panel" hidden={s !== "paste"}>
+              <p className="diag-note">{t("diag.explain.pasteHint")}</p>
               <textarea className="mono explain-sql" aria-label={t("diag.explain.pasteLabel")} rows={12} value={pasted} onChange={(e) => setPasted(e.target.value)} placeholder={t("diag.explain.pastePlaceholder")} />
               <div className="toolbar">
                 <button type="button" className="primary" disabled={!pasted.trim() || parsing} onClick={() => void parse()}>

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { ExplainResult, Member, QueryDetail } from "../../api/types";
 import { PlanRunner } from "./plan/PlanRunner";
@@ -25,6 +25,7 @@ export function QueryPlan({
   onPlanResult,
   autoRun,
   onAutoRun,
+  extraActions,
 }: {
   connectionId: string;
   member: string;
@@ -34,6 +35,8 @@ export function QueryPlan({
   onPlanResult: (r: ExplainResult, member: string) => void;
   autoRun?: boolean;
   onAutoRun?: () => void;
+  /** Кнопки в ряду копирования результата («Скопировать для LLM» карточки). */
+  extraActions?: ReactNode;
 }) {
   const { t } = useTranslation();
   const [source, setSource] = useState<Source>({ id: "pgss" });
@@ -50,6 +53,8 @@ export function QueryPlan({
   const truncatedPgss = source.id === "pgss" && detail.textTruncated;
   // Выбранный экземпляр уже закончился: пункт остаётся в списке, текст — тот, что был выбран.
   const finished = "pid" in source && !detail.running.some((r) => runningId(r.pid) === source.id) ? source : null;
+  // Выбран нормализованный текст, а экземпляр с полным текстом (с литералами) есть: источник легко не заметить в списке.
+  const offered = source.id === "pgss" ? detail.running.find((r) => !r.truncated) : undefined;
   return (
     <div className="query-plan">
       <label className="inline">
@@ -73,6 +78,14 @@ export function QueryPlan({
           <pre className="query-text" role="group" tabIndex={0} aria-label={t("diag.query.text")}>
             <code>{sql}</code>
           </pre>
+          {offered && (
+            <p className="diag-note" role="status">
+              {t("diag.query.runningHint", { pid: offered.pid })}{" "}
+              <button type="button" className="link" onClick={() => pick(runningId(offered.pid))}>
+                {t("diag.query.runningUse")}
+              </button>
+            </p>
+          )}
           {truncatedPgss ? (
             <p className="diag-note" role="status">
               {t("diag.query.pgssTruncated")}
@@ -90,6 +103,7 @@ export function QueryPlan({
               onResult={onPlanResult}
               autoRun={autoRun}
               onAutoRun={onAutoRun}
+              extraActions={extraActions}
             />
           )}
         </>

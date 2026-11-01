@@ -43,7 +43,7 @@ describe("ExplainTab", () => {
     // База по умолчанию — первая из списка: известна, когда список прочитан.
     await waitFor(() => expect(screen.getByRole("combobox", { name: "База" })).toHaveValue("postgres"));
     await user.click(screen.getByRole("tab", { name: "Вставить план" }));
-    await user.type(screen.getByRole("textbox", { name: "План (JSON)" }), "[[{{]");
+    await user.type(screen.getByRole("textbox", { name: "План (текст или JSON)" }), "[[{{]");
     await user.click(screen.getByRole("button", { name: "Разобрать" }));
     // В user.type «[[» и «{{» — экранированные «[» и «{»: в поле попадает «[{]».
     await waitFor(() => expect(api.parsePlan).toHaveBeenCalledWith("[{]"));
@@ -57,7 +57,7 @@ describe("ExplainTab", () => {
     renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql={undefined} active />);
     await screen.findByRole("combobox", { name: "Узел" });
     await user.click(screen.getByRole("tab", { name: "Вставить план" }));
-    await user.type(screen.getByRole("textbox", { name: "План (JSON)" }), "oops");
+    await user.type(screen.getByRole("textbox", { name: "План (текст или JSON)" }), "oops");
     await user.click(screen.getByRole("button", { name: "Разобрать" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("План не разобран (строка 1): x");
   });
@@ -70,12 +70,21 @@ describe("ExplainTab", () => {
     await screen.findByRole("combobox", { name: "Узел" });
     await user.click(screen.getByRole("tab", { name: "Вставить план" }));
     expect(screen.getByRole("button", { name: "Разобрать" })).toBeDisabled();
-    await user.type(screen.getByRole("textbox", { name: "План (JSON)" }), "bad");
+    await user.type(screen.getByRole("textbox", { name: "План (текст или JSON)" }), "bad");
     await user.click(screen.getByRole("button", { name: "Разобрать" }));
     expect(await screen.findByRole("alert")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Разобрать" }));
     expect(await screen.findByRole("treegrid", { name: "Дерево плана" })).toBeInTheDocument();
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("«Вставить план» объясняет назначение: текст или JSON, сервер не используется", async () => {
+    const user = userEvent.setup();
+    renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql={undefined} active />);
+    await screen.findByRole("combobox", { name: "Узел" });
+    await user.click(screen.getByRole("tab", { name: "Вставить план" }));
+    expect(screen.getByText(/План, полученный вне Глафиры.*Сервер не используется/)).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "План (текст или JSON)" })).toHaveAttribute("placeholder", "Вставьте вывод EXPLAIN: текст или FORMAT JSON, можно вместе с заголовком psql");
   });
 
   it("вставленный план без времени (TIMING OFF) показывается; выбор узла открывает панель узла", async () => {
@@ -85,7 +94,7 @@ describe("ExplainTab", () => {
     renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql={undefined} active />);
     await screen.findByRole("combobox", { name: "Узел" });
     await user.click(screen.getByRole("tab", { name: "Вставить план" }));
-    await user.type(screen.getByRole("textbox", { name: "План (JSON)" }), "x");
+    await user.type(screen.getByRole("textbox", { name: "План (текст или JSON)" }), "x");
     await user.click(screen.getByRole("button", { name: "Разобрать" }));
     const tree = await screen.findByRole("treegrid", { name: "Дерево плана" });
     await user.click(within(tree).getByRole("button", { name: /Seq Scan/ }));
@@ -172,7 +181,7 @@ describe("ExplainTab", () => {
     // Консоль на месте, загрузка (ждёт база) — только в скрытой панели запроса.
     expect(screen.getByRole("heading", { level: 2, name: "Консоль EXPLAIN" })).toBeInTheDocument();
     expect(screen.getByText("Загрузка…")).not.toBeVisible();
-    await user.type(screen.getByRole("textbox", { name: "План (JSON)" }), "x");
+    await user.type(screen.getByRole("textbox", { name: "План (текст или JSON)" }), "x");
     await user.click(screen.getByRole("button", { name: "Разобрать" }));
     expect(await screen.findByRole("treegrid", { name: "Дерево плана" })).toBeInTheDocument();
     // Режим запроса ждёт базу: вместо запуска — загрузка, поле SQL доступно.

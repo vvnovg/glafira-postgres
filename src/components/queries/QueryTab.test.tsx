@@ -208,10 +208,30 @@ describe("QueryTab", () => {
     await screen.findByText("SELECT * FROM shop.customers WHERE id = $1");
     const text = screen.getByRole("group", { name: "Текст запроса" });
     const row = text.nextElementSibling as HTMLElement;
-    expect(within(row).getAllByRole("button").map((b) => b.textContent)).toEqual(["Получить план", "Открыть в консоли", "Копировать", "Скопировать для LLM"]);
+    expect(within(row).getAllByRole("button").map((b) => b.textContent)).toEqual(["Получить план", "Открыть в консоли", "Копировать запрос", "Скопировать для LLM"]);
     expect(within(text.closest(".query-tab")!.querySelector(".toolbar") as HTMLElement).queryByRole("button", { name: "Скопировать для LLM" })).toBeNull();
     // Старой кнопки «План» под текстом нет: «План» — только подвкладка.
     expect(screen.queryByRole("button", { name: "План" })).toBeNull();
+  });
+
+  it("подвкладка «План»: подсказка о выполняющемся экземпляре переключает источник; «Скопировать для LLM» и там", async () => {
+    vi.mocked(api.queryDetail).mockResolvedValue(detail());
+    const user = userEvent.setup();
+    renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
+    await screen.findByText("SELECT * FROM shop.customers WHERE id = $1");
+    await user.click(screen.getByRole("tab", { name: "План" }));
+    expect(screen.getByText(/Выполняется экземпляр \(PID 42\)/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Скопировать для LLM" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Взять его текст" }));
+    expect(screen.getByRole("combobox", { name: "Текст запроса" })).toHaveValue("running:42");
+    expect(screen.queryByText(/Выполняется экземпляр \(PID 42\)/)).toBeNull();
+  });
+
+  it("кнопка копирования текста подписана «Копировать запрос», имя для скринридера — «Копировать текст запроса»", async () => {
+    vi.mocked(api.queryDetail).mockResolvedValue(detail());
+    renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
+    const button = await screen.findByRole("button", { name: "Копировать текст запроса" });
+    expect(button).toHaveTextContent("Копировать запрос");
   });
 
   it("track_planning выключен — «Планирование» в карточке «—»", async () => {

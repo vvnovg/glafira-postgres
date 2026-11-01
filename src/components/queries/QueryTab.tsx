@@ -8,6 +8,7 @@ import { tabId, useWorkspace } from "../../state/workspace";
 import { SubTabs } from "../catalog/SubTabs";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { QueryOverview } from "./QueryOverview";
+import { CopyLlmButton } from "./CopyLlmButton";
 import { QueryPlan } from "./QueryPlan";
 import { queryTitle } from "./queriesText";
 
@@ -154,7 +155,17 @@ export function QueryTab({ connectionId, member, database, queryId, active }: { 
               )}
               {(s === "plan" || planOpened) && (
                 <div hidden={s !== "plan"}>
-                  <QueryPlan connectionId={connectionId} member={member} database={database} detail={detail} members={topo?.members ?? null} onPlanResult={onPlanResult} autoRun={autoPlan} onAutoRun={autoTaken} />
+                  <QueryPlan
+                    connectionId={connectionId}
+                    member={member}
+                    database={database}
+                    detail={detail}
+                    members={topo?.members ?? null}
+                    onPlanResult={onPlanResult}
+                    autoRun={autoPlan}
+                    onAutoRun={autoTaken}
+                    extraActions={<CopyLlmButton connectionId={connectionId} member={member} database={database} source={{ kind: "query", queryId }} plan={last && last.member === member ? last.result.plan : null} />}
+                  />
                 </div>
               )}
             </>

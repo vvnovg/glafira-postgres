@@ -4,9 +4,11 @@ import { useTranslation } from "react-i18next";
 /**
  * Кнопка «Копировать»: буфер обмена может быть недоступен или отказать — об итоге сообщаем в любом случае
  * (запасной путь — видимое сообщение «Не удалось скопировать»). Плагин буфера обмена Tauri не подключён,
+
+ * `caption` — видимая подпись вместо «Копировать» (имя для скринридера — `label`). Плагин буфера обмена Tauri не подключён,
  * поэтому работает `navigator.clipboard`. Тексты итога — `test.copied` и `test.copyFailed` — общие для всех мест.
  */
-export function CopyButton({ text, label }: { text: string; label: string }) {
+export function CopyButton({ text, label, caption }: { text: string; label: string; caption?: string }) {
   const { t } = useTranslation();
   const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
   const timer = useRef<number | undefined>(undefined);
@@ -26,7 +28,7 @@ export function CopyButton({ text, label }: { text: string; label: string }) {
   return (
     <>
       <button type="button" aria-label={label} onClick={() => void copy()}>
-        {t("common.copy")}
+        {caption ?? t("common.copy")}
       </button>
       <span role="status" className="muted">
         {state === "copied" ? t("test.copied") : state === "failed" ? t("test.copyFailed") : ""}
