@@ -1265,7 +1265,7 @@
       "searchPlaceholder": "Part of the query text",
       "noMatch": "Nothing found for “{{q}}”",
       "own": "Glafira",
-      "ownHint": "Glafira's own query: excluded from findings and shares",
+      "ownHint": "Glafira's own query: excluded from findings",
       "goneHint": "The query is no longer in pg_stat_statements (reset or eviction)",
       "columns": {
         "query": "Query",

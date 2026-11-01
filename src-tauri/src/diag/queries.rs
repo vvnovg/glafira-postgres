@@ -467,7 +467,7 @@ fn totals_without(entries: &[Entry], own: &HashSet<QueryKey>) -> Totals {
     )
 }
 
-/// Строки отчёта: итоги — по всему набору без своих запросов (`own`); строки — только ключи поиска (`matched`, если
+/// Строки отчёта: доли — от всей нагрузки; возвращаемые итоги (для правил) — без своих запросов (`own`); строки — только ключи поиска (`matched`, если
 /// он был), затем сортировка и обрезка. Свои строки остаются в таблице с признаком `own`.
 pub fn build(
     entries: &[Entry],
@@ -475,7 +475,10 @@ pub fn build(
     matched: Option<&HashSet<QueryKey>>,
     p: &QueriesParams,
 ) -> (Vec<QueryStat>, Totals) {
+    // Доли в таблице — от всей нагрузки (одна база для всех строк, сортировка по доле согласована); итоги без своих
+    // запросов — только для правил находок, чтобы опрос Глафиры не размывал долю вызовов N+1.
     let t = totals_without(entries, own);
+    let all = totals(entries.iter().map(|e| &e.counters));
     let mut out: Vec<QueryStat> = entries
         .iter()
         .filter(|e| matched.is_none_or(|m| m.contains(&e.key)))
@@ -486,7 +489,7 @@ pub fn build(
                 e.rolname.clone(),
                 &e.counters,
                 e.minmax,
-                &t,
+                &all,
             );
             s.own = own.contains(&e.key);
             s
@@ -1173,7 +1176,11 @@ mod tests {
             out.iter()
                 .map(|r| (r.key.query_id, r.own, r.share_pct))
                 .collect::<Vec<_>>(),
-            [(2, false, 60.0), (3, false, 40.0), (1, true, 0.3)]
+            [
+                (2, false, 6000.0 / 10_030.0 * 100.0),
+                (3, false, 4000.0 / 10_030.0 * 100.0),
+                (1, true, 30.0 / 10_030.0 * 100.0)
+            ]
         );
         // Правила по этим строкам и итогам: N+1 своего запроса (3000 вызовов, 0,01 мс) нет.
         let f = rules::evaluate(None, &out, &t, &PgssState::default(), Mode::SinceReset);
