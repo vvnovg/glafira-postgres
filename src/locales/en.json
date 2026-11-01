@@ -1369,7 +1369,7 @@
       "waits": "Waits",
       "noWaitsBuffer": "Open the Wait profile tab to collect waits for this query",
       "waitsSource": {
-        "sampler": "From the Sessions sampler over the last {{coverageS}}",
+        "sampler": "From the Sessions sampler over the last {{coverage}}",
         "pgWaitSampling": "pg_wait_sampling profile since its reset"
       },
       "waitEvent": "Event",

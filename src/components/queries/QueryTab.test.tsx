@@ -5,6 +5,8 @@ import type { QueryDetail } from "../../api/types";
 import { useWorkspace } from "../../state/workspace";
 import { connection, member, topology, topologyView } from "../../test/fixtures";
 import { renderWithClient } from "../../test/render";
+import en from "../../locales/en.json";
+import ru from "../../locales/ru.json";
 
 vi.mock("../../api/client", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../../api/client")>();
@@ -298,6 +300,14 @@ describe("QueryTab", () => {
     );
     renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
     expect(await screen.findByText("По сэмплам «Сессий» за 10 мин")).toBeInTheDocument();
+  });
+
+  it("охват в подписи ожиданий — отформатированная длительность, параметр без суффикса единиц", () => {
+    // Параметры с суффиксом `S` — числа секунд; сюда приходит уже отформатированная строка.
+    for (const dict of [ru, en]) {
+      expect(dict.diag.query.waitsSource.sampler).toContain("{{coverage}}");
+      expect(dict.diag.query.waitsSource.sampler).not.toContain("{{coverageS}}");
+    }
   });
 
   it("подключение закрыто — карточка не читает сервер", async () => {

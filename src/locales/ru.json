@@ -1391,7 +1391,7 @@
       "waits": "Ожидания",
       "noWaitsBuffer": "Откройте «Профиль ожиданий», чтобы собирать ожидания этого запроса",
       "waitsSource": {
-        "sampler": "По сэмплам «Сессий» за {{coverageS}}",
+        "sampler": "По сэмплам «Сессий» за {{coverage}}",
         "pgWaitSampling": "Профиль pg_wait_sampling с момента его сброса"
       },
       "waitEvent": "Событие",
