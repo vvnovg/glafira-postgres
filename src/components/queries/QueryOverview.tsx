@@ -115,8 +115,8 @@ export function QueryOverview({
                 </tr>
               </thead>
               <tbody>
-                {/* Строки `pg_stat_kcache` — только когда расширение дало значения (без него — `null`). */}
-                {METRICS.filter((m) => !m.kcache || sinceReset.cpuUserMs !== null).map((m) => (
+                {/* Строки `pg_stat_kcache` — только когда расширение установлено; нет данных у запроса — «—». */}
+                {METRICS.filter((m) => !m.kcache || detail.kcache).map((m) => (
                   <tr key={m.id}>
                     <th scope="row">{t(m.labelKey)}</th>
                     <td className="num">{m.of(sinceReset, detail.trackPlanning)}</td>

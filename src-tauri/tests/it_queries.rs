@@ -771,6 +771,7 @@ async fn kcache_columns_on_perf() {
     let detail = query_detail::detail(&st, "it", &member, "perf", top.key.query_id)
         .await
         .unwrap();
+    assert!(detail.kcache);
     let since = detail.since_reset.expect("строка pgss есть");
     assert!(since.cpu_user_ms.is_some() && since.disk_read_bytes.is_some());
     // На узле без kcache сортировка по CPU — INVALID_INPUT, строки без полей.

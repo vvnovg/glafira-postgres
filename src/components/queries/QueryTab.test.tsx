@@ -23,7 +23,7 @@ const detail = (patch: Partial<QueryDetail> = {}): QueryDetail => ({
   history: [{ atMs: 1, calls: 10, totalExecMs: 5, meanExecMs: 0.5 }, { atMs: 60_001, calls: 20, totalExecMs: 10, meanExecMs: 0.5 }], gaps: [],
   running: [{ pid: 42, backendStartUs: 1, state: "active", startedMs: 1, durationS: 3.5, waitEventType: "IO", waitEvent: "DataFileRead", usename: "app", applicationName: "api", clientAddr: "10.0.0.5", query: "SELECT * FROM shop.customers WHERE id = 15", truncated: false }],
   waits: { source: "sampler", sinceMs: 0, total: 10, items: [{ eventType: "IO", event: "DataFileRead", count: 7, sharePct: 70 }, { eventType: "CPU", event: null, count: 3, sharePct: 30 }] },
-  findings: [], unavailable: [], serverVersionNum: 170_000, inRecovery: false, pgssVersion: "1.11", trackPlanning: true, ...patch,
+  findings: [], unavailable: [], serverVersionNum: 170_000, inRecovery: false, pgssVersion: "1.11", trackPlanning: true, kcache: false, ...patch,
 });
 
 describe("QueryTab", () => {
@@ -243,14 +243,20 @@ describe("QueryTab", () => {
     expect(within(row).getAllByRole("cell").map((c) => c.textContent)).toEqual(["—", "—"]);
   });
 
-  it("pg_stat_kcache: строки CPU и диска в метриках — только когда значения есть", async () => {
+  it("pg_stat_kcache: строки CPU и диска — только с расширением; нет данных у запроса — «—»", async () => {
     vi.mocked(api.queryDetail).mockResolvedValue(detail());
-    const { unmount } = renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
+    const first = renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
     await screen.findByRole("rowheader", { name: "Вызовов" });
     expect(screen.queryByRole("rowheader", { name: "CPU (user + sys)" })).toBeNull();
-    unmount();
+    first.unmount();
+    // Расширение есть, строки kcache у запроса нет — строки метрик на месте, значения «—».
+    vi.mocked(api.queryDetail).mockResolvedValue(detail({ kcache: true }));
+    const second = renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
+    const empty = (await screen.findByRole("rowheader", { name: "CPU (user + sys)" })).closest("tr")!;
+    expect(within(empty).getAllByRole("cell").map((c) => c.textContent)).toEqual(["—", "—"]);
+    second.unmount();
     const kc = { ...stat, cpuUserMs: 900, cpuSysMs: 100, diskReadBytes: 4096, diskWriteBytes: 0 };
-    vi.mocked(api.queryDetail).mockResolvedValue(detail({ sinceReset: kc }));
+    vi.mocked(api.queryDetail).mockResolvedValue(detail({ kcache: true, sinceReset: kc }));
     renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
     const cpu = (await screen.findByRole("rowheader", { name: "CPU (user + sys)" })).closest("tr")!;
     const cells = within(cpu).getAllByRole("cell").map((c) => c.textContent);

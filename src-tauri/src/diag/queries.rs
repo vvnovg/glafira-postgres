@@ -85,23 +85,38 @@ const DETECT_SQL: &str = marked_sql!(
 );
 
 /// `pg_stat_kcache`: версия, схема, `shared_preload_libraries` (из `pg_settings`: без `pg_read_all_settings` строки
-/// нет — NULL) и право вызова функции. Расширение без загруженной библиотеки или без права вызова роняло бы чтение
-/// всего топа — такое расширение не используется (`kcache_usable`).
+/// нет — NULL) и право вызова функции. `to_regprocedure` — повреждённое расширение (функции нет) не роняет запрос,
+/// а даёт `false`. Расширение без загруженной библиотеки или без права вызова роняло бы чтение всего топа — такое
+/// расширение не используется (`kcache_usable`, затем проба `kcache_probe_sql`).
 const DETECT_KCACHE_SQL: &str = marked_sql!(
     "SELECT e.extversion::text, n.nspname::text, \
     (SELECT setting FROM pg_settings WHERE name = 'shared_preload_libraries'), \
-    has_function_privilege(format('%I.pg_stat_kcache()', n.nspname), 'EXECUTE') \
+    COALESCE(has_function_privilege(to_regprocedure(format('%I.pg_stat_kcache()', n.nspname)), 'EXECUTE'), false) \
     FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'pg_stat_kcache'"
 );
 
-/// Можно ли читать `pg_stat_kcache()`: есть право вызова и библиотека в `shared_preload_libraries` (настройка не видна
-/// роли — считается загруженной).
+/// Можно ли читать `pg_stat_kcache()` по каталогу: есть право вызова и библиотека в `shared_preload_libraries` (настройка
+/// не видна роли — решает проба).
 pub fn kcache_usable(preload: Option<&str>, can_execute: bool) -> bool {
     can_execute
         && preload.is_none_or(|p| {
             p.split(',')
                 .any(|l| l.trim().trim_matches('"') == "pg_stat_kcache")
         })
+}
+
+/// Проба `pg_stat_kcache()` отдельной инструкцией (вне транзакции: ошибка не обрывает следующие запросы). Нужен
+/// именно вызов функции: «must be loaded via shared_preload_libraries» она бросает при первом вызове, а `LIMIT 0`
+/// исполнитель отдаёт, не вызывая её. Стоимость — один проход по хешу kcache (не больше `pg_stat_statements.max`
+/// строк), тот же, что у чтения топа.
+pub fn kcache_probe_sql(schema: &str) -> String {
+    format!("{SQL_MARKER}SELECT 1 FROM {schema}.pg_stat_kcache() LIMIT 1")
+}
+
+/// Итог пробы: ошибка вызова (библиотека не загружена, нет прав, повреждённое расширение) — kcache не используется,
+/// топ читается без него.
+pub fn kcache_after_probe<E>(caps: KcacheCaps, probe: Result<(), E>) -> Option<KcacheCaps> {
+    probe.ok().map(|()| caps)
 }
 
 pub async fn detect(c: &Client) -> AppResult<Detect> {
@@ -116,7 +131,7 @@ pub async fn detect(c: &Client) -> AppResult<Detect> {
     let Some(caps) = PgssCaps::from_version(&version) else {
         return Ok(Detect::TooOld(version));
     };
-    let kcache = c
+    let candidate = c
         .query_opt(DETECT_KCACHE_SQL, &[])
         .await
         .map_err(|e| from_pg(&e))?
@@ -129,6 +144,16 @@ pub async fn detect(c: &Client) -> AppResult<Detect> {
         .and_then(|k| {
             KcacheCaps::from_version(&k.get::<_, String>(0), quote_ident(&k.get::<_, String>(1)))
         });
+    let kcache = match candidate {
+        Some(k) => {
+            let probe = c.query(&kcache_probe_sql(&k.schema), &[]).await;
+            if let Err(e) = &probe {
+                tracing::debug!(error = %e, "pg_stat_kcache probe failed; reading without it");
+            }
+            kcache_after_probe(k, probe.map(|_| ()))
+        }
+        None => None,
+    };
     Ok(Detect::Installed(PgssInstalled {
         schema: quote_ident(&schema),
         version,
@@ -188,7 +213,9 @@ pub fn statements_sql(
                 ("k.user_time", "k.system_time", "k.reads", "k.writes")
             };
             // pgss без `toplevel` (1.8) складывает вложенные с верхними: строк kcache с `top` у ключа может быть две, и
-            // join без условия задвоил бы строку pgss — берётся только верхний уровень.
+            // join без условия задвоил бы строку pgss — берётся только верхний уровень. Цена: при
+            // `pg_stat_kcache.track = all` CPU и диск вложенных инструкций в строку не попадают (занижение; при
+            // `track = top`, по умолчанию, вложенных строк kcache нет).
             let top = match (k.has_top, caps.toplevel) {
                 (true, true) => " AND k.top = s.toplevel",
                 (true, false) => " AND k.top",
@@ -1785,6 +1812,25 @@ mod tests {
         );
         assert!(!kcache_usable(Some("pg_stat_statements"), true));
         assert!(!kcache_usable(Some("pg_stat_kcache"), false));
+        // Проба: ошибка вызова (библиотека не загружена при невидимой настройке) — топ без kcache.
+        let preload_error = app_err!(
+            ErrorCode::Internal,
+            "errors.pg.serverError",
+            "PostgreSQL error {{code}}",
+            code = "55000"
+        );
+        assert_eq!(kcache_after_probe(new.clone(), Err(preload_error)), None);
+        assert_eq!(
+            kcache_after_probe::<AppError>(new.clone(), Ok(())),
+            Some(new.clone())
+        );
+        let probe = kcache_probe_sql("\"k s\"");
+        assert!(
+            probe.starts_with("/* glafira */")
+                && probe.contains("FROM \"k s\".pg_stat_kcache() LIMIT 1"),
+            "{probe}"
+        );
+        assert!(DETECT_KCACHE_SQL.contains("to_regprocedure("));
     }
 
     /// Между снимками колонки kcache — только если расширение было при снятии обоих; иначе сортировка по CPU недоступна.

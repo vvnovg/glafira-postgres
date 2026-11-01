@@ -122,6 +122,8 @@ pub struct QueryDetail {
     pub pgss_version: Option<String>,
     /// `pg_stat_statements.track_planning`: выключен — колонки планирования нулевые, а не «планирование бесплатно».
     pub track_planning: bool,
+    /// `pg_stat_kcache` установлен и читается: строки CPU и диска в метриках показываются (без данных у запроса — «—»).
+    pub kcache: bool,
 }
 
 impl QueryDetail {
@@ -149,6 +151,7 @@ impl QueryDetail {
             in_recovery: h.in_recovery,
             pgss_version: None,
             track_planning: false,
+            kcache: false,
         }
     }
 
@@ -486,6 +489,7 @@ pub async fn detail(
     d.totals = f.totals;
     d.pgss_version = f.pgss.as_ref().map(|p| p.version.clone());
     d.track_planning = f.info.track_planning;
+    d.kcache = f.pgss.as_ref().is_some_and(|p| p.kcache.is_some());
     if let Some((text, truncated)) = f.text {
         d.text = Some(text);
         d.text_truncated = truncated;

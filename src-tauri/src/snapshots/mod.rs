@@ -222,16 +222,38 @@ pub fn annotate(a: &Snapshot, b: &Snapshot, s: &mut QueryStat) {
 /// остаются в списках — фронтенд приглушает их, как в топе).
 pub async fn compare(st: &AppState, id: &str, from: &str, to: &str) -> AppResult<Comparison> {
     let (a, b) = read_pair(st, id, from, to).await?;
-    let mut c =
-        pg_advisor::queries::compare::compare(&a.rows, a.stats_reset_ms, &b.rows, b.stats_reset_ms);
+    Ok(compare_pair(&a, &b))
+}
+
+/// Сравнение пары, старший первым. Колонки `pg_stat_kcache` остаются, только если расширение было при снятии обоих
+/// (`kcache_between`), как в режиме «между снимками».
+pub fn compare_pair(a: &Snapshot, b: &Snapshot) -> Comparison {
+    let strip = |rows: &[Cumulative]| -> Vec<Cumulative> {
+        rows.iter()
+            .map(|r| Cumulative {
+                counters: r.counters.without_kcache(),
+                ..r.clone()
+            })
+            .collect()
+    };
+    let mut c = if crate::diag::queries::kcache_between(a, b) {
+        pg_advisor::queries::compare::compare(&a.rows, a.stats_reset_ms, &b.rows, b.stats_reset_ms)
+    } else {
+        pg_advisor::queries::compare::compare(
+            &strip(&a.rows),
+            a.stats_reset_ms,
+            &strip(&b.rows),
+            b.stats_reset_ms,
+        )
+    };
     for s in c.new.iter_mut().chain(c.gone.iter_mut()) {
-        annotate(&a, &b, s);
+        annotate(a, b, s);
     }
     for ch in c.degraded.iter_mut().chain(c.improved.iter_mut()) {
-        annotate(&a, &b, &mut ch.before);
-        annotate(&a, &b, &mut ch.after);
+        annotate(a, b, &mut ch.before);
+        annotate(a, b, &mut ch.after);
     }
-    Ok(c)
+    c
 }
 
 /// Тексты снимков как `Arc<str>` — для `diag::queries::{own_keys, cached_matches}`.
@@ -343,5 +365,36 @@ mod tests {
         let back: Snapshot = serde_json::from_value(v).unwrap();
         assert!(!back.kcache && back.v == SNAPSHOT_VERSION);
         assert_eq!(back.rows[0].counters.cpu_user_ms, None);
+    }
+
+    /// Сравнение: колонки kcache — только если расширение было в обоих снимках.
+    #[test]
+    fn compare_keeps_kcache_only_when_both_snapshots_have_it() {
+        let mut a: Snapshot = serde_json::from_value(serde_json::json!({
+            "v": 1, "takenAtMs": 0, "connection": {"id": "c", "name": "C", "environment": "dev"},
+            "member": "pg-1", "serverVersionNum": 170000, "inRecovery": false, "pgssVersion": "1.11",
+            "statsResetMs": null, "dealloc": null, "max": 0, "trackPlanning": false, "hidden": false,
+            "rows": [], "texts": {}, "truncated": []
+        }))
+        .unwrap();
+        let mut b = a.clone();
+        let with_cpu = |id: i64, cpu: f64| {
+            let mut r = row(id, 10, 10.0);
+            r.counters.cpu_user_ms = Some(cpu);
+            r.counters.cpu_sys_ms = Some(0.0);
+            r
+        };
+        a.rows = vec![with_cpu(1, 1.0)];
+        b.rows = vec![with_cpu(2, 7.0)];
+        b.kcache = true;
+        let c = compare_pair(&a, &b);
+        assert_eq!((c.new.len(), c.gone.len()), (1, 1));
+        assert_eq!(c.new[0].cpu_user_ms, None, "kcache только в `to`");
+        a.kcache = true;
+        let c = compare_pair(&a, &b);
+        assert_eq!(
+            (c.new[0].cpu_user_ms, c.gone[0].cpu_user_ms),
+            (Some(7.0), Some(1.0))
+        );
     }
 }

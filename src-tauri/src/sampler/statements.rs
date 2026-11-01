@@ -157,7 +157,7 @@ impl StatementsBuffer {
     }
 
     /// Тик: дельты изменившихся ключей против прошлых накопительных значений. Первый тик и тик после промежутка —
-    /// только база (дельт нет). Ключ с уменьшившимися счётчиками (вытеснен и вернулся) и все ключи после смены
+    /// только база (дельт нет); смена `pg_stat_kcache` — новая база для его колонок. Ключ с уменьшившимися счётчиками (вытеснен и вернулся) и все ключи после смены
     /// `stats_reset` получают новую базу: дельта равна накопительному значению.
     pub fn push(&mut self, at_ms: i64, s: StatementsSample) -> Vec<StatementsEvent> {
         let mut out = Vec::with_capacity(2);
@@ -173,6 +173,12 @@ impl StatementsBuffer {
         let reset = self
             .info
             .is_some_and(|i| i.stats_reset_ms != s.snapshot.info.stats_reset_ms);
+        // `pg_stat_kcache` появился, исчез или сменил схему: для его колонок этот тик — новая база (прошлые значения
+        // относятся к другому чтению, и накопительное не должно выдать себя за дельту).
+        let kcache_changed = self
+            .pgss
+            .as_ref()
+            .is_some_and(|p| p.kcache != s.pgss.kcache);
         let mut deltas = Vec::new();
         if !baseline {
             for row in &s.snapshot.rows {
@@ -181,7 +187,12 @@ impl StatementsBuffer {
                         if !row.counters.changed_since(&prev.counters) {
                             continue;
                         }
-                        row.counters.delta(&prev.counters)
+                        let d = row.counters.delta(&prev.counters);
+                        if kcache_changed {
+                            d.without_kcache()
+                        } else {
+                            d
+                        }
                     }
                     _ => row.counters,
                 };
@@ -762,6 +773,45 @@ mod tests {
         assert_eq!(b.names(&key(1)), (Some("perf".into()), Some("app".into())));
         assert_eq!(b.last_head().map(|h| h.version_num), Some(170_000));
         assert_eq!(b.info().and_then(|i| i.stats_reset_ms), Some(1));
+    }
+
+    /// kcache появился между тиками: его колонки на этом тике — новая база, дельты CPU — со следующего тика.
+    #[test]
+    fn kcache_change_starts_a_new_base_for_its_columns() {
+        let with_cpu = |calls: i64, cpu: f64| {
+            let mut r = row(1, calls, calls as f64);
+            r.counters.cpu_user_ms = Some(cpu);
+            r.counters.cpu_sys_ms = Some(0.0);
+            r
+        };
+        let kcache = |mut s: StatementsSample| {
+            s.pgss.kcache = Some(crate::diag::queries::KcacheCaps {
+                schema: "public".into(),
+                exec_prefix: true,
+                has_top: true,
+            });
+            s
+        };
+        let mut b = StatementsBuffer::default();
+        b.push(M, sample(vec![row(1, 10, 10.0)], 1, 0));
+        b.push(2 * M, kcache(sample(vec![with_cpu(20, 5000.0)], 1, 0)));
+        let w = b.window(300).unwrap();
+        assert_eq!(w.sums[&key(1)].calls, 10);
+        assert_eq!(
+            w.sums[&key(1)].cpu_user_ms,
+            None,
+            "накопительное CPU — не дельта"
+        );
+        b.push(3 * M, kcache(sample(vec![with_cpu(30, 5040.0)], 1, 0)));
+        let w = b.window(300).unwrap();
+        assert_eq!(w.sums[&key(1)].cpu_user_ms, Some(40.0));
+        // kcache исчез: колонок нет, счётчики pgss идут дальше.
+        b.push(4 * M, sample(vec![row(1, 35, 35.0)], 1, 0));
+        let w = b.window(60).unwrap();
+        assert_eq!(
+            (w.sums[&key(1)].calls, w.sums[&key(1)].cpu_user_ms),
+            (5, None)
+        );
     }
 
     #[test]

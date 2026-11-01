@@ -808,6 +808,8 @@ export interface QueryDetail {
   pgssVersion: string | null;
   /** `pg_stat_statements.track_planning`: выключен — планирование не считается (колонки нулевые). */
   trackPlanning: boolean;
+  /** `pg_stat_kcache` установлен и читается: строки CPU и диска в метриках есть (без данных у запроса — «—»). */
+  kcache: boolean;
 }
 
 // План запроса (`pg_advisor::plan`): разобранный вывод EXPLAIN (FORMAT JSON) с вычисленными долями времени.
