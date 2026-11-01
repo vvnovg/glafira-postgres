@@ -238,7 +238,7 @@ describe("QueriesView", () => {
     vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport(data({ rows: [row("1", { own: true, text: "select own" }), row("2", { datname: null, text: "select gone" })] }), { member: "pg-1" }));
     renderWithClient(view());
     const own = (await screen.findByText("select own")).closest("td")!;
-    expect(within(own).getByText("Глафира")).toHaveAttribute("title", "Запрос самой Глафиры: не участвует в находках и долях");
+    expect(within(own).getByText("Глафира")).toHaveAttribute("title", "Запрос самой Глафиры: не участвует в находках");
     expect(screen.getByRole("button", { name: "select gone" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "select gone" })).toHaveAttribute("title", "Запроса уже нет в pg_stat_statements (сброс или вытеснение)");
     expect(within(own).queryByText("Запроса уже нет", { exact: false })).toBeNull();
