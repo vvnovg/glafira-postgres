@@ -16,6 +16,7 @@ use crate::diag::{
     sender_member,
 };
 use crate::error::AppResult;
+use crate::product::SQL_MARKER;
 use crate::state::AppState;
 use crate::topology::model::Topology;
 use crate::topology::runtime::DiagTarget;
@@ -23,7 +24,8 @@ use crate::topology::runtime::DiagTarget;
 /// Отправители WAL. Колонки: 0 pid, 1 пользователь, 2 приложение, 3 адрес клиента, 4 состояние, 5 `sync_state`,
 /// 6 приоритет, 7–10 лаги в байтах (отправлено, записано, сброшено, применено) от текущего LSN узла (на реплике —
 /// полученного), 11–13 лаги записи, сброса и применения в секундах, 14 возраст ответа, 15 слот, 16 возраст xmin.
-pub const SENDERS_SQL: &str = "SELECT r.pid, r.usename::text, r.application_name, host(r.client_addr), r.state, r.sync_state, \
+pub const SENDERS_SQL: &str = marked_sql!(
+    "SELECT r.pid, r.usename::text, r.application_name, host(r.client_addr), r.state, r.sync_state, \
     r.sync_priority, pg_wal_lsn_diff(c.lsn, r.sent_lsn)::bigint, pg_wal_lsn_diff(c.lsn, r.write_lsn)::bigint, \
     pg_wal_lsn_diff(c.lsn, r.flush_lsn)::bigint, pg_wal_lsn_diff(c.lsn, r.replay_lsn)::bigint, \
     extract(epoch FROM r.write_lag)::float8, extract(epoch FROM r.flush_lag)::float8, extract(epoch FROM r.replay_lag)::float8, \
@@ -31,13 +33,16 @@ pub const SENDERS_SQL: &str = "SELECT r.pid, r.usename::text, r.application_name
     (SELECT s.slot_name::text FROM pg_replication_slots s WHERE s.active_pid = r.pid LIMIT 1), age(r.backend_xmin)::bigint \
   FROM pg_stat_replication r, \
     LATERAL (SELECT CASE WHEN pg_is_in_recovery() THEN pg_last_wal_receive_lsn() ELSE pg_current_wal_lsn() END AS lsn) c \
-  ORDER BY r.application_name";
+  ORDER BY r.application_name"
+);
 
 /// Приёмник WAL (одна строка или ни одной): 0 состояние, 1 хост, 2 порт, 3 слот, 4 таймлайн, 5–6 возраст последнего
 /// сообщения и последней позиции отправителя в секундах.
-pub const RECEIVER_SQL: &str = "SELECT status, sender_host, sender_port, slot_name, received_tli::bigint, \
+pub const RECEIVER_SQL: &str = marked_sql!(
+    "SELECT status, sender_host, sender_port, slot_name, received_tli::bigint, \
     extract(epoch FROM now() - last_msg_receipt_time)::float8, extract(epoch FROM now() - latest_end_time)::float8 \
-  FROM pg_stat_wal_receiver";
+  FROM pg_stat_wal_receiver"
+);
 
 /// Применение WAL: 0 полученное, но не применённое (байты), 1 задержка применения (0, если применено всё полученное),
 /// 2 состояние паузы. `pg_get_wal_replay_pause_state()` — с PostgreSQL 14; раньше только «на паузе / нет».
@@ -48,7 +53,7 @@ pub fn replay_sql(caps: Caps) -> String {
         "CASE WHEN pg_is_wal_replay_paused() THEN 'paused' ELSE 'not paused' END"
     };
     format!(
-        "SELECT pg_wal_lsn_diff(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn())::bigint, \
+        "{SQL_MARKER}SELECT pg_wal_lsn_diff(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn())::bigint, \
          (CASE WHEN pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn() THEN 0 \
                ELSE GREATEST(extract(epoch FROM now() - pg_last_xact_replay_timestamp()), 0) END)::float8, {pause}"
     )
@@ -63,7 +68,7 @@ pub fn conflicts_sql(caps: Caps) -> String {
         "bigint",
     );
     format!(
-        "SELECT COALESCE(sum(confl_tablespace), 0)::bigint, COALESCE(sum(confl_lock), 0)::bigint, \
+        "{SQL_MARKER}SELECT COALESCE(sum(confl_tablespace), 0)::bigint, COALESCE(sum(confl_lock), 0)::bigint, \
          COALESCE(sum(confl_snapshot), 0)::bigint, COALESCE(sum(confl_bufferpin), 0)::bigint, \
          COALESCE(sum(confl_deadlock), 0)::bigint, {logical}, \
          (extract(epoch FROM now()) * 1000)::bigint, (extract(epoch FROM pg_postmaster_start_time()) * 1000)::bigint, \
@@ -72,8 +77,10 @@ pub fn conflicts_sql(caps: Caps) -> String {
     )
 }
 
-pub const SETTINGS_SQL: &str = "SELECT name::text, setting FROM pg_settings WHERE name IN \
-    ('synchronous_standby_names', 'synchronous_commit', 'hot_standby_feedback', 'max_standby_streaming_delay')";
+pub const SETTINGS_SQL: &str = marked_sql!(
+    "SELECT name::text, setting FROM pg_settings WHERE name IN \
+    ('synchronous_standby_names', 'synchronous_commit', 'hot_standby_feedback', 'max_standby_streaming_delay')"
+);
 
 /// Ключ счётчика конфликтов в снимке.
 const CONFLICTS_KEY: &str = "conflicts";

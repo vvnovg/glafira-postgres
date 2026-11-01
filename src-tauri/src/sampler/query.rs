@@ -11,6 +11,7 @@ use crate::conn::pool::PoolPurpose;
 use crate::diag::caps::{Caps, V14};
 use crate::diag::sessions::QUERY_LIMIT;
 use crate::error::AppResult;
+use crate::product::SQL_MARKER;
 use crate::sampler::buffer::RawSample;
 use crate::sampler::registry::{SAMPLE_TIMEOUT, SampleSource};
 use crate::state::AppState;
@@ -20,7 +21,7 @@ use crate::state::AppState;
 pub fn sample_sql(caps: Caps) -> String {
     let query_id = caps.col(V14, "a.query_id", "bigint");
     format!(
-        "SELECT a.pid, a.leader_pid, a.backend_type, a.datname::text, a.usename::text, a.application_name, \
+        "{SQL_MARKER}SELECT a.pid, a.leader_pid, a.backend_type, a.datname::text, a.usename::text, a.application_name, \
                 host(a.client_addr), a.wait_event_type, a.wait_event, {query_id}, left(a.query, {QUERY_LIMIT}) \
          FROM pg_stat_activity a \
          WHERE a.state = 'active' AND a.pid <> pg_backend_pid() \

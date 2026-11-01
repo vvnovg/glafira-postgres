@@ -10,6 +10,7 @@ use crate::diag::{
     DiagData, DiagReport, Tool, head, make_report, on_member, sql::BACKEND_START_US,
 };
 use crate::error::AppResult;
+use crate::product::SQL_MARKER;
 use crate::state::AppState;
 use crate::topology::runtime::DiagTarget;
 
@@ -25,7 +26,7 @@ pub fn locks_sql(caps: Caps) -> String {
         "CASE WHEN l.pid IS NOT NULL THEN extract(epoch FROM now() - a.state_change)::float8 END"
     };
     format!(
-        "WITH w AS (SELECT pid, pg_blocking_pids(pid) AS blocked_by FROM pg_stat_activity WHERE wait_event_type = 'Lock'), \
+        "{SQL_MARKER}WITH w AS (SELECT pid, pg_blocking_pids(pid) AS blocked_by FROM pg_stat_activity WHERE wait_event_type = 'Lock'), \
               inv AS (SELECT pid FROM w UNION SELECT unnest(blocked_by) FROM w) \
          SELECT a.pid, {BACKEND_START_US}, a.usename::text, a.application_name, a.datname::text, a.state, left(a.query, 16384), \
                 extract(epoch FROM now() - a.xact_start)::float8, extract(epoch FROM now() - a.query_start)::float8, \

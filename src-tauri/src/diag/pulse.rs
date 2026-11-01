@@ -14,6 +14,7 @@ use crate::conn::errors::from_pg;
 use crate::diag::caps::{Caps, V14, V16};
 use crate::diag::{DiagData, DiagReport, Tool, Unavailable, head, make_report};
 use crate::error::{AppError, AppResult, ErrorCode};
+use crate::product::SQL_MARKER;
 use crate::state::AppState;
 use crate::topology::model::Role;
 use crate::topology::runtime::DiagTarget;
@@ -53,7 +54,7 @@ pub fn pulse_sql(caps: Caps) -> String {
         "(SELECT max(extract(epoch FROM now() - state_change)) FROM a WHERE wait_event_type = 'Lock')"
     };
     format!(
-        "WITH a AS (SELECT pid, state, xact_start, query_start, state_change, wait_event_type FROM pg_stat_activity \
+        "{SQL_MARKER}WITH a AS (SELECT pid, state, xact_start, query_start, state_change, wait_event_type FROM pg_stat_activity \
                     WHERE backend_type = 'client backend'), \
               d AS (SELECT sum(xact_commit)::bigint AS c, sum(xact_rollback)::bigint AS r, sum(blks_hit)::bigint AS h, \
                            sum(blks_read)::bigint AS rd, sum(temp_files)::bigint AS tf, sum(temp_bytes)::bigint AS tb, \
@@ -82,7 +83,7 @@ pub fn pulse_sql(caps: Caps) -> String {
 }
 
 /// Размер `pg_wal` отдельным запросом: без `pg_monitor` он падает с отказом в праве, а остальной пульс — нет.
-const WAL_DIR_SQL: &str = "SELECT COALESCE(sum(size), 0)::bigint FROM pg_ls_waldir()";
+const WAL_DIR_SQL: &str = marked_sql!("SELECT COALESCE(sum(size), 0)::bigint FROM pg_ls_waldir()");
 
 /// Факты, снимок счётчиков и пометка о недоступном размере `pg_wal` (нет `pg_monitor`).
 pub async fn collect(

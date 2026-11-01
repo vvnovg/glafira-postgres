@@ -21,6 +21,7 @@ use crate::diag::sessions::QUERY_LIMIT;
 use crate::diag::sql::BACKEND_START_US;
 use crate::diag::{Head, Unavailable, WINDOWS_S, head, on_member};
 use crate::error::{AppResult, ErrorCode};
+use crate::product::SQL_MARKER;
 use crate::sampler::statements::{HistoryPoint, KeysWindow, StatementsBuffer};
 use crate::state::AppState;
 use crate::sync::MutexExt;
@@ -232,7 +233,7 @@ pub fn waits_of(samples: &[Sample<'_>], query_id: i64, since_ms: i64) -> Option<
 /// предел берётся из `pg_settings` (байты), а не из `current_setting` (строка с единицей, например `1kB`).
 pub fn running_sql() -> String {
     format!(
-        "SELECT a.pid, {BACKEND_START_US}, a.state, (extract(epoch FROM a.query_start) * 1000)::bigint, \
+        "{SQL_MARKER}SELECT a.pid, {BACKEND_START_US}, a.state, (extract(epoch FROM a.query_start) * 1000)::bigint, \
          extract(epoch FROM now() - a.query_start)::float8, a.wait_event_type, a.wait_event, a.usename::text, \
          a.application_name, host(a.client_addr), left(a.query, {QUERY_LIMIT}), \
          (octet_length(a.query) >= (SELECT setting::int FROM pg_settings WHERE name = 'track_activity_query_size') - 4 \
@@ -248,7 +249,7 @@ pub fn running_sql() -> String {
 fn text_sql(ns: &str, caps: PgssCaps) -> String {
     let toplevel = if caps.toplevel { "s.toplevel" } else { "true" };
     format!(
-        "SELECT s.dbid, s.userid, {toplevel}, left(s.query, {QUERY_LIMIT}), length(s.query) > {QUERY_LIMIT} \
+        "{SQL_MARKER}SELECT s.dbid, s.userid, {toplevel}, left(s.query, {QUERY_LIMIT}), length(s.query) > {QUERY_LIMIT} \
          FROM {ns}.pg_stat_statements(true) s JOIN pg_database d ON d.oid = s.dbid \
          WHERE s.queryid = $1 AND d.datname = $2 ORDER BY s.query IS NULL LIMIT 1"
     )
@@ -297,7 +298,7 @@ pub fn text_from_cache(
 
 fn totals_sql(ns: &str) -> String {
     format!(
-        "SELECT COALESCE(sum(calls), 0)::bigint, COALESCE(sum(total_exec_time), 0)::float8, COALESCE(sum(rows), 0)::bigint \
+        "{SQL_MARKER}SELECT COALESCE(sum(calls), 0)::bigint, COALESCE(sum(total_exec_time), 0)::float8, COALESCE(sum(rows), 0)::bigint \
          FROM {ns}.pg_stat_statements(false) WHERE queryid IS NOT NULL"
     )
 }
@@ -772,14 +773,14 @@ mod tests {
     fn text_sql_returns_the_key_of_the_text() {
         let new = text_sql("public", PgssCaps::from_version("1.10").unwrap());
         assert!(
-            new.starts_with("SELECT s.dbid, s.userid, s.toplevel,")
+            new.starts_with("/* glafira */ SELECT s.dbid, s.userid, s.toplevel,")
                 && new.contains("pg_stat_statements(true)")
                 && new.contains("ORDER BY s.query IS NULL LIMIT 1"),
             "{new}"
         );
         let old = text_sql("public", PgssCaps::from_version("1.8").unwrap());
         assert!(
-            old.starts_with("SELECT s.dbid, s.userid, true,"),
+            old.starts_with("/* glafira */ SELECT s.dbid, s.userid, true,"),
             "toplevel — с 1.9: {old}"
         );
     }

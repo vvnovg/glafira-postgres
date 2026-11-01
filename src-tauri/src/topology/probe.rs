@@ -80,7 +80,7 @@ pub fn no_answer(limit: Duration) -> AppError {
 async fn collect_queries(c: &Client) -> AppResult<NodeFacts> {
     let row = c
         .query_one(
-            "SELECT pg_is_in_recovery(), current_setting('server_version')",
+            marked_sql!("SELECT pg_is_in_recovery(), current_setting('server_version')"),
             &[],
         )
         .await
@@ -93,7 +93,7 @@ async fn collect_queries(c: &Client) -> AppResult<NodeFacts> {
     // pg_control_system() может быть недоступна роли — тогда без проверки system_identifier.
     f.system_id = c
         .query_one(
-            "SELECT system_identifier::text FROM pg_control_system()",
+            marked_sql!("SELECT system_identifier::text FROM pg_control_system()"),
             &[],
         )
         .await
@@ -102,7 +102,7 @@ async fn collect_queries(c: &Client) -> AppResult<NodeFacts> {
     if f.in_recovery {
         if let Some(r) = c
             .query_opt(
-                "SELECT sender_host, sender_port FROM pg_stat_wal_receiver",
+                marked_sql!("SELECT sender_host, sender_port FROM pg_stat_wal_receiver"),
                 &[],
             )
             .await
@@ -117,11 +117,11 @@ async fn collect_queries(c: &Client) -> AppResult<NodeFacts> {
                 // Задержка replay: у догнавшей реплики 0 (иначе на простаивающей она росла бы без
                 // предела), иначе возраст последней применённой транзакции, не меньше 0 (расхождение
                 // часов). GREATEST игнорирует NULL, поэтому «нет метки времени» отделено явно.
-                "SELECT pg_wal_lsn_diff(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn())::bigint, \
+                marked_sql!("SELECT pg_wal_lsn_diff(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn())::bigint, \
                  (CASE WHEN pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn() THEN 0 \
                        WHEN pg_last_xact_replay_timestamp() IS NULL THEN NULL \
                        ELSE GREATEST(0, extract(epoch FROM now() - pg_last_xact_replay_timestamp()) * 1000) \
-                  END)::bigint",
+                  END)::bigint"),
                 &[],
             )
             .await
@@ -131,8 +131,10 @@ async fn collect_queries(c: &Client) -> AppResult<NodeFacts> {
     } else {
         let rows = c
             .query(
-                "SELECT application_name, host(client_addr), state, sync_state, \
-                 pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)::bigint FROM pg_stat_replication",
+                marked_sql!(
+                    "SELECT application_name, host(client_addr), state, sync_state, \
+                 pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)::bigint FROM pg_stat_replication"
+                ),
                 &[],
             )
             .await

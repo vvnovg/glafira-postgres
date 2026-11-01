@@ -10,7 +10,7 @@ use crate::diag::{
     DiagData, DiagReport, Tool, head, make_report, on_member, sql::BACKEND_START_US,
 };
 use crate::error::AppResult;
-use crate::product::PG_APPLICATION_NAME;
+use crate::product::{PG_APPLICATION_NAME, SQL_MARKER};
 use crate::state::AppState;
 use crate::topology::runtime::DiagTarget;
 
@@ -22,7 +22,7 @@ pub fn sessions_sql(caps: Caps) -> String {
     // Признак «сессия Glafira» — имя приложения самого подключения: константа, а не копия литерала.
     let glafira = quote_literal(PG_APPLICATION_NAME);
     format!(
-        "SELECT a.pid, a.leader_pid, a.backend_type, a.datname::text, a.usename::text, a.application_name, \
+        "{SQL_MARKER}SELECT a.pid, a.leader_pid, a.backend_type, a.datname::text, a.usename::text, a.application_name, \
          host(a.client_addr), a.client_port, {BACKEND_START_US}, \
          extract(epoch FROM now() - a.xact_start)::float8, extract(epoch FROM now() - a.query_start)::float8, \
          extract(epoch FROM now() - a.state_change)::float8, a.state, a.wait_event_type, a.wait_event, \
@@ -37,8 +37,10 @@ pub fn sessions_sql(caps: Caps) -> String {
 }
 
 /// `idle_in_transaction_session_timeout` — миллисекунды, `track_activity_query_size` — байты.
-const SETTINGS_SQL: &str = "SELECT name::text, setting FROM pg_settings \
-    WHERE name IN ('idle_in_transaction_session_timeout', 'track_activity_query_size')";
+const SETTINGS_SQL: &str = marked_sql!(
+    "SELECT name::text, setting FROM pg_settings \
+    WHERE name IN ('idle_in_transaction_session_timeout', 'track_activity_query_size')"
+);
 
 pub async fn collect(c: &Client, caps: Caps) -> AppResult<SessionsData> {
     let pg = |e: tokio_postgres::Error| from_pg(&e);

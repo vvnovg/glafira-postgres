@@ -11,6 +11,7 @@ use crate::diag::{
     sender_member, sql::BACKEND_START_US,
 };
 use crate::error::AppResult;
+use crate::product::SQL_MARKER;
 use crate::state::AppState;
 use crate::topology::model::Topology;
 use crate::topology::runtime::DiagTarget;
@@ -24,7 +25,7 @@ use crate::topology::runtime::DiagTarget;
 /// 7 возраст транзакции в секундах.
 pub fn sessions_sql() -> String {
     format!(
-        "SELECT a.pid, {BACKEND_START_US}, a.usename::text, a.application_name, a.datname::text, a.state, \
+        "{SQL_MARKER}SELECT a.pid, {BACKEND_START_US}, a.usename::text, a.application_name, a.datname::text, a.state, \
                 GREATEST(age(a.backend_xmin), age(a.backend_xid))::bigint, extract(epoch FROM now() - a.xact_start)::float8 \
          FROM pg_stat_activity a \
          WHERE (a.backend_xmin IS NOT NULL OR a.backend_xid IS NOT NULL) AND a.pid <> pg_backend_pid() \
@@ -35,8 +36,10 @@ pub fn sessions_sql() -> String {
 }
 
 /// Подготовленные транзакции: 0 gid, 1 владелец, 2 БД, 3 возраст XID, 4 сколько подготовлена, секунд.
-pub const PREPARED_SQL: &str = "SELECT gid, owner::text, database::text, age(transaction)::bigint, \
-    extract(epoch FROM now() - prepared)::float8 FROM pg_prepared_xacts";
+pub const PREPARED_SQL: &str = marked_sql!(
+    "SELECT gid, owner::text, database::text, age(transaction)::bigint, \
+    extract(epoch FROM now() - prepared)::float8 FROM pg_prepared_xacts"
+);
 
 /// Слоты с xmin или `catalog_xmin`: 0 имя, 1 вид, 2 активен, 3 возраст xmin, 4 возраст `catalog_xmin`, 5 сколько
 /// неактивен, секунд (`inactive_since` — PostgreSQL 17+), 6–7 `application_name` и адрес отправителя WAL, который
@@ -48,7 +51,7 @@ pub fn slots_sql(caps: Caps) -> String {
         "float8",
     );
     format!(
-        "SELECT s.slot_name::text, s.slot_type, s.active, age(s.xmin)::bigint, age(s.catalog_xmin)::bigint, {inactive}, \
+        "{SQL_MARKER}SELECT s.slot_name::text, s.slot_type, s.active, age(s.xmin)::bigint, age(s.catalog_xmin)::bigint, {inactive}, \
                 r.application_name, host(r.client_addr) \
          FROM pg_replication_slots s LEFT JOIN pg_stat_replication r ON r.pid = s.active_pid \
          WHERE s.xmin IS NOT NULL OR s.catalog_xmin IS NOT NULL"
@@ -57,11 +60,13 @@ pub fn slots_sql(caps: Caps) -> String {
 
 /// Обратная связь реплик без слота (с физическим слотом xmin лежит в самом слоте): 0 `application_name`,
 /// 1 адрес клиента, 2 возраст xmin.
-pub const FEEDBACK_SQL: &str = "SELECT application_name, host(client_addr), age(backend_xmin)::bigint \
-    FROM pg_stat_replication WHERE backend_xmin IS NOT NULL";
+pub const FEEDBACK_SQL: &str = marked_sql!(
+    "SELECT application_name, host(client_addr), age(backend_xmin)::bigint \
+    FROM pg_stat_replication WHERE backend_xmin IS NOT NULL"
+);
 
 pub const FEEDBACK_SETTING_SQL: &str =
-    "SELECT setting = 'on' FROM pg_settings WHERE name = 'hot_standby_feedback'";
+    marked_sql!("SELECT setting = 'on' FROM pg_settings WHERE name = 'hot_standby_feedback'");
 
 /// Данные слота из `slots_sql`. У слота с активным отправителем WAL `application` и `client_addr` — отправителя.
 struct SlotRow {

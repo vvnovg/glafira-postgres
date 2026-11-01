@@ -15,6 +15,7 @@ use crate::conn::profile::ConnectionKind;
 use crate::diag::caps::{Caps, V14, V15, V16, V17};
 use crate::diag::{DiagData, DiagReport, Tool, Unavailable, head, make_report, on_member, patroni};
 use crate::error::AppResult;
+use crate::product::SQL_MARKER;
 use crate::state::AppState;
 use crate::topology::runtime::DiagTarget;
 
@@ -34,7 +35,7 @@ pub fn slots_sql(caps: Caps) -> String {
     let failover = caps.col(V17, "failover", "bool");
     let synced = caps.col(V17, "synced", "bool");
     format!(
-        "SELECT slot_name::text, slot_type, plugin::text, database::text, temporary, active, active_pid, \
+        "{SQL_MARKER}SELECT slot_name::text, slot_type, plugin::text, database::text, temporary, active, active_pid, \
                 age(xmin)::bigint, age(catalog_xmin)::bigint, restart_lsn::text, confirmed_flush_lsn::text, wal_status, \
                 safe_wal_size, pg_wal_lsn_diff(CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn() \
                                                     ELSE pg_current_wal_lsn() END, restart_lsn)::bigint, \
@@ -66,7 +67,7 @@ pub fn subscriptions_sql(caps: Caps) -> String {
         ""
     };
     format!(
-        "SELECT s.subname::text, s.pid, s.received_lsn::text, extract(epoch FROM now() - s.last_msg_receipt_time)::float8, \
+        "{SQL_MARKER}SELECT s.subname::text, s.pid, s.received_lsn::text, extract(epoch FROM now() - s.last_msg_receipt_time)::float8, \
                 extract(epoch FROM now() - s.latest_end_time)::float8, {apply}, {sync} \
          FROM pg_stat_subscription s {stats} WHERE s.relid IS NULL{leaders} ORDER BY s.subname"
     )
@@ -74,15 +75,17 @@ pub fn subscriptions_sql(caps: Caps) -> String {
 
 /// Колонки: 0 `max_slot_wal_keep_size` в мегабайтах (`-1` — без ограничения), 1 `now()` сервера, 2 запуск postmaster,
 /// 3 наибольший `stats_reset` (мс эпохи) — основа снимка счётчика, как у конфликтов recovery.
-const KEEP_SIZE_SQL: &str = "SELECT setting::bigint, (extract(epoch FROM now()) * 1000)::bigint, \
+const KEEP_SIZE_SQL: &str = marked_sql!(
+    "SELECT setting::bigint, (extract(epoch FROM now()) * 1000)::bigint, \
     (extract(epoch FROM pg_postmaster_start_time()) * 1000)::bigint, \
     (SELECT max((extract(epoch FROM stats_reset) * 1000)::bigint) FROM pg_stat_database) \
-  FROM pg_settings WHERE name = 'max_slot_wal_keep_size'";
+  FROM pg_settings WHERE name = 'max_slot_wal_keep_size'"
+);
 
 /// Может ли роль подключения удалять слоты (`pg_drop_replication_slot` требует суперпользователя или `REPLICATION`).
 /// `current_user`, а не `session_user`: права проверяются по нему.
 const CAN_DROP_SQL: &str =
-    "SELECT rolsuper OR rolreplication FROM pg_roles WHERE rolname = current_user";
+    marked_sql!("SELECT rolsuper OR rolreplication FROM pg_roles WHERE rolname = current_user");
 
 /// Ключ счётчика ошибок подписок (сумма применения и синхронизации) в снимке.
 const ERRORS_KEY: &str = "subscriptionErrors";

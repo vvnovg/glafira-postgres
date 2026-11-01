@@ -179,7 +179,7 @@ pub async fn head(c: &Client) -> AppResult<Head> {
 /// `USAGE`, а не `MEMBER`: привилегии роли доходят до сессии только при наследовании (`NOINHERIT` членство не
 /// открывает чужую статистику) — так же проверяет сам сервер.
 pub const READS_ALL_STATS_SQL: &str =
-    "SELECT pg_has_role(current_user, 'pg_read_all_stats', 'USAGE')";
+    marked_sql!("SELECT pg_has_role(current_user, 'pg_read_all_stats', 'USAGE')");
 
 /// Один раз за сбор: без права сервер прячет чужие сессии (`backend_xmin` и `backend_xid`, состояние приёмника WAL и
 /// отправителей, их LSN), и пустые поля нельзя читать как «всё в порядке» или «всё сломано».

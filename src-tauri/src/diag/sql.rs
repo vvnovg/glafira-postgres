@@ -6,4 +6,6 @@
 pub const BACKEND_START_US: &str = "(extract(epoch FROM a.backend_start) * 1000000)::bigint";
 
 /// Версия, роль узла и время сервера — первая строка каждого узлового отчёта.
-pub const HEAD_SQL: &str = "SELECT current_setting('server_version_num')::int, pg_is_in_recovery(), (extract(epoch FROM now()) * 1000)::bigint";
+pub const HEAD_SQL: &str = marked_sql!(
+    "SELECT current_setting('server_version_num')::int, pg_is_in_recovery(), (extract(epoch FROM now()) * 1000)::bigint"
+);

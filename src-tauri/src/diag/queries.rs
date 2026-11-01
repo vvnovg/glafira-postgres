@@ -18,6 +18,7 @@ use crate::diag::{
     DiagData, DiagReport, Head, Tool, Unavailable, WINDOWS_S, head, make_report, on_member,
 };
 use crate::error::{AppError, AppResult, ErrorCode};
+use crate::product::SQL_MARKER;
 use crate::state::AppState;
 use crate::sync::MutexExt;
 use crate::topology::runtime::DiagTarget;
@@ -41,8 +42,10 @@ pub enum Detect {
     TooOld(String),
 }
 
-const DETECT_SQL: &str = "SELECT e.extversion::text, n.nspname::text FROM pg_extension e \
-    JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'pg_stat_statements'";
+const DETECT_SQL: &str = marked_sql!(
+    "SELECT e.extversion::text, n.nspname::text FROM pg_extension e \
+    JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'pg_stat_statements'"
+);
 
 pub async fn detect(c: &Client) -> AppResult<Detect> {
     let Some(r) = c
@@ -95,7 +98,7 @@ pub fn statements_sql(ns: &str, caps: PgssCaps, where_clause: &str) -> String {
         ("NULL::bigint", "NULL::bigint")
     };
     format!(
-        "SELECT s.userid, s.dbid, s.queryid, {toplevel}, d.datname::text, r.rolname::text, \
+        "{SQL_MARKER}SELECT s.userid, s.dbid, s.queryid, {toplevel}, d.datname::text, r.rolname::text, \
          s.calls, s.total_exec_time, s.min_exec_time, s.max_exec_time, s.mean_exec_time, s.stddev_exec_time, s.rows, \
          s.plans, s.total_plan_time, \
          s.shared_blks_hit, s.shared_blks_read, s.shared_blks_dirtied, s.shared_blks_written, \
@@ -119,7 +122,7 @@ pub fn info_sql(ns: &str, caps: PgssCaps) -> String {
         "NULL::bigint, NULL::bigint".to_string()
     };
     format!(
-        "SELECT {info}, current_setting('pg_stat_statements.max')::bigint, \
+        "{SQL_MARKER}SELECT {info}, current_setting('pg_stat_statements.max')::bigint, \
          current_setting('pg_stat_statements.track_planning', true)"
     )
 }
@@ -128,7 +131,7 @@ pub fn info_sql(ns: &str, caps: PgssCaps) -> String {
 pub fn texts_sql(ns: &str, caps: PgssCaps) -> String {
     let toplevel = if caps.toplevel { "s.toplevel" } else { "true" };
     format!(
-        "SELECT s.queryid, s.dbid, s.userid, {toplevel}, left(s.query, {QUERY_LIMIT}), length(s.query) > {QUERY_LIMIT} \
+        "{SQL_MARKER}SELECT s.queryid, s.dbid, s.userid, {toplevel}, left(s.query, {QUERY_LIMIT}), length(s.query) > {QUERY_LIMIT} \
          FROM {ns}.pg_stat_statements(true) s WHERE s.queryid = ANY($1)"
     )
 }
@@ -790,7 +793,18 @@ mod tests {
             v12.contains("s.wal_bytes::bigint"),
             "numeric приводится к bigint"
         );
-        assert!(info_sql("public", caps("1.8")).starts_with("SELECT NULL::bigint, NULL::bigint,"));
+        assert!(
+            info_sql("public", caps("1.8"))
+                .starts_with("/* glafira */ SELECT NULL::bigint, NULL::bigint,")
+        );
+        // Периодические запросы Глафиры — с меткой: `pg_stat_statements` хранит её в тексте строки.
+        for sql in [
+            statements_sql("public", caps("1.8"), ""),
+            texts_sql("public", caps("1.9")),
+            DETECT_SQL.to_string(),
+        ] {
+            assert!(crate::product::is_marked_sql(&sql), "{sql}");
+        }
         assert!(info_sql("public", caps("1.9")).contains("FROM public.pg_stat_statements_info"));
         assert!(
             texts_sql("public", caps("1.9"))

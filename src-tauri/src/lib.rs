@@ -1,5 +1,7 @@
 #[macro_use]
 pub mod i18n;
+#[macro_use]
+pub mod product;
 pub mod actions;
 pub mod catalog;
 pub mod commands;
@@ -13,7 +15,6 @@ pub mod logging;
 pub mod migrate;
 pub mod net;
 pub mod policy;
-pub mod product;
 pub mod readiness;
 pub mod sampler;
 pub mod secrets;
