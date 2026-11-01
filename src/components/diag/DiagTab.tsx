@@ -193,34 +193,49 @@ export function DiagTab({ connectionId, tool, member, active }: { connectionId: 
   if (view.data === undefined) {
     return view.error ? <ErrorBanner error={view.error} onRetry={() => void view.refetch()} /> : <p className="empty">{t("common.loading")}</p>;
   }
+  const closedNotice = live ? null : (
+    <>
+      {state === "connecting" ? (
+        <p className="muted" role="status">
+          {t("sidebar.state.connecting")}
+        </p>
+      ) : (
+        <div className="diag-closed">
+          <p className="muted">{t("diag.closed")}</p>
+          <button type="button" className="primary" disabled={busy} onClick={() => void connect()}>
+            {t("diag.connect")}
+          </button>
+        </div>
+      )}
+      {(connectError ?? view.data.error) && <ErrorBanner error={connectError ?? view.data.error} />}
+    </>
+  );
+  const topo = view.data.topology;
+  // Выбор узла — у узловых инструментов; у одиночного сервера узел один, у инструментов кластера узел не берётся.
+  const members = live && !cluster && topo && topo.kind !== "server" ? topo.members : null;
+  // «Запросы» и без подключения рисуют свой вид (снимки и «между снимками» читаются с диска) — тот же элемент, что и при
+  // открытом подключении: обрыв подключения не сбрасывает режим и отчёт «между снимками».
+  if (isQueries) {
+    return (
+      <div className="page diag-tab">
+        <QueriesView
+          connectionId={connectionId}
+          member={member}
+          active={active}
+          live={live}
+          members={members}
+          kind={topo?.kind ?? "server"}
+          onSelectMember={pick}
+          closed={closedNotice}
+        />
+      </div>
+    );
+  }
   if (!live) {
     return (
       <div className="page diag-tab">
         <DiagHeader tool={tool} />
-        {state === "connecting" ? (
-          <p className="muted" role="status">
-            {t("sidebar.state.connecting")}
-          </p>
-        ) : (
-          <div className="diag-closed">
-            <p className="muted">{t("diag.closed")}</p>
-            <button type="button" className="primary" disabled={busy} onClick={() => void connect()}>
-              {t("diag.connect")}
-            </button>
-          </div>
-        )}
-        {(connectError ?? view.data.error) && <ErrorBanner error={connectError ?? view.data.error} />}
-      </div>
-    );
-  }
-
-  const topo = view.data.topology;
-  // Выбор узла — у узловых инструментов; у одиночного сервера узел один, у инструментов кластера узел не берётся.
-  const members = !cluster && topo && topo.kind !== "server" ? topo.members : null;
-  if (isQueries) {
-    return (
-      <div className="page diag-tab">
-        <QueriesView connectionId={connectionId} member={member} active={active} live={live} members={members} kind={topo?.kind ?? "server"} onSelectMember={pick} />
+        {closedNotice}
       </div>
     );
   }

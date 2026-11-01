@@ -1,7 +1,7 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { DiagTool, Finding } from "../../api/types";
+import type { DiagTool, Finding, QueriesMode } from "../../api/types";
 import { formatTime, formatTimestamp } from "../../lib/format";
 import { useWorkspace } from "../../state/workspace";
 import { connection, diagReport, holder, member, pulseFacts, pulseRates, replication, sender, sessionRow, slot, slotsData, topology, topologyView, waitsData } from "../../test/fixtures";
@@ -9,7 +9,7 @@ import { renderWithClient } from "../../test/render";
 
 vi.mock("../../api/client", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../../api/client")>();
-  return { ...orig, api: { runDiagnostic: vi.fn(), getTopology: vi.fn(), listConnections: vi.fn(), connect: vi.fn(), startSampler: vi.fn(), startStatementsSampler: vi.fn(), queryTexts: vi.fn(), stopSession: vi.fn(), previewSessionAction: vi.fn(), executeSessionAction: vi.fn(), previewDropSlot: vi.fn(), dropSlot: vi.fn() } };
+  return { ...orig, api: { runDiagnostic: vi.fn(), getTopology: vi.fn(), listConnections: vi.fn(), connect: vi.fn(), startSampler: vi.fn(), startStatementsSampler: vi.fn(), queryTexts: vi.fn(), stopSession: vi.fn(), previewSessionAction: vi.fn(), executeSessionAction: vi.fn(), previewDropSlot: vi.fn(), dropSlot: vi.fn(), snapshotList: vi.fn(), snapshotCompare: vi.fn(), snapshotDelete: vi.fn(), snapshotTake: vi.fn() } };
 });
 
 import { api } from "../../api/client";
@@ -247,6 +247,81 @@ describe("DiagTab", () => {
     expect(api.connect).toHaveBeenCalledWith("c");
     await screen.findByText("Проблем не найдено");
     expect(api.runDiagnostic).toHaveBeenCalledTimes(1);
+  });
+
+  describe("«Запросы» без подключения", () => {
+    const a = { file: "pg-1/2026-10-29T10-00-00.json", member: "pg-1", takenAtMs: 1_761_732_000_000, rows: 120, bytes: 40_000 };
+    const b = { file: "pg-1/2026-10-29T11-00-00.json", member: "pg-1", takenAtMs: 1_761_735_600_000, rows: 130, bytes: 42_000 };
+    const queriesData = (mode: QueriesMode) => ({
+      kind: "queries" as const,
+      mode,
+      coverageS: mode.kind === "between" ? 3600 : null,
+      ticks: null,
+      pgss: { version: "1.11", max: 5000, trackPlanning: true, hasInfo: true, statsResetMs: null, dealloc: 0 },
+      totals: { calls: 1, totalExecMs: 1, rows: 1 },
+      rows: [{ ...sinceResetRow, text: mode.kind === "between" ? "select from snapshot" : "select live" }],
+    });
+    const sinceResetRow = {
+      key: { queryId: "1", dbid: 5, userid: 10, toplevel: true }, datname: "perf", rolname: "app", calls: 1, totalExecMs: 1, meanExecMs: 1, minExecMs: null, maxExecMs: null, stddevExecMs: null,
+      rows: 1, rowsPerCall: 1, plans: 0, totalPlanMs: 0, sharedHit: 0, sharedRead: 0, sharedDirtied: 0, sharedWritten: 0, localHit: 0, localRead: 0, localDirtied: 0, localWritten: 0,
+      tempRead: 0, tempWritten: 0, ioReadMs: 0, ioWriteMs: 0, tempIoMs: null, walRecords: 0, walFpi: 0, walBytes: 0, jitFunctions: null, jitMs: null, parallelPlanned: null,
+      parallelLaunched: null, sharePct: 100, hitRatio: null, text: null, textTruncated: false, own: false,
+    };
+    beforeEach(() => {
+      vi.mocked(api.snapshotList).mockResolvedValue([b, a]);
+      vi.mocked(api.snapshotCompare).mockResolvedValue({ new: [], gone: [], degraded: [], improved: [], totalsFrom: { calls: 1, totalExecMs: 1, rows: 0 }, totalsTo: { calls: 2, totalExecMs: 2, rows: 0 }, reset: false });
+      vi.mocked(api.runDiagnostic).mockImplementation(async (_id, req) => diagReport(queriesData(req.queries!.mode), { member: "pg-1", followsLeader: req.queries!.mode.kind !== "between" }));
+      vi.mocked(api.startStatementsSampler).mockResolvedValue("s-1");
+      vi.mocked(api.stopSession).mockResolvedValue(true);
+      vi.mocked(api.queryTexts).mockResolvedValue([]);
+    });
+
+    const enterBetween = async (user: ReturnType<typeof userEvent.setup>) => {
+      const panel = await screen.findByRole("region", { name: "Снимки" });
+      const rows = await within(panel).findAllByRole("row");
+      await user.click(within(rows[1]).getByRole("checkbox"));
+      await user.click(within(rows[2]).getByRole("checkbox"));
+      await user.click(screen.getByRole("button", { name: "Сравнить" }));
+      await user.click(await screen.findByRole("button", { name: "Топ между снимками" }));
+    };
+
+    it("закрытое подключение: уведомление с «Подключиться» и панель снимков; «между снимками» читается без подключения, живые режимы недоступны", async () => {
+      vi.mocked(api.getTopology).mockResolvedValue(topologyView({ state: "disconnected", topology: null, catalogMember: null }));
+      const user = userEvent.setup();
+      renderWithClient(<DiagTab connectionId="c" tool="queries" member={null} active tabId="diag:c:queries" />);
+      expect(await screen.findByText("Подключение закрыто")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Подключиться" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Сделать снимок" })).toBeDisabled();
+      expect(api.runDiagnostic).not.toHaveBeenCalled();
+      await enterBetween(user);
+      expect(await screen.findByText("select from snapshot")).toBeInTheDocument();
+      expect(api.runDiagnostic).toHaveBeenCalledTimes(1);
+      expect(api.runDiagnostic).toHaveBeenCalledWith("c", expect.objectContaining({ tool: "queries", queries: expect.objectContaining({ mode: { kind: "between", from: a.file, to: b.file } }) }));
+      expect(screen.getByText("Подключение закрыто")).toBeInTheDocument();
+      const mode = screen.getByRole("combobox", { name: "Режим" });
+      expect(within(mode).getByRole("option", { name: "С момента сброса" })).toBeDisabled();
+      expect(api.startStatementsSampler).not.toHaveBeenCalled();
+      expect(api.queryTexts).not.toHaveBeenCalled();
+      // Выход из режима без подключения — снова только снимки.
+      await user.click(screen.getByRole("button", { name: "Выйти из режима снимков" }));
+      expect(await screen.findByRole("region", { name: "Снимки" })).toBeInTheDocument();
+      expect(screen.queryByRole("combobox", { name: "Режим" })).not.toBeInTheDocument();
+      expect(api.runDiagnostic).toHaveBeenCalledTimes(1);
+    });
+
+    it("обрыв подключения в режиме «между снимками» не теряет режим и отчёт", async () => {
+      const user = userEvent.setup();
+      const { client } = renderWithClient(<DiagTab connectionId="c" tool="queries" member={null} active tabId="diag:c:queries" />);
+      expect(await screen.findByText("select live")).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Снимки" }));
+      await enterBetween(user);
+      expect(await screen.findByText("select from snapshot")).toBeInTheDocument();
+      act(() => client.setQueryData(["topology", "c"], topologyView({ state: "disconnected", topology: null, catalogMember: null })));
+      expect(await screen.findByText("Подключение закрыто")).toBeInTheDocument();
+      expect(screen.getByText("select from snapshot")).toBeInTheDocument();
+      expect(screen.getByText(/Между снимками узла pg-1/)).toBeInTheDocument();
+      expect(screen.getByRole("combobox", { name: "Режим" })).toHaveValue("between");
+    });
   });
 
   it("профиль ожиданий: окно по умолчанию 15 минут, выбор окна перечитывает отчёт с ним и не трогает подписку на сэмплер", async () => {

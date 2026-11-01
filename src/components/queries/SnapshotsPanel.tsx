@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type KeyboardEvent, useState } from "react";
+import { type KeyboardEvent, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
 import type { Comparison, SnapshotInfo } from "../../api/types";
@@ -29,7 +29,8 @@ export function SnapshotsPanel({
   connectionId: string;
   /** Узел для нового снимка; `null` — узел ещё не известен, снимать нечего. */
   member: string | null;
-  onBetween: (from: string, to: string) => void;
+  /** Пара старший → младший; сведения о снимках нужны подписи режима (время, узел). */
+  onBetween: (from: SnapshotInfo, to: SnapshotInfo) => void;
   onDeleted?: (file: string) => void;
 }) {
   const { t } = useTranslation();
@@ -66,6 +67,11 @@ export function SnapshotsPanel({
   // Старший снимок — `from`, младший — `to`.
   const pair = pickedInfo.length === 2 && !mixed ? (pickedInfo[0].takenAtMs <= pickedInfo[1].takenAtMs ? pickedInfo : [pickedInfo[1], pickedInfo[0]]) : null;
   const error = q.error ?? take.error ?? del.error ?? compare.error;
+  // Подтверждение получает фокус: Escape и Enter работают сразу, без щелчка по нему.
+  const confirmRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (confirmDelete) confirmRef.current?.focus();
+  }, [confirmDelete]);
   const onConfirmKey = (e: KeyboardEvent) => {
     if (e.key === "Escape" && !del.isPending) setConfirmDelete(null);
   };
@@ -118,13 +124,12 @@ export function SnapshotsPanel({
                   <td>{formatTimestamp(r.takenAtMs)}</td>
                   <td>{r.member}</td>
                   <td className="num">
-                    {r.unreadable ? (
+                    {r.unreadable && (
                       <span className="kind-badge" title={t("diag.snapshots.unreadableHint")}>
                         {t(UNREADABLE[r.unreadable])}
                       </span>
-                    ) : (
-                      formatCount(r.rows)
-                    )}
+                    )}{" "}
+                    {formatCount(r.rows)}
                   </td>
                   <td className="num">{formatBytes(r.bytes)}</td>
                   <td>
@@ -143,7 +148,7 @@ export function SnapshotsPanel({
           <strong>{t("diag.snapshots.deleteTitle")}</strong>
           <p>{t("diag.snapshots.deleteQuestion", { at: formatTimestamp(confirmDelete.takenAtMs) })}</p>
           <div className="toolbar">
-            <button type="button" className="danger" disabled={del.isPending} onClick={() => del.mutate(confirmDelete.file)}>
+            <button ref={confirmRef} type="button" className="danger" disabled={del.isPending} onClick={() => del.mutate(confirmDelete.file)}>
               {t("diag.snapshots.deleteConfirm")}
             </button>
             <button type="button" disabled={del.isPending} onClick={() => setConfirmDelete(null)}>
@@ -156,7 +161,7 @@ export function SnapshotsPanel({
         <SnapshotCompare
           comparison={compared.data}
           title={t("diag.snapshots.compared", { from: formatTimestamp(compared.from.takenAtMs), to: formatTimestamp(compared.to.takenAtMs) })}
-          onBetween={() => onBetween(compared.from.file, compared.to.file)}
+          onBetween={() => onBetween(compared.from, compared.to)}
         />
       )}
     </section>

@@ -2,6 +2,7 @@ import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Finding, QueriesData, QueryStat, StatementsEvent } from "../../api/types";
+import { formatTimestamp } from "../../lib/format";
 import { useWorkspace } from "../../state/workspace";
 import { diagReport } from "../../test/fixtures";
 import { renderWithClient } from "../../test/render";
@@ -271,43 +272,65 @@ describe("QueriesView", () => {
     expect(within(screen.getByText("select 1").closest("tr")!).getAllByRole("cell")[col].textContent).toBe("—");
   });
 
-  it("«между снимками»: пара из панели снимков, без открытого подключения; подпись, покрытие, без stddev и без запроса текстов; выход", async () => {
+  it("«между снимками»: пара из панели снимков; подпись местным временем, покрытие, без stddev и без запроса текстов; удаление снимка пары и выход", async () => {
     const a = { file: "pg-1/2026-10-29T10-00-00.json", member: "pg-1", takenAtMs: 1_761_732_000_000, rows: 120, bytes: 40_000 };
     const b = { file: "pg-1/2026-10-29T11-00-00.json", member: "pg-1", takenAtMs: 1_761_735_600_000, rows: 130, bytes: 42_000 };
     vi.mocked(api.snapshotList).mockResolvedValue([b, a]);
+    vi.mocked(api.snapshotDelete).mockResolvedValue(true);
     vi.mocked(api.snapshotCompare).mockResolvedValue({ new: [], gone: [], degraded: [], improved: [], totalsFrom: { calls: 1, totalExecMs: 1, rows: 0 }, totalsTo: { calls: 2, totalExecMs: 2, rows: 0 }, reset: false });
-    vi.mocked(api.runDiagnostic).mockResolvedValue(
-      diagReport(data({ mode: { kind: "between", from: a.file, to: b.file }, coverageS: 3600, rows: [row("1", { own: true, text: "/* glafira */ select 1", stddevExecMs: null, maxExecMs: null, minExecMs: null }), row("2")] }), {
-        member: "pg-1",
-        followsLeader: false,
-        unavailable: [{ part: "between", reason: { key: "diag.unavailable.betweenReset", params: { part: "between" }, text: "between: statistics were reset between the snapshots" } }],
-      }),
+    const between = diagReport(
+      data({ mode: { kind: "between", from: a.file, to: b.file }, coverageS: 3600, rows: [row("1", { own: true, text: "/* glafira */ select 1", stddevExecMs: null, maxExecMs: null, minExecMs: null }), row("2")] }),
+      { member: "pg-1", followsLeader: false, unavailable: [{ part: "between", reason: { key: "diag.unavailable.betweenReset", params: { part: "between" }, text: "x" } }] },
     );
+    vi.mocked(api.runDiagnostic).mockImplementation(async (_id, req) => (req.queries?.mode.kind === "between" ? between : diagReport(data(), { member: "pg-1" })));
     const user = userEvent.setup();
-    renderWithClient(<QueriesView connectionId="c" member={null} active live={false} members={null} kind="server" onSelectMember={() => {}} />);
+    renderWithClient(view());
+    await screen.findByText("select 2");
+    vi.mocked(api.queryTexts).mockClear();
     const toggle = screen.getByRole("button", { name: "Снимки" });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     await user.click(toggle);
-    const rows = await screen.findAllByRole("row");
+    const panel = screen.getByRole("region", { name: "Снимки" });
+    const rows = await within(panel).findAllByRole("row");
     await user.click(within(rows[1]).getByRole("checkbox"));
     await user.click(within(rows[2]).getByRole("checkbox"));
     await user.click(screen.getByRole("button", { name: "Сравнить" }));
     await user.click(await screen.findByRole("button", { name: "Топ между снимками" }));
     await waitFor(() =>
-      expect(api.runDiagnostic).toHaveBeenCalledWith("c", { tool: "queries", member: null, queries: { mode: { kind: "between", from: a.file, to: b.file }, sort: "totalTime", limit: 50, database: null, toplevelOnly: true } }),
+      expect(api.runDiagnostic).toHaveBeenLastCalledWith("c", { tool: "queries", member: null, queries: { mode: { kind: "between", from: a.file, to: b.file }, sort: "totalTime", limit: 50, database: null, toplevelOnly: true } }),
     );
-    expect(api.runDiagnostic).toHaveBeenCalledTimes(1);
-    expect(screen.queryByRole("region", { name: /Сравнение/ })).not.toBeInTheDocument();
-    expect(screen.getByText("Между снимками: pg-1/2026-10-29T10-00-00 → pg-1/2026-10-29T11-00-00")).toBeInTheDocument();
-    expect(await screen.findByRole("status")).toHaveTextContent("60 мин между снимками");
+    expect(screen.queryByRole("region", { name: "Снимки" })).not.toBeInTheDocument();
+    expect(screen.getByText(`Между снимками узла pg-1: ${formatTimestamp(a.takenAtMs)} → ${formatTimestamp(b.takenAtMs)}`)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("1 ч между снимками"));
     expect(screen.getByRole("combobox", { name: "Режим" })).toHaveValue("between");
     expect(screen.getByText("Сравнение: статистика сбрасывалась между снимками")).toBeInTheDocument();
     expect(screen.getByText("Глафира")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Stddev" })).toBeDisabled();
     expect(api.queryTexts).not.toHaveBeenCalled();
-    expect(api.startStatementsSampler).not.toHaveBeenCalled();
+    // Выход кнопкой — снова «с момента сброса».
     await user.click(screen.getByRole("button", { name: "Выйти из режима снимков" }));
     expect(screen.getByRole("combobox", { name: "Режим" })).toHaveValue("sinceReset");
-    expect(screen.queryByText(/Между снимками:/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Между снимками узла/)).not.toBeInTheDocument();
+    // Удаление снимка активной пары выводит из режима «между снимками».
+    await user.click(screen.getByRole("button", { name: "Снимки" }));
+    const fresh = await within(screen.getByRole("region", { name: "Снимки" })).findAllByRole("row");
+    await user.click(within(fresh[1]).getByRole("checkbox"));
+    await user.click(within(fresh[2]).getByRole("checkbox"));
+    await user.click(screen.getByRole("button", { name: "Сравнить" }));
+    await user.click(await screen.findByRole("button", { name: "Топ между снимками" }));
+    expect(await screen.findByText(/Между снимками узла/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Снимки" }));
+    const again = await within(screen.getByRole("region", { name: "Снимки" })).findAllByRole("row");
+    await user.click(within(again[1]).getByRole("button", { name: "Удалить" }));
+    await user.click(screen.getByRole("button", { name: "Удалить снимок" }));
+    await waitFor(() => expect(api.snapshotDelete).toHaveBeenCalledWith("c", b.file));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Режим" })).toHaveValue("sinceReset"));
+    expect(screen.queryByText(/Между снимками узла/)).not.toBeInTheDocument();
+  });
+
+  it("покрытие «между снимками» короче минуты — в секундах", async () => {
+    vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport(data({ mode: { kind: "between", from: "pg-1/x.json", to: "pg-1/y.json" }, coverageS: 45 }), { member: "pg-1" }));
+    renderWithClient(view());
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("45 с между снимками"));
   });
 });

@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
-import type { ConnectionKind, Member, QueriesParams, QuerySort, QueryStat } from "../../api/types";
-import { formatBytes, formatCount, formatMs, formatPercent, formatTimestamp } from "../../lib/format";
+import type { ConnectionKind, Member, QueriesParams, QuerySort, QueryStat, SnapshotInfo } from "../../api/types";
+import { formatBytes, formatCount, formatDuration, formatMs, formatPercent, formatTimestamp } from "../../lib/format";
 import { useQueriesReport } from "../../lib/useQueriesReport";
 import { useStatementsSampler } from "../../lib/useStatementsSampler";
 import { useWorkspace } from "../../state/workspace";
@@ -52,14 +52,16 @@ const parseMode = (v: string, current: QueriesParams["mode"]): QueriesParams["mo
   if (v === "between" && current.kind === "between") return current;
   return { kind: "sinceReset" };
 };
-/** Подпись снимка в шапке режима: имя файла без `.json` (`<member>/<время>`). */
-const snapshotLabel = (file: string) => file.replace(/\.json$/, "");
 
 /**
  * Инструмент «Запросы» (спец. P3 §4.7): общая шапка диагностики, режим и фильтры, таблица топа, находки. Отчёт «за
  * окно» обновляется по тику сэмплера pgss, на который вкладка подписана, пока смонтирована. Тексты строк подгружаются по
  * ключам один раз и хранятся здесь же (по ключу строки), а к строкам отчёта подмешиваются при отрисовке: обновление
  * отчёта, ушедшее раньше ответа с текстами, их не затирает. Список баз копится из всех прочитанных отчётов узла.
+ *
+ * Без подключения (`live === false`, `closed` — уведомление вкладки с кнопкой «Подключиться») доступны только снимки:
+ * панель снимков и режим «между снимками», который читается с диска. Живые режимы ждут подключения; обрыв подключения
+ * в режиме «между снимками» отчёт не теряет — вкладка рисует тот же вид.
  */
 export function QueriesView({
   connectionId,
@@ -69,6 +71,7 @@ export function QueriesView({
   members,
   kind,
   onSelectMember,
+  closed,
 }: {
   connectionId: string;
   member: string | null;
@@ -77,6 +80,8 @@ export function QueriesView({
   members: Member[] | null;
   kind: ConnectionKind;
   onSelectMember: (m: string | null) => void;
+  /** Уведомление о закрытом подключении (вкладка); показывается, пока `live === false`. */
+  closed?: ReactNode;
 }) {
   const { t } = useTranslation();
   const open = useWorkspace((s) => s.open);
@@ -104,6 +109,8 @@ export function QueriesView({
   // min/max/stddev есть только у накопительного отчёта: в окне и между снимками строки — дельты.
   const deltas = params.mode.kind !== "sinceReset";
   const [showSnapshots, setShowSnapshots] = useState(false);
+  /** Снимки пары режима «между снимками» — для подписи (время и узел); в параметрах отчёта только имена файлов. */
+  const [pair, setPair] = useState<{ from: SnapshotInfo; to: SnapshotInfo } | null>(null);
   const reportMember = report?.member ?? null;
   // Узел отчёта «между снимками» — узел снимка, а не лидер: сэмплер за ним не переходит.
   const freshMember = q.isPlaceholderData || data?.mode.kind === "between" ? null : reportMember;
@@ -195,6 +202,22 @@ export function QueriesView({
   };
   // Стрелка — у колонки, по которой щёлкнули, если её сортировка ещё действует; иначе (сброс сортировки сменой режима) — у первой подходящей.
   const activeCol = COLS.find((c) => c.id === sortCol && c.sort === params.sort) ?? COLS.find((c) => c.sort === params.sort);
+  // Подпись пары: местное время снятия и узел один раз; без сведений о снимках (не должно случаться) — имена файлов.
+  const betweenLabel = (from: string, to: string) => {
+    const known = pair && pair.from.file === from && pair.to.file === to ? pair : null;
+    return known
+      ? t("diag.queries.betweenLabel", { member: known.from.member, from: formatTimestamp(known.from.takenAtMs), to: formatTimestamp(known.to.takenAtMs) })
+      : t("diag.queries.betweenLabel", { member: from.split("/")[0], from: from.replace(/\.json$/, ""), to: to.replace(/\.json$/, "") });
+  };
+  const offline = !live;
+  const enterBetween = (from: SnapshotInfo, to: SnapshotInfo) => {
+    setPair({ from, to });
+    setParams((p) => ({ ...p, mode: { kind: "between", from: from.file, to: to.file }, sort: sortAvailable(p.sort, data?.pgss ?? null, true) ? p.sort : "totalTime" }));
+    setShowSnapshots(false);
+  };
+  const onSnapshotDeleted = (file: string) => {
+    if (params.mode.kind === "between" && (params.mode.from === file || params.mode.to === file)) exitBetween();
+  };
   const exitBetween = () => setParams((p) => (p.mode.kind === "between" ? { ...p, mode: { kind: "sinceReset" } } : p));
   const openQuery = (r: QueryStat) => {
     if (reportMember === null || r.datname === null) return;
@@ -202,11 +225,23 @@ export function QueriesView({
   };
   // Покрытие — по режиму самого отчёта: при переключении в окно на экране ещё может быть отчёт «с момента сброса».
   const coverage = (() => {
-    if (data?.mode.kind === "between") return data.coverageS === null ? null : t("diag.queries.betweenCoverage", { min: Math.round(data.coverageS / 60) });
+    if (data?.mode.kind === "between") return data.coverageS === null ? null : t("diag.queries.betweenCoverage", { duration: formatDuration(data.coverageS) });
     if (!data || data.mode.kind !== "window") return null;
     if (data.coverageS === null) return t("diag.queries.firstTick");
     return t("diag.queries.coverage", { have: Math.round(data.coverageS / 60), want: data.mode.s / 60 });
   })();
+
+  // Без подключения и вне режима «между снимками» показывать нечего, кроме снимков.
+  if (offline && !between) {
+    return (
+      <>
+        <DiagHeader tool="queries" />
+        {closed}
+        <p className="muted">{t("diag.queries.offline")}</p>
+        <SnapshotsPanel connectionId={connectionId} member={null} onBetween={enterBetween} onDeleted={onSnapshotDeleted} />
+      </>
+    );
+  }
 
   return (
     <>
@@ -241,9 +276,11 @@ export function QueriesView({
               }))
             }
           >
-            <option value="sinceReset">{t("diag.queries.modes.sinceReset")}</option>
+            <option value="sinceReset" disabled={offline}>
+              {t("diag.queries.modes.sinceReset")}
+            </option>
             {[300, 900, 3600].map((s) => (
-              <option key={s} value={`window:${s}`}>
+              <option key={s} value={`window:${s}`} disabled={offline}>
                 {t("diag.queries.modes.window", { min: s / 60 })}
               </option>
             ))}
@@ -291,9 +328,10 @@ export function QueriesView({
           {t("diag.queries.openConsole")}
         </button>
       </div>
+      {offline && closed}
       {params.mode.kind === "between" && (
         <div className="toolbar snapshots-between">
-          <strong>{t("diag.queries.betweenLabel", { from: snapshotLabel(params.mode.from), to: snapshotLabel(params.mode.to) })}</strong>
+          <strong>{betweenLabel(params.mode.from, params.mode.to)}</strong>
           <button type="button" onClick={exitBetween}>
             {t("diag.queries.betweenExit")}
           </button>
@@ -302,14 +340,9 @@ export function QueriesView({
       {showSnapshots && (
         <SnapshotsPanel
           connectionId={connectionId}
-          member={member ?? resolved}
-          onBetween={(from, to) => {
-            setParams((p) => ({ ...p, mode: { kind: "between", from, to }, sort: sortAvailable(p.sort, data?.pgss ?? null, true) ? p.sort : "totalTime" }));
-            setShowSnapshots(false);
-          }}
-          onDeleted={(file) => {
-            if (params.mode.kind === "between" && (params.mode.from === file || params.mode.to === file)) exitBetween();
-          }}
+          member={offline ? null : (member ?? resolved)}
+          onBetween={enterBetween}
+          onDeleted={onSnapshotDeleted}
         />
       )}
       {q.error && <ErrorBanner error={q.error} />}

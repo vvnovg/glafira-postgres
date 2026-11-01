@@ -1300,11 +1300,12 @@
         "stddev": "Stddev",
         "max": "Max"
       },
-      "betweenCoverage": "{{min}} min between snapshots",
+      "betweenCoverage": "{{duration}} between snapshots",
       "snapshots": "Snapshots",
-      "betweenLabel": "Between snapshots: {{from}} → {{to}}",
+      "betweenLabel": "Between snapshots of {{member}}: {{from}} → {{to}}",
       "betweenExit": "Exit snapshot mode",
-      "emptyBetween": "No changes between the snapshots"
+      "emptyBetween": "No changes between the snapshots",
+      "offline": "Without a connection only snapshots are available: pick two and open the top between them"
     },
     "query": {
       "heading": "Query",

@@ -51,6 +51,11 @@ describe("SnapshotsPanel", () => {
     await waitFor(() => expect(api.snapshotList).toHaveBeenCalledTimes(2));
     await user.click(within(rows[1]).getByRole("button", { name: "Удалить" }));
     expect(api.snapshotDelete).not.toHaveBeenCalled();
+    // Подтверждение в фокусе: Escape закрывает его сразу.
+    expect(screen.getByRole("button", { name: "Удалить снимок" })).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("group", { name: "Удаление снимка" })).not.toBeInTheDocument();
+    await user.click(within(rows[1]).getByRole("button", { name: "Удалить" }));
     await user.click(screen.getByRole("button", { name: "Удалить снимок" }));
     await waitFor(() => expect(api.snapshotDelete).toHaveBeenCalledWith("c", b.file));
     expect(onDeleted).toHaveBeenCalledWith(b.file);
@@ -89,7 +94,7 @@ describe("SnapshotsPanel", () => {
     const fresh = screen.getByRole("table", { name: "Новые" });
     expect(within(fresh).getByText("Глафира")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Топ между снимками" }));
-    expect(onBetween).toHaveBeenCalledWith(a.file, b.file);
+    expect(onBetween).toHaveBeenCalledWith(a, b);
   });
 
   it("нечитаемый снимок нельзя выбрать, но можно удалить; снимки разных узлов не сравниваются", async () => {
@@ -100,6 +105,7 @@ describe("SnapshotsPanel", () => {
     renderWithClient(<SnapshotsPanel connectionId="c" member="pg-1" onBetween={() => {}} />);
     const rows = await screen.findAllByRole("row");
     expect(rows[4]).toHaveTextContent("Слишком большой");
+    expect((rows[4] as HTMLTableRowElement).cells[3]).toHaveTextContent("—");
     expect(within(rows[4]).getByRole("checkbox")).toBeDisabled();
     await user.click(within(rows[1]).getByRole("checkbox"));
     await user.click(within(rows[2]).getByRole("checkbox"));
@@ -113,5 +119,28 @@ describe("SnapshotsPanel", () => {
     await user.click(within(rows[4]).getByRole("button", { name: "Удалить" }));
     await user.click(screen.getByRole("button", { name: "Удалить снимок" }));
     await waitFor(() => expect(api.snapshotDelete).toHaveBeenCalledWith("c", broken.file));
+  });
+
+  it("отказ сравнения (снимки разных узлов, одна и та же пара) — в баннере ошибки", async () => {
+    vi.mocked(api.snapshotCompare)
+      .mockRejectedValueOnce({ code: "INVALID_INPUT", message: "m", key: "errors.snapshots.differentMembers", retryable: false })
+      .mockRejectedValueOnce({ code: "INVALID_INPUT", message: "m", key: "errors.snapshots.samePair", retryable: false });
+    const user = userEvent.setup();
+    renderWithClient(<SnapshotsPanel connectionId="c" member="pg-1" onBetween={() => {}} />);
+    const rows = await screen.findAllByRole("row");
+    await user.click(within(rows[1]).getByRole("checkbox"));
+    await user.click(within(rows[2]).getByRole("checkbox"));
+    await user.click(screen.getByRole("button", { name: "Сравнить" }));
+    expect(await screen.findByText("Снимки разных узлов сравнить нельзя")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Сравнить" }));
+    expect(await screen.findByText("Выберите два разных снимка")).toBeInTheDocument();
+  });
+
+  it("строк нет (null) — «—» и у читаемого по виду файла", async () => {
+    vi.mocked(api.snapshotList).mockResolvedValue([{ ...a, rows: null }]);
+    renderWithClient(<SnapshotsPanel connectionId="c" member="pg-1" onBetween={() => {}} />);
+    const rows = await screen.findAllByRole("row");
+    expect((rows[1] as HTMLTableRowElement).cells[3]).toHaveTextContent("—");
+    expect(within(rows[1]).getByRole("checkbox")).toBeEnabled();
   });
 });

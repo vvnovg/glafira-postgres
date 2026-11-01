@@ -1322,11 +1322,12 @@
         "stddev": "Stddev",
         "max": "Max"
       },
-      "betweenCoverage": "{{min}} мин между снимками",
+      "betweenCoverage": "{{duration}} между снимками",
       "snapshots": "Снимки",
-      "betweenLabel": "Между снимками: {{from}} → {{to}}",
+      "betweenLabel": "Между снимками узла {{member}}: {{from}} → {{to}}",
       "betweenExit": "Выйти из режима снимков",
-      "emptyBetween": "Между снимками изменений нет"
+      "emptyBetween": "Между снимками изменений нет",
+      "offline": "Без подключения доступны только снимки: выберите два и откройте топ между ними"
     },
     "query": {
       "heading": "Запрос",
