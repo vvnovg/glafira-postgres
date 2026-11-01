@@ -51,7 +51,7 @@ fn sort_column(key: &str, alias: Option<&str>) -> Option<(String, bool)> {
     }
 }
 
-/// Sort под Limit (между ними допускается Gather Merge): вход ≥ 100 × предел — индекс под ключ сортировки (по оценке;
+/// Sort под Limit (между ними допускается Gather Merge) над сканированием таблицы: вход на одно выполнение Limit ≥ 100 × предел — индекс под ключ сортировки (по оценке;
 /// с фактом — по факту). Вызывается на узле `Limit`; узлы рекомендации — [Sort, Limit].
 pub fn sort_limit(limit: &PlanNode) -> Option<Recommendation> {
     if limit.node_type != "Limit" {
@@ -64,25 +64,25 @@ pub fn sort_limit(limit: &PlanNode) -> Option<Recommendation> {
     if !matches!(n.node_type.as_str(), "Sort" | "Incremental Sort") {
         return None;
     }
-    let limit_rows = limit
+    // Под Nested Loop / SubPlan / LATERAL Limit выполняется `loops` раз: предел — на одно выполнение, вход — сумма по
+    // всем циклам (под Gather Merge — и по процессам), поэтому вход делится на число выполнений Limit.
+    let (limit_rows, limit_loops) = limit
         .actual
-        .map(|a| a.rows)
-        .unwrap_or(limit.plan_rows)
-        .max(1.0);
+        .map(|a| (a.rows, a.loops.max(1.0)))
+        .unwrap_or((limit.plan_rows, 1.0));
+    let limit_rows = limit_rows.max(1.0);
     let input = n.children.first()?;
-    // Под Gather Merge факт входа — сумма по процессам (`loops` — число процессов).
     let input_rows = input
         .actual
-        .map(|a| a.rows * a.loops)
+        .map(|a| a.rows * a.loops / limit_loops)
         .unwrap_or(input.plan_rows);
     if input_rows < th::PLAN_SORT_LIMIT_FACTOR * limit_rows {
         return None;
     }
-    let scan = n
-        .children
-        .iter()
-        .find(|c| c.relation.is_some())
-        .unwrap_or(input);
+    // Индекс под ключ сортировки возможен, только когда вход Sort — сканирование таблицы; над соединением или агрегатом
+    // совета без команды не даём (рекомендация пропускается).
+    let scan = input;
+    scan.relation.as_ref()?;
     // Индекс служит сортировке, если ключи — префикс одного направления (обратный проход индекса даёт DESC); на первом
     // неразобранном ключе или смене направления список обрывается.
     let mut cols: Vec<String> = Vec::new();
@@ -104,11 +104,7 @@ pub fn sort_limit(limit: &PlanNode) -> Option<Recommendation> {
         .param("limitRows", limit_rows.round() as i64)
         .param("keys", n.sort_key.join(", "))
         .param("table", table_name(scan).unwrap_or_default());
-    Some(if scan.relation.is_some() {
-        index_recommendation(r, scan, &cols)
-    } else {
-        r
-    })
+    Some(index_recommendation(r, scan, &cols))
 }
 
 /// Index Only Scan с heap fetches ≥ 10 % строк и ≥ 1000: VACUUM (карта видимости). «Факт».
@@ -370,6 +366,52 @@ mod tests {
     }
 
     #[test]
+    fn sort_limit_under_repeated_limit_compares_per_execution() {
+        // Limit выполняется 1000 раз (внутренняя сторона Nested Loop): вход Sort — строки на цикл × 1000 циклов.
+        let looped = |rows_per_loop: f64| {
+            let mut v = sort_under_limit();
+            v["Plan"] = with_actual(v["Plan"].clone(), 10.0, 1000);
+            v["Plan"]["Plans"][0] = with_actual(v["Plan"]["Plans"][0].clone(), 10.0, 1000);
+            v["Plan"]["Plans"][0]["Plans"][0] = with_actual(
+                v["Plan"]["Plans"][0]["Plans"][0].clone(),
+                rows_per_loop,
+                1000,
+            );
+            let mut nl = with_actual(base("Nested Loop"), 10_000.0, 1);
+            let mut outer = with_actual(base("Seq Scan"), 1000.0, 1);
+            outer["Parent Relationship"] = json!("Outer");
+            outer["Relation Name"] = json!("customers");
+            let mut inner = v["Plan"].clone();
+            inner["Parent Relationship"] = json!("Inner");
+            nl["Plans"] = json!([outer, inner]);
+            json!({ "Plan": nl })
+        };
+        assert!(
+            rec(&looped(50.0), "plan_sort_limit").is_none(),
+            "50 строк на выполнение — не повод для индекса"
+        );
+        let r = rec(&looped(5_000.0), "plan_sort_limit").unwrap();
+        assert_eq!(
+            (
+                r.params["inputRows"].as_i64(),
+                r.params["limitRows"].as_i64()
+            ),
+            (Some(5_000), Some(10))
+        );
+    }
+
+    #[test]
+    fn sort_limit_over_a_join_is_skipped() {
+        let mut v = sort_under_limit();
+        v["Plan"]["Plans"][0]["Plans"][0]["Node Type"] = json!("Hash Join");
+        v["Plan"]["Plans"][0]["Plans"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("Relation Name");
+        assert!(rec(&v, "plan_sort_limit").is_none());
+    }
+
+    #[test]
     fn heap_fetches_on_index_only_scan() {
         let mut ios = with_actual(base("Index Only Scan"), 10_000.0, 1);
         ios["Relation Name"] = json!("balances");
@@ -455,6 +497,7 @@ mod tests {
         let r = rec(&plan, "plan_jit_heavy").unwrap();
         assert_eq!(r.command.as_deref(), Some("SET jit = off;"));
         assert_eq!(r.params["jitMs"], 60.0);
+        assert_eq!(r.params["processes"], 1, "без Gather — один процесс");
         // PG 17+: `Generation` — объект; JIT меньше половины — молчит.
         let pg17 = |total: f64| json!({"Plan": with_actual(base("Aggregate"), 1.0, 1), "Execution Time": 100.0, "JIT": {"Functions": 5, "Timing": {"Generation": {"Deform": 0.1, "Total": 0.5}, "Inlining": 20.0, "Optimization": 20.0, "Emission": 10.0, "Total": total}}});
         assert_eq!(
@@ -462,7 +505,6 @@ mod tests {
             50.5
         );
         assert!(rec(&pg17(30.0), "plan_jit_heavy").is_none());
-        assert_eq!(r.params["processes"], 1);
         // Параллельный план: 120 мс JIT на 3 процесса — 40 мс из 100, молчит; на 2 процесса — 60 мс, срабатывает.
         let parallel = |launched: i64| {
             let mut g = with_actual(base("Gather"), 1.0, 1);

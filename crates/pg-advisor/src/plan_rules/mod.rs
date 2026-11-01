@@ -94,7 +94,7 @@ pub fn evaluate(t: &PlanTree) -> Report {
     let with_actual = t.root.actual.is_some();
     let early = early_stop_nodes(&t.root);
     let mut out = Vec::new();
-    walk(&t.root, None, &mut |n, _parent| {
+    walk(&t.root, &mut |n| {
         if with_actual {
             out.extend(scan::seq_scan_filter(n));
             out.extend(scan::index_filter(n));
@@ -136,7 +136,7 @@ const PARTITION_GROUPED: [&str; 1] = ["plan_seq_scan_filter"];
 /// hypopg — одна DDL, поэтому у группы её нет. `plan_no_pruning` остаётся отдельной рекомендацией.
 fn group_partitions(root: &PlanNode, recs: Vec<Recommendation>) -> Vec<Recommendation> {
     let mut groups: Vec<HashSet<u32>> = Vec::new();
-    walk(root, None, &mut |n, _| {
+    walk(root, &mut |n| {
         if matches!(n.node_type.as_str(), "Append" | "Merge Append") {
             groups.push(
                 n.children
@@ -174,7 +174,12 @@ fn group_partitions(root: &PlanNode, recs: Vec<Recommendation>) -> Vec<Recommend
 
 fn merge_partitions(parts: Vec<Recommendation>) -> Recommendation {
     let first = &parts[0];
-    let mut r = Recommendation::new(&first.id, first.severity, first.node_ids[0]);
+    let severity = parts
+        .iter()
+        .map(|p| p.severity)
+        .max()
+        .unwrap_or(first.severity);
+    let mut r = Recommendation::new(&first.id, severity, first.node_ids[0]);
     r.node_ids = parts.iter().map(|p| p.node_ids[0]).collect();
     r.node_ids.sort();
     let sum = |key: &str| -> i64 {
@@ -216,15 +221,11 @@ fn merge_partitions(parts: Vec<Recommendation>) -> Recommendation {
     r
 }
 
-/// Обход в глубину с родителем.
-pub fn walk<'a>(
-    n: &'a PlanNode,
-    parent: Option<&'a PlanNode>,
-    f: &mut impl FnMut(&'a PlanNode, Option<&'a PlanNode>),
-) {
-    f(n, parent);
+/// Обход в глубину.
+pub fn walk<'a>(n: &'a PlanNode, f: &mut impl FnMut(&'a PlanNode)) {
+    f(n);
     for c in &n.children {
-        walk(c, Some(n), f);
+        walk(c, f);
     }
 }
 

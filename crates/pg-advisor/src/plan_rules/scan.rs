@@ -331,6 +331,27 @@ mod tests {
     }
 
     #[test]
+    fn misestimate_boundary_follows_the_p3a_flag() {
+        // Оценка 1000: факт 9900 — ×9,9, молчит; 10 000 — ×10, срабатывает; переоценка ×10 (вне Limit) — тоже.
+        assert!(!ids(&seq(1000.0, 0, 9_900.0)).contains(&"plan_misestimate".to_string()));
+        let r = evaluate(&from_json(&seq(1000.0, 0, 10_000.0)).unwrap());
+        let rec = r
+            .recommendations
+            .iter()
+            .find(|r| r.id == "plan_misestimate")
+            .unwrap();
+        assert_eq!(
+            (
+                rec.params["ratio"].as_f64(),
+                rec.params["direction"].as_str()
+            ),
+            (Some(10.0), Some("under"))
+        );
+        assert!(!ids(&seq(9_900.0, 0, 1000.0)).contains(&"plan_misestimate".to_string()));
+        assert!(ids(&seq(10_000.0, 0, 1000.0)).contains(&"plan_misestimate".to_string()));
+    }
+
+    #[test]
     fn misestimate_threshold_matches_p3a_flag() {
         assert_eq!(
             crate::findings::thresholds::PLAN_MISESTIMATE_RATIO,
