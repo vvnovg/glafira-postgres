@@ -92,7 +92,7 @@ jobs:
       fail-fast: false
       matrix:
         # macos-15-intel — x86_64, как в release.yml.
-        os: [macos-14, macos-15-intel, windows-2022]
+        os: [macos-15, macos-15-intel, windows-2022]
     runs-on: ${{ matrix.os }}
     # Обрыв по таймауту пропускает сохранение кэша rust-cache: запас по времени нужен, чтобы холодная сборка успела завершиться.
     timeout-minutes: 90
