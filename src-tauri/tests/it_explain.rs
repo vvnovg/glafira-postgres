@@ -779,6 +779,18 @@ async fn llm_bundle_has_text_stats_plan_and_ddl() {
         b.tables.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
         ["orders"]
     );
+    // Индексы — только из DDL каталога, каждый один раз; индекс PRIMARY KEY отдельной строкой не повторяется.
+    let ddl = &b.tables[0].ddl;
+    assert_eq!(
+        ddl.matches("CREATE INDEX orders_customer_idx ").count(),
+        1,
+        "{ddl}"
+    );
+    assert!(
+        ddl.contains("CONSTRAINT orders_pkey PRIMARY KEY (id)"),
+        "{ddl}"
+    );
+    assert!(!ddl.contains("CREATE UNIQUE INDEX orders_pkey"), "{ddl}");
 }
 
 /// Данные без плана и без части DDL остаются доступны: ошибка пробного плана (в том числе прав) и ошибка чтения

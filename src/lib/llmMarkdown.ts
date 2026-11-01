@@ -68,7 +68,7 @@ export function llmMarkdown(b: LlmBundle, t: TFunction): string {
   if (b.planText) blocks.push(`## ${t("llm.plan")}`, fence("", b.planText.trimEnd()));
   if (b.tables.length > 0 || b.tablesOmitted > 0) {
     blocks.push(`## ${t("llm.tables")}`);
-    for (const tb of b.tables) blocks.push(`### ${tb.schema}.${tb.name}`, fence("sql", [tb.ddl.trimEnd(), ...tb.indexes].join("\n")));
+    for (const tb of b.tables) blocks.push(`### ${tb.schema}.${tb.name}`, fence("sql", tb.ddl.trimEnd()));
     // Не вошедшие таблицы: сверх лимита или с непрочитанным DDL — подпись покрывает обе причины.
     if (b.tablesOmitted > 0) blocks.push(`_${t("llm.moreTables", { count: b.tablesOmitted })}_`);
   }

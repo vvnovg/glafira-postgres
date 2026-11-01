@@ -7,7 +7,7 @@ const bundle: LlmBundle = {
   serverVersionNum: 170_004, pgssVersion: "1.11", inRecovery: false, member: "pg-1", database: "perf",
   text: "SELECT * FROM shop.customers WHERE id = $1", textTruncated: false,
   stats: { sinceReset: { key: { queryId: "1", dbid: 1, userid: 1, toplevel: true }, datname: "perf", rolname: "app", calls: 1000, totalExecMs: 500, meanExecMs: 0.5, minExecMs: 0.1, maxExecMs: 3, stddevExecMs: 0.2, rows: 1000, rowsPerCall: 1, plans: 0, totalPlanMs: 0, sharedHit: 4000, sharedRead: 10, sharedDirtied: 0, sharedWritten: 0, localHit: 0, localRead: 0, localDirtied: 0, localWritten: 0, tempRead: 0, tempWritten: 0, ioReadMs: 0, ioWriteMs: 0, tempIoMs: null, walRecords: 0, walFpi: 0, walBytes: 0, jitFunctions: null, jitMs: null, parallelPlanned: null, parallelLaunched: null, sharePct: 12.5, hitRatio: 0.9975, text: null, textTruncated: false }, window3600: null },
-  planText: "Index Scan using customers_pkey on shop.customers  (cost=0.42..8.44 rows=1 width=40)\n", tables: [{ schema: "shop", name: "customers", ddl: "CREATE TABLE shop.customers (...);", indexes: ["CREATE UNIQUE INDEX customers_pkey ON shop.customers USING btree (id)"] }], tablesOmitted: 2, warnings: ["paramsNeeded"],
+  planText: "Index Scan using customers_pkey on shop.customers  (cost=0.42..8.44 rows=1 width=40)\n", tables: [{ schema: "shop", name: "customers", ddl: "CREATE TABLE shop.customers (\n    id bigint,\n    CONSTRAINT customers_pkey PRIMARY KEY (id)\n);\n\nCREATE INDEX customers_email_idx ON shop.customers USING btree (email);\n" }], tablesOmitted: 2, warnings: ["paramsNeeded"],
 };
 
 describe("llmMarkdown", () => {
@@ -19,7 +19,10 @@ describe("llmMarkdown", () => {
     expect(md).toContain("```sql\nSELECT * FROM shop.customers WHERE id = $1\n```");
     expect(md).toContain("| Вызовов | 1 000 |");
     expect(md).toContain("## План\n\n```\nIndex Scan using customers_pkey");
-    expect(md).toContain("### shop.customers\n\n```sql\nCREATE TABLE shop.customers (...);\nCREATE UNIQUE INDEX customers_pkey");
+    // DDL каталога как есть: индексы уже в нём, каждый один раз; индекса PRIMARY KEY отдельной строкой нет.
+    expect(md).toContain("### shop.customers\n\n```sql\nCREATE TABLE shop.customers (\n    id bigint,\n    CONSTRAINT customers_pkey PRIMARY KEY (id)\n);\n\nCREATE INDEX customers_email_idx ON shop.customers USING btree (email);\n```");
+    expect(md.match(/CREATE INDEX customers_email_idx/g)).toHaveLength(1);
+    expect(md).not.toContain("CREATE UNIQUE INDEX customers_pkey");
     expect(md).toContain("_… ещё 2 таблицы (сверх лимита или DDL не прочитан)_");
     expect(md).toContain("план требует значений параметров");
     // Планирование выключено (track_planning = off): строки «Планирование» с нулём нет — ноль читался бы как факт.

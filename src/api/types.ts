@@ -911,8 +911,8 @@ export type LlmSource = { kind: "query"; queryId: string } | { kind: "sql"; sql:
 export interface LlmTable {
   schema: string;
   name: string;
+  /** DDL каталога; индексы, не принадлежащие ограничениям, уже в нём. */
   ddl: string;
-  indexes: string[];
 }
 export interface LlmStats {
   sinceReset: QueryStat | null;

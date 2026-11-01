@@ -18,7 +18,7 @@ use crate::state::AppState;
 
 /// Таблиц плана в данных не больше: остальные считаются в `tables_omitted`.
 pub const MAX_TABLES: usize = 10;
-/// Бюджет DDL (таблицы вместе с индексами), байты.
+/// Бюджет DDL (таблицы вместе с их индексами, они внутри DDL), байты.
 pub const MAX_DDL_BYTES: usize = 65_536;
 
 /// Откуда запрос: строка pgss по `queryId` или SQL консоли.
@@ -40,8 +40,9 @@ pub enum LlmSource {
 pub struct LlmTable {
     pub schema: String,
     pub name: String,
+    /// DDL каталога (`catalog::ddl::table_ddl`): уже с `CREATE INDEX` индексов, не принадлежащих ограничениям; индексы
+    /// ограничений (PRIMARY KEY, UNIQUE, EXCLUDE) описаны самими ограничениями — отдельного списка индексов нет.
     pub ddl: String,
-    pub indexes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -82,7 +83,7 @@ pub fn fit_ddl(tables: Vec<LlmTable>) -> (Vec<LlmTable>, usize) {
     let mut kept = Vec::new();
     let total = tables.len();
     for t in tables {
-        let size = t.ddl.len() + t.indexes.iter().map(|i| i.len() + 1).sum::<usize>();
+        let size = t.ddl.len();
         if used + size > MAX_DDL_BYTES {
             break;
         }
@@ -249,11 +250,6 @@ pub async fn bundle(
                                     Ok(t) => out.push(LlmTable {
                                         schema,
                                         name: r.name.clone(),
-                                        indexes: t
-                                            .indexes
-                                            .iter()
-                                            .map(|i| i.definition.clone())
-                                            .collect(),
                                         ddl: t.ddl,
                                     }),
                                     Err(e) => {
@@ -321,19 +317,16 @@ mod tests {
                 schema: "shop".into(),
                 name: "a".into(),
                 ddl: big.clone(),
-                indexes: vec![],
             },
             LlmTable {
                 schema: "shop".into(),
                 name: "b".into(),
                 ddl: big.clone(),
-                indexes: vec![],
             },
             LlmTable {
                 schema: "shop".into(),
                 name: "c".into(),
                 ddl: "small".into(),
-                indexes: vec!["CREATE INDEX i ON c (x)".into()],
             },
         ];
         let (kept, omitted) = fit_ddl(tables);
@@ -345,13 +338,12 @@ mod tests {
         assert_eq!(kept[0].name, "a");
     }
 
-    /// Таблица с DDL из `ddl_len` байт и индексами заданной длины (в бюджет каждый идёт с `+ 1`).
-    fn sized(name: &str, ddl_len: usize, index_lens: &[usize]) -> LlmTable {
+    /// Таблица с DDL из `ddl_len` байт.
+    fn sized(name: &str, ddl_len: usize) -> LlmTable {
         LlmTable {
             schema: "shop".into(),
             name: name.into(),
             ddl: "x".repeat(ddl_len),
-            indexes: index_lens.iter().map(|n| "i".repeat(*n)).collect(),
         }
     }
 
@@ -379,12 +371,12 @@ mod tests {
     }
 
     #[test]
-    fn index_bytes_count_against_the_ddl_budget() {
-        // DDL второй таблицы сам помещается, а с индексами (201 байт) — нет: она и всё за ней отбрасываются.
+    fn the_budget_counts_ddl_bytes_only() {
+        // Вторая таблица не влезает: она и всё за ней отбрасываются.
         let tables = vec![
-            sized("a", 17, &[]),
-            sized("b", MAX_DDL_BYTES - 100, &[199, 0]),
-            sized("c", 5, &[]),
+            sized("a", 117),
+            sized("b", MAX_DDL_BYTES - 100),
+            sized("c", 5),
         ];
         let (kept, omitted) = fit_ddl(tables);
         assert_eq!(
@@ -392,16 +384,14 @@ mod tests {
             (vec!["a"], 2),
             "отбрасывание с первой не влезшей: маленькая «c» после «b» не берётся"
         );
-        // Каждый индекс считается с лишним байтом (разделитель): пустой индекс при DDL на весь бюджет уже не влезает.
-        let (kept, omitted) = fit_ddl(vec![sized("a", MAX_DDL_BYTES, &[0])]);
-        assert_eq!((kept.len(), omitted), (0, 1));
-        let (kept, omitted) = fit_ddl(vec![sized("a", MAX_DDL_BYTES - 1, &[0])]);
+        // Индексы — внутри DDL, лишних байт на них нет: DDL ровно на весь бюджет помещается.
+        let (kept, omitted) = fit_ddl(vec![sized("a", MAX_DDL_BYTES)]);
         assert_eq!((kept.len(), omitted), (1, 0));
     }
 
     #[test]
     fn the_first_table_over_the_budget_leaves_nothing() {
-        let (kept, omitted) = fit_ddl(vec![sized("a", MAX_DDL_BYTES + 1, &[])]);
+        let (kept, omitted) = fit_ddl(vec![sized("a", MAX_DDL_BYTES + 1)]);
         assert_eq!((kept, omitted), (vec![], 1));
         // Пустой список — пустой результат.
         assert_eq!(fit_ddl(vec![]), (vec![], 0));
@@ -410,11 +400,11 @@ mod tests {
     #[test]
     fn a_total_of_exactly_the_budget_is_kept() {
         let half = MAX_DDL_BYTES / 2;
-        // 22 + (9 + 1) индекс = 32 768 и 32 768: вместе ровно бюджет.
-        let (kept, omitted) = fit_ddl(vec![sized("a", half - 10, &[9]), sized("b", half, &[])]);
+        // 32 768 и 32 768: вместе ровно бюджет.
+        let (kept, omitted) = fit_ddl(vec![sized("a", half), sized("b", half)]);
         assert_eq!((names(&kept), omitted), (vec!["a", "b"], 0));
         // Лишний байт — вторая таблица уже не влезает.
-        let (kept, omitted) = fit_ddl(vec![sized("a", half - 10, &[9]), sized("b", half + 1, &[])]);
+        let (kept, omitted) = fit_ddl(vec![sized("a", half), sized("b", half + 1)]);
         assert_eq!((names(&kept), omitted), (vec!["a"], 1));
     }
 
@@ -473,7 +463,6 @@ mod tests {
             schema: "shop".into(),
             name: n.into(),
             ddl: "CREATE TABLE t ();".into(),
-            indexes: vec![],
         };
         // Всё прочиталось: предупреждения нет.
         let mut warnings = Vec::new();
@@ -521,7 +510,6 @@ mod tests {
                 schema: "shop".into(),
                 name: "orders".into(),
                 ddl: "CREATE TABLE shop.orders ();".into(),
-                indexes: vec![],
             }],
             tables_omitted: 0,
             warnings: vec!["planFailed".into()],
@@ -552,7 +540,7 @@ mod tests {
         );
         assert_eq!(
             v["tables"][0],
-            serde_json::json!({"schema": "shop", "name": "orders", "ddl": "CREATE TABLE shop.orders ();", "indexes": []})
+            serde_json::json!({"schema": "shop", "name": "orders", "ddl": "CREATE TABLE shop.orders ();"})
         );
         assert!(v["planText"].is_null());
     }
