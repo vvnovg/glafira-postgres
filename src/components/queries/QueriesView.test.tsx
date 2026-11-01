@@ -1,7 +1,7 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { QueriesData, QueryStat, StatementsEvent } from "../../api/types";
+import type { Finding, QueriesData, QueryStat, StatementsEvent } from "../../api/types";
 import { useWorkspace } from "../../state/workspace";
 import { diagReport } from "../../test/fixtures";
 import { renderWithClient } from "../../test/render";
@@ -22,14 +22,14 @@ function row(id: string, patch: Partial<QueryStat> = {}): QueryStat {
     calls: 100, totalExecMs: 1000, meanExecMs: 10, minExecMs: 1, maxExecMs: 50, stddevExecMs: 5, rows: 100, rowsPerCall: 1,
     plans: 0, totalPlanMs: 0, sharedHit: 900, sharedRead: 100, sharedDirtied: 0, sharedWritten: 0, localHit: 0, localRead: 0, localDirtied: 0, localWritten: 0,
     tempRead: 0, tempWritten: 0, ioReadMs: 0, ioWriteMs: 0, tempIoMs: null, walRecords: 0, walFpi: 0, walBytes: 0,
-    jitFunctions: null, jitMs: null, parallelPlanned: null, parallelLaunched: null, sharePct: 50, hitRatio: 0.9, text: null, textTruncated: false, ...patch,
+    jitFunctions: null, jitMs: null, parallelPlanned: null, parallelLaunched: null, sharePct: 50, hitRatio: 0.9, text: null, textTruncated: false, own: false, ...patch,
   };
 }
 
 function data(patch: Partial<QueriesData> = {}): { kind: "queries" } & QueriesData {
   return {
     kind: "queries", mode: { kind: "sinceReset" }, coverageS: null, ticks: null,
-    pgss: { version: "1.11", max: 5000, trackPlanning: true, statsResetMs: 1_700_000_000_000, dealloc: 0 },
+    pgss: { version: "1.11", max: 5000, trackPlanning: true, hasInfo: true, statsResetMs: 1_700_000_000_000, dealloc: 0 },
     totals: { calls: 200, totalExecMs: 2000, rows: 200 }, rows: [row("1"), row("2", { totalExecMs: 500, sharePct: 25, text: "select 2" })], ...patch,
   };
 }
@@ -217,5 +217,57 @@ describe("QueriesView", () => {
     renderWithClient(view());
     expect(await screen.findByText("Статистика запросов (pg_stat_statements): pg_stat_statements не установлен в этой базе (CREATE EXTENSION pg_stat_statements)")).toBeInTheDocument();
     expect(screen.queryByRole("table", { name: "Запросы" })).not.toBeInTheDocument();
+  });
+
+  it("находка о запросе показывает начало его текста (title — полный), без текста — queryId", async () => {
+    const long = `select ${"x".repeat(120)} from t`;
+    const finding = (queryId: string): Finding => ({
+      id: "queries_dominant", severity: "warning", member: null, target: { kind: "query", queryId, database: "perf" },
+      params: { sharePct: 40 }, links: [{ kind: "openQuery", queryId, database: "perf", member: null }],
+    });
+    vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport(data({ rows: [row("1", { text: long }), row("2")] }), { member: "pg-1", findings: [finding("1"), finding("2")] }));
+    renderWithClient(view());
+    const list = (await screen.findByRole("region", { name: /Находки/ })).querySelectorAll(".finding-query");
+    expect(list).toHaveLength(2);
+    expect(list[0].textContent).toBe(`${long.slice(0, 89)}…`);
+    expect(list[0]).toHaveAttribute("title", long);
+    expect(list[1].textContent).toBe("2");
+  });
+
+  it("строка Глафиры помечена; строка без базы — серая кнопка с причиной", async () => {
+    vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport(data({ rows: [row("1", { own: true, text: "select own" }), row("2", { datname: null, text: "select gone" })] }), { member: "pg-1" }));
+    renderWithClient(view());
+    const own = (await screen.findByText("select own")).closest("td")!;
+    expect(within(own).getByText("Глафира")).toHaveAttribute("title", "Запрос самой Глафиры: не участвует в находках и долях");
+    expect(screen.getByRole("button", { name: "select gone" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "select gone" })).toHaveAttribute("title", "Запроса уже нет в pg_stat_statements (сброс или вытеснение)");
+    expect(within(own).queryByText("Запроса уже нет", { exact: false })).toBeNull();
+  });
+
+  it("поиск: запрос уходит с задержкой, пустое поле — без фильтра; пустой результат называет строку", async () => {
+    vi.mocked(api.runDiagnostic).mockImplementation(async (_id, req) => diagReport(data({ rows: req.queries?.search ? [] : [row("2", { text: "select 2" })] }), { member: "pg-1" }));
+    const user = userEvent.setup();
+    renderWithClient(view());
+    await screen.findByText("select 2");
+    const box = screen.getByRole("searchbox", { name: "Поиск" });
+    await user.type(box, "shop.customers");
+    // Пока печатают, лишних запросов нет.
+    expect(vi.mocked(api.runDiagnostic).mock.calls.filter(([, r]) => r.queries?.search)).toHaveLength(0);
+    await waitFor(() => expect(api.runDiagnostic).toHaveBeenLastCalledWith("c", expect.objectContaining({ queries: expect.objectContaining({ search: "shop.customers" }) })));
+    expect(vi.mocked(api.runDiagnostic).mock.calls.filter(([, r]) => r.queries?.search)).toHaveLength(1);
+    expect(await screen.findByText("Ничего не найдено по «shop.customers»")).toBeInTheDocument();
+    await user.clear(box);
+    expect(await screen.findByText("select 2")).toBeInTheDocument();
+    expect(vi.mocked(api.runDiagnostic).mock.lastCall![1].queries?.search ?? "").toBe("");
+  });
+
+  it("pgss без pg_stat_statements_info: подвал без «сброс статистики —»; track_planning выключен — «Планирование» «—»", async () => {
+    vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport(data({ pgss: { version: "1.8", hasInfo: false, max: 5000, trackPlanning: false, statsResetMs: null, dealloc: null }, rows: [row("1", { totalPlanMs: 7, text: "select 1" })] }), { member: "pg-1" }));
+    renderWithClient(view());
+    await screen.findByText("select 1");
+    expect(screen.getByText(/время сброса недоступно/)).toBeInTheDocument();
+    expect(screen.queryByText(/сброс статистики/)).toBeNull();
+    const col = screen.getAllByRole("columnheader").findIndex((h) => /Планирование/.test(h.textContent ?? ""));
+    expect(within(screen.getByText("select 1").closest("tr")!).getAllByRole("cell")[col].textContent).toBe("—");
   });
 });

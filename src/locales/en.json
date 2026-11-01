@@ -1260,6 +1260,13 @@
       "emptyWindow": "No deltas in the window yet",
       "pgss": "pg_stat_statements {{version}}, statistics reset {{reset}}",
       "noTrackPlanning": "track_planning is off: planning columns are empty",
+      "pgssNoInfo": "pg_stat_statements {{version}}, reset time unavailable (needs pg_stat_statements 1.9+)",
+      "search": "Search",
+      "searchPlaceholder": "Part of the query text",
+      "noMatch": "Nothing found for “{{q}}”",
+      "own": "Glafira",
+      "ownHint": "Glafira's own query: excluded from findings and shares",
+      "goneHint": "The query is no longer in pg_stat_statements (reset or eviction)",
       "columns": {
         "query": "Query",
         "share": "Share",

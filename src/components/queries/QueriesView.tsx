@@ -15,6 +15,8 @@ import { BLOCK_BYTES, QUERY_KEY_ID, queryTitle, sortAvailable } from "./queriesT
 /** Интервал обновления режима «с момента сброса» по умолчанию, с. */
 const DEFAULT_INTERVAL_S = 10;
 const LIMITS = [50, 100, 200] as const;
+/** Задержка ввода в поиске, мс: запрос отчёта уходит, когда владелец перестал печатать. */
+const SEARCH_DEBOUNCE_MS = 300;
 /** Ключи, тексты которых не удалось получить, перезапрашиваются не чаще этого, мс: постоянная ошибка не повторяется на каждом обновлении. */
 const TEXT_RETRY_MS = 60_000;
 
@@ -22,7 +24,7 @@ interface Col {
   id: string;
   sort: QuerySort | null;
   labelKey: string;
-  cell(r: QueryStat): string;
+  cell(r: QueryStat, trackPlanning: boolean): string;
 }
 
 const COLS: Col[] = [
@@ -36,7 +38,7 @@ const COLS: Col[] = [
   { id: "temp", sort: "tempWritten", labelKey: "diag.queries.columns.temp", cell: (r) => formatBytes(r.tempWritten * BLOCK_BYTES) },
   { id: "wal", sort: "walBytes", labelKey: "diag.queries.columns.wal", cell: (r) => formatBytes(r.walBytes) },
   { id: "io", sort: "ioTime", labelKey: "diag.queries.columns.io", cell: (r) => formatMs(r.ioReadMs + r.ioWriteMs) },
-  { id: "plan", sort: "planTime", labelKey: "diag.queries.columns.plan", cell: (r) => formatMs(r.totalPlanMs) },
+  { id: "plan", sort: "planTime", labelKey: "diag.queries.columns.plan", cell: (r, trackPlanning) => (trackPlanning ? formatMs(r.totalPlanMs) : "—") },
   { id: "jit", sort: "jitTime", labelKey: "diag.queries.columns.jit", cell: (r) => (r.jitMs === null ? "—" : formatMs(r.jitMs)) },
   { id: "stddev", sort: "stddevTime", labelKey: "diag.queries.columns.stddev", cell: (r) => (r.stddevExecMs === null ? "—" : formatMs(r.stddevExecMs)) },
   { id: "max", sort: "maxTime", labelKey: "diag.queries.columns.max", cell: (r) => (r.maxExecMs === null ? "—" : formatMs(r.maxExecMs)) },
@@ -73,6 +75,13 @@ export function QueriesView({
   const [params, setParams] = useState<QueriesParams>({ mode: { kind: "sinceReset" }, sort: "totalTime", limit: 50, database: null, toplevelOnly: true });
   /** Колонка, по которой щёлкнули: «Доля» и «Всего» сортируют одинаково, стрелка — только у выбранной. */
   const [sortCol, setSortCol] = useState("share");
+  /** Строка поиска как набрана; в параметры отчёта (`params.search`) уходит с задержкой. */
+  const [searchInput, setSearchInput] = useState("");
+  useEffect(() => {
+    const value = searchInput.trim();
+    const id = window.setTimeout(() => setParams((p) => ((p.search ?? "") === value ? p : { ...p, search: value === "" ? undefined : value })), SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(id);
+  }, [searchInput]);
   const [intervalS, setIntervalS] = useState<number | null>(DEFAULT_INTERVAL_S);
   // Сэмплер — на разрешённом узле: закреплённом или узле отчёта «за лидером» (Rust разрешает лидера на каждом отчёте, а
   // подписку с `null` — один раз). После смены лидера новый отчёт называет новый узел, и подписка переходит на него.
@@ -162,6 +171,8 @@ export function QueriesView({
     if (params.database) names.add(params.database);
     return Array.from(names).sort();
   }, [seenDbs, owner, params.database]);
+  // Текст запроса для находки над таблицей: из строк отчёта по `queryId` и базе (тексты подмешаны); нет — `null`, тогда показывается `queryId`.
+  const queryText = (database: string, queryId: string) => rows.find((r) => r.key.queryId === queryId && r.datname === database && r.text !== null)?.text ?? null;
   const setSort = (col: Col) => {
     if (!col.sort) return;
     const sort = col.sort;
@@ -239,6 +250,10 @@ export function QueriesView({
           </select>
         </label>
         <label className="inline">
+          <span>{t("diag.queries.search")}</span>
+          <input type="search" aria-label={t("diag.queries.search")} placeholder={t("diag.queries.searchPlaceholder")} value={searchInput} onChange={(e) => setSearchInput(e.target.value)} />
+        </label>
+        <label className="inline">
           <input type="checkbox" checked={params.toplevelOnly} onChange={(e) => setParams((p) => ({ ...p, toplevelOnly: e.target.checked }))} />
           <span>{t("diag.queries.toplevelOnly")}</span>
         </label>
@@ -260,7 +275,7 @@ export function QueriesView({
       {sampler.error && <ErrorBanner error={sampler.error} />}
       {report && data ? (
         <div className={q.isPlaceholderData ? "diag-body diag-pending" : "diag-body"} aria-busy={q.isPlaceholderData}>
-          <FindingsPanel connectionId={connectionId} findings={report.findings} tool="queries" member={report.member} />
+          <FindingsPanel connectionId={connectionId} findings={report.findings} tool="queries" member={report.member} queryText={queryText} />
           {report.unavailable.length > 0 && (
             <div className="diag-unavailable">
               {report.unavailable.map((u, i) => (
@@ -296,26 +311,41 @@ export function QueriesView({
                   {rows.map((r) => (
                     <tr key={QUERY_KEY_ID(r.key)}>
                       <td className="diag-query-cell" title={r.text ?? undefined}>
-                        <button type="button" className="link mono" onClick={() => openQuery(r)} disabled={reportMember === null || r.datname === null}>
+                        <button
+                          type="button"
+                          className="link mono"
+                          onClick={() => openQuery(r)}
+                          disabled={reportMember === null || r.datname === null}
+                          title={r.datname === null ? t("diag.queries.goneHint") : undefined}
+                        >
                           {queryTitle(r.text, r.key.queryId, 90)}
                         </button>
+                        {r.own && (
+                          <span className="kind-badge" title={t("diag.queries.ownHint")}>
+                            {t("diag.queries.own")}
+                          </span>
+                        )}
                         {r.textTruncated && <span className="muted"> {t("diag.queries.truncated")}</span>}
                       </td>
                       {COLS.map((c) => (
                         <td key={c.id} className="num">
-                          {c.cell(r)}
+                          {c.cell(r, data.pgss?.trackPlanning ?? true)}
                         </td>
                       ))}
                     </tr>
                   ))}
                 </tbody>
               </table>
-              {data.rows.length === 0 && <p className="empty">{byTick ? t("diag.queries.emptyWindow") : t("diag.queries.empty")}</p>}
+              {data.rows.length === 0 && (
+                <p className="empty">{params.search ? t("diag.queries.noMatch", { q: params.search }) : byTick ? t("diag.queries.emptyWindow") : t("diag.queries.empty")}</p>
+              )}
             </div>
           )}
           {data.pgss && (
             <p className="muted diag-note">
-              {t("diag.queries.pgss", { version: data.pgss.version, reset: data.pgss.statsResetMs === null ? "—" : formatTimestamp(data.pgss.statsResetMs) })}
+              {data.pgss.hasInfo
+                ? t("diag.queries.pgss", { version: data.pgss.version, reset: data.pgss.statsResetMs === null ? "—" : formatTimestamp(data.pgss.statsResetMs) })
+                : t("diag.queries.pgssNoInfo", { version: data.pgss.version })}
               {!data.pgss.trackPlanning && ` · ${t("diag.queries.noTrackPlanning")}`}
             </p>
           )}

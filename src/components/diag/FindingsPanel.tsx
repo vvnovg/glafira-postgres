@@ -4,7 +4,11 @@ import type { DiagTool, Finding, FindingLink, FindingTarget, Severity } from "..
 import { formatDuration } from "../../lib/format";
 import { useWorkspace } from "../../state/workspace";
 import { CopyButton } from "../common/CopyButton";
+import { queryTitle } from "../queries/queriesText";
 import { findingFix, findingTitle } from "./findingText";
+
+/** Сколько знаков текста запроса показывает находка (полный — в подсказке). */
+const QUERY_PREVIEW = 90;
 
 type ActionLink = Extract<FindingLink, { kind: "action" }>;
 
@@ -46,6 +50,7 @@ export function FindingsPanel({
   tool,
   member,
   onAction,
+  queryText,
 }: {
   connectionId: string;
   findings: Finding[];
@@ -55,6 +60,8 @@ export function FindingsPanel({
   member?: string | null;
   /** Кнопки действий находок (отмена, завершение сессий); без обработчика действий нет — подключение только для чтения. */
   onAction?: (link: ActionLink) => void;
+  /** Текст запроса по базе и `queryId` (из строк отчёта); нужен находкам о запросе, чтобы показать, о каком запросе речь. `null` — текста нет. */
+  queryText?: (database: string, queryId: string) => string | null;
 }) {
   const { t } = useTranslation();
   const open = useWorkspace((s) => s.open);
@@ -94,6 +101,9 @@ export function FindingsPanel({
                   <span className="finding-title">{findingTitle(f)}</span>
                   {showMember && f.member && <span className="muted">{f.member}</span>}
                 </div>
+                {queryText && f.target?.kind === "query" && (
+                  <FindingQuery text={queryText(f.target.database, f.target.queryId)} queryId={f.target.queryId} />
+                )}
                 <details>
                   <summary>{t("diag.findings.fix")}</summary>
                   <p>{findingFix(f)}</p>
@@ -137,5 +147,14 @@ export function FindingsPanel({
         </ul>
       )}
     </section>
+  );
+}
+
+/** Начало текста запроса, о котором находка (mono, `title` — полный текст); без текста — `queryId`. */
+function FindingQuery({ text, queryId }: { text: string | null; queryId: string }) {
+  return (
+    <p className="finding-query mono muted" title={text ?? undefined}>
+      {queryTitle(text, queryId, QUERY_PREVIEW)}
+    </p>
   );
 }

@@ -1282,6 +1282,13 @@
       "emptyWindow": "В окне ещё нет дельт",
       "pgss": "pg_stat_statements {{version}}, сброс статистики {{reset}}",
       "noTrackPlanning": "track_planning выключен: колонки планирования пустые",
+      "pgssNoInfo": "pg_stat_statements {{version}}, время сброса недоступно (нужен pg_stat_statements 1.9+)",
+      "search": "Поиск",
+      "searchPlaceholder": "Часть текста запроса",
+      "noMatch": "Ничего не найдено по «{{q}}»",
+      "own": "Глафира",
+      "ownHint": "Запрос самой Глафиры: не участвует в находках и долях",
+      "goneHint": "Запроса уже нет в pg_stat_statements (сброс или вытеснение)",
       "columns": {
         "query": "Запрос",
         "share": "Доля",

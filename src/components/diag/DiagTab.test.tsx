@@ -150,7 +150,7 @@ describe("DiagTab", () => {
         mode: { kind: "sinceReset" },
         coverageS: null,
         ticks: null,
-        pgss: { version: "1.11", max: 5000, trackPlanning: true, statsResetMs: null, dealloc: 0 },
+        pgss: { version: "1.11", max: 5000, trackPlanning: true, hasInfo: true, statsResetMs: null, dealloc: 0 },
         totals: { calls: 0, totalExecMs: 0, rows: 0 },
         rows: [],
       }),

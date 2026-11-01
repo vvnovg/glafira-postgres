@@ -680,12 +680,12 @@ export interface QueryStat {
   text: string | null;
   textTruncated: boolean;
   /** Запрос самой Глафиры (метка в начале текста): вне находок и итогов долей; Rust отдаёт поле всегда. */
-  own?: boolean;
+  own: boolean;
 }
 export interface PgssMeta {
   version: string;
   /** Есть `pg_stat_statements_info` (1.9+); без него `statsResetMs` и `dealloc` — `null`. */
-  hasInfo?: boolean;
+  hasInfo: boolean;
   max: number;
   trackPlanning: boolean;
   statsResetMs: number | null;
@@ -770,7 +770,7 @@ export interface QueryDetail {
   inRecovery: boolean;
   pgssVersion: string | null;
   /** `pg_stat_statements.track_planning`: выключен — планирование не считается (колонки нулевые). */
-  trackPlanning?: boolean;
+  trackPlanning: boolean;
 }
 
 // План запроса (`pg_advisor::plan`): разобранный вывод EXPLAIN (FORMAT JSON) с вычисленными долями времени.
