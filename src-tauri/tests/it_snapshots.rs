@@ -19,7 +19,12 @@ async fn take_compare_and_between_mode() {
         .name
         .clone();
     let a = snapshots::take(&st, "it", &member).await.unwrap();
-    assert!(a.rows > 0 && a.bytes > 0 && a.file.starts_with(&format!("{member}/")));
+    assert!(
+        a.rows.is_some_and(|r| r > 0)
+            && a.unreadable.is_none()
+            && a.bytes > 0
+            && a.file.starts_with(&format!("{member}/"))
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

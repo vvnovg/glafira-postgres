@@ -18,8 +18,22 @@ pub struct SnapshotInfo {
     pub file: String,
     pub member: String,
     pub taken_at_ms: i64,
-    pub rows: usize,
+    /// `None` — файл не прочитан (`unreadable`).
+    pub rows: Option<usize>,
     pub bytes: u64,
+    /// Файл есть, но не открывается: в списке — по имени и размеру, чтобы его можно было удалить; сравнение и
+    /// режим «между снимками» его не принимают.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unreadable: Option<Unreadable>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Unreadable {
+    /// Больше `MAX_SNAPSHOT_BYTES`.
+    TooLarge,
+    /// Не разбирается как снимок (запись прервана, чужой или испорченный файл).
+    Corrupt,
 }
 
 pub struct SnapshotStore {
@@ -38,6 +52,40 @@ pub fn file_name(taken_at_ms: i64) -> String {
         t.hour(),
         t.minute(),
         t.second()
+    )
+}
+
+/// Время снятия по имени файла (`file_name`, UTC); `None` — имя не по шаблону.
+pub fn time_of_name(name: &str) -> Option<i64> {
+    let stem = name.strip_suffix(".json")?;
+    let b = stem.as_bytes();
+    if b.len() != 19
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b'-'
+        || b[16] != b'-'
+    {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| stem.get(r)?.parse::<u32>().ok();
+    let date = time::Date::from_calendar_date(
+        i32::try_from(num(0..4)?).ok()?,
+        time::Month::try_from(u8::try_from(num(5..7)?).ok()?).ok()?,
+        u8::try_from(num(8..10)?).ok()?,
+    )
+    .ok()?;
+    let t = time::Time::from_hms(
+        u8::try_from(num(11..13)?).ok()?,
+        u8::try_from(num(14..16)?).ok()?,
+        u8::try_from(num(17..19)?).ok()?,
+    )
+    .ok()?;
+    Some(
+        time::PrimitiveDateTime::new(date, t)
+            .assume_utc()
+            .unix_timestamp()
+            * 1000,
     )
 }
 
@@ -198,13 +246,15 @@ impl SnapshotStore {
             file: format!("{}/{name}", snap.member),
             member: snap.member.clone(),
             taken_at_ms: snap.taken_at_ms,
-            rows: snap.rows.len(),
+            rows: Some(snap.rows.len()),
             bytes: bytes.len() as u64,
+            unreadable: None,
         })
     }
 
     /// Снимки подключения, новые первыми. Из файла читается шапка (`Header`: время, узел, число строк — из
-    /// содержимого, имя файла — только адрес); нечитаемые и слишком большие файлы пропускаются.
+    /// содержимого, имя файла — только адрес). Нечитаемые и слишком большие файлы — в списке с `unreadable` (время —
+    /// из имени файла), чтобы их можно было удалить; файлы не по шаблону `<member>/<имя>.json` пропускаются.
     pub fn list(&self, connection_id: &str) -> AppResult<Vec<SnapshotInfo>> {
         let root = self.connection_dir(connection_id)?;
         let mut out = Vec::new();
@@ -225,16 +275,39 @@ impl SnapshotStore {
                     continue;
                 }
                 let Ok(meta) = f.metadata() else { continue };
-                let Ok(h) = read_file::<Header>(&f.path()) else {
+                if !meta.is_file() {
                     continue;
+                }
+                let info = match read_file::<Header>(&f.path()) {
+                    Ok(h) => SnapshotInfo {
+                        file,
+                        member: h.member,
+                        taken_at_ms: h.taken_at_ms,
+                        rows: Some(h.row_count.unwrap_or(h.rows.0)),
+                        bytes: meta.len(),
+                        unreadable: None,
+                    },
+                    // Нечитаемый файл — по имени каталога, имени файла (или времени изменения) и размеру.
+                    Err(_) => SnapshotInfo {
+                        member: m.file_name().to_string_lossy().into_owned(),
+                        taken_at_ms: time_of_name(&f.file_name().to_string_lossy())
+                            .or_else(|| {
+                                let t = meta.modified().ok()?;
+                                let d = t.duration_since(std::time::UNIX_EPOCH).ok()?;
+                                i64::try_from(d.as_millis()).ok()
+                            })
+                            .unwrap_or(0),
+                        file,
+                        rows: None,
+                        bytes: meta.len(),
+                        unreadable: Some(if meta.len() > MAX_SNAPSHOT_BYTES {
+                            Unreadable::TooLarge
+                        } else {
+                            Unreadable::Corrupt
+                        }),
+                    },
                 };
-                out.push(SnapshotInfo {
-                    file,
-                    member: h.member,
-                    taken_at_ms: h.taken_at_ms,
-                    rows: h.row_count.unwrap_or(h.rows.0),
-                    bytes: meta.len(),
-                });
+                out.push(info);
             }
         }
         out.sort_by(|a, b| {
@@ -351,7 +424,7 @@ mod tests {
         let info = store.write("c1", &snap).unwrap();
         assert_eq!(
             (info.file.as_str(), info.member.as_str(), info.rows),
-            ("pg-1/2025-10-29T11-00-00.json", "pg-1", 0)
+            ("pg-1/2025-10-29T11-00-00.json", "pg-1", Some(0))
         );
         #[cfg(unix)]
         {
@@ -418,16 +491,58 @@ mod tests {
 
     /// Битый файл (запись прервана, чужой файл) не мешает списку.
     #[test]
-    fn list_skips_unreadable_files() {
+    fn list_shows_corrupt_files_so_they_can_be_deleted() {
         let dir = tempfile::tempdir().unwrap();
         let store = SnapshotStore::new(dir.path());
-        store
+        let good = store
             .write("c1", &snapshot("pg-1", 1_761_735_600_000))
             .unwrap();
         let member_dir = dir.path().join("snapshots/c1/pg-1");
         std::fs::write(member_dir.join("2025-10-29T12-00-00.json"), b"{").unwrap();
         std::fs::write(member_dir.join("notes.txt"), b"x").unwrap();
-        assert_eq!(store.list("c1").unwrap().len(), 1);
+        let list = store.list("c1").unwrap();
+        assert_eq!(list.len(), 2, "файл не по шаблону пропускается");
+        assert_eq!(
+            list[0],
+            SnapshotInfo {
+                file: "pg-1/2025-10-29T12-00-00.json".into(),
+                member: "pg-1".into(),
+                taken_at_ms: 1_761_739_200_000,
+                rows: None,
+                bytes: 1,
+                unreadable: Some(Unreadable::Corrupt),
+            },
+            "время — из имени файла"
+        );
+        assert_eq!(list[1], good);
+        let v = serde_json::to_value(&list[0]).unwrap();
+        assert_eq!(
+            (&v["unreadable"], &v["rows"]),
+            (&"corrupt".into(), &serde_json::Value::Null)
+        );
+        assert!(
+            serde_json::to_value(&list[1])
+                .unwrap()
+                .get("unreadable")
+                .is_none()
+        );
+        assert!(
+            store.read("c1", &list[0].file).is_err(),
+            "сравнение его не примет"
+        );
+        assert!(store.delete("c1", &list[0].file).unwrap());
+        assert_eq!(store.list("c1").unwrap(), [good]);
+    }
+
+    #[test]
+    fn file_names_parse_back_to_time() {
+        assert_eq!(
+            time_of_name(&file_name(1_761_735_600_000)),
+            Some(1_761_735_600_000)
+        );
+        assert_eq!(time_of_name("2025-13-29T11-00-00.json"), None);
+        assert_eq!(time_of_name("x.json"), None);
+        assert_eq!(time_of_name("2025-10-29T11-00-00.txt"), None);
     }
 
     /// Список берёт число строк из `rowCount`, а у файла без него — считает массив `rows`.
@@ -454,7 +569,7 @@ mod tests {
             3
         ];
         let info = store.write("c1", &snap).unwrap();
-        assert_eq!(info.rows, 3, "rowCount выставляется при записи");
+        assert_eq!(info.rows, Some(3), "rowCount выставляется при записи");
         assert_eq!(store.read("c1", &info.file).unwrap().row_count, 3);
         let mut v = serde_json::to_value(&snap).unwrap();
         v.as_object_mut().unwrap().remove("rowCount");
@@ -466,7 +581,10 @@ mod tests {
         )
         .unwrap();
         let list = store.list("c1").unwrap();
-        assert_eq!(list.iter().map(|i| i.rows).collect::<Vec<_>>(), [3, 3]);
+        assert_eq!(
+            list.iter().map(|i| i.rows).collect::<Vec<_>>(),
+            [Some(3), Some(3)]
+        );
     }
 
     #[test]
@@ -487,7 +605,13 @@ mod tests {
             store.read("c1", &info.file).unwrap_err().key,
             "errors.snapshots.tooLarge"
         );
-        assert!(store.list("c1").unwrap().is_empty());
+        let list = store.list("c1").unwrap();
+        assert_eq!(
+            (list.len(), list[0].unreadable, list[0].rows, list[0].bytes),
+            (1, Some(Unreadable::TooLarge), None, MAX_SNAPSHOT_BYTES + 1),
+            "в списке — чтобы удалить"
+        );
+        assert!(store.delete("c1", &info.file).unwrap());
     }
 
     /// Каталоги, созданные раньше с другими правами, получают 0700; удаление подключения убирает его снимки.
