@@ -361,7 +361,9 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .diag-command { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .diag-facts { display: flex; flex-direction: column; gap: 2px; }
 /* Дерево плана (P3): горячие узлы жирным, выбранный — фоном, ошибка оценки — цветом и словом «×N» (цвет не единственный признак). */
+.plan-tree tr.plan-hot { background: color-mix(in srgb, var(--warn) 14%, transparent); }
 .plan-tree tr.plan-hot td:first-child { font-weight: 600; }
+.plan-tree tr.plan-hot .kind-badge:first-child { background: color-mix(in srgb, var(--warn) 30%, transparent); font-weight: 600; }
 .plan-tree tr.plan-selected { background: color-mix(in srgb, var(--accent) 15%, transparent); }
 .plan-node { display: flex; align-items: baseline; gap: 4px; }
 .plan-node .link { text-align: left; }
@@ -380,6 +382,8 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 /* Карточка запроса и запуск плана (P3a). */
 .query-text { margin: 0; max-height: 200px; overflow: auto; white-space: pre-wrap; }
 .query-overview, .plan-runner, .query-plan { display: flex; flex-direction: column; gap: 12px; }
+/* Подпись флажка GENERIC_PLAN — обычным цветом: от него зависит, что делает «План». */
+.params-form label.generic { color: var(--fg); font-weight: 600; }
 .params-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
 .sparkline { color: var(--accent); margin-right: 12px; }
 .sql-error mark { background: color-mix(in srgb, var(--danger-text) 25%, transparent); color: inherit; outline: 1px solid var(--danger-text); }

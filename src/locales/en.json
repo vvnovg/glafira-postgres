@@ -1342,7 +1342,10 @@
       "sourcePgss": "Normalized text (pg_stat_statements)",
       "sourceRunning": "Running instance PID {{pid}}",
       "sourceTruncated": "truncated",
-      "pgssTruncated": "The normalized text is truncated: a plan cannot be built from it. Choose a running instance with the full text."
+      "pgssTruncated": "The normalized text is truncated: a plan cannot be built from it. Choose a running instance with the full text.",
+      "runningHint": "An instance is running (PID {{pid}}).",
+      "runningUse": "Use its text",
+      "copyQuery": "Copy query"
     },
     "plan": {
       "tree": "Plan tree",
@@ -1364,7 +1367,8 @@
         "lossy": "lossy",
         "heapFetches": "heap fetches",
         "workersShort": "fewer workers",
-        "parallel": "parallel"
+        "parallel": "parallel",
+        "hot": "hot"
       },
       "details": {
         "title": "Node details",
@@ -1444,7 +1448,8 @@
         "asWrite": "Run as a write",
         "writeOnReplica": "A write cannot run on a replica: choose the primary",
         "writeReadOnly": "Writes are unavailable: the connection is read-only",
-        "errorAt": "Error at line {{line}}, column {{column}}"
+        "errorAt": "Error at line {{line}}, column {{column}}",
+        "planGeneric": "Plan (generic)"
       },
       "confirm": {
         "title": "Execute the query and roll back",
@@ -1452,7 +1457,8 @@
         "run": "Execute and roll back",
         "rollback": "Rows will change and be rolled back.",
         "tables": "Tables:",
-        "sideEffects": "Rollback undoes the row changes, including those made by triggers, and NOTIFY is not delivered. It does not undo sequence advances, external calls (dblink, http) or non-transactional functions, including those called from triggers. Locks are held while the query runs."
+        "sideEffects": "Rollback undoes the row changes, including those made by triggers, and NOTIFY is not delivered. It does not undo sequence advances, external calls (dblink, http) or non-transactional functions, including those called from triggers. Locks are held while the query runs.",
+        "rollbackData": "Data will change and be rolled back."
       },
       "history": {
         "title": "History",
@@ -1471,9 +1477,10 @@
       "sourceSql": "Query",
       "sourcePaste": "Paste a plan",
       "placeholder": "SELECT … — one statement; $1, $2 become parameter fields",
-      "pasteLabel": "Plan (JSON)",
-      "pastePlaceholder": "Paste EXPLAIN (FORMAT JSON) output, psql framing is fine",
-      "parse": "Parse"
+      "pasteLabel": "Plan (text or JSON)",
+      "pastePlaceholder": "Paste EXPLAIN output: text or FORMAT JSON, with or without the psql header",
+      "parse": "Parse",
+      "pasteHint": "A plan obtained outside Glafira: from psql, auto_explain or a colleague. The server is not used."
     }
   },
   "findings": {

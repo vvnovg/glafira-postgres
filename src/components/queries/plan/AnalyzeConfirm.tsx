@@ -13,7 +13,7 @@ export function AnalyzeConfirm({ connection, relations, admin, busy, onConfirm, 
     <ConfirmDialog connection={connection} title={t("diag.plan.confirm.title")} confirmLabel={t("diag.plan.confirm.run")} danger busy={busy} onConfirm={onConfirm} onCancel={onCancel}>
       {/* Ярус записи из-за административной функции (`adminFunction`): откат её действие не отменит. */}
       {admin && <p className="diag-warn">{t("diag.plan.confirm.admin")}</p>}
-      <p>{t("diag.plan.confirm.rollback")}</p>
+      <p>{relations.length > 0 ? t("diag.plan.confirm.rollback") : t("diag.plan.confirm.rollbackData")}</p>
       {/* Таблиц нет («как запись» после отказа самой пробы — плана нет): строки «Таблицы:» тоже нет. */}
       {relations.length > 0 && <p>{t("diag.plan.confirm.tables")}</p>}
       {relations.length > 0 && (

@@ -36,7 +36,9 @@ describe("PlanRunner", () => {
     expect(screen.getByRole("textbox", { name: "$2" })).toBeInTheDocument();
     expect(screen.getByText(/«План с выполнением» берёт значения из полей ниже/)).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole("button", { name: "План с выполнением" })).toBeEnabled());
-    await user.click(screen.getByRole("button", { name: "План" }));
+    // Кнопка называет режим: при поставленном флажке «План (общий)».
+    expect(screen.queryByRole("button", { name: "План" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "План (общий)" }));
     await waitFor(() => expect(api.explain).toHaveBeenCalledWith("c", expect.objectContaining({ sql: "SELECT * FROM t WHERE a = $1 AND b = $2", mode: "plan", params: { kind: "generic" }, member: "pg-1", database: "perf" })));
     expect(await screen.findByRole("treegrid", { name: "Дерево плана" })).toBeInTheDocument();
     // ANALYZE прямо при поставленном флажке: значения из полей, пустое поле — NULL.
@@ -204,7 +206,7 @@ describe("PlanRunner: вход пробы, реплика, загрузка пр
     await user.click(await screen.findByRole("button", { name: "Выполнить как запись" }));
     const dialog = await screen.findByRole("group", CONFIRM);
     expect(within(dialog).queryByText("Таблицы:")).toBeNull();
-    expect(within(dialog).getByText("Строки изменятся и откатятся.")).toBeInTheDocument();
+    expect(within(dialog).getByText("Данные изменятся и откатятся.")).toBeInTheDocument();
     vi.mocked(api.explain).mockResolvedValueOnce(result({ mode: "analyze", tier: "write", relations: [] }));
     await user.click(within(dialog).getByRole("button", { name: "Выполнить и откатить" }));
     await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("c", expect.objectContaining({ mode: "analyze", forceWrite: true, sql: "SELECT f()" })));
@@ -315,7 +317,7 @@ describe("PlanRunner: вход пробы, реплика, загрузка пр
     const first = renderWithClient(runner(sql));
     expect(screen.getByText(/Параметров больше 100 \(всего: 101\)/)).toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "$1" })).toBeNull();
-    const plan = await screen.findByRole("button", { name: "План" });
+    const plan = await screen.findByRole("button", { name: "План (общий)" });
     await waitFor(() => expect(plan).toBeEnabled());
     expect(screen.getByRole("button", { name: "План с выполнением" })).toBeDisabled();
     await user.click(plan);
@@ -348,6 +350,70 @@ describe("PlanRunner: вход пробы, реплика, загрузка пр
     await act(async () => finish(result()));
     expect(onResult).not.toHaveBeenCalled();
     expect(api.explain).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("PlanRunner: отказы и режим", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(api.listConnections).mockResolvedValue([connection({ id: "c", environment: "dev", readOnly: false })]);
+  });
+
+  it("«План» и «План с выполнением» без primary-стиля", async () => {
+    renderWithClient(<PlanRunner connectionId="c" member="pg-1" database="perf" sql="SELECT 1" serverVersionNum={170_000} inRecovery={false} />);
+    expect(screen.getByRole("button", { name: "План" })).not.toHaveClass("primary");
+    expect(screen.getByRole("button", { name: "План с выполнением" })).not.toHaveClass("primary");
+  });
+
+  it("ошибка запуска убирает прошлый результат с экрана до нового успешного; история остаётся", async () => {
+    vi.mocked(api.explain).mockResolvedValueOnce(result()).mockResolvedValueOnce(result());
+    const user = userEvent.setup();
+    renderWithClient(<PlanRunner connectionId="c" member="pg-1" database="perf" sql="SELECT 1" serverVersionNum={170_000} inRecovery={false} />);
+    await user.click(screen.getByRole("button", { name: "План" }));
+    await user.click(screen.getByRole("button", { name: "План" }));
+    expect(await screen.findByText(/История/)).toBeInTheDocument();
+    expect(screen.getByRole("treegrid", { name: "Дерево плана" })).toBeInTheDocument();
+    vi.mocked(api.explain).mockRejectedValueOnce({ code: "INVALID_INPUT", message: "x", retryable: false, key: "errors.explain.oneStatement" });
+    await user.click(screen.getByRole("button", { name: "План" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Введите ровно одну инструкцию");
+    expect(screen.queryByRole("treegrid", { name: "Дерево плана" })).toBeNull();
+    expect(screen.getByText(/История/)).toBeInTheDocument();
+    // Выбор запуска из истории снимает отказ.
+    await user.click(screen.getAllByRole("button", { name: /^#\d/ })[0]);
+    expect(screen.getByRole("treegrid", { name: "Дерево плана" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("отказ в записи — красным баннером, прошлый результат скрыт", async () => {
+    vi.mocked(api.listConnections).mockResolvedValue([connection({ id: "c", readOnly: true })]);
+    vi.mocked(api.explain).mockResolvedValueOnce(result()).mockResolvedValueOnce(result({ tier: "write" }));
+    const user = userEvent.setup();
+    renderWithClient(<PlanRunner connectionId="c" member="pg-1" database="perf" sql="UPDATE t SET a = 1" serverVersionNum={170_000} inRecovery={false} />);
+    await user.click(screen.getByRole("button", { name: "План" }));
+    expect(await screen.findByRole("treegrid", { name: "Дерево плана" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "План с выполнением" }));
+    expect(await screen.findByText("Запись недоступна: подключение только для чтения")).toHaveClass("error-banner");
+    expect(screen.queryByRole("treegrid", { name: "Дерево плана" })).toBeNull();
+  });
+
+  it("параметров больше 100: сообщение красным", async () => {
+    const sql = `SELECT ${Array.from({ length: 101 }, (_, i) => `$${i + 1}`).join(", ")}`;
+    renderWithClient(<PlanRunner connectionId="c" member="pg-1" database="perf" sql={sql} serverVersionNum={170_000} inRecovery={false} />);
+    expect(screen.getByText(/Параметров больше 100 \(всего: 101\)/)).toHaveClass("error-banner");
+  });
+
+  it("подпись флажка GENERIC_PLAN не приглушена", () => {
+    renderWithClient(<PlanRunner connectionId="c" member="pg-1" database="perf" sql="SELECT $1" serverVersionNum={170_000} inRecovery={false} />);
+    expect(screen.getByRole("checkbox", { name: "GENERIC_PLAN (без значений)" }).closest("label")).toHaveClass("generic");
+  });
+
+  it("сводка результата начинается с режима запуска", async () => {
+    vi.mocked(api.explain).mockResolvedValue(result({ mode: "plan" }));
+    const user = userEvent.setup();
+    const { container } = renderWithClient(<PlanRunner connectionId="c" member="pg-1" database="perf" sql="SELECT 1" serverVersionNum={170_000} inRecovery={false} />);
+    await user.click(screen.getByRole("button", { name: "План" }));
+    await screen.findByRole("treegrid", { name: "Дерево плана" });
+    expect(container.querySelector(".plan-summary-part")).toHaveTextContent("План");
   });
 });
 

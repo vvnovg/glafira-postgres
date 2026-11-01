@@ -321,6 +321,8 @@ export function PlanRunner({
   const current = runs.find((r) => r.id === shown) ?? null;
   const error = failed?.error ?? null;
   const place = failed ? errorPlace(failed.sql, failed.error) : null;
+  // Отказ или ошибка последнего запуска: на экране не должно остаться прежнего результата, похожего на текущий.
+  const refused = failed !== null || writeHint === "replica" || writeHint === "readOnly";
   const busy = running || explain.isPending;
   // Профиль ещё читается: ни подсказки read-only, ни запуска — кнопки ждут.
   const loading = profile === undefined;
@@ -348,8 +350,8 @@ export function PlanRunner({
     <div className="plan-runner">
       <ParamsForm count={count} values={values} onChange={setValues} generic={generic} canGeneric={canGeneric} onGeneric={setGeneric} />
       <div className="toolbar">
-        <button type="button" className="primary" disabled={!idle || planBlocked} onClick={() => void runPlan()}>
-          {t("diag.plan.run.plan")}
+        <button type="button" disabled={!idle || planBlocked} onClick={() => void runPlan()}>
+          {genericOn ? t("diag.plan.run.planGeneric") : t("diag.plan.run.plan")}
         </button>
         <button type="button" disabled={!idle || analyzeBlocked} onClick={() => void runAnalyze()}>
           {t("diag.plan.run.analyze")}
@@ -405,22 +407,24 @@ export function PlanRunner({
         </p>
       )}
       {writeHint === "replica" && (
-        <p className="diag-note" role="status">
+        <p className="error-banner" role="status">
           {t("diag.plan.run.writeOnReplica")}
         </p>
       )}
       {writeHint === "readOnly" && (
-        <p className="diag-note" role="status">
+        <p className="error-banner" role="status">
           {t("diag.plan.run.writeReadOnly")}
         </p>
       )}
       {confirmOpen && profile && (
         <AnalyzeConfirm connection={profile} relations={confirm.relations} admin={confirm.admin} busy={busy} onConfirm={(c) => void confirmed(c)} onCancel={() => setConfirm(null)} />
       )}
-      {current && (
+      {/* После отказа или ошибки запуска результат прошлого запуска как текущий не показывается; история остаётся. */}
+      {current && !refused && (
         <PlanView
           tree={current.result.plan}
           tier={current.result.tier}
+          mode={current.result.mode}
           warnings={current.result.warnings}
           raw={current.result.raw}
           elapsedMs={current.result.elapsedMs}
@@ -428,7 +432,7 @@ export function PlanRunner({
           extraActions={extraActions}
         />
       )}
-      {!current && extraActions && <div className="toolbar">{extraActions}</div>}
+      {(!current || refused) && extraActions && <div className="toolbar">{extraActions}</div>}
       {runs.length > 1 && (
         <section className="plan-history">
           <h3>{t("diag.plan.history.title")}</h3>
@@ -439,7 +443,12 @@ export function PlanRunner({
                   type="button"
                   className="link"
                   aria-current={r.id === shown}
-                  onClick={() => setShown(r.id)}
+                  onClick={() => {
+                    // Выбор запуска из истории снимает прежний отказ: показывается выбранный результат.
+                    setFailed(null);
+                    setWriteHint(null);
+                    setShown(r.id);
+                  }}
                 >
                   {r.member === member
                     ? t("diag.plan.history.item", { n: r.id, mode: t(MODE_KEYS[r.result.mode]), tier: t(TIER_KEYS[r.result.tier]), time: formatTime(r.at), ms: formatMs(r.result.elapsedMs) })

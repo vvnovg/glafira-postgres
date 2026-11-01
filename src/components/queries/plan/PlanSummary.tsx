@@ -1,6 +1,6 @@
 import { useMemo, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import type { ExplainTier, PlanTree } from "../../../api/types";
+import type { ExplainMode, ExplainTier, PlanTree } from "../../../api/types";
 import { formatMs } from "../../../lib/format";
 import { CopyButton } from "../../common/CopyButton";
 import { renderText } from "./planText";
@@ -12,16 +12,23 @@ const WARNING_KEYS: Record<string, string> = {
   adminFunction: "diag.plan.warnings.adminFunction",
 };
 
+/** Режим запуска — подписями кнопок запуска (литералами: правило словарей). */
+const MODE_KEYS: Record<ExplainMode, string> = { plan: "diag.plan.run.plan", analyze: "diag.plan.run.analyze" };
+
+/** Предупреждение — справка, а не ограничение: нейтральная заметка; остальные — предупреждения. */
+const NOTE_WARNINGS = new Set(["genericPlan"]);
+
 /**
- * Сводка плана: узел (если план получен не на узле вкладки), планирование, выполнение, ярус, JIT, триггеры, settings,
+ * Сводка плана: режим запуска (если известен), узел (если план получен не на узле вкладки), планирование, выполнение, ярус, JIT, триггеры, settings,
  * предупреждения; «JSON» и «Как текст».
  */
-export function PlanSummary({ tree, tier, warnings = [], raw, elapsedMs, member, extraActions }: { tree: PlanTree; tier?: ExplainTier; warnings?: string[]; raw?: unknown; elapsedMs?: number; member?: string; extraActions?: ReactNode }) {
+export function PlanSummary({ tree, tier, mode, warnings = [], raw, elapsedMs, member, extraActions }: { tree: PlanTree; tier?: ExplainTier; mode?: ExplainMode; warnings?: string[]; raw?: unknown; elapsedMs?: number; member?: string; extraActions?: ReactNode }) {
   const { t } = useTranslation();
   // Текст и JSON большого плана собираются один раз на план, а не при каждой перерисовке сводки.
   const json = useMemo(() => (raw === undefined ? null : JSON.stringify(raw, null, 2)), [raw]);
   const text = useMemo(() => renderText(tree), [tree]);
   const parts = [
+    mode !== undefined && t(MODE_KEYS[mode]),
     member !== undefined && t("diag.plan.summary.node", { member }),
     tree.planningMs !== null && t("diag.plan.summary.planning", { ms: formatMs(tree.planningMs) }),
     tree.executionMs !== null && t("diag.plan.summary.execution", { ms: formatMs(tree.executionMs) }),
@@ -48,7 +55,7 @@ export function PlanSummary({ tree, tier, warnings = [], raw, elapsedMs, member,
         </p>
       )}
       {warnings.map((w) => (
-        <p key={w} className="diag-note" role="status">{WARNING_KEYS[w] ? t(WARNING_KEYS[w]) : w}</p>
+        <p key={w} className={NOTE_WARNINGS.has(w) ? "diag-note" : "diag-warn"} role="status">{WARNING_KEYS[w] ? t(WARNING_KEYS[w]) : w}</p>
       ))}
       <div className="toolbar">
         {/* Кнопки копирования одинаково подписаны «Копировать»: что именно копируется, говорит подпись рядом (имя кнопки для скринридера — полное). */}

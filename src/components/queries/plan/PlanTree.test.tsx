@@ -46,6 +46,9 @@ describe("PlanTreeView", () => {
     expect(within(rows[1]).getByText("×100")).toHaveClass("plan-misestimate");
     expect(rows[1]).toHaveTextContent("500 → 5");
     expect(rows[2]).not.toHaveClass("plan-hot");
+    // Горячий узел помечен словом в «Пометках», а не только жирным шрифтом.
+    expect(within(rows[1]).getByText("горячий")).toBeInTheDocument();
+    expect(within(rows[2]).queryByText("горячий")).toBeNull();
     await user.click(within(rows[1]).getByRole("button", { name: /Seq Scan/ }));
     expect(onSelect).toHaveBeenCalledWith(1);
   });
@@ -302,10 +305,11 @@ describe("planText: имена узлов как в psql", () => {
     const tree = planTree();
     expect(flatten(tree.root, new Set()).map((r) => [r.node.id, r.depth])).toEqual([[0, 0], [1, 1], [2, 1]]);
     expect(flatten(tree.root, new Set([0])).map((r) => r.node.id)).toEqual([0]);
-    expect(marks(planNode({ neverExecuted: true, hashBatches: 2, lossyHeapBlocks: 1, heapFetches: 1, workersPlanned: 3, workersLaunched: 2, parallelAware: true }))).toEqual([
+    expect(marks(planNode({ hot: true }))).toEqual(["hot"]);
+    expect(marks(planNode({ hot: false, neverExecuted: true, hashBatches: 2, lossyHeapBlocks: 1, heapFetches: 1, workersPlanned: 3, workersLaunched: 2, parallelAware: true }))).toEqual([
       "neverExecuted", "disk", "lossy", "heapFetches", "workersShort", "parallel",
     ]);
-    expect(marks(planNode())).toEqual([]);
+    expect(marks(planNode({ hot: false }))).toEqual([]);
   });
 });
 

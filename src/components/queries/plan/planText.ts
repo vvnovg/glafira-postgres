@@ -90,6 +90,7 @@ export function flatten(root: PlanNode, collapsed: ReadonlySet<number>): { node:
 /** Ключи пометок узла (`diag.plan.marks.*`). */
 export function marks(n: PlanNode): string[] {
   const out: string[] = [];
+  if (n.hot) out.push("hot");
   if (n.neverExecuted) out.push("neverExecuted");
   if (n.sortSpaceType === "Disk" || (n.hashBatches ?? 0) > 1) out.push("disk");
   if ((n.lossyHeapBlocks ?? 0) > 0) out.push("lossy");

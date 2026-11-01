@@ -26,6 +26,13 @@ describe("PlanView", () => {
     expect(screen.queryByText(/^Узел:/)).toBeNull();
   });
 
+  it("сводка начинается с режима запуска; ограничения — предупреждением, справка — заметкой", () => {
+    const { container } = render(<PlanView tree={planTree()} mode="analyze" tier="read" warnings={["genericPlan", "probeWithoutReadOnly"]} />);
+    expect(container.querySelector(".plan-summary-part")).toHaveTextContent("План с выполнением");
+    expect(screen.getByText("План общий (GENERIC_PLAN): без значений параметров")).toHaveClass("diag-note");
+    expect(container.querySelector(".diag-warn")).not.toBeNull();
+  });
+
   it("план получен не на узле вкладки — сводка называет узел", () => {
     render(<PlanView tree={planTree()} tier="read" member="pg-2" />);
     expect(screen.getByText("Узел: pg-2")).toBeInTheDocument();

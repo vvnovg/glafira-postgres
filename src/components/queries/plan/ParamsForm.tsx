@@ -36,13 +36,13 @@ export function ParamsForm({
     <fieldset className="params-form">
       <legend>{t("diag.plan.params.title", { count })}</legend>
       {canGeneric && (
-        <label className="inline">
+        <label className="inline generic">
           <input type="checkbox" checked={generic} onChange={(e) => onGeneric(e.target.checked)} />
           <span>{t("diag.plan.params.generic")}</span>
         </label>
       )}
       {tooMany ? (
-        <p className="diag-note" role="status">
+        <p className="error-banner" role="status">
           {t("diag.plan.params.tooMany", { count, max: PARAM_FIELDS_LIMIT })}
         </p>
       ) : (
