@@ -131,8 +131,11 @@ pub fn misestimate(n: &PlanNode, early_stop: bool) -> Option<Recommendation> {
     }
     if cols.len() >= 2 {
         let list: Vec<String> = cols.iter().map(|c| quote_ident(c)).collect();
+        // Имя статистики обязательно до PG 16 (`CREATE STATISTICS ON …` без имени — синтаксическая ошибка на 13–15);
+        // схема — как у таблицы, иначе объект ляжет в первую схему `search_path`.
+        let name = qualified(rel.schema.as_deref(), &statistics_name(&rel.name, &cols));
         cmd.push_str(&format!(
-            "\nCREATE STATISTICS ON {} FROM {target};",
+            "\nCREATE STATISTICS {name} ON {} FROM {target};",
             list.join(", ")
         ));
     }
@@ -145,6 +148,24 @@ pub fn misestimate(n: &PlanNode, early_stop: bool) -> Option<Recommendation> {
             .param("direction", if under { "under" } else { "over" })
             .command(cmd),
     )
+}
+
+/// Имя расширенной статистики `<таблица>_<кол1>_<кол2>…_stat`, не длиннее `NAMEDATALEN - 1` = 63 байт: длинная
+/// основа обрезается по границе символа, суффикс `_stat` остаётся.
+pub(crate) fn statistics_name(table: &str, cols: &[String]) -> String {
+    const MAX: usize = 63;
+    const SUFFIX: &str = "_stat";
+    let mut base = table.to_string();
+    for c in cols {
+        base.push('_');
+        base.push_str(c);
+    }
+    let mut cut = base.len().min(MAX - SUFFIX.len());
+    while !base.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    base.truncate(cut);
+    base + SUFFIX
 }
 
 #[cfg(test)]
@@ -285,9 +306,25 @@ mod tests {
             "ALTER TABLE \"shop\".\"orders\" ALTER COLUMN \"status\" SET STATISTICS 1000;"
         ));
         assert!(
-            cmd.contains("CREATE STATISTICS ON \"status\", \"region\" FROM \"shop\".\"orders\";"),
+            cmd.contains(
+                "CREATE STATISTICS \"shop\".\"orders_status_region_stat\" ON \"status\", \"region\" FROM \"shop\".\"orders\";"
+            ),
             "{cmd}"
         );
+    }
+
+    #[test]
+    fn statistics_name_is_capped_at_63_bytes_on_a_char_boundary() {
+        use super::statistics_name;
+        assert_eq!(
+            statistics_name("t", &["a".into(), "b".into()]),
+            "t_a_b_stat"
+        );
+        let long = "ж".repeat(40);
+        let name = statistics_name(&long, &["col".into(), "other".into()]);
+        assert!(name.len() <= 63, "{} байт", name.len());
+        assert!(name.ends_with("_stat"), "{name}");
+        assert!(name.starts_with("жж"), "{name}");
     }
 
     #[test]
