@@ -65,19 +65,29 @@ fn bad_ddl() -> AppError {
     )
 }
 
-/// `;` вне кавычек: в строковых литералах `'…'` и идентификаторах `"…"` (удвоенная кавычка — та же логика: закрыть и
-/// открыть) точка с запятой допустима. Осторожно в сторону отказа: `;` в комментарии, в `$$…$$` или после `\'` в
-/// `E'…'` считается внешним — такой DDL отклоняется, хотя был бы безопасен (в предложенных командах их нет).
-fn has_outer_semicolon(s: &str) -> bool {
+/// Признак второй инструкции или способа её спрятать. Вне кавычек `'…'` / `"…"` (удвоенная кавычка — закрыть и открыть)
+/// запрещены `;`, начала комментариев `--` и `/*` и `$` (долларовые кавычки, `$N`): в комментарии или `$$…$$` кавычка
+/// сбила бы разбор, и `;` за ней оказалась бы «внутри». Обратная косая черта запрещена везде: `E'\''` (и `'\''` при
+/// `standard_conforming_strings = off`) экранирует кавычку, которую этот разбор считает закрывающей. Предложенные
+/// команды (`plan_rules::index_ddl`) берут идентификаторы в кавычки и ничего из этого не содержат.
+fn has_hidden_statement(s: &str) -> bool {
+    if s.contains('\\') {
+        return true;
+    }
     let mut quote: Option<char> = None;
+    let mut prev: Option<char> = None;
     for ch in s.chars() {
         match quote {
             Some(q) if ch == q => quote = None,
             Some(_) => {}
             None if ch == '\'' || ch == '"' => quote = Some(ch),
-            None if ch == ';' => return true,
+            None if ch == ';' || ch == '$' => return true,
+            None if (prev == Some('-') && ch == '-') || (prev == Some('/') && ch == '*') => {
+                return true;
+            }
             None => {}
         }
+        prev = if quote.is_none() { Some(ch) } else { None };
     }
     false
 }
@@ -91,7 +101,7 @@ pub fn validate_ddl(ddl: &str) -> AppResult<()> {
         || words[0] != "CREATE"
         || words[1] != "INDEX"
         || words[2] != "ON"
-        || has_outer_semicolon(&s)
+        || has_hidden_statement(&s)
     {
         return Err(bad_ddl());
     }
@@ -140,7 +150,16 @@ pub async fn schema_of(c: &Client) -> AppResult<Option<String>> {
         Ok(c.query_opt(SCHEMA_SQL, &[]).await?.map(|r| r.get(0)))
     })
     .await
-    .map_err(|e| app(e, probe_ctx("", &Params::None)))
+    .map_err(|e| {
+        app(
+            e,
+            Context {
+                origin: None,
+                write: false,
+                read_only: true,
+            },
+        )
+    })
 }
 
 fn probe_ctx(original: &str, params: &Params) -> Context {
@@ -187,6 +206,7 @@ fn validate_request(req: &HypoRequest) -> AppResult<String> {
 }
 
 pub async fn check(st: &AppState, id: &str, req: &HypoRequest) -> AppResult<HypoResult> {
+    // Проверка до соединения: неверный запрос не открывает сеанс (`check_on` повторит её — она дешёвая).
     validate_request(req)?;
     let client =
         crate::actions::conn::open_explain(st, id, &req.member, Some(&req.database)).await?;
@@ -354,6 +374,20 @@ mod tests {
         );
         assert!(validate_ddl("CREATE INDEX ON t (a) WHERE b = 'x'; DROP TABLE t").is_err());
         assert!(validate_ddl("CREATE INDEX ON \"t\"; DROP TABLE t").is_err());
+        for hidden in [
+            "CREATE INDEX ON t (a) -- '\n; CREATE INDEX ON u (b)",
+            "CREATE INDEX ON t (a) WHERE b = $$'$$; CREATE INDEX ON u (b)",
+            "CREATE INDEX ON t (a) WHERE b = E'\\'' ; DROP TABLE t; --'",
+            "CREATE INDEX ON t (a) WHERE b = '\\'' ; DROP TABLE t; --'",
+            "CREATE INDEX ON t (a) /* ' */ ; DROP TABLE t",
+            "CREATE INDEX ON t (a) WHERE b = $1",
+        ] {
+            assert!(validate_ddl(hidden).is_err(), "{hidden}");
+        }
+        assert!(
+            validate_ddl("CREATE INDEX ON \"a--b\" (\"c/*d\") WHERE e = '$x--'").is_ok(),
+            "внутри кавычек -- /* $ допустимы"
+        );
         assert!(
             validate_ddl("CREATE INDEX ON t (a) /* ; */").is_err(),
             "в комментарии — осторожно, отказ"
