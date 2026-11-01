@@ -5141,14 +5141,16 @@ fn node(n: &PlanNode, depth: usize, out: &mut String) {
 mkdir -p crates/pg-advisor/tests/fixtures/plans/json
 P=crates/pg-advisor/tests/fixtures/plans/json
 X() { docker exec gp-pg-perf psql -U postgres -d perf -XqAt -c "EXPLAIN ($2) $3" > "$P/$1.json"; }
+# XS: то же с настройками сессии перед EXPLAIN ($4; -q прячет ответы SET)
+XS() { docker exec gp-pg-perf psql -U postgres -d perf -XqAt -c "$4" -c "EXPLAIN ($2) $3" > "$P/$1.json"; }
 X seq_scan_filter_analyze       "ANALYZE, BUFFERS, VERBOSE, FORMAT JSON" "SELECT count(*) FROM shop.orders WHERE status = 'disputed'"
 X nested_loop_misestimate_analyze "ANALYZE, BUFFERS, VERBOSE, FORMAT JSON" "SELECT o.id, a.note FROM shop.audit a JOIN shop.orders o ON o.id = a.order_id WHERE a.actor = 'app' AND a.order_id = 1"
 X sort_limit_analyze            "ANALYZE, BUFFERS, VERBOSE, FORMAT JSON" "SELECT * FROM shop.orders ORDER BY total DESC LIMIT 10"
 X sort_spill_analyze            "ANALYZE, BUFFERS, VERBOSE, FORMAT JSON" "SELECT customer_id, sum(total) FROM shop.orders GROUP BY customer_id ORDER BY 2 DESC"
-X index_only_heap_fetches_analyze "ANALYZE, BUFFERS, VERBOSE, FORMAT JSON" "SELECT count(*) FROM shop.balances WHERE customer_id BETWEEN 1000 AND 2000"
+XS index_only_heap_fetches_analyze "ANALYZE, BUFFERS, VERBOSE, FORMAT JSON" "SELECT count(*) FROM shop.balances WHERE customer_id BETWEEN 1000 AND 20000" "SET enable_bitmapscan = off"
 X subplan_per_row_analyze       "ANALYZE, BUFFERS, VERBOSE, FORMAT JSON" "SELECT oi.id FROM shop.order_items oi WHERE oi.product_id BETWEEN 100 AND 110 AND oi.price > (SELECT avg(x.price) FROM shop.order_items x WHERE x.order_id = oi.order_id)"
-X append_partitions_analyze     "ANALYZE, BUFFERS, VERBOSE, FORMAT JSON" "SELECT count(*) FROM shop.events WHERE kind = 'pay' AND payload ->> 'k' = '7'"
-X parallel_jit_analyze          "ANALYZE, BUFFERS, VERBOSE, FORMAT JSON" "SELECT customer_id % 1000, sum(total * 1.07 + 3), avg(total) FROM shop.orders GROUP BY 1"
+X append_partitions_analyze     "ANALYZE, BUFFERS, VERBOSE, FORMAT JSON" "SELECT count(*) FROM shop.events WHERE happened_at::date = date '2026-03-05'"
+XS parallel_jit_analyze         "ANALYZE, BUFFERS, VERBOSE, FORMAT JSON" "SELECT customer_id % 1000, sum(total * 1.07 + 3), avg(total) FROM shop.orders GROUP BY 1" "SET max_parallel_workers_per_gather = 4; SET min_parallel_table_scan_size = '64kB'; SET parallel_setup_cost = 0; SET parallel_tuple_cost = 0"
 X hash_join_temp_analyze        "ANALYZE, BUFFERS, VERBOSE, FORMAT JSON" "SELECT count(*) FROM shop.order_items oi JOIN shop.orders o ON o.id = oi.order_id WHERE o.created_at >= timestamptz '2025-06-01'"
 X update_modify_table_plain     "VERBOSE, FORMAT JSON" "UPDATE shop.balances SET balance = balance + 1 WHERE customer_id = 1"
 X generic_plan_plain            "VERBOSE, SETTINGS, GENERIC_PLAN, FORMAT JSON" "SELECT * FROM shop.customers WHERE id = \$1"
@@ -5158,7 +5160,7 @@ for v in 13 14 15 16 18; do
 done
 ```
 
-(в `psql -At` вывод JSON идёт без обрамления; файлы — чистый JSON.) Проверить: `ls $P | wc -l` — 17 файлов.
+(в `psql -At` вывод JSON идёт без обрамления; файлы — чистый JSON.) Три фикстуры — `index_only_heap_fetches_analyze`, `append_partitions_analyze`, `parallel_jit_analyze` — пересняты в P3b (задача 2) другими запросами и настройками, чтобы на них срабатывали правила рекомендаций: прежние давали Bitmap Heap Scan без `Heap Fetches`, Append без пустых партиций и агрегат без Gather; запросы — в комментарии к тесту `analyze_fixtures_trigger_expected_recommendations` в `crates/pg-advisor/tests/plans.rs`. Проверить: `ls $P | wc -l` — 17 файлов.
 
 - [ ] **Step 5: Прогнать тесты**
 

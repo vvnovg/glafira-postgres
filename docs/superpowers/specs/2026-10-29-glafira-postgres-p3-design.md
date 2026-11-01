@@ -582,6 +582,9 @@ interface ExplainResult {
    не берёт (§7.4). В консоли выбора узла для ANALYZE нет: он идёт на узле консоли.
 4. `mode: analyze`, ярус записи: `ensure_mutation_allowed(profile, confirmation.confirm)` (read-only профиль — `READ_ONLY`;
    prod — имя подключения); узел в recovery — `FEATURE_UNAVAILABLE` (`errors.explain.writeOnReplica`, «выберите primary»).
+   P3b (§15 п. 17 и 20 з): затем `ensure_write_confirmed` — без флага `writeConfirmed` (его выставляет «Выполнить и откатить» окна
+   подтверждения) `CONFIRMATION_REQUIRED` (`errors.explain.writeNotConfirmed`) на любом окружении; для `forceWrite` та же проверка — в
+   `validate`, до соединения. Порядок в `ensure_write_allowed`: `ensure_mutation_allowed`, `ensure_write_confirmed`, проверка реплики.
    Фронтенд перед вызовом показывает `ConfirmDialog`: отношения из пробного плана и предупреждение — строки изменятся и
    откатятся. Откат отменяет изменения строк, в том числе сделанные триггерами, и `NOTIFY` не доставляется (он уходит только при
    commit); не отменяются сдвиг последовательностей, внешние вызовы (`dblink`, `http`) и нетранзакционные функции, в том числе
@@ -700,61 +703,131 @@ interface PlanNode {
 
 ### 9.1 Рекомендации по плану (`pg-advisor::plan_rules`)
 
-`evaluate(&PlanTree) -> Vec<Recommendation>`; `Recommendation { id, severity, nodeIds, params, evidence: { label, value }[],
-command: string | null, hypo: { indexDdl } | null }`. Тексты (заголовок, эффект, риски) — во фронтенде по `id` и `params`,
-как у находок; команда собирается в Rust с `quote_ident`, приложение её **не выполняет** — только показывает и копирует.
-Правила с пометкой «факт» требуют `actual` (ANALYZE); без него пропускаются, блок показывает «выполните план с выполнением,
-чтобы проверить ещё N правил».
+`evaluate(&PlanTree) -> Report { recommendations, skipped }`; `Recommendation { id, severity, nodeIds, params, command: string | null,
+hypo: { indexDdl } | null }` (camelCase). Доказательство — не массив `evidence`, а `params` (цифры узла, как `Finding.params`); тексты
+заголовка, доказательства, эффекта и рисков — во фронтенде по ключам `recommend.<id>.{title,evidence,effect,risks}` (у части правил —
+варианты ключей: `titlePartitions` / `evidencePartitions` у сгруппированных партиций, `titleBitmap` / `evidenceBitmap` и `effectMemory` у
+`plan_spill`, `evidencePlan` у `plan_no_pruning` без ANALYZE, `evidenceParallel` у `plan_jit_heavy` с `processes > 1`). Команда собирается
+в Rust с кавычками идентификаторов, приложение её **не выполняет** — только показывает и копирует. Правила с пометкой «факт» (`FACT_RULES`,
+9 из 11) требуют `actual` (ANALYZE); без него пропускаются и перечисляются в `skipped`, блок показывает «выполните план с выполнением, чтобы
+проверить ещё N правил». Порядок — по уровню (сначала critical), затем `nodeIds`, затем `id`. Пороги — `findings::thresholds::PLAN_*`.
 
 | id | Условие | Команда / совет | Уровень |
 |---|---|---|---|
-| `plan_seq_scan_filter` (факт) | Seq Scan, `(actual.rows + rowsRemovedByFilter) × loops ≥ 10 000`, `rowsRemovedByFilter ≥ 10 × actual.rows` | `CREATE INDEX CONCURRENTLY ON s.t (cols)` — колонки простых сравнений `col op const` из `filter` (регулярное выражение по `(alias.)?ident op`); не разобрано — шаблон с `<колонки фильтра>` без hypopg | warning |
-| `plan_index_filter` (факт) | Index Scan / Bitmap Heap Scan, `rowsRemovedByFilter ≥ 10 × actual.rows`, `≥ 1000` | составной индекс: колонки `indexCond` + колонки `filter`; порядок — равенства раньше диапазонов | warning |
-| `plan_nested_loop_seq` (факт) | Nested Loop, внутренний ребёнок — Seq Scan с `loops ≥ 1000` | индекс по колонкам ключа соединения (`joinFilter` / `filter` внутреннего узла) | warning |
-| `plan_misestimate` (факт) | `estimateRatio ≥ 10` или `≤ 0.1` при `max(planRows, actual.rows) ≥ 1000` | `ANALYZE s.t`; `ALTER TABLE … ALTER COLUMN … SET STATISTICS 1000`; при ≥ 2 колонках одной таблицы в условии — `CREATE STATISTICS` | warning |
-| `plan_spill` (факт) | `sortSpaceType = Disk`, `hashBatches > 1`, `lossyHeapBlocks > 0` | `SET work_mem = '<объём × 1,5, не больше 1 ГБ>'` для сессии или `ALTER ROLE … SET work_mem`; индекс под `sortKey` | warning |
-| `plan_sort_limit` | Sort под Limit, `planRows` входа ≥ 100 × `planRows` Limit (факт — по `actual`) | индекс под `sortKey` (`CREATE INDEX CONCURRENTLY … (keys)`) | info |
-| `plan_heap_fetches` (факт) | Index Only Scan, `heapFetches ≥ 0.1 × actual.rows × loops`, `≥ 1000` | `VACUUM s.t` (карта видимости) | info |
-| `plan_no_pruning` | Append / Merge Append с ≥ 10 детьми-сканами и без `subplansRemoved`; факт: ≥ 50 % детей с `actual.rows = 0` | добавить условие по ключу партиционирования; проверить `enable_partition_pruning` | warning |
-| `plan_workers_short` (факт) | `workersLaunched < workersPlanned` | `max_parallel_workers`, `max_worker_processes` | info |
-| `plan_subplan_per_row` (факт) | узел с `parentRelationship = SubPlan`, `loops ≥ 1000` | переписать на JOIN / LATERAL | warning |
-| `plan_jit_heavy` (факт) | `jit.totalMs > 0.5 × executionMs` | `SET jit = off` для сессии / роли или выше `jit_above_cost` | info |
+| `plan_seq_scan_filter` (факт) | Seq Scan, `(actual.rows + rowsRemovedByFilter) × loops ≥ 10 000`, `rowsRemovedByFilter ≥ 10 × actual.rows` | `CREATE INDEX CONCURRENTLY ON s.t (cols)` по колонкам фильтра; не разобрано — шаблон `(<columns>)` без hypopg. Сканы партиций под одним `Append` / `Merge Append` (от двух) объединяются в одну рекомендацию (`group_partitions`): `partitions`, `tables`, суммы строк, максимум `loops`, уровень — наибольший, `nodeIds` — все сканы, команда — строка `CREATE INDEX` на партицию, без `hypo` | warning |
+| `plan_index_filter` (факт) | Index Scan / Bitmap Heap Scan (по `recheckCond`), `rowsRemovedByFilter ≥ 10 × actual.rows`, `≥ 1000` | составной индекс: колонки `indexCond` + колонки `filter`; равенства раньше диапазонов | warning |
+| `plan_nested_loop_seq` (факт) | Nested Loop, внутренний ребёнок — Seq Scan с `loops ≥ 1000` | индекс по ключу соединения: колонки `filter` внутреннего узла, а если их нет — `joinFilter` Nested Loop (колонка берётся с той стороны сравнения, что относится к внутреннему узлу); `nodeIds` — [Nested Loop, Seq Scan] | warning |
+| `plan_misestimate` (факт) | флаг `misestimated` узла P3a (`estimateRatio ≥ 10` или `≤ 0.1`) при `max(planRows, actual.rows) ≥ 1000`; переоценка (`direction = over`) под `Limit` без блокирующего узла между ними (`early_stop_nodes`: Sort, Hash, Hashed SetOp, Aggregate не `Sorted`) не показывается | `ANALYZE s.t;` + `ALTER TABLE … ALTER COLUMN … SET STATISTICS 1000;` по колонкам условия + `CREATE STATISTICS` при двух колонках и больше; `ratio` — конечный (`max(actual,1) / max(plan,1)`, обращённый при < 1) | warning |
+| `plan_spill` (факт) | `sortSpaceType = Disk`, `hashBatches > 1`, `lossyHeapBlocks > 0` | сортировка и хеш: `SET work_mem = '<объём × 1,5, не больше 1 ГБ>kB';`, у сортировки по колонкам — индекс под `sortKey` в тексте эффекта; lossy bitmap: объём не считается (`lossyBlocks`, `exactBlocks`), команда — шаблон `SET work_mem = '<work_mem>';` | warning |
+| `plan_sort_limit` | правило на узле `Limit`: под ним Sort (допустим один `Gather Merge` между ними), вход Sort ≥ 100 × строк Limit — на одно выполнение Limit (`rows × loops / loops Limit`; без факта — по `planRows`); вход Sort — скан таблицы (над соединением или агрегатом молчит) | индекс под префикс ключей сортировки одного направления из простых колонок (выражение, `NULLS`, `COLLATE`, чужой alias, смена ASC / DESC обрывают список); нет колонок — шаблон `(<columns>)` без hypopg; `nodeIds` — [Sort, Limit] | info |
+| `plan_heap_fetches` (факт) | Index Only Scan, `heapFetches ≥ 0.1 × actual.rows × loops`, `≥ 1000` | `VACUUM s.t;` (карта видимости) | info |
+| `plan_no_pruning` | Append / Merge Append с ≥ 10 детьми-сканами и без `subplansRemoved`; факт: ≥ 50 % детей с `actual.rows = 0` | без команды: условие по ключу партиционирования; с фактом — warning, без факта — info (`evidencePlan`) | warning / info |
+| `plan_workers_short` (факт) | `workersLaunched < workersPlanned` | `SHOW max_parallel_workers;` `SHOW max_worker_processes;` | info |
+| `plan_subplan_per_row` (факт) | узел с `parentRelationship = SubPlan`, `loops ≥ 1000` | без команды: переписать на JOIN / LATERAL | warning |
+| `plan_jit_heavy` (факт) | `jit.totalMs / processes > 0.5 × executionMs`, `processes` = 1 + сумма `Workers Launched` всех Gather / Gather Merge (сервер складывает JIT всех процессов) | `SET jit = off;` для сессии / роли или выше `jit_above_cost`; `nodeIds` — корень | info |
 
-`evidence` — цифры узла (строки, отсев, loops, объём, время); `hypo.indexDdl` есть у `plan_seq_scan_filter`, `plan_index_filter`,
-`plan_nested_loop_seq`, `plan_sort_limit`, когда колонки разобраны. Блок `Recommendations` под сводкой плана: карточка на
-рекомендацию (заголовок, доказательство, команда с копированием, эффект, риски, «Проверить гипотезу», «Показать узел» —
-прокрутка и выделение в дереве).
+**Колонки** (`columns_of`, без парсера SQL): условие очищается от внешних скобок, делится по `AND` верхнего уровня (вложенные группы `AND`
+раскрываются, кавычки `'…'` и `"…"` учитываются); из конъюнкта берётся ведущий идентификатор `(alias.)?col`, если за ним идёт оператор
+`= <> != <= >= < > ~~ !~~ ~~* !~~* IS IN`; приведение снимается **только у текстовых типов** (`text`, `varchar` / `character varying`, `bpchar` /
+`character`, `name`, с модификатором длины или без), любое другое приведение (в том числе `::date` и массивы) и функции делают конъюнкт
+выражением без колонки; у ключа соединения `other.col op alias.col` колонка берётся справа; дубликаты убираются, равенства — раньше
+диапазонов. `hypo.indexDdl` (`CREATE INDEX ON s.t (cols)`, без `CONCURRENTLY` и `;`) есть у `plan_seq_scan_filter` (кроме
+сгруппированной), `plan_index_filter`, `plan_nested_loop_seq`, `plan_sort_limit`, когда колонки разобраны.
+
+**Блок `Recommendations`** под сводкой плана (`PlanView.afterSummary`; только у планов, полученных `explain`, у вставленного плана блока нет):
+заголовок с числом, «Советов нет», строка о пропущенных правилах; карточка на рекомендацию — уровень, заголовок, доказательство, команда с
+«Копировать команду» и пометкой, что приложение её не выполняет (у шаблона — ещё «замените <…> своими значениями»; шаблон узнаётся по
+точным токенам `<columns>` и `<work_mem>`), эффект, риски, «Проверить гипотезу» (только при `hypo`), «Показать узел»: выбирает первый узел,
+отмечает все `nodeIds` (полоса и метка «рекомендация», не только цвет), раскрывает свёрнутых предков и прокручивает к первому; клик по строке
+дерева снимает отметки. Рекомендация с неизвестным фронтенду `id` (нет всех четырёх ключей) — карточка «Рекомендация <id>» с советом обновить
+приложение и командой, без эффекта и рисков.
 
 ### 9.2 hypopg
 
 `hypo_check(id, { member, database, sql, params, searchPath, indexDdl }) -> HypoResult { indexName, estimatedBytes, costBefore,
-costAfter, used, planAfter: PlanTree }` на одном соединении `for_explain()`:
-`BEGIN READ ONLY` → `SET LOCAL …` → `SELECT indexrelid, indexname FROM hypopg_create_index($1)` → `SELECT hypopg_relation_size($1)`
-→ `EXPLAIN (FORMAT JSON[, GENERIC_PLAN]) <sql>` → `SELECT hypopg_reset()` → `ROLLBACK`. `used` — в `planAfter` есть узел с
-`indexName = indexName`. `indexDdl` проверяется: начинается с `CREATE INDEX`, без `CONCURRENTLY` (hypopg его не принимает),
-одна инструкция. Расширение не установлено в базе (`pg_extension`) — кнопка выключена с подсказкой (`errors.hypo.notInstalled`,
-`FEATURE_UNAVAILABLE`). `HypoCheck`: «стоимость была / стала», использован ли индекс, оценка размера, дерево «после».
+costAfter, used, planAfter: PlanTree }` на отдельном соединении `for_explain()`. Запрос — запуск, давший показанный план: фронтенд берёт
+`member`, `database`, `sql`, `params` и `searchPath` из сохранённого `ExplainRequest` этого запуска, а не из текущих полей формы; у плана с
+выполнением на реплике это реплика (там нужен пакет `hypopg`; работа на hot standby автотестами не проверена). Ход:
+1. Проверки до соединения: `explain::validate` над запросом в режиме «План» (пустой текст, длина, число `$N`, `search_path`, `GENERIC_PLAN`
+   на < 16 по версии из `head`) и `validate_ddl`: ровно `CREATE INDEX ON …` (без имени индекса, `UNIQUE`, `CONCURRENTLY`), вне кавычек
+   `'…'` / `"…"` нет `;`, `--`, `/*` и `$`, обратной косой черты нет нигде (иначе `E'\''` или `standard_conforming_strings = off` прятали бы
+   вторую инструкцию) — `errors.hypo.badDdl`.
+2. Схема расширения из `pg_extension` (нет — `errors.hypo.notInstalled`, `FEATURE_UNAVAILABLE`); функции `hypopg` вызываются с этой схемой.
+3. Стоимость «до» — проба `explain_in_tx` в своей транзакции `READ ONLY` с опциями пробы P3a (`probe_options`: `PROBE_OPTIONS` плюс
+   `GENERIC_PLAN`, когда параметры общие) и `Origin::new` с той же строкой опций.
+4. Одна транзакция `BEGIN READ ONLY` (`run::begin_tx`: `SET LOCAL statement_timeout`, `lock_timeout` и проверенный `search_path` запроса) →
+   `<schema>.hypopg_create_index($1)` → `<schema>.hypopg_relation_size(indexrelid)` → EXPLAIN «после» (`explain_in_open_tx`) →
+   `<schema>.hypopg_reset()` → `ROLLBACK`. Виртуальный индекс живёт в памяти сессии и переживает откат, поэтому сброс идёт до `ROLLBACK`
+   при любом исходе; если транзакция уже прервана и сброс в ней не прошёл, он повторяется после `ROLLBACK`. Сбой отката или повторного
+   сброса возвращается ошибкой (после более ранней ошибки шага). Истёк клиентский срок (`within`) — возврат сразу, соединение
+   закрывается без ожидания отката.
+5. `used` — в `planAfter` есть узел с `indexName = indexName`.
+
+Ошибки сервера при создании гипотезы — `errors.hypo.rejected` (`INVALID_INPUT`, `{{message}}`) для 42601, 42P01, 42703, 42704, 42883,
+42809, 42P17 и XX000 с сообщением «hypopg…»; остальное — обычным путём `from_pg`. Кнопка «Проверить гипотезу» есть у любой рекомендации с
+`hypo` (установлен ли `hypopg`, фронтенд заранее не проверяет): без расширения окно показывает `errors.hypo.notInstalled`. `HypoCheck` —
+модальное окно (фокус на «Закрыть», Tab в окне, Escape закрывает): команда, пояснение, «Стоимость: до → после», использован ли индекс,
+оценка размера, дерево «после». Публичные `check_on(client, req)`, `schema_of`, `hypothesize` — для `it_hypopg`, который на том же
+клиенте проверяет пустой `hypopg_list_indexes` после успешной проверки, после сбоя пробы «после» и после отвергнутой гипотезы.
 
 ### 9.3 Снимки
 
-Файл `data_dir/snapshots/<connectionId>/<member>/<yyyy-mm-ddThh-mm-ss>.json` (`write_private`, 0600; каталоги 0700):
+Файл `data_dir/snapshots/<connectionId>/<member>/<yyyy-mm-ddThh-mm-ss>.json` (время снятия в UTC; запись — `storage::fs::atomic_write`:
+временный файл 0600 → rename → fsync, так что список не видит недописанных файлов; каталоги `snapshots/`, `<id>/`, `<member>/` выставляются в
+0700 и тогда, когда уже существовали). Второй снимок узла в ту же секунду отклоняется (`errors.snapshots.exists`), а не заменяет первый.
 ```ts
 interface Snapshot {
   v: 1; takenAtMs: number; connection: { id: string; name: string }; member: string;
-  serverVersionNum: number; pgssVersion: string; statsResetMs: number | null; dealloc: number | null;
-  rows: QueryStat[];                     // все строки pgss, накопительно, без text
-  texts: Record<string, string>;         // queryId → текст для 500 верхних по totalExecMs
+  serverVersionNum: number; inRecovery: boolean; pgssVersion: string; statsResetMs: number | null; dealloc: number | null;
+  max: number; trackPlanning: boolean; hidden: boolean;   // отчёт «между снимками» без догадок о max и track_planning
+  kcache: boolean;                       // при снятии был pg_stat_kcache (поле без смены v; старые файлы — false)
+  rowCount: number;                      // для списка без разбора rows
+  rows: Cumulative[];                    // все строки pgss, накопительно, без текстов
+  texts: Record<string, string>;         // queryId → текст: 500 верхних по totalExecMs и 500 по calls, без повторов
+  truncated: string[];                   // queryId с текстом, обрезанным по QUERY_LIMIT
 }
 ```
-Команды: `snapshot_take(id, member) -> SnapshotInfo`, `snapshot_list(id) -> SnapshotInfo[]` (`{ file, member, takenAtMs, rows, bytes }`),
-`snapshot_delete(id, file)`, `snapshot_compare(id, from, to) -> Comparison`. Сравнение (`queries::compare`, по ключу):
-`new` (есть только в `to`), `gone` (только в `from`), `degraded` (`meanExecMs` ≥ ×2 при `calls ≥ 50` в обоих), `improved`
-(≤ ×0,5 при тех же условиях), `totals` обоих; `stats_reset` между снимками — предупреждение «статистика сбрасывалась, дельты
-неполны». Режим топа «между снимками» — `DiagData::Queries` из дельт `to − from` (счётчик уменьшился — берётся значение `to`),
-`coverageS` — разница времён, узел — узел снимка. Снимки разных узлов одного подключения сравнивать можно (primary и реплика)
-с пометкой; разных подключений — нет (список показывает только текущее). `SnapshotsPanel` в инструменте: список, «Сделать
-снимок», «Сравнить» (два выбранных), «Удалить», размер; `SnapshotCompare` — четыре списка с дельтами и переход в режим
-«между снимками».
+Тексты по вызовам добавлены к уточнению 5 плана: без них у частых дешёвых запросов (опрос узла самим приложением, кандидаты N+1) не было бы
+текста, и пометка `own` и N+1 «между снимками» ошибались бы. SQL снятия несёт метку `/* glafira */`.
+
+Адрес файла в командах — относительный путь `<member>/<имя>.json` (`valid_file`: ровно два обычных компонента, без `..` и обратной косой
+черты; id подключения — один компонент) → `errors.snapshots.badFile`. Команды: `snapshot_take(id, member) -> SnapshotInfo` (нет
+`pg_stat_statements` — `errors.queries.pgssMissing` / `pgssTooOld`); `snapshot_list(id) -> SnapshotInfo[]` (новые сверху, без открытого
+подключения; читается только заголовок файла); `snapshot_delete(id, file) -> bool` (`false` — файла уже не было; пустой каталог узла
+удаляется); `snapshot_compare(id, from, to) -> Comparison`. `SnapshotInfo { file, member, takenAtMs, rows: number | null, bytes, unreadable?:
+"tooLarge" | "corrupt" }`: файл больше `MAX_SNAPSHOT_BYTES` (128 МиБ) или не разбираемый в список попадает (время — из имени файла, узел —
+из каталога, размер — из `stat`), выбрать его нельзя, удалить можно; `read` такие файлы отклоняет (`errors.snapshots.tooLarge`, ошибка
+JSON), файл новее `SNAPSHOT_VERSION` — `errors.storage.newerSchema`. Снимки подключения удаляются вместе с ним (`remove_connection` в
+`delete_connection_full`; сбой — предупреждение в логе, удаление профиля не откатывается); в архив диагностики не входят (`write_archive` не
+читает `data_dir`).
+
+Пара читается `read_pair`: тот же файл дважды — `errors.snapshots.samePair`; снимки **разных узлов** отклоняются
+(`errors.snapshots.differentMembers`, `INVALID_INPUT`: счётчики не связаны), а не сравниваются с пометкой; порядок `from` / `to` любой —
+пара упорядочивается по времени (старший — начало). Сравнение (`queries::compare`, по ключу): `new` (есть только в `to`), `gone` (только в
+`from`), `degraded` (`meanExecMs` ≥ ×2 при `calls ≥ 50` — `COMPARE_*`), `improved` (≤ ×0,5 при тех же условиях), `totalsFrom` / `totalsTo`,
+`reset` — `stats_reset` различается («статистика сбрасывалась, надёжны только новые и исчезнувшие»). `before` — накопленное значение `from`,
+`after` — дельта; у строк — `text`, `textTruncated`, `own` из текстов снимков (свои строки не отбрасываются, фронтенд их приглушает).
+
+Режим топа «между снимками» — `run_diagnostic` с `queries.mode = { kind: "between", from, to }`; `diag::run` обрабатывает его до выбора
+цели диагностики (`report_between` строит `DiagReport` сам), поэтому **открытое подключение не нужно**, `member` запроса игнорируется, узел
+отчёта — узел снимков, `followsLeader = false`, шапка (версия, `inRecovery`, `observedAtMs`) — из снимка `to`. Строки — дельты `to − from`;
+ключ только в `to` или с уменьшившимися счётчиками — значение `to` целиком; после сброса — все строки `to` целиком; неизменившиеся строки
+отбрасываются. `coverageS` — `to.takenAt − from.takenAt`, а при сбросе между снимками — `to.takenAt − max(to.statsReset, from.takenAt)`
+(значок значит одно и то же с окном: время, за которое накоплены дельты); `ticks = null`; сброс — `unavailable{part: between,
+reason: betweenReset}`, скрытые чужие строки в `to` — `unavailable{others}`. Находки — как в режиме окна (`dealloc_grew` — рост `dealloc`
+без сброса). `minmax` нет: сортировки `maxTime` и `stddevTime` — `errors.queries.sortUnavailable`; `cpuTime` — только если оба снимка с
+`kcache` (иначе поля kcache снимаются с обеих сторон, `without_kcache`). Поиск — подстрока без учёта регистра по текстам снимков
+(`cached_matches`), на сервер не ходит. Пометка `own` — по тем же правилам, что в P3a.
+
+Интерфейс: кнопка «Снимки» в шапке инструмента (`aria-expanded`) открывает `SnapshotsPanel`: подсказка «хранятся только на этом
+компьютере», список (время, узел, строк, размер, метки нечитаемых), «Сделать снимок» (узел инструмента; неактивна без узла, то есть без
+подключения), выбор до двух (третий заменяет более ранний), «Сравнить» — только для двух читаемых снимков одного узла (разные узлы —
+пояснение, кнопка неактивна), «Удалить» с подтверждением в строке (Escape отменяет). `SnapshotCompare` — четыре списка, сброс, итоги
+вызовов, свои строки приглушены, CPU у новых и исчезнувших при данных kcache; «Топ между снимками» берёт пару, которая сравнивалась.
+В режиме «между снимками» над таблицей — «Между снимками узла {{member}}: A → B» (локальное время) и «Выйти из режима снимков»; значок
+«{{duration}} между снимками»; `query_texts` не вызывается; удаление снимка текущей пары выходит из режима. Без подключения инструмент
+показывает пометку о закрытом подключении, подсказку и панель снимков, а в режиме «между снимками» — отчёт; «С момента сброса» и окна в
+списке режимов неактивны.
 
 ### 9.4 Текстовые планы (`plan::from_text`) — в P3a
 
@@ -779,14 +852,41 @@ Memory Usage: … kB`, `Heap Blocks: exact=… lossy=…`, `Buffers: shared hit=
 
 ### 9.5 Расширения
 
-- **`pg_stat_kcache`** (`pg_extension` в базе подключения): `pg_stat_kcache()` соединяется с pgss по `(queryid, userid, dbid[, top])`;
-  2.2+ — `exec_user_time`, `exec_system_time`, `exec_reads`, `exec_writes` (байты); старше — `user_time`, `system_time`, `reads`,
-  `writes`. Поля `cpuUserMs`, `cpuSysMs`, `diskReadBytes`, `diskWriteBytes` в `QueryStat` и `Delta`; сортировка `cpuTime`;
-  колонки «CPU» и «Диск» в таблице и карточке.
-- **`pg_wait_sampling`**: `SELECT event_type, event, sum(count) FROM pg_wait_sampling_profile WHERE queryid = $1 GROUP BY 1, 2`
-  → `waits` с `source: "pgWaitSampling"`; `pg_wait_sampling.profile_queries = off` — подсказка в блоке; `pg_wait_sampling.profile_period`
-  — в подвале блока.
-Оба — только если установлены; иначе поведение P3a.
+- **`pg_stat_kcache`.** `detect` (P3a) вторым помеченным запросом `DETECT_KCACHE_SQL` читает версию и схему расширения, видимый роли
+  `shared_preload_libraries` и `has_function_privilege(… 'EXECUTE')` (через `to_regprocedure`, сломанное расширение даёт `false`);
+  `kcache_usable` отбрасывает расширение, если список preload виден и библиотеки в нём нет или нет права. Затем — проба
+  `SELECT 1 FROM <schema>.pg_stat_kcache() LIMIT 1` (`LIMIT 0` не вызвал бы функцию, и ошибка «must be loaded via shared_preload_libraries»
+  не сработала бы), в автокоммите; любая ошибка — расширения нет (лог debug), отчёт строится как без него. Итог — `KcacheCaps { schema,
+  exec_prefix, has_top }` в `PgssInstalled.kcache` (2.2+ — `exec_*` и `top`). `statements_sql(ns, caps, kcache, where)`: `LEFT JOIN
+  pg_stat_kcache() k ON (queryid, userid, dbid)` плюс `AND k.top = s.toplevel`; с pgss 1.8 (нет `toplevel`) и kcache 2.2+ — `AND k.top`,
+  иначе строки верхнего уровня и вложенные задвоили бы строку pgss (при `pg_stat_kcache.track = all` CPU вложенных инструкций тогда не
+  учитывается); старше 2.2 — `user_time`, `system_time`, `reads`, `writes` без `top`. Времена × 1000 → мс. Поля `cpuUserMs`, `cpuSysMs`,
+  `diskReadBytes`, `diskWriteBytes` (`Option`) в `Counters` / `QueryStat`; в дельте счётчик kcache, который уменьшился, берётся текущим
+  значением (у kcache свой `pg_stat_kcache_reset()`, его `decreased_from` pgss не видит); сортировка `cpuTime` = user + sys, доступна при
+  `PgssMeta.kcache`. Сэмплер кэширует `PgssInstalled`: при смене наличия kcache тик даёт дельты `without_kcache()` (новая база для колонок
+  kcache); установленное при работающем сэмплере расширение окно увидит после его перезапуска или ошибки чтения. Снимок хранит признак
+  `kcache` (§9.3). Интерфейс: колонки «CPU» (сортируемая) и «Чтение с диска» в таблице **скрыты**, когда `pgss.kcache = false` (а не
+  прочерки); карточка — метрики «CPU (user + sys)» и «Диск прочитано / записано» при `QueryDetail.kcache` (прочерк, если у запроса данных
+  нет); «Скопировать для LLM» — строки CPU и диска; при входе в режим «между снимками» сортировка `cpuTime` сбрасывается на `totalTime`.
+- **`pg_wait_sampling`.** `WAIT_SAMPLING_SQL` (помеченный, один запрос к каталогу при каждом чтении карточки): схема, `current_setting(
+  'pg_wait_sampling.profile_queries', true)` (NULL — библиотека не загружена), `shared_preload_libraries`, права на
+  `pg_wait_sampling_get_profile()` и `SELECT` на представление профиля, есть ли колонка `queryid` (её нет в 1.0). `wait_sampling_plan` →
+  `Skip` (нет расширения, прав, `queryid`, preload виден и без библиотеки, параметр не определён или неизвестен — карточка берёт сэмплы P3a
+  без пометки), `Off` (`none` / `off` / `no` / `false` / `0` — `unavailable{part: waitsProfile}`, текст `diag.unavailable.waitsProfileOff`,
+  ожидания из сэмплов), `Read` (`top` / `all` / `on` / `yes` / `true` / `1` без учёта регистра: перечисление 1.1.4+ и логический параметр
+  старых версий). Чтение: `SELECT COALESCE(event_type, 'CPU'), COALESCE(event, 'CPU'), sum(count) FROM <schema>.pg_wait_sampling_profile
+  WHERE queryid = $1 GROUP BY 1, 2` (сэмплы CPU при `sample_cpu = on` хранятся с NULL; сумма по pid и **по базам**: в профиле нет `dbid`,
+  ожидания одного `queryid` в разных базах складываются; при `top` ожидания вложенных инструкций приписаны верхней) → `waits` с
+  `source: "pgWaitSampling"`, `sinceMs: 0`, `coverageS: null`. `WaitProfiles` в `AppState` (`CloseListener`) кэширует готовый результат по
+  `(узел: id подключения, поколение, member; queryId)` на `WAIT_PROFILE_TTL_MS = 30 с`, включая «запроса в профиле нет»: сборщик расширения
+  отдаёт на каждый запрос весь профиль через `shm_mq`, и на стенде (≈ 360 тыс. строк) чтение стоит ≈ 65 мс. Ошибки состояния сервера
+  (классы 55 и 42, 58P01, XX000 с упоминанием `pg_wait_sampling` или `shared_preload_libraries`) запоминаются на
+  `WAIT_SAMPLING_RETRY_MS = 10 мин`, остальные (57014 и прочие) — нет; во всех случаях карточка берёт сэмплы, закрытое подключение — ошибка
+  карточки. Кэш чистится при закрытии подключения и удалении узла, ключ с поколением — переподключение начинает заново. Профиль
+  предпочитается сэмплам (`pick_waits`). У сэмплов P3a в `QueryWaits` появилось `coverageS` (`now − since`, `since` — позднее из «час назад»
+  и первого тика буфера). Подпись над таблицей: «Профиль pg_wait_sampling с момента его сброса» или «По сэмплам «Сессий» за {{coverageS}}».
+  `pg_wait_sampling.profile_period` в подвале блока не показывается (замысел спеки не реализован). Версия 1.0 пропускается без пометки.
+Оба расширения — только если установлены и пригодны; иначе поведение P3a.
 
 ### 9.6 Готовность
 
@@ -797,8 +897,14 @@ Memory Usage: … kB`, `Heap Blocks: exact=… lossy=…`, `Buffers: shared hit=
 - `readAllData` (P3a) — warning на 14+ без роли: «EXPLAIN запросов приложения требует права чтения таблиц: `GRANT pg_read_all_data`»;
   на 13 — warning без команды «нужны права SELECT на таблицы запросов»; суперпользователь — ok. Роль даёт только чтение:
   EXPLAIN запроса, который пишет, требует прав на запись и без выполнения (§8.3, п. 5);
-- P3b — подсказки к существующим пунктам расширений: hypopg — «для «Проверить гипотезу»», `pg_stat_kcache` — «CPU и диск
-  в топе», `pg_wait_sampling` — «точные ожидания запроса».
+- P3b — параметр `hint` у пунктов `extension` для `hypopg`, `pg_stat_kcache`, `pg_wait_sampling` (`HINTED`; у остальных трёх
+  необязательных расширений его нет). `TestPanel` у пункта не в состоянии ok показывает вместо общего `affects` текст
+  `readiness.extension.hints.<name>` (что даёт: «Проверка гипотез индексов («Проверить гипотезу» в плане)», «CPU и диск по запросам в
+  инструменте «Запросы»», «Точный профиль ожиданий запроса в карточке») и строкой ниже `readiness.extension.enable.<name>` — как включить:
+  hypopg — только `CREATE EXTENSION`, без preload и перезапуска; `pg_stat_kcache` — в `shared_preload_libraries` после
+  `pg_stat_statements`, перезапуск, `CREATE EXTENSION`, `EXECUTE` на `pg_stat_kcache()`, если его нет; `pg_wait_sampling` — preload,
+  перезапуск, `CREATE EXTENSION`, `profile_queries = top` (`on` в старых версиях), версия 1.1+, `EXECUTE` на функции профиля, если его нет.
+  `pg_monitor` этих прав не даёт, поэтому текст говорит «выдать, если нет».
 
 ---
 
@@ -807,7 +913,7 @@ Memory Usage: … kB`, `Heap Blocks: exact=… lossy=…`, `Buffers: shared hit=
 | Часть | Команды |
 |---|---|
 | P3a | `run_diagnostic(id, request)` с `tool: "queries"` и `queries: QueriesParams` → `DiagReport` (§4.5); `start_statements_sampler(id, member: Option<String>, channel: Channel<StatementsEvent>) -> SessionId` (останов — существующий `stop_session`); `query_texts(id, member, keys: QueryKey[]) -> QueryText[]`; `query_detail(id, member, database, queryId) -> QueryDetail`; `explain(id, request: ExplainRequest) -> ExplainResult`; `parse_plan(text: String) -> PlanTree`; `query_llm_bundle(id, member, database, source: LlmSource, plan: Option<PlanTree>) -> LlmBundle` (данные, §7.4; markdown собирает фронтенд) |
-| P3b | `explain` возвращает `recommendations`; `parse_plan` принимает текст; `hypo_check(id, request: HypoRequest) -> HypoResult`; `snapshot_take(id, member) -> SnapshotInfo`; `snapshot_list(id) -> SnapshotInfo[]`; `snapshot_delete(id, file) -> bool`; `snapshot_compare(id, from, to) -> Comparison` |
+| P3b | `explain` возвращает `recommendations` и `recommendationsSkipped`, `ExplainRequest` принимает `writeConfirmed: boolean` (serde default `false`, §8.3 п. 4); `hypo_check(id, request: HypoRequest) -> HypoResult` (§9.2); `snapshot_take(id, member) -> SnapshotInfo`; `snapshot_list(id) -> SnapshotInfo[]`; `snapshot_delete(id, file) -> bool`; `snapshot_compare(id, from, to) -> Comparison` (§9.3); режим «между снимками» — `run_diagnostic` с `queries.mode = { kind: "between", from, to }`, без открытого подключения; `QueryStat` / `PgssMeta` / `QueryDetail` — поля kcache (§9.5), `QueryWaits.coverageS`. Текстовые планы в `parse_plan` — уже в P3a (§9.4) |
 
 `member: None` у `start_statements_sampler` — «за лидером» на момент подписки, как у `start_sampler`. Все команды возвращают
 `Result<T, AppError>`; JSON — camelCase; `Option` → `null`; теги — `kind`. Типы фронтенда повторяют структуры
@@ -821,12 +927,12 @@ Tauri нет: данные сэмплера идут каналом подпис
 | code | Причина | Поведение UI |
 |---|---|---|
 | `EXPLAIN_WRITES` (новый, P3a) | SQLSTATE 25006 в `READ ONLY` (ярус чтения или пробный план): запрос, признанный чтением, пытается писать (`errors.explain.writes`) | Сообщение и кнопка «Выполнить как запись»: повторяет запрос с `forceWrite` (§8.3, п. 4) → ярус записи с подтверждением |
-| `FEATURE_UNAVAILABLE` | Ярус записи на реплике (`errors.explain.writeOnReplica`); hypopg не установлен (`errors.hypo.notInstalled`); `GENERIC_PLAN` на < 16 (`errors.explain.genericUnsupported`); pgss исчез у сэмплера | Подсказка у кнопки; сэмплер — событие `error` и остановка |
+| `FEATURE_UNAVAILABLE` | Ярус записи на реплике (`errors.explain.writeOnReplica`); hypopg не установлен (`errors.hypo.notInstalled`, показывается в окне проверки); снимок без `pg_stat_statements` (`errors.queries.pgssMissing` / `pgssTooOld`); `GENERIC_PLAN` на < 16 (`errors.explain.genericUnsupported`); pgss исчез у сэмплера | Подсказка у кнопки; сэмплер — событие `error` и остановка |
 | `NOT_AUTHORIZED` (42501) | Нет прав на таблицы запроса при EXPLAIN (`errors.explain.notAuthorized`, подсказка `pg_read_all_data`; у INSERT / UPDATE / DELETE / MERGE / CREATE — `errors.explain.notAuthorizedWrite`, права на запись нужны и без выполнения) | Сообщение с подсказкой; пункт готовности `readAllData` |
 | `TIMEOUT` (57014) | EXPLAIN ANALYZE не уложился в срок (`errors.explain.timeout`); пробный план — в 15 с (тот же `errors.explain.timeout`) | «План не получен за отведённое время; выполнение прервано, изменений нет» |
-| `INVALID_INPUT` | Вторая инструкция (`errors.explain.oneStatement`), число параметров (`paramsCount`), ошибки сервера классов 42 и 22 — синтаксис, неизвестные объекты, значения параметров (`errors.explain.server` с `params.message`, `details: "position N"`), пустой запрос, слишком длинный запрос (`sqlTooLong`), `GENERIC_PLAN` с ANALYZE (`genericAnalyze`), `forceWrite` не с ANALYZE (`forceWritePlan`), срок вне 5…600, `search_path` с недопустимыми символами (`badSearchPath`), сортировка вне версии (`errors.queries.sortUnavailable`), отчёт без `queries`, `indexDdl` не `CREATE INDEX` (`errors.hypo.badDdl`), снимки разных подключений (`errors.snapshots.foreign`) | Сообщение у формы; позиция ошибки подсвечивается в консоли |
-| `READ_ONLY`, `CONFIRMATION_REQUIRED` | Guard яруса записи (как P2); `READ_ONLY` также при SQLSTATE 25006 вне `READ ONLY` — сервер не принимает запись в сеансе (`errors.explain.serverReadOnly`) | Кнопки нет / диалог подтверждения; «как запись» не предлагается |
-| `NOT_FOUND` | Файл снимка исчез (`errors.snapshots.notFound`) | Список перечитывается |
+| `INVALID_INPUT` | Вторая инструкция (`errors.explain.oneStatement`), число параметров (`paramsCount`), ошибки сервера классов 42 и 22 — синтаксис, неизвестные объекты, значения параметров (`errors.explain.server` с `params.message`, `details: "position N"`), пустой запрос, слишком длинный запрос (`sqlTooLong`), `GENERIC_PLAN` с ANALYZE (`genericAnalyze`), `forceWrite` не с ANALYZE (`forceWritePlan`), срок вне 5…600, `search_path` с недопустимыми символами (`badSearchPath`), сортировка вне версии (`errors.queries.sortUnavailable`), отчёт без `queries`, `indexDdl` не одна инструкция `CREATE INDEX ON …` без `CONCURRENTLY`, комментариев, `$` и обратной косой черты (`errors.hypo.badDdl`), сервер отверг гипотезу — 42601, 42P01, 42703, 42704, 42883, 42809, 42P17 и XX000 «hypopg…» (`errors.hypo.rejected`, `params.message`), неверный путь снимка (`errors.snapshots.badFile`), снимки разных узлов (`errors.snapshots.differentMembers`), один снимок дважды (`errors.snapshots.samePair`), снимок узла в ту же секунду (`errors.snapshots.exists`), файл снимка больше 128 МиБ (`errors.snapshots.tooLarge`). Снимков разных подключений команды не принимают по построению (адрес — внутри каталога подключения), ключа `errors.snapshots.foreign` нет | Сообщение у формы; позиция ошибки подсвечивается в консоли |
+| `READ_ONLY`, `CONFIRMATION_REQUIRED` | Guard яруса записи (как P2); `CONFIRMATION_REQUIRED` также без флага `writeConfirmed` (`errors.explain.writeNotConfirmed`, P3b): `forceWrite` — в `validate` до соединения, ярус записи по пробе — после пробы `READ ONLY` и до выполнения, на любом окружении; `READ_ONLY` также при SQLSTATE 25006 вне `READ ONLY` — сервер не принимает запись в сеансе (`errors.explain.serverReadOnly`) | Кнопки нет / диалог подтверждения; «как запись» не предлагается |
+| `NOT_FOUND` | Файл снимка исчез (`errors.snapshots.notFound`) | Сообщение в панели снимков, список перечитывается |
 | `NODE_UNAVAILABLE` | Узел недоступен или подключение закрыто за время EXPLAIN | Как в P2 |
 | `RECOVERY_CONFLICT` | EXPLAIN ANALYZE на реплике отменён конфликтом recovery | Как в P2, `retryable` |
 
@@ -843,14 +949,14 @@ Tauri нет: данные сэмплера идут каналом подпис
 ```
 crates/pg-advisor/src/  pgss.rs  queries/{mod,rules}.rs  plan/{mod,json,text_out,text_in}.rs
                         plan/text_in.rs (из P3b, §9.4)
-                        P3b: queries/compare.rs  plan_rules/{mod, seq_scan, index_filter, …}.rs
+                        P3b: queries/compare.rs  plan_rules/{mod,scan,exec}.rs
 crates/pg-advisor/tests/fixtures/plans/{json,text}/  (PG 13–18, по правилу — положительная и отрицательная)
 src-tauri/src/   sampler/statements.rs  diag/{queries,query_detail}.rs  explain/{mod,run,params,tier,llm}.rs
-                 commands/{queries,explain}.rs   P3b: explain/hypopg.rs  snapshots/{mod,store,compare}.rs  commands/snapshots.rs
+                 commands/{queries,explain}.rs   P3b: explain/hypopg.rs  snapshots/{mod,store}.rs  commands/snapshots.rs
 src-tauri/tests/ it_queries.rs  it_explain.rs   P3b: it_hypopg.rs  it_snapshots.rs
 src/components/queries/  QueriesView QueryTab QueryOverview QueryPlan ExplainTab Sparkline CopyLlmButton queriesText
                          plan/{PlanTree,PlanView,PlanRunner,PlanNodeDetails,PlanSummary,ParamsForm,AnalyzeConfirm,planText}
-                         P3b: Recommendations HypoCheck SnapshotsPanel SnapshotCompare
+                         P3b: plan/{Recommendations,HypoCheck,recommendText}  SnapshotsPanel SnapshotCompare
 src/lib/  useStatementsSampler.ts  useQueriesReport.ts  useQueryDetail.ts  useExplain.ts  llmMarkdown.ts
 dev/perf/  Dockerfile  20-init.sql  heavy.sql  README.md
 docs/guide/{en,ru}/queries.md
@@ -898,13 +1004,20 @@ Scan по `balances`, коррелированный подзапрос на с�
 nested loop, параллельный план с воркерами, CTE и InitPlan, Append по партициям, Sort на диске, JIT, триггеры, план без ANALYZE,
 `never executed`) — числа узлов, собственное время, горячие узлы, ошибка оценки, `extra`; `to_text` — проверки подстроками (golden-текстов нет), JIT без времён (без ANALYZE и `TIMING OFF`); `plan::text_in` — пары JSON / текст
 (psql обычный и с `+`, ANALYZE + BUFFERS, `TIMING OFF`, `never executed`, параллельный Gather, auto_explain), круговой тест; `queries::rules` — исключение `own`.
-P3b: каждое правило — положительная и отрицательная фикстура; `from_text` на парах JSON / текст; `compare` (новые, исчезнувшие,
-деградировавшие, ускорившиеся, сброс между снимками).
+P3b: каждое правило — положительные и отрицательные unit-случаи на построенных узлах (пороги, `never executed`, `Limit`, Gather Merge,
+JIT-объект PG 17+, параллельный JIT), `columns_of` (вложенные `AND`, кавычки, текстовые и прочие приведения, ключ соединения справа);
+`tests/plans.rs::analyze_fixtures_trigger_expected_recommendations` — восемь фикстур `*_analyze` с `pg-perf` дают ожидаемые правила
+(три фикстуры пересняты в P3b, запросы — в комментарии теста и в скрипте плана P3a), `partition_grouping_and_parallel_jit_on_fixtures`;
+пары JSON / текст — в P3a; `compare` (новые, исчезнувшие, деградировавшие, ускорившиеся, сброс между снимками, уменьшившиеся счётчики);
+kcache в `Counters` (сложение, дельта, сброс kcache, `without_kcache`, сортировка `cpuTime`).
 
 **`src-tauri` (unit):** `StatementsBuffer` — дельты, первый тик без дельт, вытеснение ключа, смена `stats_reset`, предел записей
 (вытеснение целыми тиками), суммы по окнам и покрытие; `explain::tier` — `ModifyTable` в корне и в CTE, `CREATE`, комментарии
 перед первым словом; `explain::params::count_params` (лексер PostgreSQL: литералы, идентификаторы, комментарии, долларовые кавычки, предел 65 535); `llm` — состав markdown и пределы; SQL по `PgssCaps` — снимки текста запросов
-(`snapshots/diag-sql/`, как P2); `ActionRecord` с `explain`; P3b: формат файла снимка, права 0600, листинг, удаление.
+(`snapshots/diag-sql/`, как P2); `ActionRecord` с `explain`; P3b: формат файла снимка, права 0600 / 0700, листинг (заголовок, нечитаемые
+файлы), удаление и удаление с подключением, отказ в ту же секунду, порядок пары, покрытие после сброса, режим «между снимками» без
+подключения; `validate_ddl` (обход через `;` в кавычках, комментарии, `$`, обратная косая черта); `ensure_write_confirmed`;
+`statements_sql` с kcache по версиям и проба; `wait_sampling_plan`, кэш профиля и ошибок, `pick_waits`; `readiness` — `hint`.
 
 **Интеграция** (`GPG_IT_PERF=localhost:5471`; без переменной тест пропускается, как с матрицей `GPG_IT_MATRIX`; на CI — workflow `perf`, §13.3):
 - `it_queries`: отчёт «с момента сброса» под нагрузкой — строки, итоги, тексты по ключам, `Unavailable{others}` под ролью без
@@ -918,8 +1031,14 @@ P3b: каждое правило — положительная и отрица�
   с подтверждением — выполнен и откатан (число строк не изменилось), строка журнала `explainAnalyze`; volatile-функция с записью
   в ярусе чтения → `EXPLAIN_WRITES`; две инструкции → `INVALID_INPUT`; `pg_sleep` сверх срока → `TIMEOUT`; read-only профиль →
   `READ_ONLY` на ярусе записи, ярус чтения работает; на реплике (`gp-pg-replica`) ярус записи → `FEATURE_UNAVAILABLE`.
-- P3b `it_hypopg`: индекс-гипотеза снижает стоимость и используется; `hypopg_reset` оставляет сессию чистой; без расширения —
-  `FEATURE_UNAVAILABLE`. `it_snapshots`: снять два снимка под нагрузкой, сравнить, режим «между снимками».
+- P3b `it_hypopg` (2 теста): индекс-гипотеза снижает стоимость и используется; `hypopg_list_indexes` пуст на том же клиенте после
+  успешной проверки, после сбоя пробы «после» и после отвергнутой гипотезы (`errors.hypo.rejected`); неквалифицированные имена работают с
+  `search_path` запроса и не работают без него. `it_explain`: без ANALYZE пропущено 9 правил, ANALYZE `shop.orders WHERE status = $1`
+  даёт `plan_seq_scan_filter`; `forceWrite` и ANALYZE `UPDATE` без `writeConfirmed` отклонены без записи журнала, с флагом — выполнены
+  и откатаны. `it_snapshots`: снимок 0600, порядок списка, сравнение в обоих порядках, режим «между снимками» после отключения (строки,
+  покрытие, тексты, своя строка, `pgss.max`, CPU), поиск, отказ сортировки по stddev, удаление и `notFound`. `it_queries`:
+  `kcache_columns_on_perf` (на `pg-perf` CPU и сортировка, на `pg-lab` — `sortUnavailable` и без kcache),
+  `wait_sampling_profile_on_perf` (профиль, `sinceMs = 0`, повторное чтение из кэша без вызова профиля).
 
 **Фронтенд (vitest):** `QueriesView` — режимы, покрытие, пустое окно, серые сортировки, `unavailable`, открытие карточки;
 `QueryTab` — обзор без буфера, таблицы после плана, выбор источника текста; `PlanTree` — развёртка, горячие узлы, пометки
@@ -927,7 +1046,8 @@ P3b: каждое правило — положительная и отрица�
 записи; `findingText` для новых находок; `pnpm i18n:check`.
 
 **Смоук GUI** на `pg-perf` под `heavy.sql` — чек-лист в плане (`docs/smoke/`): топ в обоих режимах, карточка, план и ANALYZE
-обоих ярусов, консоль, «для LLM»; P3b — рекомендации по каждому сценарию, hypopg, снимки.
+обоих ярусов, консоль, «для LLM»; P3b — `docs/smoke/p3b.md`: рекомендации по каждому правилу (запросы консоли, а не только `heavy.sql`),
+hypopg (на реплике — шаг «проверить»), снимки, kcache, `pg_wait_sampling`, подсказки готовности.
 
 ### 13.3 CI
 
@@ -935,7 +1055,8 @@ P3b: каждое правило — положительная и отрица�
 в CI. Интеграционные тесты идут в job `linux` (`.github/workflows/ci.yml`) на каждый push, но без `GPG_IT_PERF`: части
 `it_queries` и `it_explain` на `pg-perf` там пропускаются. Сервис `pg-perf` — в профиле `perf` (образ собирается из пакетов PGDG на
 каждом запуске), и тесты на нём гоняет отдельный workflow `.github/workflows/perf.yml` — по расписанию (ночью) и по
-`workflow_dispatch`: стенд с профилями `matrix` и `perf`, `scripts/wait-perf.sh`, `--test it_queries --test it_explain`. macOS и
+`workflow_dispatch`: стенд с профилями `matrix` и `perf`, `scripts/wait-perf.sh`, `--test it_queries --test it_explain --test it_hypopg
+--test it_snapshots` (P3b; там же `GPG_IT_LAB` для части «без kcache»). macOS и
 Windows — только unit-тесты и сборка. Фикстуры планов — в репозитории. Решение владельца — §15, п. 16.
 
 ---
@@ -951,6 +1072,9 @@ Windows — только unit-тесты и сборка. Фикстуры пл�
   (путь, 0600, удаление из приложения).
 - `dev/perf/README.md` — сервис, нагрузка, роли.
 - `docs/guide/*/diagnostics.md` — ссылка на новую главу; `CHANGELOG.md` — при релизе.
+- P3b: разделы главы «Запросы» `{#recommendations}`, `{#snapshots}`, `{#extensions}`; `docs/admin.md` — необязательные расширения
+  (preload, перезапуск, `CREATE EXTENSION`, `profile_queries`, права `EXECUTE`), нагрузка kcache / `pg_wait_sampling` / hypopg, `writeConfirmed`,
+  снимки в «Данные и логи»; смоук — `docs/smoke/p3b.md`.
 
 ---
 
@@ -1041,6 +1165,41 @@ Windows — только unit-тесты и сборка. Фикстуры пл�
     кнопка «План (общий)» при `GENERIC_PLAN`; режим запуска в сводке; отказы и ошибки — красной плашкой без плана прошлого запуска;
     подсказка «Выполняется экземпляр (PID …) — взять его текст»; в окне подтверждения без таблиц — «Данные изменятся и откатятся.».
 
+20. **Решения по ходу реализации P3b (2026-10-30 — 2026-11-01).** Решения контролёра плана по вопросам исполнителей и ревью; текст §9–§13
+    уже приведён к ним:
+    (а) *JIT по процессам* (§9.1): сервер складывает время JIT лидера и воркеров и сравнивает с временем по часам, поэтому
+    `plan_jit_heavy` срабатывал почти на любом параллельном плане; время JIT делится на число процессов (1 + запущенные воркеры), `jitMs`
+    в параметрах — как отдал сервер, плюс `processes`.
+    (б) *Группировка сканов партиций* (§9.1): `plan_seq_scan_filter` на каждой партиции давал по рекомендации на партицию (24 на стенде);
+    сканы под одним `Append` объединяются в одну рекомендацию со строкой `CREATE INDEX` на партицию и без гипотезы.
+    (в) *Приведения в колонках* (§9.1, уточнение 1 плана): снимается только приведение к текстовому типу; `::date` и прочие делают условие
+    выражением — индекс по самой колонке такому условию не помогает, а команда вводила бы в заблуждение.
+    (г) *Шаблоны команд*: нет колонок — `(<columns>)`, lossy bitmap — `SET work_mem = '<work_mem>';` (объём битовой карты по страницам heap
+    не считается), без гипотезы; фронтенд узнаёт шаблон по этим токенам и просит заменить `<…>`.
+    (д) *«Показать узел»* отмечает все `nodeIds` (Sort и Limit, Nested Loop и скан, все партиции), а не только первый.
+    (е) *Неизвестное правило* — карточка с `id`, командой и советом обновить приложение, а не пустой текст.
+    (ж) *hypopg* (§9.2): одна транзакция `READ ONLY` с `search_path` запроса, `hypopg_reset()` до `ROLLBACK` (и повтор после, если
+    транзакция прервана); проверка DDL — одна инструкция `CREATE INDEX ON`, без комментариев, `$` и обратной косой черты; запрос — сохранённый
+    запуск, а не текущие поля формы. На реплике проверка идёт на реплике и требует там пакет `hypopg`; работа на hot standby автотестами не
+    проверена (смоук P3b, шаг 13 — «проверить»).
+    (з) *`writeConfirmed`* (п. 17): ярусу записи нужен флаг из окна подтверждения на любом окружении; `forceWrite` без флага отклоняется до
+    соединения, ярус записи, найденный пробой, — после пробы `READ ONLY` и до выполнения (раньше пробы ярус неизвестен).
+    (и) *Снимки* (§9.3): отказ при втором снимке узла в ту же секунду (а не замена); пара в любом порядке; снимки разных узлов — отказ
+    (`differentMembers`), а не сравнение с пометкой; нечитаемые файлы видны в списке и удаляются; снимки удаляются вместе с подключением;
+    в архив диагностики не входят; режим «между снимками» работает без открытого подключения; покрытие — время между снимками, а при сбросе —
+    от сброса до второго снимка (п. 12: значок значит одно — время, за которое накоплены дельты); тексты — 500 верхних по времени и 500 по
+    вызовам.
+    (к) *`pg_stat_kcache`* (§9.5): колонки только при пригодном расширении (проверка каталога и пробный вызов, иначе — как без него, чтобы
+    одно сломанное необязательное расширение не ломало топ); «между снимками» — только если оба снимка с kcache; с pgss 1.8 и kcache ≥ 2.2
+    join по `k.top` — учитывается CPU только верхнего уровня; без расширения колонок нет (а не прочерки).
+    (л) *`pg_wait_sampling`* (§9.5): `profile_queries` — перечисление `none` / `top` / `all` (логический `on` / `off` в старых версиях),
+    версия 1.1+ (колонка `queryid`); профиль кэшируется на 30 с на запрос и узел, ошибки состояния сервера — на 10 мин; при недоступности —
+    сэмплы «Сессий»; ожидания одного `queryid` суммируются по базам; подпись источника и охвата над таблицей.
+    (м) *Готовность* (§9.6): кроме «что даёт» — строка «как включить» (`readiness.extension.enable.<name>`), тексты подсказок оставлены
+    дословно.
+    (н) *Фикстуры* `index_only_heap_fetches_analyze`, `parallel_jit_analyze`, `append_partitions_analyze` пересняты другими запросами
+    (поправка 3 плана P3b); скрипт снятия в плане P3a обновлён.
+
 ---
 
 ## 16. Критерии готовности
@@ -1066,6 +1225,9 @@ Windows — только unit-тесты и сборка. Фикстуры пл�
 
 **P3b:**
 1. Каждое из 11 правил срабатывает на своей фикстуре и на своём запросе `heavy.sql` и молчит на отрицательной фикстуре.
+   *Уточнение по реализации:* на стенде часть правил срабатывает не на запросе `heavy.sql`, а на запросе консоли из смоука P3b, шаг 5
+   (`heavy.sql` даёт Bitmap Heap Scan вместо Index Only Scan, фильтр `events` не по ключу партиционирования, JIT ниже порога); `plan_nested_loop_seq`
+   стендом не воспроизводится и проверяется unit-тестами; отрицательные случаи — unit-тесты на построенных узлах.
 2. «Проверить гипотезу» показывает стоимость «была / стала», использование индекса и размер; сессия после проверки чиста.
 3. Снимок снимается и хранится с правами 0600; два снимка сравниваются; режим «между снимками» строит топ.
 4. ~~Текстовые планы psql с PG 13–18 разбираются в то же дерево, что JSON.~~ Выполнено в P3a (решение владельца 2026-11-01, §15 п. 19).
