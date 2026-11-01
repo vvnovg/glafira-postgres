@@ -769,6 +769,8 @@ export interface RunningInstance {
 export interface QueryWaits {
   source: "sampler" | "pgWaitSampling";
   sinceMs: number;
+  /** Сколько секунд охватывают сэмплы (не больше часа); у профиля pg_wait_sampling — null. */
+  coverageS: number | null;
   total: number;
   items: { eventType: string; event: string | null; count: number; sharePct: number }[];
 }

@@ -820,6 +820,26 @@ async fn wait_sampling_profile_on_perf() {
                 assert_eq!(w.source, query_detail::WaitsSource::PgWaitSampling);
                 assert_eq!(w.since_ms, 0);
                 assert!(w.total > 0 && !w.items.is_empty());
+                // Повторный опрос карточки в пределах TTL берёт прочитанный профиль, а не читает его заново: число
+                // вызовов чтения профиля в pgss не растёт.
+                let su = common::superuser(&perf, "perf").await;
+                let reads = || async {
+                    su.query_one(
+                        "SELECT COALESCE(sum(calls), 0)::bigint FROM pg_stat_statements \
+                         WHERE query LIKE '%pg_wait_sampling_profile WHERE queryid%'",
+                        &[],
+                    )
+                    .await
+                    .unwrap()
+                    .get::<_, i64>(0)
+                };
+                let before = reads().await;
+                assert!(before > 0, "профиль читался");
+                let again = query_detail::detail(&st, "it", &member, "perf", top.key.query_id)
+                    .await
+                    .unwrap();
+                assert_eq!(again.waits.as_ref(), Some(w));
+                assert_eq!(reads().await, before, "второй опрос — из кеша");
             }
             None => assert!(
                 detail.unavailable.iter().any(|u| u.part == "waitsProfile"),

@@ -46,6 +46,8 @@ pub struct AppState {
     pub actions: Arc<crate::actions::journal::ActionJournal>,
     /// Снимки `pg_stat_statements` (`snapshots/` в каталоге данных; P3b).
     pub snapshots: Arc<crate::snapshots::SnapshotStore>,
+    /// Кеши профиля `pg_wait_sampling` карточек запросов (P3b): прочитанные профили и ошибки чтения по узлам.
+    pub wait_profiles: Arc<crate::diag::query_detail::WaitProfiles>,
 }
 
 impl AppState {
@@ -76,6 +78,8 @@ impl AppState {
         let runtimes = Runtimes::new(live.clone(), pools.clone(), tunnels.clone());
         let counters = Arc::new(CounterMemory::default());
         runtimes.add_close_listener(counters.clone());
+        let wait_profiles = Arc::new(crate::diag::query_detail::WaitProfiles::default());
+        runtimes.add_close_listener(wait_profiles.clone());
         let sessions = Arc::new(SessionRegistry::default());
         let samplers = SamplerRegistry::new(
             Activity {
@@ -105,6 +109,7 @@ impl AppState {
             secrets_lock: Arc::new(std::sync::Mutex::new(())),
             actions: Arc::new(crate::actions::journal::ActionJournal::new(data_dir)),
             snapshots: Arc::new(crate::snapshots::SnapshotStore::new(data_dir)),
+            wait_profiles,
         })
     }
 

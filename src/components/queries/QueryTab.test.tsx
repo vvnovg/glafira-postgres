@@ -22,7 +22,7 @@ const detail = (patch: Partial<QueryDetail> = {}): QueryDetail => ({
   totals: { calls: 4000, totalExecMs: 2000, rows: 0 }, byUser: [{ rolname: "app", toplevel: true, stat }],
   history: [{ atMs: 1, calls: 10, totalExecMs: 5, meanExecMs: 0.5 }, { atMs: 60_001, calls: 20, totalExecMs: 10, meanExecMs: 0.5 }], gaps: [],
   running: [{ pid: 42, backendStartUs: 1, state: "active", startedMs: 1, durationS: 3.5, waitEventType: "IO", waitEvent: "DataFileRead", usename: "app", applicationName: "api", clientAddr: "10.0.0.5", query: "SELECT * FROM shop.customers WHERE id = 15", truncated: false }],
-  waits: { source: "sampler", sinceMs: 0, total: 10, items: [{ eventType: "IO", event: "DataFileRead", count: 7, sharePct: 70 }, { eventType: "CPU", event: null, count: 3, sharePct: 30 }] },
+  waits: { source: "sampler", sinceMs: 0, coverageS: 3600, total: 10, items: [{ eventType: "IO", event: "DataFileRead", count: 7, sharePct: 70 }, { eventType: "CPU", event: null, count: 3, sharePct: 30 }] },
   findings: [], unavailable: [], serverVersionNum: 170_000, inRecovery: false, pgssVersion: "1.11", trackPlanning: true, kcache: false, ...patch,
 });
 
@@ -46,7 +46,7 @@ describe("QueryTab", () => {
     expect(screen.getByRole("table", { name: "Метрики" })).toHaveTextContent("60");
     expect(screen.getByRole("table", { name: "Выполняющиеся экземпляры" })).toHaveTextContent("42");
     expect(screen.getByRole("table", { name: "Ожидания" })).toHaveTextContent("IO:DataFileRead");
-    expect(screen.getByText("По сэмплам «Сессий», 60 мин")).toBeInTheDocument();
+    expect(screen.getByText("По сэмплам «Сессий» за 1 ч")).toBeInTheDocument();
     expect(screen.getByText("Таблицы появятся после первого плана")).toBeInTheDocument();
     expect(api.startStatementsSampler).toHaveBeenCalledWith("c", "pg-1", expect.any(Function));
     // «Открыть в консоли» подставляет текст в консоль подключения.
@@ -269,7 +269,7 @@ describe("QueryTab", () => {
 
   it("pg_wait_sampling: подпись источника ожиданий; выключенный profile_queries — пометка с подписью части", async () => {
     vi.mocked(api.queryDetail).mockResolvedValue(
-      detail({ waits: { source: "pgWaitSampling", sinceMs: 0, total: 4, items: [{ eventType: "IO", event: "DataFileRead", count: 4, sharePct: 100 }] } }),
+      detail({ waits: { source: "pgWaitSampling", sinceMs: 0, coverageS: null, total: 4, items: [{ eventType: "IO", event: "DataFileRead", count: 4, sharePct: 100 }] } }),
     );
     const { unmount } = renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
     expect(await screen.findByText("Профиль pg_wait_sampling с момента его сброса")).toBeInTheDocument();
@@ -289,7 +289,15 @@ describe("QueryTab", () => {
     expect(
       await screen.findByText("Профиль ожиданий (pg_wait_sampling): pg_wait_sampling.profile_queries выключен, ожидания — по сэмплам «Сессий»"),
     ).toBeInTheDocument();
-    expect(screen.getByText("По сэмплам «Сессий», 60 мин")).toBeInTheDocument();
+    expect(screen.getByText("По сэмплам «Сессий» за 1 ч")).toBeInTheDocument();
+  });
+
+  it("сэмплер работает меньше часа — подпись ожиданий с фактическим охватом", async () => {
+    vi.mocked(api.queryDetail).mockResolvedValue(
+      detail({ waits: { source: "sampler", sinceMs: 0, coverageS: 600, total: 1, items: [{ eventType: "CPU", event: null, count: 1, sharePct: 100 }] } }),
+    );
+    renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
+    expect(await screen.findByText("По сэмплам «Сессий» за 10 мин")).toBeInTheDocument();
   });
 
   it("подключение закрыто — карточка не читает сервер", async () => {

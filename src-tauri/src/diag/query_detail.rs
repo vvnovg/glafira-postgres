@@ -3,7 +3,7 @@
 //! а без него — из буфера сэмплера активности.
 
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex};
 
 use pg_advisor::ash::Sample;
 use pg_advisor::findings::Finding;
@@ -28,6 +28,7 @@ use crate::product::SQL_MARKER;
 use crate::sampler::statements::{HistoryPoint, KeysWindow, StatementsBuffer};
 use crate::state::AppState;
 use crate::sync::MutexExt;
+use crate::topology::runtime::CloseListener;
 
 /// История и ожидания — за последний час.
 const LOOKBACK_MS: i64 = 3_600_000;
@@ -74,6 +75,9 @@ pub struct WaitItem {
 pub struct QueryWaits {
     pub source: WaitsSource,
     pub since_ms: i64,
+    /// Сколько секунд охватывают сэмплы (от `since_ms` до момента чтения; не больше часа). У профиля — `None`
+    /// (накопительный с его сброса, время сброса профиль не хранит).
+    pub coverage_s: Option<i64>,
     pub total: u64,
     pub items: Vec<WaitItem>,
 }
@@ -194,6 +198,14 @@ pub fn window_stat(w: &KeysWindow, key: QueryKey) -> QueryStat {
     stat(key, None, None, &w.sum, None, &w.totals)
 }
 
+/// Порядок строк ожиданий: больше сэмплов — выше, при равенстве — по типу и событию.
+fn by_samples(a: &WaitItem, b: &WaitItem) -> std::cmp::Ordering {
+    b.count
+        .cmp(&a.count)
+        .then_with(|| a.event_type.cmp(&b.event_type))
+        .then_with(|| a.event.cmp(&b.event))
+}
+
 /// Ожидания запроса из сэмплов активности: группировка по типу и событию; активные без ожидания — `CPU`.
 pub fn waits_of(samples: &[Sample<'_>], query_id: i64, since_ms: i64) -> Option<QueryWaits> {
     let mut groups: HashMap<(String, Option<String>), u64> = HashMap::new();
@@ -221,15 +233,11 @@ pub fn waits_of(samples: &[Sample<'_>], query_id: i64, since_ms: i64) -> Option<
             share_pct: count as f64 * 100.0 / total as f64,
         })
         .collect();
-    items.sort_by(|a, b| {
-        b.count
-            .cmp(&a.count)
-            .then_with(|| a.event_type.cmp(&b.event_type))
-            .then_with(|| a.event.cmp(&b.event))
-    });
+    items.sort_by(by_samples);
     Some(QueryWaits {
         source: WaitsSource::Sampler,
         since_ms,
+        coverage_s: None,
         total,
         items,
     })
@@ -238,6 +246,8 @@ pub fn waits_of(samples: &[Sample<'_>], query_id: i64, since_ms: i64) -> Option<
 /// Профиль `pg_wait_sampling` запроса по типу и событию, сумма по процессам (`profile_pid`). Строки без ожидания
 /// (`sample_cpu`, NULL в `event_type`) — `CPU`, как у сэмплов активности. `queryid` профиля — запрос верхнего уровня
 /// при `profile_queries = top` (ожидания вложенных инструкций приписаны вызывающей) и текущая инструкция при `all`.
+/// Базы в профиле нет (`dbid` он не хранит): у одного `queryid` (одинаковый нормализованный текст в разных базах)
+/// ожидания всех баз суммируются.
 pub fn waits_sql(ns: &str) -> String {
     format!(
         "{SQL_MARKER}SELECT COALESCE(event_type, 'CPU')::text, event::text, sum(count)::bigint \
@@ -262,15 +272,11 @@ pub fn waits_from_profile(rows: Vec<(String, Option<String>, i64)>) -> Option<Qu
             share_pct: count as f64 * 100.0 / total as f64,
         })
         .collect();
-    items.sort_by(|a, b| {
-        b.count
-            .cmp(&a.count)
-            .then_with(|| a.event_type.cmp(&b.event_type))
-            .then_with(|| a.event.cmp(&b.event))
-    });
+    items.sort_by(by_samples);
     Some(QueryWaits {
         source: WaitsSource::PgWaitSampling,
         since_ms: 0,
+        coverage_s: None,
         total,
         items,
     })
@@ -336,47 +342,114 @@ fn waits_profile_off() -> Unavailable {
     }
 }
 
-/// Сколько карточка не читает профиль `pg_wait_sampling` узла после ошибки чтения (расширение создано, но не читается):
-/// каждая ошибка — строка ERROR в логе сервера, а карточка опрашивается каждые 5 с.
+/// Сколько карточка не читает профиль `pg_wait_sampling` узла после ошибки состояния сервера (расширение создано, но не
+/// читается): каждая ошибка — строка ERROR в логе сервера, а карточка опрашивается каждые 5 с.
 pub const WAIT_SAMPLING_RETRY_MS: i64 = 600_000;
 
-/// Ошибки чтения профиля по подключению и узлу: время последней.
+/// Сколько живёт прочитанный профиль запроса. Профиль отдаёт процесс-сборщик расширения: на каждый запрос он целиком
+/// пересылает свой хеш через `shm_mq` (`send_profile`), а фильтр по `queryid` применяется уже после — на pg-perf это
+/// около 65 мс на 358 тыс. строк. Карточка опрашивается каждые 5 с, поэтому чтение профиля прорежено: в пределах TTL
+/// повторный опрос карточки берёт готовый результат (дешёвый запрос к каталогу при этом выполняется).
+pub const WAIT_PROFILE_TTL_MS: i64 = 30_000;
+
+/// Узел открытого подключения: номер открытия (`generation`) отличает переподключение — после него прошлые ошибки и
+/// результаты не действуют.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NodeKey {
+    pub id: String,
+    pub generation: u64,
+    pub member: String,
+}
+
+/// Прочитанный профиль запроса: время чтения и результат (`None` — запроса в профиле нет).
+type ReadProfile = (i64, Option<QueryWaits>);
+
+/// Кеши профиля `pg_wait_sampling` карточек: ошибки чтения по узлу и прочитанные профили по узлу и запросу. Устаревшие
+/// записи выбрасываются при каждой записи, записи закрытого подключения и ушедшего узла — по `CloseListener`.
 #[derive(Debug, Default)]
-pub struct ProfileFailures(Mutex<HashMap<String, i64>>);
+pub struct WaitProfiles {
+    failures: Mutex<HashMap<NodeKey, i64>>,
+    results: Mutex<HashMap<(NodeKey, i64), ReadProfile>>,
+}
 
-impl ProfileFailures {
-    /// Чтение отложено: последняя ошибка случилась меньше `WAIT_SAMPLING_RETRY_MS` назад.
-    pub fn blocked(&self, key: &str, now_ms: i64) -> bool {
-        let mut m = self.0.lock_safe();
-        match m.get(key) {
-            Some(at) if now_ms - at < WAIT_SAMPLING_RETRY_MS => true,
-            Some(_) => {
-                m.remove(key);
-                false
-            }
-            None => false,
+impl WaitProfiles {
+    /// Чтение профиля узла отложено: ошибка состояния сервера случилась меньше `WAIT_SAMPLING_RETRY_MS` назад.
+    pub fn failed_recently(&self, node: &NodeKey, now_ms: i64) -> bool {
+        self.failures
+            .lock_safe()
+            .get(node)
+            .is_some_and(|at| now_ms - at < WAIT_SAMPLING_RETRY_MS)
+    }
+
+    pub fn remember_failure(&self, node: &NodeKey, now_ms: i64) {
+        let mut m = self.failures.lock_safe();
+        m.retain(|_, at| now_ms - *at < WAIT_SAMPLING_RETRY_MS);
+        m.insert(node.clone(), now_ms);
+    }
+
+    /// Прочитанный меньше `WAIT_PROFILE_TTL_MS` назад профиль запроса (`Some(None)` — запроса в профиле не было).
+    pub fn cached(&self, node: &NodeKey, query_id: i64, now_ms: i64) -> Option<Option<QueryWaits>> {
+        self.results
+            .lock_safe()
+            .get(&(node.clone(), query_id))
+            .filter(|(at, _)| now_ms - at < WAIT_PROFILE_TTL_MS)
+            .map(|(_, w)| w.clone())
+    }
+
+    pub fn remember(&self, node: &NodeKey, query_id: i64, now_ms: i64, waits: Option<QueryWaits>) {
+        let mut m = self.results.lock_safe();
+        m.retain(|_, (at, _)| now_ms - *at < WAIT_PROFILE_TTL_MS);
+        m.insert((node.clone(), query_id), (now_ms, waits));
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> (usize, usize) {
+        (
+            self.failures.lock_safe().len(),
+            self.results.lock_safe().len(),
+        )
+    }
+}
+
+impl CloseListener for WaitProfiles {
+    fn connection_closed(&self, connection_id: &str) {
+        self.failures
+            .lock_safe()
+            .retain(|k, _| k.id != connection_id);
+        self.results
+            .lock_safe()
+            .retain(|(k, _), _| k.id != connection_id);
+    }
+
+    fn member_removed(&self, connection_id: &str, member: &str) {
+        let gone = |k: &NodeKey| k.id == connection_id && k.member == member;
+        self.failures.lock_safe().retain(|k, _| !gone(k));
+        self.results.lock_safe().retain(|(k, _), _| !gone(k));
+    }
+}
+
+/// Ошибка чтения профиля — от состояния сервера, которое само не пройдёт: библиотека не загружена или сборщик не
+/// запущен (`55…`, сообщения расширения `pg_wait_sampling …` с `XX000`), нет объекта или прав (`42…`), нет файла
+/// библиотеки (`58P01`). Отмена (`57014`), тайм-аут и обрыв соединения — разовые: их не запоминаем.
+pub fn server_state_error(code: Option<&str>, message: &str) -> bool {
+    match code {
+        Some(c) if c.starts_with("55") || c.starts_with("42") || c == "58P01" => true,
+        Some("XX000") => {
+            message.contains("pg_wait_sampling") || message.contains("shared_preload_libraries")
         }
-    }
-
-    pub fn remember(&self, key: &str, now_ms: i64) {
-        self.0.lock_safe().insert(key.to_string(), now_ms);
+        _ => false,
     }
 }
 
-static PROFILE_FAILURES: LazyLock<ProfileFailures> = LazyLock::new(ProfileFailures::default);
-
-/// Ключ узла для `ProfileFailures`.
-fn failures_key(id: &str, member: &str) -> String {
-    format!("{id}\u{0}{member}")
-}
-
-/// Профиль ожиданий запроса: `Ok(None)` — читать нечего. Ошибка чтения (библиотека не загружена при невидимой
-/// `shared_preload_libraries`, повреждённое расширение) не ломает карточку: ожидания берутся из сэмплов, а узел на
-/// `WAIT_SAMPLING_RETRY_MS` запоминается. Инструкции — вне транзакции: ошибка не обрывает следующие запросы.
+/// Профиль ожиданий запроса: `Ok(None)` — читать нечего. Ошибка чтения не ломает карточку: ожидания берутся из
+/// сэмплов, а при ошибке состояния сервера (`server_state_error`) узел на `WAIT_SAMPLING_RETRY_MS` запоминается.
+/// Обрыв соединения — ошибка карточки, как у остальных её запросов. Инструкции — вне транзакции: ошибка не обрывает
+/// следующие запросы.
 async fn read_waits_profile(
     c: &Client,
     query_id: i64,
-    failures_key: &str,
+    node: &NodeKey,
+    cache: &WaitProfiles,
     unavailable: &mut Vec<Unavailable>,
 ) -> AppResult<Option<QueryWaits>> {
     let Some(r) = c
@@ -402,21 +475,46 @@ async fn read_waits_profile(
         WaitSampling::Read(schema) => schema,
     };
     let now = crate::topology::model::now_ms();
-    if PROFILE_FAILURES.blocked(failures_key, now) {
+    if let Some(waits) = cache.cached(node, query_id, now) {
+        return Ok(waits);
+    }
+    if cache.failed_recently(node, now) {
         return Ok(None);
     }
     match c.query(&waits_sql(&schema), &[&query_id]).await {
-        Ok(rows) => Ok(waits_from_profile(
-            rows.iter()
-                .map(|r| (r.get(0), r.get(1), r.get(2)))
-                .collect(),
-        )),
+        Ok(rows) => {
+            let waits = waits_from_profile(
+                rows.iter()
+                    .map(|r| (r.get(0), r.get(1), r.get(2)))
+                    .collect(),
+            );
+            cache.remember(node, query_id, now, waits.clone());
+            Ok(waits)
+        }
+        Err(e) if e.is_closed() => Err(from_pg(&e)),
         Err(e) => {
             tracing::debug!(error = %e, "pg_wait_sampling profile read failed; waits from the sampler");
-            PROFILE_FAILURES.remember(failures_key, now);
+            let db = e.as_db_error();
+            if server_state_error(db.map(|d| d.code().code()), db.map_or("", |d| d.message())) {
+                cache.remember_failure(node, now);
+            }
             Ok(None)
         }
     }
+}
+
+/// Начало ожиданий из сэмплов: час назад или первый тик буфера, если сэмплер работает меньше часа.
+pub fn sampler_since(now_ms: i64, oldest_tick: Option<i64>) -> i64 {
+    let start = now_ms - LOOKBACK_MS;
+    oldest_tick.map_or(start, |t| t.max(start))
+}
+
+/// Ожидания карточки: профиль `pg_wait_sampling`, если в нём есть запрос, иначе сэмплы активности.
+pub fn pick_waits(
+    profile: Option<QueryWaits>,
+    sampler: impl FnOnce() -> Option<QueryWaits>,
+) -> Option<QueryWaits> {
+    profile.or_else(sampler)
 }
 
 /// Выполняющиеся экземпляры (14+): `$1` — `query_id`, `$2` — база. Перечисляются только активные ведущие бэкенды
@@ -517,7 +615,8 @@ async fn fetch(
     database: &str,
     query_id: i64,
     cache: Option<&Mutex<StatementsBuffer>>,
-    failures_key: &str,
+    node: &NodeKey,
+    profiles: &WaitProfiles,
 ) -> AppResult<Fetched> {
     let pg = |e: tokio_postgres::Error| from_pg(&e);
     let h = head(c).await?;
@@ -646,7 +745,7 @@ async fn fetch(
         unavailable.extend(caps.missing(V14, "running"));
         Vec::new()
     };
-    let waits_profile = read_waits_profile(c, query_id, failures_key, &mut unavailable).await?;
+    let waits_profile = read_waits_profile(c, query_id, node, profiles, &mut unavailable).await?;
     Ok(Fetched {
         head: h,
         pgss,
@@ -671,9 +770,16 @@ pub async fn detail(
     // Замыкание отдаёт будущее на любое время жизни соединения, поэтому база и буфер уходят в него владеемыми.
     let database = database.to_string();
     let cache = st.statements.buffer(id, member);
-    let key = failures_key(id, member);
+    let node = NodeKey {
+        id: id.to_string(),
+        generation: target.generation,
+        member: member.to_string(),
+    };
+    let profiles = st.wait_profiles.clone();
     let f = on_member(st, id, &target, |c| {
-        Box::pin(async move { fetch(c, &database, query_id, cache.as_deref(), &key).await })
+        Box::pin(
+            async move { fetch(c, &database, query_id, cache.as_deref(), &node, &profiles).await },
+        )
     })
     .await?;
     let mut d = QueryDetail::empty(&f.head);
@@ -752,17 +858,15 @@ pub async fn detail(
             .map(|(from_ms, to_ms)| Gap { from_ms, to_ms })
             .collect();
     }
-    d.waits = f.waits_profile;
-    if d.waits.is_none()
-        && let Some(b) = st.samplers.buffer(id, member)
-    {
+    d.waits = pick_waits(f.waits_profile, || {
+        let b = st.samplers.buffer(id, member)?;
         let b = b.lock_safe();
-        d.waits = waits_of(
-            &b.samples(now_ms - LOOKBACK_MS),
-            query_id,
-            now_ms - LOOKBACK_MS,
-        );
-    }
+        let since = sampler_since(now_ms, b.oldest_tick());
+        waits_of(&b.samples(since), query_id, since).map(|w| QueryWaits {
+            coverage_s: Some((now_ms - since) / 1000),
+            ..w
+        })
+    });
     Ok(d)
 }
 
@@ -902,16 +1006,147 @@ mod tests {
         assert_eq!(waits_profile_off().part, "waitsProfile");
     }
 
+    fn node(id: &str, generation: u64, member: &str) -> NodeKey {
+        NodeKey {
+            id: id.into(),
+            generation,
+            member: member.into(),
+        }
+    }
+
+    fn profile_waits(count: i64) -> Option<QueryWaits> {
+        waits_from_profile(vec![("IO".into(), Some("DataFileRead".into()), count)])
+    }
+
     #[test]
-    fn profile_failures_hold_off_reads_for_a_while() {
-        let f = ProfileFailures::default();
-        assert!(!f.blocked("a", 1_000));
-        f.remember("a", 1_000);
-        assert!(f.blocked("a", 1_000 + WAIT_SAMPLING_RETRY_MS - 1));
-        assert!(!f.blocked("b", 1_000), "другой узел не затронут");
-        assert!(!f.blocked("a", 1_000 + WAIT_SAMPLING_RETRY_MS));
-        assert!(!f.blocked("a", 1_000 + 1), "истёкшая запись удалена");
-        assert_ne!(failures_key("ab", "c"), failures_key("a", "bc"));
+    fn wait_profiles_hold_off_failed_nodes_for_a_while() {
+        let p = WaitProfiles::default();
+        let a = node("c", 1, "pg-1");
+        assert!(!p.failed_recently(&a, 1_000));
+        p.remember_failure(&a, 1_000);
+        assert!(p.failed_recently(&a, 1_000 + WAIT_SAMPLING_RETRY_MS - 1));
+        assert!(
+            !p.failed_recently(&node("c", 1, "pg-2"), 1_000),
+            "другой узел не затронут"
+        );
+        assert!(
+            !p.failed_recently(&node("c", 2, "pg-1"), 1_000),
+            "переподключение — новый номер открытия"
+        );
+        assert!(!p.failed_recently(&a, 1_000 + WAIT_SAMPLING_RETRY_MS));
+        // Устаревшие записи выбрасываются при следующей записи.
+        p.remember_failure(&node("d", 1, "pg-1"), 1_000 + WAIT_SAMPLING_RETRY_MS);
+        assert_eq!(p.len().0, 1);
+        // Закрытие подключения и уход узла стирают его записи.
+        p.remember_failure(&a, 5_000);
+        p.remember(&a, 7, 5_000, profile_waits(3));
+        p.member_removed("c", "pg-1");
+        assert!(!p.failed_recently(&a, 5_001) && p.cached(&a, 7, 5_001).is_none());
+        p.remember_failure(&a, 5_000);
+        p.remember(&a, 7, 5_000, profile_waits(3));
+        p.connection_closed("c");
+        assert!(!p.failed_recently(&a, 5_001) && p.cached(&a, 7, 5_001).is_none());
+        assert!(p.failed_recently(
+            &node("d", 1, "pg-1"),
+            5_001 + WAIT_SAMPLING_RETRY_MS - 10_000
+        ));
+    }
+
+    #[test]
+    fn wait_profiles_reuse_a_read_within_the_ttl() {
+        let p = WaitProfiles::default();
+        let a = node("c", 1, "pg-1");
+        assert_eq!(p.cached(&a, 7, 0), None);
+        p.remember(&a, 7, 1_000, profile_waits(5));
+        p.remember(&a, 8, 1_000, None);
+        assert_eq!(
+            p.cached(&a, 7, 1_000 + WAIT_PROFILE_TTL_MS - 1),
+            Some(profile_waits(5))
+        );
+        assert_eq!(
+            p.cached(&a, 8, 1_000),
+            Some(None),
+            "запроса в профиле нет — тоже результат"
+        );
+        assert_eq!(p.cached(&a, 9, 1_000), None, "другой запрос — промах");
+        assert_eq!(
+            p.cached(&node("c", 2, "pg-1"), 7, 1_000),
+            None,
+            "после переподключения — промах"
+        );
+        assert_eq!(
+            p.cached(&a, 7, 1_000 + WAIT_PROFILE_TTL_MS),
+            None,
+            "TTL истёк"
+        );
+        // Запись выбрасывает устаревшие результаты: в кеше только свежие.
+        p.remember(&a, 10, 1_000 + WAIT_PROFILE_TTL_MS, None);
+        assert_eq!(p.len().1, 1);
+    }
+
+    #[test]
+    fn only_server_state_errors_are_remembered() {
+        assert!(server_state_error(
+            Some("55000"),
+            "must be loaded via shared_preload_libraries"
+        ));
+        assert!(server_state_error(
+            Some("42501"),
+            "permission denied for function"
+        ));
+        assert!(server_state_error(Some("42P01"), "relation does not exist"));
+        assert!(server_state_error(Some("58P01"), "could not access file"));
+        assert!(server_state_error(
+            Some("XX000"),
+            "pg_wait_sampling shared memory wasn't initialized yet"
+        ));
+        assert!(server_state_error(
+            Some("XX000"),
+            "pg_wait_sampling collector wasn't started"
+        ));
+        assert!(!server_state_error(
+            Some("XX000"),
+            "unexpected chunk number"
+        ));
+        assert!(!server_state_error(
+            Some("57014"),
+            "canceling statement due to statement timeout"
+        ));
+        assert!(!server_state_error(Some("57P01"), "terminating connection"));
+        assert!(!server_state_error(Some("53200"), "out of memory"));
+        assert!(!server_state_error(None, "connection closed"));
+    }
+
+    #[test]
+    fn detail_prefers_profile_waits_over_sampler_waits() {
+        let sampler = || {
+            Some(QueryWaits {
+                source: WaitsSource::Sampler,
+                since_ms: 1,
+                coverage_s: Some(60),
+                total: 1,
+                items: Vec::new(),
+            })
+        };
+        let w = pick_waits(profile_waits(4), || panic!("сэмплы не нужны"));
+        assert_eq!(w.map(|w| w.source), Some(WaitsSource::PgWaitSampling));
+        assert_eq!(
+            pick_waits(None, sampler).map(|w| w.source),
+            Some(WaitsSource::Sampler)
+        );
+        assert_eq!(pick_waits(None, || None), None);
+    }
+
+    #[test]
+    fn sampler_waits_cover_at_most_the_lookback() {
+        let now = 10 * LOOKBACK_MS;
+        assert_eq!(sampler_since(now, None), now - LOOKBACK_MS);
+        assert_eq!(
+            sampler_since(now, Some(now - 600_000)),
+            now - 600_000,
+            "сэмплер работает 10 мин"
+        );
+        assert_eq!(sampler_since(now, Some(0)), now - LOOKBACK_MS);
     }
 
     #[test]

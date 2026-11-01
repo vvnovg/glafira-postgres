@@ -216,7 +216,7 @@ export function QueryOverview({
         ) : (
           <>
             <p className="muted">
-              {detail.waits.source === "pgWaitSampling" ? t("diag.query.waitsSource.pgWaitSampling") : t("diag.query.waitsSource.sampler")}
+              {detail.waits.source === "pgWaitSampling" ? t("diag.query.waitsSource.pgWaitSampling") : t("diag.query.waitsSource.sampler", { coverageS: formatDuration(detail.waits.coverageS) })}
             </p>
             <div className="table-scroll">
               <table className="diag-table" aria-label={t("diag.query.waits")}>
