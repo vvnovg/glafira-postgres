@@ -36,6 +36,40 @@ pub fn from_psql_text(text: &str) -> Result<Value, PlanError> {
     })
 }
 
+/// Начало JSON-плана: строка `[` / `{` (у psql — с хвостом `+`), `[{…` / `{"…` (одной строкой, auto_explain с
+/// `format = json`).
+fn starts_json(line: &str) -> bool {
+    let t = line.trim().trim_start_matches('|').trim_start();
+    let mut chars = t.chars();
+    matches!(chars.next(), Some('[' | '{'))
+        && chars
+            .find(|c| !c.is_whitespace())
+            .is_none_or(|c| matches!(c, '{' | '"' | '+'))
+}
+
+/// Вставленный план любого вида: JSON (с обрамлением psql или без, в том числе после префикса записи auto_explain)
+/// или текстовый EXPLAIN (`text_in`). JSON — если строка с `[` / `{` встречается раньше заголовка узла текстового плана.
+pub fn from_any(text: &str) -> Result<PlanTree, PlanError> {
+    let lines: Vec<&str> = text.lines().collect();
+    let json_at = lines.iter().position(|l| starts_json(l));
+    let head_at = lines.iter().position(|l| {
+        l.contains("(cost=") || l.contains("(actual ") || l.trim_start().starts_with("->")
+    });
+    match json_at {
+        Some(j) if head_at.is_none_or(|h| j < h) => {
+            // Строки до JSON — заголовок psql или префикс журнала; номер строки ошибки — в исходном тексте.
+            let body = lines[j..].join("\n");
+            from_psql_text(&body)
+                .and_then(|v| from_json(&v))
+                .map_err(|e| PlanError {
+                    line: e.line.map(|l| l + j),
+                    ..e
+                })
+        }
+        _ => crate::plan::text_in::from_text(text),
+    }
+}
+
 pub fn from_json(v: &Value) -> Result<PlanTree, PlanError> {
     let top = match v {
         Value::Array(items) => items.first().ok_or_else(|| err("empty plan array"))?,
@@ -458,6 +492,25 @@ mod tests {
         assert_eq!(from_json(&v).unwrap().root.node_type, "Result");
         assert!(from_psql_text("[{\"Plan\": {\"Node Type\": \"Result\", \"Startup Cost\": 0, \"Total Cost\": 0, \"Plan Rows\": 1, \"Plan Width\": 1}}]").is_ok(), "чистый JSON тоже принимается");
         let e = from_psql_text("not json at all").unwrap_err();
+        assert_eq!(e.line, Some(1));
+    }
+
+    #[test]
+    fn from_any_detects_json_and_text() {
+        let json = "[{\"Plan\": {\"Node Type\": \"Result\", \"Startup Cost\": 0, \"Total Cost\": 0, \"Plan Rows\": 1, \"Plan Width\": 1}}]";
+        assert_eq!(from_any(json).unwrap().root.node_type, "Result");
+        let psql = "   QUERY PLAN\n--------------\n [           +\n   {\"Plan\": {\"Node Type\": \"Limit\"}}+\n ]\n(1 row)\n";
+        assert_eq!(from_any(psql).unwrap().root.node_type, "Limit");
+        // auto_explain с `format = json`: префикс журнала, затем объект.
+        let log = "2026-11-01 10:00:00 UTC [1] LOG:  duration: 1.000 ms  plan:\n\t{\n\t  \"Query Text\": \"SELECT 1\",\n\t  \"Plan\": {\"Node Type\": \"Result\"}\n\t}\n";
+        assert_eq!(from_any(log).unwrap().root.node_type, "Result");
+        let text =
+            " QUERY PLAN\n------------\n Result  (cost=0.00..0.01 rows=1 width=4)\n(1 row)\n";
+        assert_eq!(from_any(text).unwrap().root.node_type, "Result");
+        // Ошибка JSON — с номером строки исходного текста (после двух строк заголовка).
+        let e = from_any(" QUERY PLAN\n----\n [\n   {\"Plan\": oops}\n ]\n").unwrap_err();
+        assert_eq!(e.line, Some(4), "{e:?}");
+        let e = from_any("garbage").unwrap_err();
         assert_eq!(e.line, Some(1));
     }
 

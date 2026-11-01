@@ -1,0 +1,37 @@
+                                                                          QUERY PLAN                                                                          
+--------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=5746.59..5746.62 rows=10 width=20) (actual time=47.556..47.558 rows=10 loops=1)
+   Buffers: shared hit=6010 read=17
+   I/O Timings: shared read=0.057
+   ->  Sort  (cost=5746.59..5751.99 rows=2157 width=20) (actual time=2.033..2.034 rows=10 loops=1)
+         Sort Key: (count(*)) DESC
+         Sort Method: top-N heapsort  Memory: 26kB
+         Buffers: shared hit=6010 read=17
+         I/O Timings: shared read=0.057
+         ->  GroupAggregate  (cost=0.84..5699.98 rows=2157 width=20) (actual time=0.028..1.895 rows=1834 loops=1)
+               Group Key: c.id
+               Buffers: shared hit=6007 read=17
+               I/O Timings: shared read=0.057
+               ->  Nested Loop  (cost=0.84..5651.45 rows=5392 width=12) (actual time=0.020..1.570 rows=4956 loops=1)
+                     Buffers: shared hit=6007 read=17
+                     I/O Timings: shared read=0.057
+                     ->  Index Scan using customers_pkey on customers c  (cost=0.42..86.17 rows=2157 width=12) (actual time=0.009..0.175 rows=1999 loops=1)
+                           Index Cond: (id < 2000)
+                           Buffers: shared hit=21 read=5
+                           I/O Timings: shared read=0.017
+                     ->  Index Only Scan using orders_customer_idx on orders o  (cost=0.42..2.55 rows=3 width=8) (actual time=0.000..0.001 rows=2 loops=1999)
+                           Index Cond: (customer_id = c.id)
+                           Heap Fetches: 0
+                           Buffers: shared hit=5986 read=12
+                           I/O Timings: shared read=0.040
+ Planning:
+   Buffers: shared hit=131 read=8
+   I/O Timings: shared read=0.028
+ Planning Time: 0.307 ms
+ JIT:
+   Functions: 10
+   Options: Inlining true, Optimization true, Expressions true, Deforming true
+   Timing: Generation 0.153 ms (Deform 0.038 ms), Inlining 29.496 ms, Optimization 7.746 ms, Emission 8.282 ms, Total 45.677 ms
+ Execution Time: 54.859 ms
+(33 rows)
+

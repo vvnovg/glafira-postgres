@@ -1,0 +1,20 @@
+                                                             QUERY PLAN                                                             
+------------------------------------------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on orders  (cost=9.86..424.39 rows=119 width=34) (actual time=0.028..0.259 rows=109 loops=1)
+   Recheck Cond: ((customer_id < 40) OR ((customer_id >= 1000) AND (customer_id <= 1010)))
+   Heap Blocks: exact=109
+   Buffers: shared hit=118
+   ->  BitmapOr  (cost=9.86..9.86 rows=119 width=0) (actual time=0.013..0.013 rows=0 loops=1)
+         Buffers: shared hit=9
+         ->  Bitmap Index Scan on orders_customer_idx  (cost=0.00..5.11 rows=92 width=0) (actual time=0.005..0.005 rows=83 loops=1)
+               Index Cond: (customer_id < 40)
+               Buffers: shared hit=3
+         ->  Bitmap Index Scan on orders_customer_idx  (cost=0.00..4.69 rows=27 width=0) (actual time=0.008..0.008 rows=26 loops=1)
+               Index Cond: ((customer_id >= 1000) AND (customer_id <= 1010))
+               Buffers: shared hit=6
+ Planning:
+   Buffers: shared hit=110
+ Planning Time: 0.219 ms
+ Execution Time: 0.299 ms
+(16 rows)
+

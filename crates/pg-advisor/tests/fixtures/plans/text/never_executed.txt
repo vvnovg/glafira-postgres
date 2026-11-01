@@ -1,0 +1,17 @@
+                                                           QUERY PLAN                                                           
+--------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop  (cost=9.28..21.33 rows=1 width=76) (actual time=0.007..0.007 rows=0 loops=1)
+   ->  Bitmap Heap Scan on orders o  (cost=8.86..12.88 rows=1 width=34) (actual time=0.007..0.007 rows=0 loops=1)
+         Recheck Cond: ((id = '-1'::integer) OR (id < 0))
+         ->  BitmapOr  (cost=8.86..8.86 rows=1 width=0) (actual time=0.005..0.005 rows=0 loops=1)
+               ->  Bitmap Index Scan on orders_pkey  (cost=0.00..4.43 rows=1 width=0) (actual time=0.005..0.005 rows=0 loops=1)
+                     Index Cond: (id = '-1'::integer)
+               ->  Bitmap Index Scan on orders_pkey  (cost=0.00..4.43 rows=1 width=0) (actual time=0.000..0.000 rows=0 loops=1)
+                     Index Cond: (id < 0)
+   ->  Index Scan using customers_pkey on customers c  (cost=0.42..8.45 rows=1 width=42) (never executed)
+         Index Cond: (id = o.customer_id)
+         Filter: ((o.id = '-1'::integer) OR ((o.id < 0) AND (id < 0)))
+ Planning Time: 0.359 ms
+ Execution Time: 0.050 ms
+(13 rows)
+

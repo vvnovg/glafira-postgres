@@ -1,0 +1,22 @@
+2026-11-01 14:23:40.262 UTC [175440] LOG:  duration: 55.579 ms  plan:
+	Query Text: SELECT c.region, count(*) FROM shop.customers c
+	  JOIN shop.orders o ON o.customer_id = c.id
+	 WHERE c.id < 500
+	 GROUP BY c.region;
+	HashAggregate  (cost=2075.93..2075.97 rows=4 width=12) (actual time=55.572..55.573 rows=4 loops=1)
+	  Group Key: c.region
+	  Batches: 1  Memory Usage: 24kB
+	  Buffers: shared hit=1510 dirtied=1
+	  ->  Nested Loop  (cost=0.84..2069.14 rows=1358 width=4) (actual time=55.091..55.478 rows=1259 loops=1)
+	        Buffers: shared hit=1510 dirtied=1
+	        ->  Index Scan using customers_pkey on customers c  (cost=0.42..26.92 rows=543 width=12) (actual time=0.011..0.050 rows=499 loops=1)
+	              Index Cond: (id < 500)
+	              Buffers: shared hit=9
+	        ->  Index Only Scan using orders_customer_idx on orders o  (cost=0.42..3.73 rows=3 width=8) (actual time=0.000..0.001 rows=3 loops=499)
+	              Index Cond: (customer_id = c.id)
+	              Heap Fetches: 3
+	              Buffers: shared hit=1501 dirtied=1
+	JIT:
+	  Functions: 10
+	  Options: Inlining true, Optimization true, Expressions true, Deforming true
+	  Timing: Generation 0.184 ms (Deform 0.058 ms), Inlining 35.849 ms, Optimization 9.831 ms, Emission 9.377 ms, Total 55.241 ms

@@ -1,0 +1,32 @@
+                                                                QUERY PLAN                                                                 
+-------------------------------------------------------------------------------------------------------------------------------------------
+ Finalize GroupAggregate  (cost=11768.15..11768.91 rows=3 width=12) (actual rows=3 loops=1)
+   Group Key: o.status
+   ->  Gather Merge  (cost=11768.15..11768.85 rows=6 width=12) (actual rows=9 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         ->  Sort  (cost=10768.12..10768.13 rows=3 width=12) (actual rows=3 loops=3)
+               Sort Key: o.status
+               Sort Method: quicksort  Memory: 25kB
+               Worker 0:  Sort Method: quicksort  Memory: 25kB
+               Worker 1:  Sort Method: quicksort  Memory: 25kB
+               ->  Partial HashAggregate  (cost=10768.07..10768.10 rows=3 width=12) (actual rows=3 loops=3)
+                     Group Key: o.status
+                     Batches: 1  Memory Usage: 24kB
+                     Worker 0:  Batches: 1  Memory Usage: 24kB
+                     Worker 1:  Batches: 1  Memory Usage: 24kB
+                     ->  Parallel Hash Join  (cost=3707.45..10504.67 rows=52680 width=4) (actual rows=41793 loops=3)
+                           Hash Cond: (o.customer_id = c.id)
+                           ->  Parallel Seq Scan on orders o  (cost=0.00..6250.33 rows=208333 width=12) (actual rows=166667 loops=3)
+                           ->  Parallel Hash  (cost=3335.59..3335.59 rows=29749 width=8) (actual rows=16667 loops=3)
+                                 Buckets: 65536  Batches: 1  Memory Usage: 2528kB
+                                 ->  Parallel Seq Scan on customers c  (cost=0.00..3335.59 rows=29749 width=8) (actual rows=16667 loops=3)
+                                       Filter: (region = 'eu'::text)
+                                       Rows Removed by Filter: 50000
+ Planning Time: 0.287 ms
+ JIT:
+   Functions: 51
+   Options: Inlining true, Optimization true, Expressions true, Deforming true
+ Execution Time: 93.559 ms
+(28 rows)
+

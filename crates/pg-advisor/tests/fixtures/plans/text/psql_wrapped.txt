@@ -1,0 +1,24 @@
+                                                                     QUERY PLAN                                                                      
+-----------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=530.46..530.48 rows=5 width=14) (actual time=0.203..0.203 rows=5 loops=1)                                                             +
+   Buffers: shared hit=159                                                                                                                          +
+   ->  Sort  (cost=530.46..530.66 rows=80 width=14) (actual time=0.202..0.202 rows=5 loops=1)                                                       +
+         Sort Key: o.total DESC                                                                                                                     +
+         Sort Method: top-N heapsort  Memory: 25kB                                                                                                  +
+         Buffers: shared hit=159                                                                                                                    +
+         ->  Nested Loop  (cost=0.84..529.13 rows=80 width=14) (actual time=0.012..0.184 rows=65 loops=1)                                           +
+               Buffers: shared hit=156                                                                                                              +
+               ->  Index Only Scan using customers_pkey on customers c  (cost=0.42..4.98 rows=32 width=8) (actual time=0.002..0.004 rows=29 loops=1)+
+                     Index Cond: (id < 30)                                                                                                          +
+                     Heap Fetches: 0                                                                                                                +
+                     Buffers: shared hit=4                                                                                                          +
+               ->  Index Scan using orders_customer_idx on orders o  (cost=0.42..16.35 rows=3 width=22) (actual time=0.003..0.006 rows=2 loops=29)  +
+                     Index Cond: (customer_id = c.id)                                                                                               +
+                     Buffers: shared hit=152                                                                                                        +
+ Planning:                                                                                                                                          +
+   Buffers: shared hit=203 read=1                                                                                                                   +
+   I/O Timings: shared read=0.005                                                                                                                   +
+ Planning Time: 0.312 ms                                                                                                                            +
+ Execution Time: 0.221 ms
+(1 row)
+

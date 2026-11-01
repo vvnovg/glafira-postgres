@@ -1,0 +1,13 @@
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ Finalize Aggregate  (cost=7772.06..7772.07 rows=1 width=8)
+   ->  Gather  (cost=7771.84..7772.05 rows=2 width=8)
+         Workers Planned: 2
+         ->  Partial Aggregate  (cost=6771.84..6771.85 rows=1 width=8)
+               ->  Parallel Seq Scan on orders  (cost=0.00..6771.17 rows=271 width=0)
+                     Filter: (status = 'disputed'::text)
+ JIT:
+   Functions: 6
+   Options: Inlining true, Optimization true, Expressions true, Deforming true
+(9 rows)
+

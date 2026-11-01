@@ -1,0 +1,117 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Nested Loop",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Join Type": "Inner",
+      "Startup Cost": 9.28,
+      "Total Cost": 21.33,
+      "Plan Rows": 1,
+      "Plan Width": 76,
+      "Actual Startup Time": 0.007,
+      "Actual Total Time": 0.007,
+      "Actual Rows": 0,
+      "Actual Loops": 1,
+      "Inner Unique": true,
+      "Plans": [
+        {
+          "Node Type": "Bitmap Heap Scan",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Relation Name": "orders",
+          "Alias": "o",
+          "Startup Cost": 8.86,
+          "Total Cost": 12.88,
+          "Plan Rows": 1,
+          "Plan Width": 34,
+          "Actual Startup Time": 0.006,
+          "Actual Total Time": 0.007,
+          "Actual Rows": 0,
+          "Actual Loops": 1,
+          "Recheck Cond": "((id = '-1'::integer) OR (id < 0))",
+          "Rows Removed by Index Recheck": 0,
+          "Exact Heap Blocks": 0,
+          "Lossy Heap Blocks": 0,
+          "Plans": [
+            {
+              "Node Type": "BitmapOr",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Startup Cost": 8.86,
+              "Total Cost": 8.86,
+              "Plan Rows": 1,
+              "Plan Width": 0,
+              "Actual Startup Time": 0.005,
+              "Actual Total Time": 0.005,
+              "Actual Rows": 0,
+              "Actual Loops": 1,
+              "Plans": [
+                {
+                  "Node Type": "Bitmap Index Scan",
+                  "Parent Relationship": "Member",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Index Name": "orders_pkey",
+                  "Startup Cost": 0.00,
+                  "Total Cost": 4.43,
+                  "Plan Rows": 1,
+                  "Plan Width": 0,
+                  "Actual Startup Time": 0.004,
+                  "Actual Total Time": 0.005,
+                  "Actual Rows": 0,
+                  "Actual Loops": 1,
+                  "Index Cond": "(id = '-1'::integer)"
+                },
+                {
+                  "Node Type": "Bitmap Index Scan",
+                  "Parent Relationship": "Member",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Index Name": "orders_pkey",
+                  "Startup Cost": 0.00,
+                  "Total Cost": 4.43,
+                  "Plan Rows": 1,
+                  "Plan Width": 0,
+                  "Actual Startup Time": 0.000,
+                  "Actual Total Time": 0.000,
+                  "Actual Rows": 0,
+                  "Actual Loops": 1,
+                  "Index Cond": "(id < 0)"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "Node Type": "Index Scan",
+          "Parent Relationship": "Inner",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Scan Direction": "Forward",
+          "Index Name": "customers_pkey",
+          "Relation Name": "customers",
+          "Alias": "c",
+          "Startup Cost": 0.42,
+          "Total Cost": 8.45,
+          "Plan Rows": 1,
+          "Plan Width": 42,
+          "Actual Startup Time": 0.000,
+          "Actual Total Time": 0.000,
+          "Actual Rows": 0,
+          "Actual Loops": 0,
+          "Index Cond": "(id = o.customer_id)",
+          "Rows Removed by Index Recheck": 0,
+          "Filter": "((o.id = '-1'::integer) OR ((o.id < 0) AND (id < 0)))",
+          "Rows Removed by Filter": 0
+        }
+      ]
+    },
+    "Planning Time": 0.354,
+    "Triggers": [
+    ],
+    "Execution Time": 0.046
+  }
+]

@@ -1,0 +1,190 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Sorted",
+      "Partial Mode": "Finalize",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Startup Cost": 11768.15,
+      "Total Cost": 11768.91,
+      "Plan Rows": 3,
+      "Plan Width": 12,
+      "Actual Rows": 3,
+      "Actual Loops": 1,
+      "Group Key": ["o.status"],
+      "Plans": [
+        {
+          "Node Type": "Gather Merge",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Startup Cost": 11768.15,
+          "Total Cost": 11768.85,
+          "Plan Rows": 6,
+          "Plan Width": 12,
+          "Actual Rows": 9,
+          "Actual Loops": 1,
+          "Workers Planned": 2,
+          "Workers Launched": 2,
+          "Plans": [
+            {
+              "Node Type": "Sort",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Startup Cost": 10768.12,
+              "Total Cost": 10768.13,
+              "Plan Rows": 3,
+              "Plan Width": 12,
+              "Actual Rows": 3,
+              "Actual Loops": 3,
+              "Sort Key": ["o.status"],
+              "Sort Method": "quicksort",
+              "Sort Space Used": 25,
+              "Sort Space Type": "Memory",
+              "Workers": [
+                {
+                  "Worker Number": 0,
+                  "Sort Method": "quicksort",
+                  "Sort Space Used": 25,
+                  "Sort Space Type": "Memory"
+                },
+                {
+                  "Worker Number": 1,
+                  "Sort Method": "quicksort",
+                  "Sort Space Used": 25,
+                  "Sort Space Type": "Memory"
+                }
+              ],
+              "Plans": [
+                {
+                  "Node Type": "Aggregate",
+                  "Strategy": "Hashed",
+                  "Partial Mode": "Partial",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 10768.07,
+                  "Total Cost": 10768.10,
+                  "Plan Rows": 3,
+                  "Plan Width": 12,
+                  "Actual Rows": 3,
+                  "Actual Loops": 3,
+                  "Group Key": ["o.status"],
+                  "Planned Partitions": 0,
+                  "HashAgg Batches": 1,
+                  "Peak Memory Usage": 24,
+                  "Disk Usage": 0,
+                  "Workers": [
+                    {
+                      "Worker Number": 0,
+                      "HashAgg Batches": 1,
+                      "Peak Memory Usage": 24,
+                      "Disk Usage": 0
+                    },
+                    {
+                      "Worker Number": 1,
+                      "HashAgg Batches": 1,
+                      "Peak Memory Usage": 24,
+                      "Disk Usage": 0
+                    }
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Hash Join",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": true,
+                      "Async Capable": false,
+                      "Join Type": "Inner",
+                      "Startup Cost": 3707.45,
+                      "Total Cost": 10504.67,
+                      "Plan Rows": 52680,
+                      "Plan Width": 4,
+                      "Actual Rows": 41793,
+                      "Actual Loops": 3,
+                      "Inner Unique": true,
+                      "Hash Cond": "(o.customer_id = c.id)",
+                      "Workers": [
+                      ],
+                      "Plans": [
+                        {
+                          "Node Type": "Seq Scan",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": true,
+                          "Async Capable": false,
+                          "Relation Name": "orders",
+                          "Alias": "o",
+                          "Startup Cost": 0.00,
+                          "Total Cost": 6250.33,
+                          "Plan Rows": 208333,
+                          "Plan Width": 12,
+                          "Actual Rows": 166667,
+                          "Actual Loops": 3,
+                          "Workers": [
+                          ]
+                        },
+                        {
+                          "Node Type": "Hash",
+                          "Parent Relationship": "Inner",
+                          "Parallel Aware": true,
+                          "Async Capable": false,
+                          "Startup Cost": 3335.59,
+                          "Total Cost": 3335.59,
+                          "Plan Rows": 29749,
+                          "Plan Width": 8,
+                          "Actual Rows": 16667,
+                          "Actual Loops": 3,
+                          "Hash Buckets": 65536,
+                          "Original Hash Buckets": 65536,
+                          "Hash Batches": 1,
+                          "Original Hash Batches": 1,
+                          "Peak Memory Usage": 2496,
+                          "Workers": [
+                          ],
+                          "Plans": [
+                            {
+                              "Node Type": "Seq Scan",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": true,
+                              "Async Capable": false,
+                              "Relation Name": "customers",
+                              "Alias": "c",
+                              "Startup Cost": 0.00,
+                              "Total Cost": 3335.59,
+                              "Plan Rows": 29749,
+                              "Plan Width": 8,
+                              "Actual Rows": 16667,
+                              "Actual Loops": 3,
+                              "Filter": "(region = 'eu'::text)",
+                              "Rows Removed by Filter": 50000,
+                              "Workers": [
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Planning Time": 0.285,
+    "Triggers": [
+    ],
+    "JIT": {
+      "Functions": 51,
+      "Options": {
+        "Inlining": true,
+        "Optimization": true,
+        "Expressions": true,
+        "Deforming": true
+      }
+    },
+    "Execution Time": 92.687
+  }
+]

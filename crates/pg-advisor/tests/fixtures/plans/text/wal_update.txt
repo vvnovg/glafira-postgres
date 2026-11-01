@@ -1,0 +1,15 @@
+                                                           QUERY PLAN                                                           
+--------------------------------------------------------------------------------------------------------------------------------
+ Update on orders  (cost=0.42..10.17 rows=0 width=0) (actual time=14.869..14.879 rows=0 loops=1)
+   Buffers: shared hit=927 read=96 dirtied=104 written=2
+   I/O Timings: shared read=1.532 write=0.314
+   WAL: records=404 fpi=99 bytes=736193
+   ->  Index Scan using orders_pkey on orders  (cost=0.42..10.17 rows=100 width=12) (actual time=0.007..0.041 rows=100 loops=1)
+         Index Cond: (id <= 100)
+         Buffers: shared hit=4
+ Planning:
+   Buffers: shared hit=90
+ Planning Time: 0.185 ms
+ Execution Time: 14.928 ms
+(11 rows)
+

@@ -1,0 +1,22 @@
+                                                                         QUERY PLAN                                                                          
+-------------------------------------------------------------------------------------------------------------------------------------------------------------
+ CTE Scan on recent r  (cost=16.09..470.03 rows=99 width=16) (actual time=0.045..0.387 rows=299 loops=1)
+   Filter: (customer_id > (InitPlan 4).col1)
+   CTE recent
+     ->  Index Scan using orders_pkey on orders  (cost=0.42..15.64 rows=298 width=16) (actual time=0.007..0.079 rows=299 loops=1)
+           Index Cond: (id < 300)
+   InitPlan 4
+     ->  Result  (cost=0.45..0.46 rows=1 width=8) (actual time=0.017..0.017 rows=1 loops=1)
+           InitPlan 3
+             ->  Limit  (cost=0.42..0.45 rows=1 width=8) (actual time=0.016..0.017 rows=1 loops=1)
+                   ->  Index Only Scan using customers_pkey on customers  (cost=0.42..5204.42 rows=200000 width=8) (actual time=0.016..0.016 rows=1 loops=1)
+                         Heap Fetches: 0
+   SubPlan 2
+     ->  Aggregate  (cost=4.51..4.52 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=299)
+           ->  Index Only Scan using order_items_order_idx on order_items i  (cost=0.43..4.50 rows=4 width=0) (actual time=0.000..0.001 rows=3 loops=299)
+                 Index Cond: (order_id = r.id)
+                 Heap Fetches: 0
+ Planning Time: 0.286 ms
+ Execution Time: 0.436 ms
+(18 rows)
+

@@ -1,7 +1,8 @@
-//! Модель плана выполнения (спец. P3 §8.5): дерево узлов из `EXPLAIN (FORMAT JSON)` (P3b — и из текста),
-//! вычисляемые поля (собственное время, доля, ошибка оценки, горячие узлы) и текстовый рендер.
+//! Модель плана выполнения (спец. P3 §8.5): дерево узлов из `EXPLAIN (FORMAT JSON)` и из текстового EXPLAIN
+//! (psql, auto_explain), вычисляемые поля (собственное время, доля, ошибка оценки, горячие узлы) и текстовый рендер.
 
 pub mod json;
+pub mod text_in;
 pub mod text_out;
 
 use serde::{Deserialize, Serialize};
@@ -85,7 +86,7 @@ pub struct Setting {
     pub value: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanNode {
     /// Порядок обхода в глубину, с нуля.

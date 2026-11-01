@@ -1,0 +1,66 @@
+                                                                                                       QUERY PLAN                                                                                                       
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=8813.74..8813.74 rows=3 width=44) (actual time=86.882..89.376 rows=3 loops=1)
+   Output: status, (count(*)), (sum(total))
+   Sort Key: (count(*)) DESC
+   Sort Method: quicksort  Memory: 25kB
+   Buffers: shared hit=4186
+   ->  Finalize GroupAggregate  (cost=8812.92..8813.71 rows=3 width=44) (actual time=86.870..89.366 rows=3 loops=1)
+         Output: status, count(*), sum(total)
+         Group Key: orders.status
+         Buffers: shared hit=4183
+         ->  Gather Merge  (cost=8812.92..8813.62 rows=6 width=44) (actual time=86.861..89.356 rows=9 loops=1)
+               Output: status, (PARTIAL count(*)), (PARTIAL sum(total))
+               Workers Planned: 2
+               Workers Launched: 2
+               Buffers: shared hit=4183
+               ->  Sort  (cost=7812.89..7812.90 rows=3 width=44) (actual time=80.994..80.995 rows=3 loops=3)
+                     Output: status, (PARTIAL count(*)), (PARTIAL sum(total))
+                     Sort Key: orders.status
+                     Sort Method: quicksort  Memory: 25kB
+                     Buffers: shared hit=4183
+                     Worker 0:  actual time=78.123..78.123 rows=3 loops=1
+                       Sort Method: quicksort  Memory: 25kB
+                       JIT:
+                         Functions: 6
+                         Options: Inlining true, Optimization true, Expressions true, Deforming true
+                         Timing: Generation 0.153 ms (Deform 0.058 ms), Inlining 34.708 ms, Optimization 11.991 ms, Emission 10.163 ms, Total 57.015 ms
+                       Buffers: shared hit=1426
+                     Worker 1:  actual time=78.127..78.127 rows=3 loops=1
+                       Sort Method: quicksort  Memory: 25kB
+                       JIT:
+                         Functions: 6
+                         Options: Inlining true, Optimization true, Expressions true, Deforming true
+                         Timing: Generation 0.165 ms (Deform 0.061 ms), Inlining 35.832 ms, Optimization 11.941 ms, Emission 9.814 ms, Total 57.751 ms
+                       Buffers: shared hit=1408
+                     ->  Partial HashAggregate  (cost=7812.83..7812.87 rows=3 width=44) (actual time=80.977..80.978 rows=3 loops=3)
+                           Output: status, PARTIAL count(*), PARTIAL sum(total)
+                           Group Key: orders.status
+                           Batches: 1  Memory Usage: 24kB
+                           Buffers: shared hit=4167
+                           Worker 0:  actual time=78.104..78.105 rows=3 loops=1
+                             Batches: 1  Memory Usage: 24kB
+                             Buffers: shared hit=1418
+                           Worker 1:  actual time=78.105..78.106 rows=3 loops=1
+                             Batches: 1  Memory Usage: 24kB
+                             Buffers: shared hit=1400
+                           ->  Parallel Seq Scan on shop.orders  (cost=0.00..6250.33 rows=208333 width=10) (actual time=0.007..6.816 rows=166667 loops=3)
+                                 Output: id, customer_id, status, total, created_at
+                                 Buffers: shared hit=4167
+                                 Worker 0:  actual time=0.006..7.099 rows=170120 loops=1
+                                   Buffers: shared hit=1418
+                                 Worker 1:  actual time=0.005..6.760 rows=168000 loops=1
+                                   Buffers: shared hit=1400
+ Settings: work_mem = '8MB', max_parallel_workers = '2', max_parallel_workers_per_gather = '4', jit_above_cost = '1000', jit_inline_above_cost = '1000', jit_optimize_above_cost = '1000', search_path = 'shop, public'
+ Query Identifier: 2223818613946063395
+ Planning:
+   Buffers: shared hit=117 read=1
+   I/O Timings: shared read=0.006
+ Planning Time: 0.187 ms
+ JIT:
+   Functions: 21
+   Options: Inlining true, Optimization true, Expressions true, Deforming true
+   Timing: Generation 0.531 ms (Deform 0.180 ms), Inlining 108.244 ms, Optimization 38.100 ms, Emission 34.938 ms, Total 181.813 ms
+ Execution Time: 96.924 ms
+(62 rows)
+
