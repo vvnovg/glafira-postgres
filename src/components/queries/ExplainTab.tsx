@@ -169,12 +169,8 @@ export function ExplainTab({
                     serverVersionNum={serverVersionNum}
                     inRecovery={inRecovery}
                     onResult={(r, on) => setLast({ plan: r.plan, sql, node: on, db: dbName })}
+                    extraActions={sql.trim() ? <CopyLlmButton connectionId={connectionId} member={nodeName} database={dbName} source={{ kind: "sql", sql }} plan={lastPlan} /> : undefined}
                   />
-                  {sql.trim() && (
-                    <div className="toolbar">
-                      <CopyLlmButton connectionId={connectionId} member={nodeName} database={dbName} source={{ kind: "sql", sql }} plan={lastPlan} />
-                    </div>
-                  )}
                 </>
               ) : (
                 // Базы ещё не знаем (список читается): запуску нужна база, режиму «Вставить план» — нет.

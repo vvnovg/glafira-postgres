@@ -1,15 +1,16 @@
 import { useTranslation } from "react-i18next";
-import type { QueryDetail, QueryStat, RelationRef } from "../../api/types";
+import type { PlanTree, QueryDetail, QueryStat, RelationRef } from "../../api/types";
 import { formatBytes, formatCount, formatDuration, formatMs, formatPercent } from "../../lib/format";
 import { useWorkspace } from "../../state/workspace";
 import { CopyButton } from "../common/CopyButton";
 import { FindingsPanel } from "../diag/FindingsPanel";
 import { unavailableText } from "../diag/unavailable";
+import { CopyLlmButton } from "./CopyLlmButton";
 import { Sparkline } from "./Sparkline";
 import { BLOCK_BYTES } from "./queriesText";
 
 /** Строки метрик: ключ подписи — литералом (правило словарей), значение — из строки pgss. */
-const METRICS: { id: string; labelKey: string; of: (s: QueryStat) => string }[] = [
+const METRICS: { id: string; labelKey: string; of: (s: QueryStat, trackPlanning: boolean) => string }[] = [
   { id: "calls", labelKey: "diag.query.metric.calls", of: (s) => formatCount(s.calls) },
   { id: "total", labelKey: "diag.query.metric.total", of: (s) => formatMs(s.totalExecMs) },
   { id: "mean", labelKey: "diag.query.metric.mean", of: (s) => formatMs(s.meanExecMs) },
@@ -20,22 +21,25 @@ const METRICS: { id: string; labelKey: string; of: (s: QueryStat) => string }[] 
   { id: "read", labelKey: "diag.query.metric.read", of: (s) => `${formatBytes(s.sharedRead * BLOCK_BYTES)} / ${formatBytes(s.sharedWritten * BLOCK_BYTES)}` },
   { id: "temp", labelKey: "diag.query.metric.temp", of: (s) => formatBytes(s.tempWritten * BLOCK_BYTES) },
   { id: "wal", labelKey: "diag.query.metric.wal", of: (s) => formatBytes(s.walBytes) },
-  { id: "planning", labelKey: "diag.query.metric.planning", of: (s) => formatMs(s.totalPlanMs) },
+  { id: "planning", labelKey: "diag.query.metric.planning", of: (s, trackPlanning) => (trackPlanning ? formatMs(s.totalPlanMs) : "—") },
   { id: "jit", labelKey: "diag.query.metric.jit", of: (s) => (s.jitMs === null ? "—" : formatMs(s.jitMs)) },
 ];
 
 /**
  * Обзор карточки (спец. P3 §7.3): текст (с копированием), метрики (с момента сброса и за час), история (промежутки
  * сэмплера рвут линию), находки, разбивка, экземпляры, ожидания, таблицы (из последнего плана вкладки; `null` — плана ещё
- * не было: «Получить план» строит пробный план). `onPlan` только открывает подвкладку «План», `onGetPlan` — и запускает пробу.
+ * не было). Ряд кнопок под текстом: «Получить план» (`onGetPlan` — открывает подвкладку «План» и запускает пробный план),
+ * «Открыть в консоли», «Копировать запрос», «Скопировать для LLM» (`llmPlan` — последний план вкладки на её узле). Без выполняющихся
+ * экземпляров на сервере < 14 блок «Выполняющиеся экземпляры» скрыт целиком, пометка о причине остаётся вверху.
  */
 export function QueryOverview({
   connectionId,
   member,
   database,
   detail,
+  queryId,
   relations,
-  onPlan,
+  llmPlan,
   onGetPlan,
   onConsole,
 }: {
@@ -43,8 +47,9 @@ export function QueryOverview({
   member: string;
   database: string;
   detail: QueryDetail;
+  queryId: string;
   relations: RelationRef[] | null;
-  onPlan: () => void;
+  llmPlan: PlanTree | null;
   onGetPlan: () => void;
   onConsole: () => void;
 }) {
@@ -67,13 +72,17 @@ export function QueryOverview({
           </pre>
         )}
         <div className="toolbar">
-          <button type="button" onClick={onPlan}>
-            {t("diag.query.plan")}
-          </button>
+          {/* Без текста (запрос ушёл из pgss) и с обрезанным текстом плана не построить: кнопка ждала бы запуска вечно. */}
+          {detail.text !== null && !detail.textTruncated && (
+            <button type="button" onClick={onGetPlan}>
+              {t("diag.query.getPlan")}
+            </button>
+          )}
           <button type="button" disabled={detail.text === null} onClick={onConsole}>
             {t("diag.query.openConsole")}
           </button>
           {detail.text !== null && <CopyButton text={detail.text} label={t("diag.query.copyText")} />}
+          <CopyLlmButton connectionId={connectionId} member={member} database={database} source={{ kind: "query", queryId }} plan={llmPlan} />
         </div>
       </section>
       <FindingsPanel connectionId={connectionId} findings={findings} member={member} />
@@ -102,8 +111,8 @@ export function QueryOverview({
                 {METRICS.map((m) => (
                   <tr key={m.id}>
                     <th scope="row">{t(m.labelKey)}</th>
-                    <td className="num">{m.of(sinceReset)}</td>
-                    <td className="num">{hour ? m.of(hour) : "—"}</td>
+                    <td className="num">{m.of(sinceReset, detail.trackPlanning)}</td>
+                    <td className="num">{hour ? m.of(hour, detail.trackPlanning) : "—"}</td>
                   </tr>
                 ))}
               </tbody>
@@ -153,43 +162,45 @@ export function QueryOverview({
           </div>
         </section>
       )}
-      <section>
-        <h3>{t("diag.query.running")}</h3>
-        {detail.running.length > 0 ? (
-          <div className="table-scroll">
-            <table className="diag-table" aria-label={t("diag.query.running")}>
-              <thead>
-                <tr>
-                  <th scope="col">PID</th>
-                  <th scope="col">{t("diag.query.state")}</th>
-                  <th scope="col" className="num">
-                    {t("diag.query.duration")}
-                  </th>
-                  <th scope="col">{t("diag.query.wait")}</th>
-                  <th scope="col">{t("diag.query.who")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {detail.running.map((r) => (
-                  <tr key={`${r.pid}:${r.backendStartUs}`}>
-                    <td>{r.pid}</td>
-                    <td>{r.state ?? ""}</td>
-                    <td className="num">{formatDuration(r.durationS)}</td>
-                    <td>{r.waitEventType ? `${r.waitEventType}${r.waitEvent ? `:${r.waitEvent}` : ""}` : ""}</td>
-                    <td>{[r.usename, r.applicationName, r.clientAddr].filter(Boolean).join(" · ")}</td>
+      {/* На PG 13 экземпляров не узнать: причина — в строке «недоступно» выше, блок не показывается совсем. */}
+      {!runningUnavailable && (
+        <section>
+          <h3>{t("diag.query.running")}</h3>
+          {detail.running.length > 0 ? (
+            <div className="table-scroll">
+              <table className="diag-table" aria-label={t("diag.query.running")}>
+                <thead>
+                  <tr>
+                    <th scope="col">PID</th>
+                    <th scope="col">{t("diag.query.state")}</th>
+                    <th scope="col" className="num">
+                      {t("diag.query.duration")}
+                    </th>
+                    <th scope="col">{t("diag.query.wait")}</th>
+                    <th scope="col">{t("diag.query.who")}</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          // На PG 13 экземпляров не узнать: причина — в строке «недоступно» выше, «не выполняется» было бы неправдой.
-          !runningUnavailable && <p className="muted">{t("diag.query.noRunning")}</p>
-        )}
-        <button type="button" className="link" onClick={() => open({ kind: "diag", connectionId, tool: "sessions", member })}>
-          {t("diag.query.openSessions", { tool: t("diag.tools.sessions") })}
-        </button>
-      </section>
+                </thead>
+                <tbody>
+                  {detail.running.map((r) => (
+                    <tr key={`${r.pid}:${r.backendStartUs}`}>
+                      <td>{r.pid}</td>
+                      <td>{r.state ?? ""}</td>
+                      <td className="num">{formatDuration(r.durationS)}</td>
+                      <td>{r.waitEventType ? `${r.waitEventType}${r.waitEvent ? `:${r.waitEvent}` : ""}` : ""}</td>
+                      <td>{[r.usename, r.applicationName, r.clientAddr].filter(Boolean).join(" · ")}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="muted">{t("diag.query.noRunning")}</p>
+          )}
+          <button type="button" className="link" onClick={() => open({ kind: "diag", connectionId, tool: "sessions", member })}>
+            {t("diag.query.openSessions", { tool: t("diag.tools.sessions") })}
+          </button>
+        </section>
+      )}
       <section>
         <h3>{t("diag.query.waits")}</h3>
         {detail.waits === null ? (
@@ -224,18 +235,7 @@ export function QueryOverview({
       <section>
         <h3>{t("diag.query.tables")}</h3>
         {relations === null ? (
-          <p className="muted">
-            {t("diag.query.tablesAfterPlan")}
-            {/* Без текста (запрос ушёл из pgss) и с обрезанным текстом плана не построить: кнопка ждала бы запуска вечно. */}
-            {detail.text !== null && !detail.textTruncated && (
-              <>
-                {" "}
-                <button type="button" className="link" onClick={onGetPlan}>
-                  {t("diag.query.getPlan")}
-                </button>
-              </>
-            )}
-          </p>
+          <p className="muted">{t("diag.query.tablesAfterPlan")}</p>
         ) : relations.length === 0 ? (
           <p className="muted">{t("diag.query.noTables")}</p>
         ) : (

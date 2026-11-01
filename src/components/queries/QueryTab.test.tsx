@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { QueryDetail } from "../../api/types";
@@ -14,7 +14,7 @@ vi.mock("../../api/client", async (importOriginal) => {
 import { api } from "../../api/client";
 import { QueryTab } from "./QueryTab";
 
-const stat = { key: { queryId: "7", dbid: 1, userid: 1, toplevel: true }, datname: "perf", rolname: "app", calls: 1200, totalExecMs: 600, meanExecMs: 0.5, minExecMs: 0.1, maxExecMs: 4, stddevExecMs: 0.3, rows: 1200, rowsPerCall: 1, plans: 0, totalPlanMs: 0, sharedHit: 5000, sharedRead: 0, sharedDirtied: 0, sharedWritten: 0, localHit: 0, localRead: 0, localDirtied: 0, localWritten: 0, tempRead: 0, tempWritten: 0, ioReadMs: 0, ioWriteMs: 0, tempIoMs: null, walRecords: 0, walFpi: 0, walBytes: 0, jitFunctions: null, jitMs: null, parallelPlanned: null, parallelLaunched: null, sharePct: 30, hitRatio: 1, text: null, textTruncated: false };
+const stat = { key: { queryId: "7", dbid: 1, userid: 1, toplevel: true }, datname: "perf", rolname: "app", calls: 1200, totalExecMs: 600, meanExecMs: 0.5, minExecMs: 0.1, maxExecMs: 4, stddevExecMs: 0.3, rows: 1200, rowsPerCall: 1, plans: 0, totalPlanMs: 0, sharedHit: 5000, sharedRead: 0, sharedDirtied: 0, sharedWritten: 0, localHit: 0, localRead: 0, localDirtied: 0, localWritten: 0, tempRead: 0, tempWritten: 0, ioReadMs: 0, ioWriteMs: 0, tempIoMs: null, walRecords: 0, walFpi: 0, walBytes: 0, jitFunctions: null, jitMs: null, parallelPlanned: null, parallelLaunched: null, sharePct: 30, hitRatio: 1, text: null, textTruncated: false, own: false };
 
 const detail = (patch: Partial<QueryDetail> = {}): QueryDetail => ({
   text: "SELECT * FROM shop.customers WHERE id = $1", textTruncated: false, sinceReset: stat,
@@ -23,7 +23,7 @@ const detail = (patch: Partial<QueryDetail> = {}): QueryDetail => ({
   history: [{ atMs: 1, calls: 10, totalExecMs: 5, meanExecMs: 0.5 }, { atMs: 60_001, calls: 20, totalExecMs: 10, meanExecMs: 0.5 }], gaps: [],
   running: [{ pid: 42, backendStartUs: 1, state: "active", startedMs: 1, durationS: 3.5, waitEventType: "IO", waitEvent: "DataFileRead", usename: "app", applicationName: "api", clientAddr: "10.0.0.5", query: "SELECT * FROM shop.customers WHERE id = 15", truncated: false }],
   waits: { source: "sampler", sinceMs: 0, total: 10, items: [{ eventType: "IO", event: "DataFileRead", count: 7, sharePct: 70 }, { eventType: "CPU", event: null, count: 3, sharePct: 30 }] },
-  findings: [], unavailable: [], serverVersionNum: 170_000, inRecovery: false, pgssVersion: "1.11", ...patch,
+  findings: [], unavailable: [], serverVersionNum: 170_000, inRecovery: false, pgssVersion: "1.11", trackPlanning: true, ...patch,
 });
 
 describe("QueryTab", () => {
@@ -72,8 +72,9 @@ describe("QueryTab", () => {
     expect(screen.getByRole("combobox", { name: "Текст запроса" })).toHaveValue("running:42");
     expect(screen.getByRole("treegrid", { name: "Дерево плана" })).toBeInTheDocument();
     expect(api.explain).toHaveBeenCalledTimes(1);
-    // «Скопировать для LLM» передаёт последний план вкладки; markdown собирается на языке интерфейса.
+    // «Скопировать для LLM» — в ряду кнопок обзора; передаёт последний план вкладки; markdown собирается на языке интерфейса.
     vi.mocked(api.queryLlmBundle).mockResolvedValue({ serverVersionNum: 170_004, pgssVersion: "1.11", inRecovery: false, member: "pg-1", database: "perf", text: "SELECT 1", textTruncated: false, stats: null, planText: "Result\n", tables: [], tablesOmitted: 0, warnings: [] });
+    await user.click(screen.getByRole("tab", { name: "Обзор" }));
     await user.click(screen.getByRole("button", { name: "Скопировать для LLM" }));
     expect(await screen.findByText("Скопировано")).toBeInTheDocument();
     expect(api.queryLlmBundle).toHaveBeenCalledWith("c", "pg-1", "perf", { kind: "query", queryId: "7" }, plan);
@@ -97,6 +98,9 @@ describe("QueryTab", () => {
     expect(await screen.findByText("Запроса больше нет в pg_stat_statements")).toBeInTheDocument();
     expect(screen.getByText("Выполняющиеся экземпляры (query_id): только с PostgreSQL 14")).toBeInTheDocument();
     expect(screen.queryByText("Сейчас не выполняется")).not.toBeInTheDocument();
+    // Блок экземпляров скрыт целиком: ни заголовка, ни ссылки на «Сессии».
+    expect(screen.queryByRole("heading", { name: "Выполняющиеся экземпляры" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Открыть «/ })).toBeNull();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
@@ -140,10 +144,10 @@ describe("QueryTab", () => {
     await waitFor(() => expect(api.explain).toHaveBeenCalledWith("c", expect.objectContaining({ mode: "plan", sql: "SELECT * FROM shop.customers WHERE id = $1", member: "pg-1" })));
     expect(await screen.findByRole("treegrid", { name: "Дерево плана" })).toBeVisible();
     expect(api.explain).toHaveBeenCalledTimes(1);
-    // Таблицы из пробы — в обзоре; «Получить план» больше не нужен.
+    // Таблицы из пробы — в обзоре; кнопка «Получить план» под текстом остаётся, а второй (внизу) нет.
     await user.click(screen.getByRole("tab", { name: "Обзор" }));
     expect(await screen.findByRole("button", { name: "shop.customers" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Получить план" })).toBeNull();
+    expect(screen.getAllByRole("button", { name: "Получить план" })).toHaveLength(1);
   });
 
   it("«Скопировать для LLM» берёт план, только если он получен на узле вкладки: ANALYZE чтения на реплике — без плана", async () => {
@@ -164,12 +168,15 @@ describe("QueryTab", () => {
     await user.click(screen.getByRole("button", { name: "План с выполнением" }));
     await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("c", expect.objectContaining({ mode: "analyze", member: "pg-2" })));
     expect(await screen.findByText("Узел: pg-2")).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Обзор" }));
     await user.click(screen.getByRole("button", { name: "Скопировать для LLM" }));
     await waitFor(() => expect(api.queryLlmBundle).toHaveBeenLastCalledWith("c", "pg-1", "perf", { kind: "query", queryId: "7" }, null));
     // План на узле вкладки — уходит в копию.
     vi.mocked(api.explain).mockResolvedValueOnce({ mode: "plan", tier: "read", plan: onLeader, raw: [], relations: [], elapsedMs: 4, warnings: [] });
+    await user.click(screen.getByRole("tab", { name: "План" }));
     await user.click(screen.getByRole("button", { name: "План" }));
     await waitFor(() => expect(screen.queryByText("Узел: pg-2")).toBeNull());
+    await user.click(screen.getByRole("tab", { name: "Обзор" }));
     await user.click(screen.getByRole("button", { name: "Скопировать для LLM" }));
     await waitFor(() => expect(api.queryLlmBundle).toHaveBeenLastCalledWith("c", "pg-1", "perf", { kind: "query", queryId: "7" }, onLeader));
   });
@@ -193,6 +200,25 @@ describe("QueryTab", () => {
     await user.selectOptions(screen.getByRole("combobox", { name: "Текст запроса" }), "running:42");
     expect(screen.getByRole("button", { name: "План" })).toBeInTheDocument();
     expect(api.explain).not.toHaveBeenCalled();
+  });
+
+  it("ряд кнопок под текстом: Получить план, Открыть в консоли, Копировать текст запроса, Скопировать для LLM; в шапке LLM нет", async () => {
+    vi.mocked(api.queryDetail).mockResolvedValue(detail());
+    renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
+    await screen.findByText("SELECT * FROM shop.customers WHERE id = $1");
+    const text = screen.getByRole("group", { name: "Текст запроса" });
+    const row = text.nextElementSibling as HTMLElement;
+    expect(within(row).getAllByRole("button").map((b) => b.textContent)).toEqual(["Получить план", "Открыть в консоли", "Копировать", "Скопировать для LLM"]);
+    expect(within(text.closest(".query-tab")!.querySelector(".toolbar") as HTMLElement).queryByRole("button", { name: "Скопировать для LLM" })).toBeNull();
+    // Старой кнопки «План» под текстом нет: «План» — только подвкладка.
+    expect(screen.queryByRole("button", { name: "План" })).toBeNull();
+  });
+
+  it("track_planning выключен — «Планирование» в карточке «—»", async () => {
+    vi.mocked(api.queryDetail).mockResolvedValue(detail({ trackPlanning: false, sinceReset: { ...stat, totalPlanMs: 12 } }));
+    renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
+    const row = (await screen.findByRole("rowheader", { name: "Планирование" })).closest("tr")!;
+    expect(within(row).getAllByRole("cell").map((c) => c.textContent)).toEqual(["—", "—"]);
   });
 
   it("подключение закрыто — карточка не читает сервер", async () => {

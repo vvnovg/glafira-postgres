@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { toAppError } from "../../../api/client";
 import type { AppError, Confirmation, ExplainMode, ExplainParams, ExplainRequest, ExplainResult, ExplainTier, Member, RelationRef } from "../../../api/types";
@@ -119,6 +119,7 @@ export function PlanRunner({
   onResult,
   autoRun,
   onAutoRun,
+  extraActions,
 }: {
   connectionId: string;
   member: string;
@@ -130,6 +131,8 @@ export function PlanRunner({
   onResult?: (r: ExplainResult, member: string) => void;
   autoRun?: boolean;
   onAutoRun?: () => void;
+  /** Кнопки в ряду копирования результата (рядом с «JSON» и «Как текст»); без результата — отдельным рядом. */
+  extraActions?: ReactNode;
 }) {
   const { t } = useTranslation();
   const qc = useQueryClient();
@@ -422,8 +425,10 @@ export function PlanRunner({
           raw={current.result.raw}
           elapsedMs={current.result.elapsedMs}
           member={current.member !== member ? current.member : undefined}
+          extraActions={extraActions}
         />
       )}
+      {!current && extraActions && <div className="toolbar">{extraActions}</div>}
       {runs.length > 1 && (
         <section className="plan-history">
           <h3>{t("diag.plan.history.title")}</h3>

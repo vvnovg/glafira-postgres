@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { ExplainTier, PlanTree } from "../../../api/types";
 import { formatMs } from "../../../lib/format";
@@ -16,7 +16,7 @@ const WARNING_KEYS: Record<string, string> = {
  * Сводка плана: узел (если план получен не на узле вкладки), планирование, выполнение, ярус, JIT, триггеры, settings,
  * предупреждения; «JSON» и «Как текст».
  */
-export function PlanSummary({ tree, tier, warnings = [], raw, elapsedMs, member }: { tree: PlanTree; tier?: ExplainTier; warnings?: string[]; raw?: unknown; elapsedMs?: number; member?: string }) {
+export function PlanSummary({ tree, tier, warnings = [], raw, elapsedMs, member, extraActions }: { tree: PlanTree; tier?: ExplainTier; warnings?: string[]; raw?: unknown; elapsedMs?: number; member?: string; extraActions?: ReactNode }) {
   const { t } = useTranslation();
   // Текст и JSON большого плана собираются один раз на план, а не при каждой перерисовке сводки.
   const json = useMemo(() => (raw === undefined ? null : JSON.stringify(raw, null, 2)), [raw]);
@@ -62,6 +62,7 @@ export function PlanSummary({ tree, tier, warnings = [], raw, elapsedMs, member 
           <span className="muted">{t("diag.plan.asText")}</span>
           <CopyButton text={text} label={t("diag.plan.copyText")} />
         </span>
+        {extraActions}
       </div>
     </section>
   );

@@ -7,7 +7,6 @@ import { useStatementsSampler } from "../../lib/useStatementsSampler";
 import { tabId, useWorkspace } from "../../state/workspace";
 import { SubTabs } from "../catalog/SubTabs";
 import { ErrorBanner } from "../common/ErrorBanner";
-import { CopyLlmButton } from "./CopyLlmButton";
 import { QueryOverview } from "./QueryOverview";
 import { QueryPlan } from "./QueryPlan";
 import { queryTitle } from "./queriesText";
@@ -15,9 +14,9 @@ import { queryTitle } from "./queriesText";
 type Section = "overview" | "plan";
 
 /**
- * Вкладка запроса (спец. P3 §7): шапка с базой, `queryId`, узлом, «Обновить» и «Скопировать для LLM», подвкладки «Обзор» и
+ * Вкладка запроса (спец. P3 §7): шапка с базой, `queryId`, узлом и «Обновить», подвкладки «Обзор» и
  * «План». Подписана на сэмплер pgss узла (история копится, пока открыта хотя бы одна вкладка); таблицы запроса — из
- * последнего плана, хранятся в состоянии вкладки. «Скопировать для LLM» получает последний план, только если он получен на
+ * последнего плана, хранятся в состоянии вкладки. «Скопировать для LLM» (в обзоре) получает последний план, только если он получен на
  * узле вкладки (план реплики к узлу вкладки не относится — тогда Rust строит пробный план сам). Подвкладка «План» после первого открытия остаётся смонтированной
  * (скрытой на «Обзоре»): значения параметров, история и показанный план живут, пока открыта вкладка. Заголовок вкладки,
  * открытой без текста (из находки), становится началом текста, когда тот прочитан. Узла больше нет в топологии —
@@ -125,7 +124,6 @@ export function QueryTab({ connectionId, member, database, queryId, active }: { 
         <button type="button" onClick={() => void q.refetch()}>
           {t("diag.header.refresh")}
         </button>
-        <CopyLlmButton connectionId={connectionId} member={member} database={database} source={{ kind: "query", queryId }} plan={last && last.member === member ? last.result.plan : null} />
       </div>
       {q.error && <ErrorBanner error={q.error} onRetry={() => void q.refetch()} />}
       {sampler.error && <ErrorBanner error={sampler.error} />}
@@ -147,8 +145,9 @@ export function QueryTab({ connectionId, member, database, queryId, active }: { 
                   member={member}
                   database={database}
                   detail={detail}
+                  queryId={queryId}
                   relations={last?.result.relations ?? null}
-                  onPlan={() => show("plan")}
+                  llmPlan={last && last.member === member ? last.result.plan : null}
                   onGetPlan={getPlan}
                   onConsole={() => open({ kind: "explain", connectionId, member, database, sql: detail.text ?? "" })}
                 />

@@ -272,4 +272,18 @@ describe("ExplainTab", () => {
     await user.click(screen.getByRole("button", { name: "Скопировать для LLM" }));
     await waitFor(() => expect(api.queryLlmBundle).toHaveBeenCalledWith("c", "pg-1", "perf", { kind: "sql", sql: "SELECT 1 " }, null));
   });
+
+  it("«Скопировать для LLM» после запуска — в ряду копирования результата, рядом с «JSON» и «Как текст»", async () => {
+    vi.mocked(api.explain).mockResolvedValue({ mode: "plan", tier: "read", plan: planTree(), raw: [], relations: [], elapsedMs: 3, warnings: [] });
+    const user = userEvent.setup();
+    renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql="SELECT 1" active />);
+    await screen.findByRole("combobox", { name: "База" });
+    await user.click(screen.getByRole("button", { name: "План" }));
+    await screen.findByRole("treegrid", { name: "Дерево плана" });
+    const llm = screen.getByRole("button", { name: "Скопировать для LLM" });
+    const row = screen.getByRole("button", { name: "Копировать как текст" }).closest(".toolbar");
+    expect(row).not.toBeNull();
+    expect(row!.contains(llm)).toBe(true);
+    expect(screen.getAllByRole("button", { name: "Скопировать для LLM" })).toHaveLength(1);
+  });
 });
