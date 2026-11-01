@@ -14,6 +14,84 @@ use crate::topology::model::{
     Member, Role, Topology, TopologyWarning, member_name, system_id_warning,
 };
 
+const SQL_ROLE_VERSION: &str =
+    marked_sql!("SELECT pg_is_in_recovery(), current_setting('server_version')");
+const SQL_SYSTEM_ID: &str = marked_sql!("SELECT system_identifier::text FROM pg_control_system()");
+const SQL_WAL_RECEIVER: &str =
+    marked_sql!("SELECT sender_host, sender_port FROM pg_stat_wal_receiver");
+const SQL_REPLICA_LAG: &str = marked_sql!(
+    "SELECT pg_wal_lsn_diff(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn())::bigint, \
+     (CASE WHEN pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn() THEN 0 \
+           WHEN pg_last_xact_replay_timestamp() IS NULL THEN NULL \
+           ELSE GREATEST(0, extract(epoch FROM now() - pg_last_xact_replay_timestamp()) * 1000) \
+      END)::bigint"
+);
+const SQL_REPLICATION: &str = marked_sql!(
+    "SELECT application_name, host(client_addr), state, sync_state, \
+     pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)::bigint FROM pg_stat_replication"
+);
+
+/// Запросы опроса узла: самые частые запросы Глафиры (каждый тик топологии).
+const POLL_SQL: [&str; 5] = [
+    SQL_ROLE_VERSION,
+    SQL_SYSTEM_ID,
+    SQL_WAL_RECEIVER,
+    SQL_REPLICA_LAG,
+    SQL_REPLICATION,
+];
+
+/// Текст строки `pg_stat_statements` — запрос опроса узла без метки. Так их записывали версии до метки (0.3.0), а
+/// `pg_stat_statements` хранит текст первого выполнения: после обновления старые строки остаются без метки до сброса
+/// статистики. Сравнение — с точностью до литералов и параметров (сервер заменяет константы на `$N`) и пробелов.
+pub fn is_unmarked_poll_sql(text: &str) -> bool {
+    let t = normalize_sql(text);
+    POLL_SQL
+        .iter()
+        .any(|sql| normalize_sql(sql.trim_start_matches(crate::product::SQL_MARKER)) == t)
+}
+
+/// Литералы (строки, числа) и параметры `$N` — в `?`, пробельные последовательности — в один пробел.
+fn normalize_sql(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut chars = sql.trim().chars().peekable();
+    let mut prev: Option<char> = None;
+    while let Some(c) = chars.next() {
+        let ident_before = prev.is_some_and(|p| p.is_alphanumeric() || p == '_');
+        if c == '\'' {
+            while let Some(n) = chars.next() {
+                if n == '\'' {
+                    if chars.peek() == Some(&'\'') {
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            out.push('?');
+            prev = Some('?');
+        } else if (c == '$' || c.is_ascii_digit()) && !ident_before {
+            while chars
+                .peek()
+                .is_some_and(|n| n.is_ascii_digit() || *n == '.')
+            {
+                chars.next();
+            }
+            out.push('?');
+            prev = Some('?');
+        } else if c.is_whitespace() {
+            while chars.peek().is_some_and(|n| n.is_whitespace()) {
+                chars.next();
+            }
+            out.push(' ');
+            prev = Some(' ');
+        } else {
+            out.push(c);
+            prev = Some(c);
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ReplicationRow {
     pub application_name: String,
@@ -79,10 +157,7 @@ pub fn no_answer(limit: Duration) -> AppError {
 
 async fn collect_queries(c: &Client) -> AppResult<NodeFacts> {
     let row = c
-        .query_one(
-            marked_sql!("SELECT pg_is_in_recovery(), current_setting('server_version')"),
-            &[],
-        )
+        .query_one(SQL_ROLE_VERSION, &[])
         .await
         .map_err(|e| from_pg(&e))?;
     let mut f = NodeFacts {
@@ -91,20 +166,10 @@ async fn collect_queries(c: &Client) -> AppResult<NodeFacts> {
         ..Default::default()
     };
     // pg_control_system() может быть недоступна роли — тогда без проверки system_identifier.
-    f.system_id = c
-        .query_one(
-            marked_sql!("SELECT system_identifier::text FROM pg_control_system()"),
-            &[],
-        )
-        .await
-        .ok()
-        .map(|r| r.get(0));
+    f.system_id = c.query_one(SQL_SYSTEM_ID, &[]).await.ok().map(|r| r.get(0));
     if f.in_recovery {
         if let Some(r) = c
-            .query_opt(
-                marked_sql!("SELECT sender_host, sender_port FROM pg_stat_wal_receiver"),
-                &[],
-            )
+            .query_opt(SQL_WAL_RECEIVER, &[])
             .await
             .map_err(|e| from_pg(&e))?
         {
@@ -117,11 +182,7 @@ async fn collect_queries(c: &Client) -> AppResult<NodeFacts> {
                 // Задержка replay: у догнавшей реплики 0 (иначе на простаивающей она росла бы без
                 // предела), иначе возраст последней применённой транзакции, не меньше 0 (расхождение
                 // часов). GREATEST игнорирует NULL, поэтому «нет метки времени» отделено явно.
-                marked_sql!("SELECT pg_wal_lsn_diff(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn())::bigint, \
-                 (CASE WHEN pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn() THEN 0 \
-                       WHEN pg_last_xact_replay_timestamp() IS NULL THEN NULL \
-                       ELSE GREATEST(0, extract(epoch FROM now() - pg_last_xact_replay_timestamp()) * 1000) \
-                  END)::bigint"),
+                SQL_REPLICA_LAG,
                 &[],
             )
             .await
@@ -130,13 +191,7 @@ async fn collect_queries(c: &Client) -> AppResult<NodeFacts> {
         f.replay_delay_ms = r.get(1);
     } else {
         let rows = c
-            .query(
-                marked_sql!(
-                    "SELECT application_name, host(client_addr), state, sync_state, \
-                 pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)::bigint FROM pg_stat_replication"
-                ),
-                &[],
-            )
+            .query(SQL_REPLICATION, &[])
             .await
             .map_err(|e| from_pg(&e))?;
         f.replicas = rows
@@ -340,6 +395,32 @@ pub async fn observe_hosts(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unmarked_poll_sql_is_recognised_as_stored_by_pg_stat_statements() {
+        use super::is_unmarked_poll_sql;
+        // Тексты строк pgss, записанных версией без метки (константы заменены сервером на $N).
+        assert!(is_unmarked_poll_sql(
+            "SELECT pg_is_in_recovery(), current_setting($1)"
+        ));
+        assert!(is_unmarked_poll_sql(
+            "SELECT system_identifier::text FROM pg_control_system()"
+        ));
+        assert!(is_unmarked_poll_sql(
+            "SELECT application_name, host(client_addr), state, sync_state, pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)::bigint FROM pg_stat_replication"
+        ));
+        assert!(is_unmarked_poll_sql(
+            "SELECT pg_wal_lsn_diff(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn())::bigint, (CASE WHEN pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn() THEN $1 WHEN pg_last_xact_replay_timestamp() IS NULL THEN NULL ELSE GREATEST($2, extract(epoch FROM now() - pg_last_xact_replay_timestamp()) * $3) END)::bigint"
+        ));
+        assert!(is_unmarked_poll_sql(
+            "  SELECT sender_host,  sender_port\nFROM pg_stat_wal_receiver "
+        ));
+        assert!(!is_unmarked_poll_sql("SELECT pg_is_in_recovery()"));
+        assert!(!is_unmarked_poll_sql(
+            "SELECT * FROM shop.customers WHERE id = $1"
+        ));
+        assert!(!is_unmarked_poll_sql(""));
+    }
+
     use super::*;
     use crate::topology::BoxFuture;
 

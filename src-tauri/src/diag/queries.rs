@@ -24,6 +24,7 @@ use crate::product::is_marked_sql;
 use crate::sampler::statements::StatementsBuffer;
 use crate::state::AppState;
 use crate::sync::MutexExt;
+use crate::topology::probe::is_unmarked_poll_sql;
 use crate::topology::runtime::DiagTarget;
 
 /// Пределы строк отчёта (спец. §4.2).
@@ -519,14 +520,14 @@ pub fn own_candidates(
         .collect()
 }
 
-/// Ключи набора, текст которых начинается с метки Глафиры.
+/// Ключи набора — запросы Глафиры: текст с меткой или запрос опроса узла без метки (строка записана до метки).
 pub fn own_keys(
     entries: &[Entry],
     text: impl Fn(&QueryKey) -> Option<Arc<str>>,
 ) -> HashSet<QueryKey> {
     entries
         .iter()
-        .filter(|e| text(&e.key).is_some_and(|t| is_marked_sql(&t)))
+        .filter(|e| text(&e.key).is_some_and(|t| is_marked_sql(&t) || is_unmarked_poll_sql(&t)))
         .map(|e| e.key)
         .collect()
 }
