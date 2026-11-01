@@ -1318,7 +1318,6 @@
       "gone": "Запроса больше нет в pg_stat_statements",
       "openConsole": "Открыть в консоли",
       "copyLlm": "Скопировать для LLM",
-      "copyText": "Копировать текст запроса",
       "metrics": "Метрики",
       "sinceReset": "С момента сброса",
       "lastHour": "За 60 мин",

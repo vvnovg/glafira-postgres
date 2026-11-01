@@ -81,7 +81,7 @@ export function QueryOverview({
           <button type="button" disabled={detail.text === null} onClick={onConsole}>
             {t("diag.query.openConsole")}
           </button>
-          {detail.text !== null && <CopyButton text={detail.text} label={t("diag.query.copyText")} caption={t("diag.query.copyQuery")} />}
+          {detail.text !== null && <CopyButton text={detail.text} caption={t("diag.query.copyQuery")} />}
           <CopyLlmButton connectionId={connectionId} member={member} database={database} source={{ kind: "query", queryId }} plan={llmPlan} />
         </div>
       </section>

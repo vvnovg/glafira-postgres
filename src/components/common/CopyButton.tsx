@@ -2,13 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 /**
- * Кнопка «Копировать»: буфер обмена может быть недоступен или отказать — об итоге сообщаем в любом случае
- * (запасной путь — видимое сообщение «Не удалось скопировать»). Плагин буфера обмена Tauri не подключён,
-
- * `caption` — видимая подпись вместо «Копировать» (имя для скринридера — `label`). Плагин буфера обмена Tauri не подключён,
- * поэтому работает `navigator.clipboard`. Тексты итога — `test.copied` и `test.copyFailed` — общие для всех мест.
+ * Кнопка «Копировать»: буфер обмена может быть недоступен или отказать — об итоге сообщаем в любом случае (запасной
+ * путь — видимое сообщение «Не удалось скопировать»). `caption` — видимая подпись вместо «Копировать»; она же имя для
+ * скринридера (видимая подпись входит в имя, WCAG 2.5.3), и `label` при ней не нужен. Без `caption` имя — `label`.
+ * Плагин буфера обмена Tauri не подключён, поэтому работает `navigator.clipboard`. Тексты итога — `test.copied` и
+ * `test.copyFailed` — общие для всех мест.
  */
-export function CopyButton({ text, label, caption }: { text: string; label: string; caption?: string }) {
+export function CopyButton({ text, label, caption }: { text: string } & ({ label: string; caption?: undefined } | { label?: undefined; caption: string })) {
   const { t } = useTranslation();
   const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
   const timer = useRef<number | undefined>(undefined);
@@ -27,7 +27,7 @@ export function CopyButton({ text, label, caption }: { text: string; label: stri
   }
   return (
     <>
-      <button type="button" aria-label={label} onClick={() => void copy()}>
+      <button type="button" aria-label={caption === undefined ? label : undefined} onClick={() => void copy()}>
         {caption ?? t("common.copy")}
       </button>
       <span role="status" className="muted">

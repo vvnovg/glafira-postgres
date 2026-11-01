@@ -1296,7 +1296,6 @@
       "gone": "The query is no longer in pg_stat_statements",
       "openConsole": "Open in console",
       "copyLlm": "Copy for LLM",
-      "copyText": "Copy the query text",
       "metrics": "Metrics",
       "sinceReset": "Since reset",
       "lastHour": "Last 60 min",

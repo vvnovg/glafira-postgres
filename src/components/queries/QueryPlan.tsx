@@ -78,8 +78,9 @@ export function QueryPlan({
           <pre className="query-text" role="group" tabIndex={0} aria-label={t("diag.query.text")}>
             <code>{sql}</code>
           </pre>
+          {/* Без живой области: карточка обновляется, и подсказка не должна звучать заново на каждом обновлении. */}
           {offered && (
-            <p className="diag-note" role="status">
+            <p className="diag-note">
               {t("diag.query.runningHint", { pid: offered.pid })}{" "}
               <button type="button" className="link" onClick={() => pick(runningId(offered.pid))}>
                 {t("diag.query.runningUse")}

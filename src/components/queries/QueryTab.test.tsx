@@ -128,14 +128,14 @@ describe("QueryTab", () => {
     expect(tabs[tabs.length - 1]).toMatchObject({ kind: "query", connectionId: "c", member: "pg-2", database: "perf", queryId: "7" });
   });
 
-  it("«Копировать текст запроса», «Обновить» и «Получить план», который сразу строит пробный план", async () => {
+  it("«Копировать запрос», «Обновить» и «Получить план», который сразу строит пробный план", async () => {
     vi.mocked(api.queryDetail).mockResolvedValue(detail());
     const plan = (await import("../../test/plans")).planTree();
     vi.mocked(api.explain).mockResolvedValue({ mode: "plan", tier: "read", plan, raw: [], relations: [{ schema: "shop", name: "customers" }], elapsedMs: 5, warnings: [] });
     const user = userEvent.setup();
     renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
     await screen.findByText("SELECT * FROM shop.customers WHERE id = $1");
-    await user.click(screen.getByRole("button", { name: "Копировать текст запроса" }));
+    await user.click(screen.getByRole("button", { name: "Копировать запрос" }));
     expect(await navigator.clipboard.readText()).toBe("SELECT * FROM shop.customers WHERE id = $1");
     const reads = vi.mocked(api.queryDetail).mock.calls.length;
     await user.click(screen.getByRole("button", { name: "Обновить" }));
@@ -202,7 +202,7 @@ describe("QueryTab", () => {
     expect(api.explain).not.toHaveBeenCalled();
   });
 
-  it("ряд кнопок под текстом: Получить план, Открыть в консоли, Копировать текст запроса, Скопировать для LLM; в шапке LLM нет", async () => {
+  it("ряд кнопок под текстом: Получить план, Открыть в консоли, Копировать запрос, Скопировать для LLM; в шапке LLM нет", async () => {
     vi.mocked(api.queryDetail).mockResolvedValue(detail());
     renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
     await screen.findByText("SELECT * FROM shop.customers WHERE id = $1");
@@ -220,18 +220,20 @@ describe("QueryTab", () => {
     renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
     await screen.findByText("SELECT * FROM shop.customers WHERE id = $1");
     await user.click(screen.getByRole("tab", { name: "План" }));
-    expect(screen.getByText(/Выполняется экземпляр \(PID 42\)/)).toBeInTheDocument();
+    // Подсказка обновляется с карточкой — без живой области, чтобы скринридер не повторял её на каждом обновлении.
+    expect(screen.getByText(/Выполняется экземпляр \(PID 42\)/).closest("[role=status]")).toBeNull();
     expect(screen.getByRole("button", { name: "Скопировать для LLM" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Взять его текст" }));
     expect(screen.getByRole("combobox", { name: "Текст запроса" })).toHaveValue("running:42");
     expect(screen.queryByText(/Выполняется экземпляр \(PID 42\)/)).toBeNull();
   });
 
-  it("кнопка копирования текста подписана «Копировать запрос», имя для скринридера — «Копировать текст запроса»", async () => {
+  it("кнопка копирования текста: видимая подпись «Копировать запрос» — она же имя для скринридера (WCAG 2.5.3)", async () => {
     vi.mocked(api.queryDetail).mockResolvedValue(detail());
     renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
-    const button = await screen.findByRole("button", { name: "Копировать текст запроса" });
+    const button = await screen.findByRole("button", { name: "Копировать запрос" });
     expect(button).toHaveTextContent("Копировать запрос");
+    expect(button).not.toHaveAttribute("aria-label");
   });
 
   it("track_planning выключен — «Планирование» в карточке «—»", async () => {
