@@ -697,6 +697,7 @@ async fn llm_bundle_has_text_stats_plan_and_ddl() {
                 limit: 200,
                 database: None,
                 toplevel_only: true,
+                search: None,
             }),
         },
     )

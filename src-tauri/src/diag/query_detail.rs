@@ -120,6 +120,8 @@ pub struct QueryDetail {
     pub server_version_num: i32,
     pub in_recovery: bool,
     pub pgss_version: Option<String>,
+    /// `pg_stat_statements.track_planning`: выключен — колонки планирования нулевые, а не «планирование бесплатно».
+    pub track_planning: bool,
 }
 
 impl QueryDetail {
@@ -146,6 +148,7 @@ impl QueryDetail {
             server_version_num: h.version_num,
             in_recovery: h.in_recovery,
             pgss_version: None,
+            track_planning: false,
         }
     }
 
@@ -481,6 +484,7 @@ pub async fn detail(
     d.running = f.running;
     d.totals = f.totals;
     d.pgss_version = f.pgss.as_ref().map(|p| p.version.clone());
+    d.track_planning = f.info.track_planning;
     if let Some((text, truncated)) = f.text {
         d.text = Some(text);
         d.text_truncated = truncated;
@@ -794,6 +798,10 @@ mod tests {
             serde_json::json!([{"windowS": 300, "stat": null}, {"windowS": 900, "stat": null}, {"windowS": 3600, "stat": null}])
         );
         assert_eq!(v["unavailable"][0]["part"], "statements");
+        assert_eq!(
+            (&v["trackPlanning"], &v["serverVersionNum"]),
+            (&false.into(), &170_000.into())
+        );
         assert_eq!(
             (&v["text"], &v["sinceReset"], &v["waits"]),
             (

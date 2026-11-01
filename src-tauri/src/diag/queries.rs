@@ -1,10 +1,11 @@
 //! Инструмент «Запросы» (спец. P3 §4): поиск `pg_stat_statements`, SQL по версии расширения, режим «с момента
 //! сброса» и ленивые тексты. Режим «за окно» — из буфера сэмплера pgss (`sampler::statements`).
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use pg_advisor::pgss::PgssCaps;
-use pg_advisor::queries::rules::{self, Mode, PgssState};
+use pg_advisor::queries::rules::{self, Mode, PgssState, n_plus_one_share};
 use pg_advisor::queries::{
     Counters, Cumulative, QueryKey, QuerySort, QueryStat, Totals, stat, top, totals,
 };
@@ -19,6 +20,7 @@ use crate::diag::{
 };
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::product::SQL_MARKER;
+use crate::product::is_marked_sql;
 use crate::state::AppState;
 use crate::sync::MutexExt;
 use crate::topology::runtime::DiagTarget;
@@ -134,6 +136,53 @@ pub fn texts_sql(ns: &str, caps: PgssCaps) -> String {
         "{SQL_MARKER}SELECT s.queryid, s.dbid, s.userid, {toplevel}, left(s.query, {QUERY_LIMIT}), length(s.query) > {QUERY_LIMIT} \
          FROM {ns}.pg_stat_statements(true) s WHERE s.queryid = ANY($1)"
     )
+}
+
+/// Ключи строк, текст которых содержит подстроку `$1` без учёта регистра (`$1` — уже экранированный `like_escape`).
+pub fn search_sql(ns: &str, caps: PgssCaps) -> String {
+    let toplevel = if caps.toplevel { "s.toplevel" } else { "true" };
+    format!(
+        "{SQL_MARKER}SELECT s.queryid, s.dbid, s.userid, {toplevel} \
+         FROM {ns}.pg_stat_statements(true) s WHERE s.query ILIKE '%' || $1 || '%'"
+    )
+}
+
+/// Подстрока для `LIKE` / `ILIKE` буквально: `%`, `_` и `\` (символ экранирования по умолчанию) экранируются.
+pub fn like_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Ключи строк pgss, текст которых содержит `search` (без учёта регистра).
+pub async fn search_keys(
+    c: &Client,
+    pgss: &PgssInstalled,
+    search: &str,
+) -> AppResult<HashSet<QueryKey>> {
+    let rows = c
+        .query(
+            &search_sql(&pgss.schema, pgss.caps),
+            &[&like_escape(search)],
+        )
+        .await
+        .map_err(|e| from_pg(&e))?;
+    Ok(rows
+        .iter()
+        .filter_map(|r| {
+            Some(QueryKey {
+                query_id: r.get::<_, Option<i64>>(0)?,
+                dbid: r.get(1),
+                userid: r.get(2),
+                toplevel: r.get::<_, Option<bool>>(3).unwrap_or(true),
+            })
+        })
+        .collect())
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -252,6 +301,16 @@ pub struct QueriesParams {
     pub database: Option<String>,
     #[serde(default = "default_true")]
     pub toplevel_only: bool,
+    /// Подстрока текста запроса без учёта регистра; пусто или `None` — без фильтра.
+    #[serde(default)]
+    pub search: Option<String>,
+}
+
+impl QueriesParams {
+    /// Строка поиска, если она задана (не пустая и не из одних пробелов).
+    pub fn search(&self) -> Option<&str> {
+        self.search.as_deref().filter(|s| !s.trim().is_empty())
+    }
 }
 
 pub fn validate(p: &QueriesParams) -> AppResult<()> {
@@ -283,6 +342,8 @@ pub fn validate(p: &QueriesParams) -> AppResult<()> {
 #[serde(rename_all = "camelCase")]
 pub struct PgssMeta {
     pub version: String,
+    /// Есть `pg_stat_statements_info` (1.9+): без него время сброса и число вытеснений недоступны.
+    pub has_info: bool,
     pub max: i64,
     pub track_planning: bool,
     pub stats_reset_ms: Option<i64>,
@@ -293,6 +354,7 @@ impl PgssMeta {
     pub fn of(pgss: &PgssInstalled, info: &PgssInfo) -> Self {
         Self {
             version: pgss.version.clone(),
+            has_info: pgss.caps.info,
             max: info.max,
             track_planning: info.track_planning,
             stats_reset_ms: info.stats_reset_ms,
@@ -326,33 +388,158 @@ impl QueriesData {
     }
 }
 
-/// Фильтр строк по параметрам: база и верхний уровень.
-pub fn keep(c: &Cumulative, p: &QueriesParams) -> bool {
-    (!p.toplevel_only || c.key.toplevel)
-        && p.database
-            .as_deref()
-            .is_none_or(|d| c.datname.as_deref() == Some(d))
+/// Строка набора до сортировки: ключ, имена, счётчики и `(min, max, stddev)` — только у накопительных данных.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Entry {
+    pub key: QueryKey,
+    pub datname: Option<String>,
+    pub rolname: Option<String>,
+    pub counters: Counters,
+    pub minmax: Option<(f64, f64, f64)>,
 }
 
-/// Строки отчёта «с момента сброса»: фильтр, итоги по отфильтрованному набору, сортировка и обрезка.
-pub fn stats_since_reset(rows: &[Cumulative], p: &QueriesParams) -> (Vec<QueryStat>, Totals) {
-    let kept: Vec<&Cumulative> = rows.iter().filter(|c| keep(c, p)).collect();
-    let t = totals(kept.iter().map(|c| &c.counters));
-    let mut out: Vec<QueryStat> = kept
+/// Фильтр строк по параметрам: база и верхний уровень.
+pub fn keep(key: &QueryKey, datname: Option<&str>, p: &QueriesParams) -> bool {
+    (!p.toplevel_only || key.toplevel) && p.database.as_deref().is_none_or(|d| datname == Some(d))
+}
+
+/// Набор «с момента сброса» после фильтра базы и верхнего уровня.
+pub fn entries_since_reset(rows: &[Cumulative], p: &QueriesParams) -> Vec<Entry> {
+    rows.iter()
+        .filter(|c| keep(&c.key, c.datname.as_deref(), p))
+        .map(|c| Entry {
+            key: c.key,
+            datname: c.datname.clone(),
+            rolname: c.rolname.clone(),
+            counters: c.counters,
+            minmax: Some((c.min_exec_ms, c.max_exec_ms, c.stddev_exec_ms)),
+        })
+        .collect()
+}
+
+/// Итоги набора без собственных запросов Глафиры — знаменатели долей.
+fn totals_without(entries: &[Entry], own: &HashSet<QueryKey>) -> Totals {
+    totals(
+        entries
+            .iter()
+            .filter(|e| !own.contains(&e.key))
+            .map(|e| &e.counters),
+    )
+}
+
+/// Строки отчёта: итоги — по всему набору без своих запросов (`own`); строки — только ключи поиска (`matched`, если
+/// он был), затем сортировка и обрезка. Свои строки остаются в таблице с признаком `own`.
+pub fn build(
+    entries: &[Entry],
+    own: &HashSet<QueryKey>,
+    matched: Option<&HashSet<QueryKey>>,
+    p: &QueriesParams,
+) -> (Vec<QueryStat>, Totals) {
+    let t = totals_without(entries, own);
+    let mut out: Vec<QueryStat> = entries
         .iter()
-        .map(|c| {
-            stat(
-                c.key,
-                c.datname.clone(),
-                c.rolname.clone(),
-                &c.counters,
-                Some((c.min_exec_ms, c.max_exec_ms, c.stddev_exec_ms)),
+        .filter(|e| matched.is_none_or(|m| m.contains(&e.key)))
+        .map(|e| {
+            let mut s = stat(
+                e.key,
+                e.datname.clone(),
+                e.rolname.clone(),
+                &e.counters,
+                e.minmax,
                 &t,
-            )
+            );
+            s.own = own.contains(&e.key);
+            s
         })
         .collect();
     top(&mut out, p.sort, p.limit);
     (out, t)
+}
+
+/// Ключи набора, текст которых нужно прочитать, чтобы узнать, не свой ли это запрос: строка прошла бы правило N+1 при
+/// итогах без уже известных своих (`own`), а текст её неизвестен (`unknown`).
+pub fn own_candidates(
+    entries: &[Entry],
+    own: &HashSet<QueryKey>,
+    unknown: impl Fn(&QueryKey) -> bool,
+) -> Vec<QueryKey> {
+    let t = totals_without(entries, own);
+    entries
+        .iter()
+        .filter(|e| !own.contains(&e.key) && unknown(&e.key))
+        .filter(|e| {
+            let c = &e.counters;
+            let mean = if c.calls > 0 {
+                c.total_exec_ms / c.calls as f64
+            } else {
+                0.0
+            };
+            n_plus_one_share(c.calls, mean, &t).is_some()
+        })
+        .map(|e| e.key)
+        .collect()
+}
+
+/// Ключи набора, текст которых начинается с метки Глафиры.
+pub fn own_keys(
+    entries: &[Entry],
+    text: impl Fn(&QueryKey) -> Option<Arc<str>>,
+) -> HashSet<QueryKey> {
+    entries
+        .iter()
+        .filter(|e| text(&e.key).is_some_and(|t| is_marked_sql(&t)))
+        .map(|e| e.key)
+        .collect()
+}
+
+/// Тексты, прочитанные отчётом: `None` — строки нет или текста у неё нет.
+type Fetched = HashMap<QueryKey, Option<(Arc<str>, bool)>>;
+
+/// Свои запросы Глафиры в наборе (спец. P3 §4). Текст — из кеша узла; кандидатам N+1 без известного текста он
+/// читается с сервера (как `texts`), пока кандидаты не кончатся: исключение своих из итогов поднимает доли остальных.
+/// Сбой чтения не роняет отчёт — строки остаются не своими.
+async fn resolve_own(
+    st: &AppState,
+    id: &str,
+    target: &DiagTarget,
+    member: &str,
+    entries: &[Entry],
+) -> (HashSet<QueryKey>, Fetched) {
+    let buffer = st.statements.buffer(id, member);
+    let mut fetched: Fetched = HashMap::new();
+    loop {
+        let (own, candidates) = {
+            let b = buffer.as_ref().map(|b| b.lock_safe());
+            let text = |k: &QueryKey| match fetched.get(k) {
+                Some(t) => t.as_ref().map(|(t, _)| Arc::clone(t)),
+                None => b.as_ref().and_then(|b| b.text(k)).map(|(t, _)| t),
+            };
+            let own = own_keys(entries, text);
+            let candidates = own_candidates(entries, &own, |k| {
+                !fetched.contains_key(k)
+                    && b.as_ref()
+                        .is_none_or(|b| b.text(k).is_none() && !b.text_missing(k))
+            });
+            (own, candidates)
+        };
+        if candidates.is_empty() {
+            return (own, fetched);
+        }
+        match fetch_texts(st, id, target, candidates.clone()).await {
+            Ok(texts) => {
+                for k in candidates {
+                    fetched.insert(k, None);
+                }
+                for t in texts {
+                    fetched.insert(t.key, t.text.map(|x| (Arc::from(x), t.truncated)));
+                }
+            }
+            Err(e) => {
+                tracing::warn!(connection = %id, member, "query texts for own-query detection not read: {}", e.message);
+                return (own, fetched);
+            }
+        }
+    }
 }
 
 /// Подставляет тексты из кеша: `lookup` отдаёт текст и признак обрезки.
@@ -456,12 +643,19 @@ async fn report_since_reset(
     p: &QueriesParams,
 ) -> AppResult<DiagReport> {
     let member = member_name(target)?;
+    let search = p.search().map(str::to_string);
     let (h, detected, snapshot) = on_member(st, id, target, |c| {
         Box::pin(async move {
             let h = head(c).await?;
             let d = detect(c).await?;
             let snap = match &d {
-                Detect::Installed(pgss) => Some(read_cumulative(c, pgss).await?),
+                Detect::Installed(pgss) => {
+                    let matched = match &search {
+                        Some(s) => Some(search_keys(c, pgss, s).await?),
+                        None => None,
+                    };
+                    Some((read_cumulative(c, pgss).await?, matched))
+                }
                 _ => None,
             };
             Ok((h, d, snap))
@@ -470,12 +664,14 @@ async fn report_since_reset(
     .await?;
     let mut unavailable = Vec::new();
     let (data, findings) = match (detected, snapshot) {
-        (Detect::Installed(pgss), Some(snap)) => {
+        (Detect::Installed(pgss), Some((snap, matched))) => {
             if !p.sort.available(&pgss.caps, false) {
                 return Err(sort_unavailable());
             }
-            let (mut rows, t) = stats_since_reset(&snap.rows, p);
-            attach_texts(&mut rows, |k| cached_text(st, id, &member, k));
+            let entries = entries_since_reset(&snap.rows, p);
+            let (own, fetched) = resolve_own(st, id, target, &member, &entries).await;
+            let (mut rows, t) = build(&entries, &own, matched.as_ref(), p);
+            attach_texts(&mut rows, |k| report_text(st, id, &member, &fetched, k));
             if snap.hidden {
                 unavailable.push(hidden_rows());
             }
@@ -586,27 +782,36 @@ async fn report_window(
         return Err(sort_unavailable());
     }
     let h = head_of(h).await?;
-    let kept: Vec<(QueryKey, Counters, Option<String>, Option<String>)> = w
+    let matched = match p.search().map(str::to_string) {
+        Some(s) => {
+            let pgss = pgss.clone();
+            Some(
+                on_member(st, id, target, |c| {
+                    Box::pin(async move { search_keys(c, &pgss, &s).await })
+                })
+                .await?,
+            )
+        }
+        None => None,
+    };
+    let entries: Vec<Entry> = w
         .sums
         .iter()
         .map(|(k, c)| {
             let (datname, rolname) = names.get(k).cloned().unwrap_or_default();
-            (*k, *c, datname, rolname)
+            Entry {
+                key: *k,
+                datname,
+                rolname,
+                counters: *c,
+                minmax: None,
+            }
         })
-        .filter(|(k, _, datname, _)| {
-            (!p.toplevel_only || k.toplevel)
-                && p.database
-                    .as_deref()
-                    .is_none_or(|d| datname.as_deref() == Some(d))
-        })
+        .filter(|e| keep(&e.key, e.datname.as_deref(), p))
         .collect();
-    let t = totals(kept.iter().map(|(_, c, _, _)| c));
-    let mut rows: Vec<QueryStat> = kept
-        .into_iter()
-        .map(|(k, c, datname, rolname)| stat(k, datname, rolname, &c, None, &t))
-        .collect();
-    top(&mut rows, p.sort, p.limit);
-    attach_texts(&mut rows, |k| cached_text(st, id, &member, k));
+    let (own, fetched) = resolve_own(st, id, target, &member, &entries).await;
+    let (mut rows, t) = build(&entries, &own, matched.as_ref(), p);
+    attach_texts(&mut rows, |k| report_text(st, id, &member, &fetched, k));
     let mut unavailable = Vec::new();
     if hidden {
         unavailable.push(hidden_rows());
@@ -647,6 +852,20 @@ pub fn cached_text(
         .and_then(|b| b.lock_safe().text(key))
 }
 
+/// Текст строки отчёта: прочитанный этим отчётом или из кеша узла.
+fn report_text(
+    st: &AppState,
+    id: &str,
+    member: &str,
+    fetched: &Fetched,
+    key: &QueryKey,
+) -> Option<(Arc<str>, bool)> {
+    match fetched.get(key) {
+        Some(Some(t)) => Some(t.clone()),
+        _ => cached_text(st, id, member, key),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryText {
@@ -666,8 +885,19 @@ pub async fn texts(
         return Ok(Vec::new());
     }
     let target = st.runtimes.diag_target(id, member, false)?;
+    fetch_texts(st, id, &target, keys).await
+}
+
+/// Тексты по ключам на узле `target` одним запросом; прочитанное — в кеш узла (строка без текста — отметкой «текста
+/// нет»).
+async fn fetch_texts(
+    st: &AppState,
+    id: &str,
+    target: &DiagTarget,
+    keys: Vec<QueryKey>,
+) -> AppResult<Vec<QueryText>> {
     let ids: Vec<i64> = keys.iter().map(|k| k.query_id).collect();
-    let rows = on_member(st, id, &target, |c| {
+    let rows = on_member(st, id, target, |c| {
         Box::pin(async move {
             let Detect::Installed(pgss) = detect(c).await? else {
                 return Ok(Vec::new());
@@ -700,10 +930,17 @@ pub async fn texts(
     if let Some(m) = target.member.as_ref().map(|m| m.name.clone())
         && let Some(b) = st.statements.buffer(id, &m)
     {
-        b.lock_safe().remember_texts(
+        let mut b = b.lock_safe();
+        b.remember_texts(
             rows.iter()
                 .filter_map(|t| t.text.clone().map(|text| (t.key, text, t.truncated))),
         );
+        let no_text: Vec<QueryKey> = rows
+            .iter()
+            .filter(|t| t.text.is_none())
+            .map(|t| t.key)
+            .collect();
+        b.remember_no_text(&no_text);
     }
     Ok(rows)
 }
@@ -745,7 +982,12 @@ mod tests {
             limit: 50,
             database: None,
             toplevel_only: true,
+            search: None,
         }
+    }
+
+    fn since_reset(rows: &[Cumulative], p: &QueriesParams) -> (Vec<QueryStat>, Totals) {
+        build(&entries_since_reset(rows, p), &HashSet::new(), None, p)
     }
 
     #[test]
@@ -821,7 +1063,7 @@ mod tests {
             cumulative(3, true, "other", 10, 500.0),
             cumulative(4, true, "perf", 10, 300.0),
         ];
-        let (out, t) = stats_since_reset(&rows, &params(QueriesMode::SinceReset));
+        let (out, t) = since_reset(&rows, &params(QueriesMode::SinceReset));
         // Только toplevel, обе базы: 1, 3, 4 — по убыванию времени.
         assert_eq!(
             out.iter().map(|r| r.key.query_id).collect::<Vec<_>>(),
@@ -838,12 +1080,118 @@ mod tests {
         p.database = Some("perf".into());
         p.toplevel_only = false;
         p.limit = 50;
-        let (out, t) = stats_since_reset(&rows, &p);
+        let (out, t) = since_reset(&rows, &p);
         assert_eq!(
             out.iter().map(|r| r.key.query_id).collect::<Vec<_>>(),
             [2, 4, 1]
         );
         assert_eq!(t.total_exec_ms, 1300.0);
+    }
+
+    /// Свои запросы Глафиры: в таблице с признаком `own`, но не в итогах — доли остальных считаются без них.
+    #[test]
+    fn own_rows_are_flagged_and_left_out_of_the_totals() {
+        let rows = vec![
+            cumulative(1, true, "perf", 3000, 30.0),
+            cumulative(2, true, "perf", 1000, 6000.0),
+            cumulative(3, true, "perf", 1000, 4000.0),
+        ];
+        let p = params(QueriesMode::SinceReset);
+        let entries = entries_since_reset(&rows, &p);
+        let own = HashSet::from([rows[0].key]);
+        let (out, t) = build(&entries, &own, None, &p);
+        assert_eq!((t.calls, t.total_exec_ms), (2000, 10_000.0));
+        assert_eq!(
+            out.iter()
+                .map(|r| (r.key.query_id, r.own, r.share_pct))
+                .collect::<Vec<_>>(),
+            [(2, false, 60.0), (3, false, 40.0), (1, true, 0.3)]
+        );
+        // Правила по этим строкам и итогам: N+1 своего запроса (3000 вызовов, 0,01 мс) нет.
+        let f = rules::evaluate(None, &out, &t, &PgssState::default(), Mode::SinceReset);
+        assert!(f.iter().all(|x| x.id != "query_n_plus_one"), "{f:?}");
+        let (_, all) = build(&entries, &HashSet::new(), None, &p);
+        let f = rules::evaluate(
+            None,
+            &since_reset(&rows, &p).0,
+            &all,
+            &PgssState::default(),
+            Mode::SinceReset,
+        );
+        assert_eq!(
+            f.iter().filter(|x| x.id == "query_n_plus_one").count(),
+            1,
+            "без метки — находка"
+        );
+    }
+
+    /// Кандидаты в свои — строки, что прошли бы N+1 при итогах без уже известных своих, и только с неизвестным текстом.
+    #[test]
+    fn own_candidates_are_n_plus_one_rows_with_unknown_texts() {
+        let p = params(QueriesMode::SinceReset);
+        let rows = vec![
+            cumulative(1, true, "perf", 3000, 30.0),     // 30 %
+            cumulative(2, true, "perf", 1800, 18.0),     // 18 %, без ключа 1 — 25,7 %
+            cumulative(3, true, "perf", 5200, 52_000.0), // долгий
+        ];
+        let entries = entries_since_reset(&rows, &p);
+        let none = HashSet::new();
+        assert_eq!(own_candidates(&entries, &none, |_| true), [rows[0].key]);
+        assert!(
+            own_candidates(&entries, &none, |_| false).is_empty(),
+            "тексты известны"
+        );
+        let own = HashSet::from([rows[0].key]);
+        assert_eq!(own_candidates(&entries, &own, |_| true), [rows[1].key]);
+        // Свой — по метке в начале текста; ведущие пробелы не мешают.
+        let texts = HashMap::from([
+            (rows[0].key, Arc::<str>::from("  \n/* glafira */ SELECT $1")),
+            (rows[1].key, Arc::<str>::from("SELECT 1 /* glafira */")),
+        ]);
+        assert_eq!(own_keys(&entries, |k| texts.get(k).cloned()), own);
+    }
+
+    /// Поиск ограничивает строки, но не итоги: доли — от всей нагрузки.
+    #[test]
+    fn search_restricts_rows_but_not_the_totals() {
+        let rows = vec![
+            cumulative(1, true, "perf", 10, 100.0),
+            cumulative(2, true, "perf", 10, 300.0),
+            cumulative(3, false, "perf", 10, 900.0),
+        ];
+        let p = params(QueriesMode::SinceReset);
+        let entries = entries_since_reset(&rows, &p);
+        let matched = HashSet::from([rows[0].key, rows[2].key]);
+        let (out, t) = build(&entries, &HashSet::new(), Some(&matched), &p);
+        assert_eq!(out.iter().map(|r| r.key.query_id).collect::<Vec<_>>(), [1]);
+        assert_eq!(
+            t.total_exec_ms, 400.0,
+            "итоги — по всем строкам после фильтра базы и уровня"
+        );
+        assert_eq!(out[0].share_pct, 25.0);
+        let (out, _) = build(&entries, &HashSet::new(), Some(&HashSet::new()), &p);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn search_sql_and_escaping() {
+        assert_eq!(like_escape("shop.customers"), "shop.customers");
+        assert_eq!(like_escape(r"50%_a\b"), r"50\%\_a\\b");
+        let sql = search_sql("public", caps("1.9"));
+        assert!(
+            sql.starts_with("/* glafira */ SELECT s.queryid, s.dbid, s.userid, s.toplevel ")
+                && sql.ends_with(
+                    "FROM public.pg_stat_statements(true) s WHERE s.query ILIKE '%' || $1 || '%'"
+                ),
+            "{sql}"
+        );
+        assert!(search_sql("public", caps("1.8")).contains("s.userid, true FROM"));
+        let mut p = params(QueriesMode::SinceReset);
+        assert_eq!(p.search(), None);
+        p.search = Some("  ".into());
+        assert_eq!(p.search(), None, "пробелы — не поиск");
+        p.search = Some(" Orders".into());
+        assert_eq!(p.search(), Some(" Orders"));
     }
 
     #[test]
@@ -852,7 +1200,7 @@ mod tests {
             cumulative(1, true, "perf", 1, 1.0),
             cumulative(2, true, "perf", 1, 1.0),
         ];
-        let (mut out, _) = stats_since_reset(&rows, &params(QueriesMode::SinceReset));
+        let (mut out, _) = since_reset(&rows, &params(QueriesMode::SinceReset));
         attach_texts(&mut out, |k| {
             (k.query_id == 1).then(|| (std::sync::Arc::<str>::from("SELECT 1"), true))
         });
@@ -901,6 +1249,7 @@ mod tests {
         }))
         .unwrap();
         let q = r.queries.unwrap();
+        assert_eq!(q.search, None, "search необязателен");
         assert_eq!(
             (
                 q.mode,
@@ -917,7 +1266,11 @@ mod tests {
                 false
             )
         );
-        let r: crate::diag::DiagRequest = serde_json::from_value(serde_json::json!({"tool": "queries", "queries": {"mode": {"kind": "sinceReset"}, "sort": "calls", "limit": 50, "database": null}})).unwrap();
+        let r: crate::diag::DiagRequest = serde_json::from_value(serde_json::json!({"tool": "queries", "queries": {"mode": {"kind": "sinceReset"}, "sort": "calls", "limit": 50, "database": null, "search": "orders"}})).unwrap();
+        assert_eq!(
+            r.queries.as_ref().unwrap().search.as_deref(),
+            Some("orders")
+        );
         assert!(
             r.queries.unwrap().toplevel_only,
             "toplevelOnly по умолчанию включён"
@@ -936,6 +1289,20 @@ mod tests {
             )
         );
         assert_eq!(v["totals"]["calls"], 0);
+        let pgss = PgssInstalled {
+            schema: "public".into(),
+            version: "1.8".into(),
+            caps: caps("1.8"),
+        };
+        let meta = serde_json::to_value(PgssMeta::of(&pgss, &PgssInfo::default())).unwrap();
+        assert_eq!(
+            (
+                &meta["hasInfo"],
+                &meta["statsResetMs"],
+                &meta["trackPlanning"]
+            ),
+            (&false.into(), &serde_json::Value::Null, &false.into())
+        );
     }
 
     #[test]

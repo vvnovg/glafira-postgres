@@ -22,6 +22,7 @@ fn since_reset(sort: QuerySort) -> QueriesParams {
         limit: 50,
         database: None,
         toplevel_only: true,
+        search: None,
     }
 }
 
@@ -60,12 +61,11 @@ async fn top_since_reset_on_perf() {
             .all(|w| w[0].total_exec_ms >= w[1].total_exec_ms),
         "по убыванию времени"
     );
-    // Сэмплер pgss не запущен: кеша текстов у узла нет, строки без текстов (они подгружаются по ключам).
-    assert!(
-        d.rows
-            .iter()
-            .all(|x| x.key.toplevel && x.datname.is_some() && x.text.is_none())
-    );
+    // Сэмплер pgss не запущен: кеша текстов у узла нет, строки без текстов (они подгружаются по ключам). Текст есть
+    // только у кандидатов N+1: его отчёт читает сам, чтобы отличить запросы Глафиры.
+    assert!(d.rows.iter().all(|x| x.key.toplevel
+        && x.datname.is_some()
+        && (x.text.is_none() || (x.calls >= 1000 && x.mean_exec_ms <= 1.0))));
     assert!(
         r.unavailable
             .iter()
@@ -98,6 +98,129 @@ async fn top_since_reset_on_perf() {
             .skip_while(|r| r.is_some())
             .all(|r| r.is_none()),
         "None в конце: {ratios:?}"
+    );
+}
+
+/// Поиск по тексту — на сервере, без учёта регистра: строки только найденные, итоги — по всей нагрузке.
+#[tokio::test]
+async fn search_filters_rows_by_text_on_perf() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st) = common::open_server_in(&perf, "perf").await;
+    let app = common::superuser(&perf, "perf").await;
+    app.batch_execute("SELECT count(*) FROM shop.customers")
+        .await
+        .unwrap();
+    let params = |search: &str| QueriesParams {
+        sort: QuerySort::Calls,
+        limit: 200,
+        database: Some("perf".into()),
+        search: Some(search.into()),
+        ..since_reset(QuerySort::Calls)
+    };
+    let all = diag::run(
+        &st,
+        "it",
+        request(QueriesParams {
+            search: None,
+            ..params("")
+        }),
+    )
+    .await
+    .unwrap();
+    let DiagData::Queries(all) = &all.data else {
+        unreachable!()
+    };
+    let r = diag::run(&st, "it", request(params("SHOP.Customers")))
+        .await
+        .unwrap();
+    let DiagData::Queries(d) = &r.data else {
+        unreachable!()
+    };
+    assert!(!d.rows.is_empty(), "shop.customers найден");
+    let keys: Vec<_> = d.rows.iter().map(|x| x.key).collect();
+    let texts = queries::texts(&st, "it", None, keys).await.unwrap();
+    assert!(
+        texts.iter().all(|t| t
+            .text
+            .as_deref()
+            .is_some_and(|s| s.to_lowercase().contains("shop.customers"))),
+        "{texts:?}"
+    );
+    assert!(
+        d.totals.calls >= all.totals.calls,
+        "итоги — по всей нагрузке, не по найденному: {} < {}",
+        d.totals.calls,
+        all.totals.calls
+    );
+    // `%` и `_` — буквально: такого текста нет.
+    let r = diag::run(&st, "it", request(params("zz_no_such%text")))
+        .await
+        .unwrap();
+    let DiagData::Queries(d) = &r.data else {
+        unreachable!()
+    };
+    assert!(d.rows.is_empty() && d.totals.calls > 0);
+}
+
+/// Запрос с меткой Глафиры в базе postgres стенда: строка помечена `own`, в итоги не входит, находки N+1 не даёт.
+#[tokio::test]
+async fn own_queries_are_flagged_and_left_out_of_totals() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st) = common::open_server_in(&perf, "perf").await;
+    let pg = common::superuser(&perf, "postgres").await;
+    let marked = pg
+        .prepare("/* glafira */ SELECT 1 AS it_own_probe")
+        .await
+        .unwrap();
+    for _ in 0..5000 {
+        pg.query_one(&marked, &[]).await.unwrap();
+    }
+    let r = diag::run(
+        &st,
+        "it",
+        request(QueriesParams {
+            sort: QuerySort::Calls,
+            limit: 200,
+            database: Some("postgres".into()),
+            ..since_reset(QuerySort::Calls)
+        }),
+    )
+    .await
+    .unwrap();
+    let DiagData::Queries(d) = &r.data else {
+        unreachable!()
+    };
+    let own = d
+        .rows
+        .iter()
+        .find(|x| {
+            x.text
+                .as_deref()
+                .is_some_and(|t| t.contains("it_own_probe"))
+        })
+        .unwrap_or_else(|| panic!("строка метки с текстом: {:?}", d.rows));
+    assert!(own.own && own.calls >= 5000, "{own:?}");
+    assert_eq!(
+        d.totals.calls,
+        d.rows
+            .iter()
+            .filter(|x| !x.own)
+            .map(|x| x.calls)
+            .sum::<i64>(),
+        "итоги — без своих строк (все строки базы в пределе 200)"
+    );
+    let qid = own.key.query_id.to_string();
+    assert!(
+        r.findings.iter().all(|f| !matches!(
+            &f.target,
+            Some(pg_advisor::findings::FindingTarget::Query { query_id, .. }) if *query_id == qid
+        )),
+        "{:?}",
+        r.findings
     );
 }
 
@@ -551,7 +674,7 @@ async fn query_detail_of_a_missing_query_does_not_read_texts() {
         probe
             .query_one(
                 "SELECT COALESCE(sum(calls), 0)::bigint FROM pg_stat_statements \
-                 WHERE query LIKE 'SELECT s.dbid, s.userid, %JOIN pg_database d ON d.oid = s.dbid WHERE s.queryid = $1%'",
+                 WHERE query LIKE '/* glafira */ SELECT s.dbid, s.userid, %JOIN pg_database d ON d.oid = s.dbid WHERE s.queryid = $1%'",
                 &[],
             )
             .await

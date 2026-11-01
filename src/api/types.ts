@@ -635,6 +635,8 @@ export interface QueriesParams {
   limit: 50 | 100 | 200;
   database: string | null;
   toplevelOnly: boolean;
+  /** Подстрока текста запроса без учёта регистра (на сервере); пусто или нет — без фильтра. Итоги — по всем строкам. */
+  search?: string | null;
 }
 /** Строка отчёта: накопительная («с момента сброса») или дельта за окно; `min`/`max`/`stddev` у окна — `null`. */
 export interface QueryStat {
@@ -677,9 +679,13 @@ export interface QueryStat {
   /** Текст из кеша; `null` — ещё не запрашивался (`query_texts`). */
   text: string | null;
   textTruncated: boolean;
+  /** Запрос самой Глафиры (метка в начале текста): вне находок и итогов долей; Rust отдаёт поле всегда. */
+  own?: boolean;
 }
 export interface PgssMeta {
   version: string;
+  /** Есть `pg_stat_statements_info` (1.9+); без него `statsResetMs` и `dealloc` — `null`. */
+  hasInfo?: boolean;
   max: number;
   trackPlanning: boolean;
   statsResetMs: number | null;
@@ -763,6 +769,8 @@ export interface QueryDetail {
   serverVersionNum: number;
   inRecovery: boolean;
   pgssVersion: string | null;
+  /** `pg_stat_statements.track_planning`: выключен — планирование не считается (колонки нулевые). */
+  trackPlanning?: boolean;
 }
 
 // План запроса (`pg_advisor::plan`): разобранный вывод EXPLAIN (FORMAT JSON) с вычисленными долями времени.
