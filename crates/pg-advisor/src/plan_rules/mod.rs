@@ -111,6 +111,7 @@ pub fn evaluate(t: &PlanTree) -> Report {
     if with_actual {
         out.extend(exec::jit_heavy(t));
     }
+    let mut out = group_partitions(&t.root, out);
     out.sort_by(|a, b| {
         b.severity
             .cmp(&a.severity)
@@ -125,6 +126,94 @@ pub fn evaluate(t: &PlanTree) -> Report {
             FACT_RULES.iter().map(|s| s.to_string()).collect()
         },
     }
+}
+
+/// Правила по партициям, которые группируются под одним Append / Merge Append.
+const PARTITION_GROUPED: [&str; 1] = ["plan_seq_scan_filter"];
+
+/// Одинаковые рекомендации по партициям одного Append / Merge Append — одна рекомендация: узлы — все сканирования,
+/// `partitions` — их число, строки суммируются, команды индексов — по строке на партицию (без повторов). Гипотеза
+/// hypopg — одна DDL, поэтому у группы её нет. `plan_no_pruning` остаётся отдельной рекомендацией.
+fn group_partitions(root: &PlanNode, recs: Vec<Recommendation>) -> Vec<Recommendation> {
+    let mut groups: Vec<HashSet<u32>> = Vec::new();
+    walk(root, None, &mut |n, _| {
+        if matches!(n.node_type.as_str(), "Append" | "Merge Append") {
+            groups.push(
+                n.children
+                    .iter()
+                    .filter(|c| c.relation.is_some())
+                    .map(|c| c.id)
+                    .collect(),
+            );
+        }
+    });
+    let mut recs: Vec<Option<Recommendation>> = recs.into_iter().map(Some).collect();
+    let mut out = Vec::new();
+    for members in &groups {
+        for rule in PARTITION_GROUPED {
+            let idx: Vec<usize> = recs
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| {
+                    r.as_ref().is_some_and(|r| {
+                        r.id == rule && r.node_ids.len() == 1 && members.contains(&r.node_ids[0])
+                    })
+                })
+                .map(|(i, _)| i)
+                .collect();
+            if idx.len() < 2 {
+                continue;
+            }
+            let parts: Vec<Recommendation> = idx.iter().filter_map(|&i| recs[i].take()).collect();
+            out.push(merge_partitions(parts));
+        }
+    }
+    out.extend(recs.into_iter().flatten());
+    out
+}
+
+fn merge_partitions(parts: Vec<Recommendation>) -> Recommendation {
+    let first = &parts[0];
+    let mut r = Recommendation::new(&first.id, first.severity, first.node_ids[0]);
+    r.node_ids = parts.iter().map(|p| p.node_ids[0]).collect();
+    r.node_ids.sort();
+    let sum = |key: &str| -> i64 {
+        parts
+            .iter()
+            .filter_map(|p| p.params.get(key)?.as_i64())
+            .sum()
+    };
+    let tables: Vec<&str> = parts
+        .iter()
+        .filter_map(|p| p.params.get("table")?.as_str())
+        .collect();
+    r = r
+        .param("partitions", parts.len() as i64)
+        .param("table", tables.first().copied().unwrap_or_default())
+        .param("tables", tables.join(", "))
+        .param("rowsRead", sum("rowsRead"))
+        .param("rowsReturned", sum("rowsReturned"))
+        .param(
+            "loops",
+            parts
+                .iter()
+                .filter_map(|p| p.params.get("loops")?.as_u64())
+                .max()
+                .unwrap_or(0),
+        );
+    if let Some(cols) = parts.iter().find_map(|p| p.params.get("columns")) {
+        r = r.param("columns", cols.clone());
+    }
+    let mut cmds: Vec<&str> = Vec::new();
+    for c in parts.iter().filter_map(|p| p.command.as_deref()) {
+        if !cmds.contains(&c) {
+            cmds.push(c);
+        }
+    }
+    if !cmds.is_empty() {
+        r = r.command(cmds.join("\n"));
+    }
+    r
 }
 
 /// Обход в глубину с родителем.
@@ -331,10 +420,7 @@ fn join_key_rhs(s: &str, alias: &str) -> Option<(String, bool)> {
     } else {
         after.trim()
     };
-    let cast_only = tail.strip_prefix("::").is_some_and(|t| {
-        t.chars()
-            .all(|c| c.is_alphanumeric() || " _[]\"().,".contains(c))
-    });
+    let cast_only = tail.strip_prefix("::").is_some_and(text_like);
     (tail.is_empty() || cast_only).then(|| (col, op == "="))
 }
 
@@ -354,7 +440,8 @@ fn leading_column(s: &str, alias: Option<&str>) -> Option<(String, bool)> {
     // Приведение после колонки: `::type` (тип может быть из нескольких слов) — до первого оператора.
     let mut tokens = rest.split_whitespace();
     let mut tok = tokens.next()?;
-    if tok.starts_with("::") {
+    if let Some(first) = tok.strip_prefix("::") {
+        let mut ty = first.to_string();
         loop {
             tok = tokens.next()?;
             if OPERATORS.contains(&tok) {
@@ -366,13 +453,33 @@ fn leading_column(s: &str, alias: Option<&str>) -> Option<(String, bool)> {
             {
                 return None;
             }
+            ty.push(' ');
+            ty.push_str(tok);
+        }
+        if !text_like(&ty) {
+            return None;
         }
     }
     OPERATORS.contains(&tok).then(|| (col, tok == "="))
 }
 
-/// Колонки простых сравнений `col op …` (в том числе `alias.col` своего псевдонима и `(col)::type`); равенства —
-/// первыми. Конъюнкты с функциями и чужими псевдонимами пропускаются.
+/// Приведение к строковому типу (`text`, `character varying`/`varchar`, `bpchar`/`character`, `name`) — неявное
+/// приведение планировщика, индекс по колонке ему служит. Приведение к любому другому типу (`date`, `integer`, …)
+/// делает конъюнкт выражением: колонки нет.
+fn text_like(ty: &str) -> bool {
+    let ty = ty.trim().replace('"', "").to_lowercase();
+    let ty = match ty.find('(') {
+        Some(i) => ty[..i].trim_end(),
+        None => ty.as_str(),
+    };
+    matches!(
+        ty,
+        "text" | "character varying" | "varchar" | "bpchar" | "character" | "name"
+    )
+}
+
+/// Колонки простых сравнений `col op …` (в том числе `alias.col` своего псевдонима и `(col)::type` строкового типа);
+/// равенства — первыми. Конъюнкты с функциями, нестроковыми приведениями и чужими псевдонимами пропускаются.
 pub fn columns_of(cond: &str, alias: Option<&str>) -> Vec<String> {
     let mut eq: Vec<String> = Vec::new();
     let mut other: Vec<String> = Vec::new();
@@ -557,6 +664,40 @@ mod tests {
     }
 
     #[test]
+    fn partition_scans_of_one_append_are_grouped() {
+        let scan = |i: u32| {
+            serde_json::json!({"Node Type": "Seq Scan", "Parent Relationship": "Member", "Relation Name": format!("events_{i}"), "Schema": "shop", "Alias": format!("events_{i}"),
+                "Startup Cost": 0.0, "Total Cost": 1.0, "Plan Rows": 10, "Plan Width": 8, "Actual Startup Time": 0.1, "Actual Total Time": 5.0, "Actual Rows": 0, "Actual Loops": 1,
+                "Filter": format!("(events_{i}.kind = 'pay'::text)"), "Rows Removed by Filter": 20_000})
+        };
+        let v = serde_json::json!({"Plan": {"Node Type": "Append", "Startup Cost": 0.0, "Total Cost": 10.0, "Plan Rows": 30, "Plan Width": 8,
+            "Actual Startup Time": 0.1, "Actual Total Time": 20.0, "Actual Rows": 0, "Actual Loops": 1, "Plans": [scan(0), scan(1), scan(2)]}});
+        let r = evaluate(&crate::plan::json::from_json(&v).unwrap());
+        let seq: Vec<&Recommendation> = r
+            .recommendations
+            .iter()
+            .filter(|r| r.id == "plan_seq_scan_filter")
+            .collect();
+        assert_eq!(seq.len(), 1);
+        let g = seq[0];
+        assert_eq!(g.node_ids, [1, 2, 3]);
+        assert_eq!(g.params["partitions"], 3);
+        assert_eq!(g.params["rowsRead"], 60_000);
+        assert_eq!(
+            g.params["tables"],
+            "shop.events_0, shop.events_1, shop.events_2"
+        );
+        assert!(g.hypo.is_none());
+        assert_eq!(g.command.as_deref().unwrap().lines().count(), 3);
+        assert!(
+            g.command
+                .as_deref()
+                .unwrap()
+                .contains("CREATE INDEX CONCURRENTLY ON \"shop\".\"events_1\" (\"kind\");")
+        );
+    }
+
+    #[test]
     fn hashed_set_op_blocks_early_stop() {
         let plan = |strategy: &str| {
             crate::plan::json::from_json(&serde_json::json!({"Plan": {"Node Type": "Limit", "Plans": [
@@ -574,11 +715,33 @@ mod tests {
     }
 
     #[test]
+    fn only_text_like_casts_are_stripped() {
+        assert_eq!(
+            columns_of(
+                "(((o.code)::character varying(10) = 'x'::text) AND ((o.kind)::bpchar = 'a'::bpchar) AND ((o.n)::name = 'n'::name))",
+                Some("o")
+            ),
+            ["code", "kind", "n"]
+        );
+        assert!(
+            columns_of("((e.happened_at)::date = '2026-03-05'::date)", Some("e")).is_empty(),
+            "приведение к date — выражение, индекс по колонке не поможет"
+        );
+        assert!(columns_of("((o.total)::numeric > 5)", Some("o")).is_empty());
+        assert!(columns_of("((o.id)::integer = 5)", Some("o")).is_empty());
+        assert!(columns_of("((o.tags)::text[] = '{}'::text[])", Some("o")).is_empty());
+    }
+
+    #[test]
     fn join_key_is_taken_from_the_right_side() {
         assert_eq!(columns_of("(a.order_id = o.id)", Some("o")), ["id"]);
         assert_eq!(
-            columns_of("((a.x = 1) AND (a.order_id < (o.id)::bigint))", Some("o")),
-            ["id"]
+            columns_of("((a.x = 1) AND (a.code < (o.code)::text))", Some("o")),
+            ["code"]
+        );
+        assert!(
+            columns_of("(a.order_id = (o.id)::bigint)", Some("o")).is_empty(),
+            "приведение к нестроковому типу — выражение"
         );
         assert!(
             columns_of("(a.order_id = b.id)", Some("o")).is_empty(),

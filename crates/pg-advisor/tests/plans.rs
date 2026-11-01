@@ -293,3 +293,28 @@ fn analyze_fixtures_trigger_expected_recommendations() {
         );
     }
 }
+
+/// Решения по итогам задачи 2: сканирования партиций одного Append — одна рекомендация; JIT параллельного плана
+/// делится на число процессов; приведение `::date` к колонке — выражение (индекса-гипотезы нет).
+#[test]
+fn partition_grouping_and_parallel_jit_on_fixtures() {
+    let ids = |name: &str| pg_advisor::plan_rules::evaluate(&load(name)).recommendations;
+    let append = ids("append_partitions_analyze");
+    let seq: Vec<_> = append
+        .iter()
+        .filter(|r| r.id == "plan_seq_scan_filter")
+        .collect();
+    assert_eq!(
+        seq.len(),
+        1,
+        "одна рекомендация на Append, а не по партиции"
+    );
+    assert_eq!(seq[0].params["partitions"], 24);
+    assert_eq!(seq[0].node_ids.len(), 24);
+    assert!(seq[0].hypo.is_none() && seq[0].params.get("columns").is_none());
+    assert!(append.iter().any(|r| r.id == "plan_no_pruning"));
+    // 121.8 мс JIT по 3 процессам (2 воркера + ведущий) — 40.6 мс из 182.9 мс выполнения: меньше половины.
+    let par = ids("parallel_jit_analyze");
+    assert!(!par.iter().any(|r| r.id == "plan_jit_heavy"), "{par:?}");
+    assert!(par.iter().any(|r| r.id == "plan_workers_short"));
+}

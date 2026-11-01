@@ -7,7 +7,8 @@ use crate::plan_rules::{
     Recommendation, column_ref, index_recommendation, qualified, scan::alias, table_name,
 };
 
-/// Sort на диске, Hash с батчами, lossy bitmap: `work_mem` ×1,5 от объёма (не меньше 1 МБ и не больше 1 ГБ). «Факт».
+/// Sort на диске, Hash с батчами: `work_mem` ×1,5 от объёма (не меньше 1 МБ и не больше 1 ГБ). Lossy bitmap: объём
+/// битовой карты по страницам кучи не оценить — доказательство в числах страниц, команда — шаблон `<work_mem>`. «Факт».
 pub fn spill(n: &PlanNode) -> Option<Recommendation> {
     n.actual?;
     let (kind, space_kb) = if n.sort_space_type.as_deref() == Some("Disk") {
@@ -17,13 +18,15 @@ pub fn spill(n: &PlanNode) -> Option<Recommendation> {
             "hash",
             n.peak_memory_kb.unwrap_or(0) * n.hash_batches.unwrap_or(1),
         )
-    } else if n.lossy_heap_blocks.is_some_and(|l| l > 0) {
-        (
-            "bitmap",
-            (n.lossy_heap_blocks.unwrap_or(0) + n.exact_heap_blocks.unwrap_or(0)) * 8,
-        )
     } else {
-        return None;
+        let lossy = n.lossy_heap_blocks.filter(|l| *l > 0)?;
+        return Some(
+            Recommendation::new("plan_spill", Severity::Warning, n.id)
+                .param("kind", "bitmap")
+                .param("lossyBlocks", lossy)
+                .param("exactBlocks", n.exact_heap_blocks.unwrap_or(0))
+                .command("SET work_mem = '<work_mem>';"),
+        );
     };
     let work_mem_kb =
         ((space_kb as f64 * th::PLAN_WORK_MEM_FACTOR) as i64).clamp(1024, th::PLAN_WORK_MEM_MAX_KB);
@@ -196,18 +199,32 @@ pub fn subplan_per_row(n: &PlanNode) -> Option<Recommendation> {
     )
 }
 
-/// JIT не меньше половины выполнения. «Факт»: времена JIT есть только при ANALYZE с TIMING.
+/// Число процессов, выполнявших план: запущенные воркеры всех Gather / Gather Merge плюс ведущий.
+fn processes(n: &PlanNode) -> i64 {
+    let own = if matches!(n.node_type.as_str(), "Gather" | "Gather Merge") {
+        n.workers_launched.unwrap_or(0)
+    } else {
+        0
+    };
+    own + n.children.iter().map(|c| processes(c) - 1).sum::<i64>() + 1
+}
+
+/// JIT не меньше половины выполнения. Сервер суммирует время JIT по процессам, а время выполнения — по часам, поэтому
+/// JIT делится на число процессов (воркеры Gather / Gather Merge + ведущий); `jitMs` — сумма, как у сервера.
+/// «Факт»: времена JIT есть только при ANALYZE с TIMING.
 pub fn jit_heavy(t: &PlanTree) -> Option<Recommendation> {
     let jit = t.jit.as_ref()?;
     let jit_ms = jit.total_ms?;
     let exec = t.execution_ms?;
-    if exec <= 0.0 || jit_ms < th::PLAN_JIT_SHARE * exec {
+    let procs = processes(&t.root).max(1);
+    if exec <= 0.0 || jit_ms / (procs as f64) < th::PLAN_JIT_SHARE * exec {
         return None;
     }
     Some(
         Recommendation::new("plan_jit_heavy", Severity::Info, t.root.id)
             .param("jitMs", jit_ms)
             .param("execMs", exec)
+            .param("processes", procs)
             .param("functions", jit.functions)
             .command("SET jit = off;"),
     )
@@ -263,10 +280,17 @@ mod tests {
         let mut bitmap = with_actual(base("Bitmap Heap Scan"), 1000.0, 1);
         bitmap["Lossy Heap Blocks"] = json!(300);
         bitmap["Exact Heap Blocks"] = json!(10);
+        let r = rec(&json!({"Plan": bitmap}), "plan_spill").unwrap();
         assert_eq!(
-            rec(&json!({"Plan": bitmap}), "plan_spill").unwrap().params["kind"],
-            "bitmap"
+            (
+                r.params["kind"].as_str(),
+                r.params["lossyBlocks"].as_i64(),
+                r.params["exactBlocks"].as_i64()
+            ),
+            (Some("bitmap"), Some(300), Some(10))
         );
+        assert!(r.params.get("workMemKb").is_none() && r.params.get("spaceKb").is_none());
+        assert_eq!(r.command.as_deref(), Some("SET work_mem = '<work_mem>';"));
         // Предел work_mem — 1 ГБ.
         let mut huge = with_actual(base("Sort"), 1.0, 1);
         huge["Sort Space Type"] = json!("Disk");
@@ -438,5 +462,22 @@ mod tests {
             50.5
         );
         assert!(rec(&pg17(30.0), "plan_jit_heavy").is_none());
+        assert_eq!(r.params["processes"], 1);
+        // Параллельный план: 120 мс JIT на 3 процесса — 40 мс из 100, молчит; на 2 процесса — 60 мс, срабатывает.
+        let parallel = |launched: i64| {
+            let mut g = with_actual(base("Gather"), 1.0, 1);
+            g["Parent Relationship"] = json!("Outer");
+            g["Workers Planned"] = json!(launched);
+            g["Workers Launched"] = json!(launched);
+            let mut root = with_actual(base("Aggregate"), 1.0, 1);
+            root["Plans"] = json!([g]);
+            json!({"Plan": root, "Execution Time": 100.0, "JIT": {"Functions": 5, "Timing": {"Generation": 20.0, "Inlining": 50.0, "Optimization": 50.0, "Emission": 0.0, "Total": 120.0}}})
+        };
+        assert!(rec(&parallel(2), "plan_jit_heavy").is_none());
+        let r = rec(&parallel(1), "plan_jit_heavy").unwrap();
+        assert_eq!(
+            (r.params["jitMs"].as_f64(), r.params["processes"].as_i64()),
+            (Some(120.0), Some(2))
+        );
     }
 }
