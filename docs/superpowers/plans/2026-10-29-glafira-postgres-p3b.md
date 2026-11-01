@@ -1,14 +1,16 @@
-# P3b «Советовать и сравнивать» — рекомендации по плану, hypopg, снимки, текстовые планы, расширения: план реализации
+# P3b «Советовать и сравнивать» — рекомендации по плану, hypopg, снимки, расширения: план реализации
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Реализовать часть P3b спецификации `docs/superpowers/specs/2026-10-29-glafira-postgres-p3-design.md` (§1, пункты 7–10 и остаток пункта 11; §9 целиком): 11 правил рекомендаций по плану с доказательством, командой, эффектом и рисками и проверкой гипотезы через hypopg; снимки `pg_stat_statements` на диске, сравнение и режим топа «между снимками»; парсер текстовых планов psql / auto_explain; `pg_stat_kcache` (CPU и диск) и `pg_wait_sampling` (точный профиль ожиданий запроса); подсказки готовности к расширениям; разделы руководства и admin.md.
+**Goal:** Реализовать часть P3b спецификации `docs/superpowers/specs/2026-10-29-glafira-postgres-p3-design.md` (§1, пункты 7–10 и остаток пункта 11; §9 целиком): 11 правил рекомендаций по плану с доказательством, командой, эффектом и рисками и проверкой гипотезы через hypopg; снимки `pg_stat_statements` на диске, сравнение и режим топа «между снимками»; `pg_stat_kcache` (CPU и диск) и `pg_wait_sampling` (точный профиль ожиданий запроса); подсказки готовности к расширениям; разделы руководства и admin.md.
 
 **Architecture:** Правила — чистые функции `pg_advisor::plan_rules` над `PlanTree` P3a; `explain::run` добавляет их в `ExplainResult.recommendations`. Проверка гипотезы — `explain/hypopg.rs` на соединении `for_explain()` в одной транзакции `READ ONLY` (виртуальный индекс → EXPLAIN → `hypopg_reset()`). Снимки — файлы `data_dir/snapshots/<подключение>/<узел>/<время>.json` (0600) через `storage::fs::write_private`; сравнение — `pg_advisor::queries::compare`; режим «между снимками» — дельты двух файлов в том же `DiagData::Queries`. Текстовый парсер — `plan::from_text` в тот же `PlanTree`, `parse_plan` принимает и текст. Расширения — join к pgss (`pg_stat_kcache`) и запрос профиля (`pg_wait_sampling`) только при установленном расширении. Интерфейс — блок `Recommendations` под сводкой плана, `HypoCheck`, `SnapshotsPanel`/`SnapshotCompare` в инструменте «Запросы», колонки CPU/диск, источник ожиданий в карточке.
 
 **Tech Stack:** как у P3a (Tauri 2, Rust 2024, tokio-postgres с `with-serde_json-1`, serde; React 19 + TS + TanStack Query + Zustand + i18next; Vitest). Новых крейтов нет (`time` для имён файлов уже в зависимостях).
 
 **Образец кода:** корень репозитория — `$P` (`/Users/vvnovg/postgres-patroni-diag`). Опора — код P3a: `crates/pg-advisor/src/{plan,queries}`, `src-tauri/src/{explain,diag/queries.rs,diag/query_detail.rs,sampler/statements.rs}`, `src/components/queries/**`. Имена и сигнатуры P3a — по плану `docs/superpowers/plans/2026-10-29-glafira-postgres-p3a.md` (блоки Interfaces).
+
+(Парсер текстовых планов из этого плана перенесён в P3a — поправка 10 ниже.)
 
 ## Поправки по итогам P3a
 
@@ -35,6 +37,11 @@
      аргумент — в каждом новом вызове).
    - п. 16 — `pg-perf` в профиле `perf`; `it_hypopg`, `it_snapshots` и прочие тесты на нём идут в workflow `perf`
      (`.github/workflows/perf.yml`: добавить их в `--test …`), а не в `ci.yml`.
+10. **Решение владельца 2026-11-01 (смоук P3a): парсер текстовых планов перенесён из P3b в P3a** (спека §1 п. 9, §2 п. 6, §9.4). Задача 5 ниже снята
+    (оставлена пустой строкой-заглушкой); `from_text`, `from_any` и `parse_plan` для текста уже есть в P3a, подпись и подсказка поля вставки
+    («текст или JSON») тоже. Не делать: файлы `plan/text_in.rs`, пары фикстур `plans/text/` и `tests/plans.rs` (строки карты файлов с пометкой (5)),
+    правку `ExplainTab` для вставки текста, раздел «Текстовые планы» главы «Запросы» и шаг 6 смоука P3b (они в P3a). Критерий готовности P3b №4
+    выполнен в P3a. Поправка 8 (`from_text` разбирает `Settings:`) выполнена там же. Остальные задачи не зависят от задачи 5.
 
 ## Global Constraints
 
@@ -54,7 +61,7 @@
 6. **Режим «между снимками»**: дельта `to − from` по ключу; ключ только в `to` или с уменьшившимися счётчиками — значение `to` целиком; `stats_reset` различается — предупреждение в отчёте (`unavailable{part: between}` с причиной «статистика сбрасывалась»); `coverageS` — разница времён снятия; узел отчёта — узел снимка `to`.
 7. **`pg_stat_kcache`**: join по `(queryid, userid, dbid[, top])` через `LEFT JOIN`; версия 2.2+ — колонки `exec_*` и `top`, старше — `user_time`, `system_time`, `reads`, `writes` и без `top` (тогда join без него). Времена CPU в секундах → миллисекунды. Поля `Counters` / `QueryStat`: `cpu_user_ms`, `cpu_sys_ms`, `disk_read_bytes`, `disk_write_bytes` (`Option`, `None` без расширения); сортировка `cpuTime` = user + sys.
 8. **`pg_wait_sampling`** читается в `query_detail` только при установленном расширении: профиль накопительный с момента `pg_wait_sampling_reset_profile()`, поэтому `sinceMs: 0`; при `pg_wait_sampling.profile_queries = off` — `unavailable{part: waitsProfile}` и ожидания из сэмплов, как в P3a.
-9. **Текстовый парсер** принимает вывод psql (`QUERY PLAN`, разделитель, `(N rows)`), «сырой» EXPLAIN и тело записи auto_explain (строки до первой строки плана — «LOG: duration: … plan:» и т. п. — пропускаются); неразобранная строка деталей — в `extra["text"]` массивом строк.
+9. **Текстовый парсер (перенесён в P3a, поправка 10)** принимает вывод psql (`QUERY PLAN`, разделитель, `(N rows)`), «сырой» EXPLAIN и тело записи auto_explain (строки до первой строки плана — «LOG: duration: … plan:» и т. п. — пропускаются); неразобранная строка деталей — в `extra["text"]` массивом строк.
 10. **Подсказки готовности к расширениям** — параметр `hint` пункта `extension` (`hypopg`, `pg_stat_kcache`, `pg_wait_sampling`); фронтенд показывает `readiness.extension.hints.<name>`, если ключ есть.
 
 ## Карта файлов
@@ -65,14 +72,14 @@ crates/pg-advisor/
   src/plan_rules/mod.rs           Recommendation, HypoIndex, Skipped, evaluate, columns_of, index_ddl          (1)
   src/plan_rules/scan.rs          seq_scan_filter, index_filter, nested_loop_seq, misestimate                  (1)
   src/plan_rules/exec.rs          spill, sort_limit, heap_fetches, no_pruning, workers_short, subplan, jit     (2)
-  src/plan/text_in.rs             from_text                                                                   (5)
-  src/plan/json.rs                from_psql_text → from_any (JSON или текст)                                   (5)
+  src/plan/text_in.rs             from_text                                                                   (перенесено в P3a)
+  src/plan/json.rs                from_psql_text → from_any (JSON или текст)                                   (перенесено в P3a)
   src/queries/compare.rs          Comparison, Change, compare                                                 (6)
   src/queries/mod.rs              Counters/QueryStat: cpu_*, disk_*, QuerySort::CpuTime                       (8)
   src/findings.rs                 thresholds PLAN_*, COMPARE_*                                                 (1, 2, 6)
   src/readiness.rs                hint у пункта extension                                                     (10)
-  tests/fixtures/plans/{json,text}/  пары JSON / текст с pg-perf и матрицы                                     (5)
-  tests/plans.rs                  эквивалентность пар                                                          (5)
+  tests/fixtures/plans/{json,text}/  пары JSON / текст с pg-perf и матрицы                                     (перенесено в P3a)
+  tests/plans.rs                  эквивалентность пар                                                          (перенесено в P3a)
 src-tauri/src/
   explain/run.rs                  recommendations в ExplainResult                                             (3)
   explain/hypopg.rs               HypoRequest, HypoResult, check                                              (3)
@@ -90,12 +97,12 @@ src/
   components/queries/{SnapshotsPanel,SnapshotCompare}.tsx, QueriesView (режим between, кнопка «Снимки»)       (7)
   components/queries/QueriesView.tsx (колонки CPU/диск), QueryOverview (источник ожиданий)                   (8, 9)
   components/connections/TestPanel.tsx (hint)                                                                 (10)
-  components/queries/ExplainTab.tsx (вставка текста)                                                          (5)
+  components/queries/ExplainTab.tsx (вставка текста)                                                          (перенесено в P3a)
   locales/{en,ru}.json, docs/i18n/same-as-en.json
 docs/guide/{en,ru}/queries.md (разделы P3b), docs/admin.md, docs/smoke/p3b.md, спека                           (11)
 ```
 
-**Порядок:** 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11. Задача 3 зависит от 1–2 (правила); 4 — от 3 (поле `recommendations`, `hypo_check`); 6 — от P3a (`read_cumulative`, `texts_sql`, `QueriesMode::Between`); 7 — от 6; 8 и 9 — независимы; 11 — последняя.
+**Порядок:** 1 → 2 → 3 → 4 → (5 перенесена в P3a) → 6 → 7 → 8 → 9 → 10 → 11. Задача 3 зависит от 1–2 (правила); 4 — от 3 (поле `recommendations`, `hypo_check`); 6 — от P3a (`read_cumulative`, `texts_sql`, `QueriesMode::Between`); 7 — от 6; 8 и 9 — независимы; 11 — последняя.
 
 ---
 
@@ -1554,577 +1561,9 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ---
 
-### Task 5: `pg-advisor::plan::from_text` — текстовые планы psql и auto_explain
+### Task 5: ПЕРЕНЕСЕНА В P3A — текстовые планы psql и auto_explain
 
-**Files:**
-- Create: `crates/pg-advisor/src/plan/text_in.rs`, `crates/pg-advisor/tests/fixtures/plans/text/*.txt`
-- Modify: `crates/pg-advisor/src/plan/mod.rs` (`pub mod text_in;`), `crates/pg-advisor/src/plan/json.rs` (`from_any`), `crates/pg-advisor/tests/plans.rs` (пары), `src-tauri/src/commands/explain.rs` (`parse_plan` → `from_any`), `src/components/queries/ExplainTab.tsx` и словари (подпись «План (JSON или текст)»)
-- Test: unit-тесты `text_in.rs`; `tests/plans.rs`
-
-**Interfaces:**
-- Produces: `plan::text_in::from_text(&str) -> Result<PlanTree, PlanError>`; `plan::json::from_any(&str) -> Result<PlanTree, PlanError>` (JSON — через `from_psql_text`, иначе текст).
-
-- [ ] **Step 1: Падающие тесты**
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const TEXT: &str = "\
-                                                                QUERY PLAN
-------------------------------------------------------------------------------------------------------------------------------
- Hash Join  (cost=10.00..100.00 rows=1000 width=8) (actual time=1.000..50.000 rows=10 loops=1)
-   Hash Cond: (o.customer_id = c.id)
-   Buffers: shared hit=100 read=20
-   ->  Seq Scan on shop.orders o  (cost=0.00..60.00 rows=500 width=8) (actual time=0.100..30.000 rows=5 loops=1)
-         Filter: (o.status = 'disputed'::text)
-         Rows Removed by Filter: 499995
-   ->  Hash  (cost=5.00..5.00 rows=100 width=8) (actual time=0.500..0.500 rows=100 loops=1)
-         Buckets: 1024  Batches: 1  Memory Usage: 12kB
-         ->  Index Scan using customers_pkey on shop.customers c  (cost=0.30..4.00 rows=100 width=8) (never executed)
-               Index Cond: (c.id < 100)
- Planning Time: 0.500 ms
- JIT:
-   Functions: 3
-   Timing: Generation 1.000 ms, Inlining 0.000 ms, Optimization 2.000 ms, Emission 3.000 ms, Total 6.000 ms
- Execution Time: 55.000 ms
-(16 rows)
-";
-
-    #[test]
-    fn parses_psql_text_into_the_same_tree() {
-        let t = from_text(TEXT).unwrap();
-        assert_eq!((t.planning_ms, t.execution_ms), (Some(0.5), Some(55.0)));
-        assert_eq!(t.jit.as_ref().map(|j| (j.functions, j.total_ms)), Some((3, 6.0)));
-        let root = &t.root;
-        assert_eq!((root.node_type.as_str(), root.total_cost, root.plan_rows), ("Hash Join", 100.0, 1000.0));
-        assert_eq!(root.hash_cond.as_deref(), Some("(o.customer_id = c.id)"));
-        assert_eq!(root.buffers.map(|b| (b.shared_hit, b.shared_read)), Some((100, 20)));
-        assert_eq!(root.actual.map(|a| (a.total_ms, a.rows, a.loops)), Some((50.0, 10.0, 1)));
-        let seq = &root.children[0];
-        assert_eq!(seq.relation.as_ref().map(|r| (r.schema.as_deref(), r.name.as_str(), r.alias.as_deref())), Some((Some("shop"), "orders", Some("o"))));
-        assert_eq!((seq.rows_removed_by_filter, seq.filter.as_deref()), (Some(499_995), Some("(o.status = 'disputed'::text)")));
-        let hash = &root.children[1];
-        assert_eq!((hash.node_type.as_str(), hash.hash_batches, hash.peak_memory_kb), ("Hash", Some(1), Some(12)));
-        let idx = &hash.children[0];
-        assert_eq!((idx.node_type.as_str(), idx.index_name.as_deref(), idx.never_executed), ("Index Scan", Some("customers_pkey"), true));
-        assert_eq!(idx.index_cond.as_deref(), Some("(c.id < 100)"));
-        assert!(seq.hot && seq.misestimated, "вычисляемые поля те же, что у JSON");
-    }
-
-    #[test]
-    fn handles_parallel_sort_and_unknown_lines() {
-        let text = "\
-Limit  (cost=1.0..2.0 rows=10 width=8) (actual time=5.000..5.010 rows=10 loops=1)
-  ->  Gather Merge  (cost=1.0..2.0 rows=100 width=8) (actual time=5.000..5.005 rows=10 loops=1)
-        Workers Planned: 2
-        Workers Launched: 1
-        ->  Sort  (cost=1.0..2.0 rows=50 width=8) (actual time=4.000..4.001 rows=10 loops=2)
-              Sort Key: o.total DESC
-              Sort Method: top-N heapsort  Memory: 25kB
-              Worker 0:  Sort Method: top-N heapsort  Memory: 25kB
-              Mystery: something new
-              ->  Parallel Seq Scan on orders o  (cost=0.0..1.0 rows=25 width=8) (actual time=0.010..3.000 rows=250000 loops=2)
-Planning Time: 0.100 ms
-Execution Time: 6.000 ms
-";
-        let t = from_text(text).unwrap();
-        let gm = &t.root.children[0];
-        assert_eq!((gm.workers_planned, gm.workers_launched), (Some(2), Some(1)));
-        let sort = &gm.children[0];
-        assert_eq!(sort.sort_key, ["o.total DESC"]);
-        assert_eq!((sort.sort_method.as_deref(), sort.sort_space_kb, sort.sort_space_type.as_deref()), (Some("top-N heapsort"), Some(25), Some("Memory")));
-        assert_eq!(sort.extra["text"], serde_json::json!(["Worker 0:  Sort Method: top-N heapsort  Memory: 25kB", "Mystery: something new"]));
-        let scan = &sort.children[0];
-        assert_eq!((scan.node_type.as_str(), scan.parallel_aware), ("Seq Scan", true));
-        assert_eq!(scan.relation.as_ref().map(|r| (r.schema.as_deref(), r.name.as_str())), Some((None, "orders")));
-    }
-
-    #[test]
-    fn plain_explain_without_actual_and_auto_explain_prefix() {
-        let text = "2026-10-29 10:00:00 UTC [123] LOG:  duration: 12.345 ms  plan:\n\tQuery Text: SELECT 1\n\tResult  (cost=0.00..0.01 rows=1 width=4)\n";
-        let t = from_text(text).unwrap();
-        assert_eq!((t.root.node_type.as_str(), t.root.actual), ("Result", None));
-        assert_eq!(t.root.extra["queryText"], "SELECT 1");
-        let e = from_text("no plan here").unwrap_err();
-        assert_eq!(e.line, Some(1));
-    }
-
-    #[test]
-    fn from_any_dispatches() {
-        assert_eq!(crate::plan::json::from_any("[{\"Plan\": {\"Node Type\": \"Result\", \"Startup Cost\": 0, \"Total Cost\": 0, \"Plan Rows\": 1, \"Plan Width\": 1}}]").unwrap().root.node_type, "Result");
-        assert_eq!(crate::plan::json::from_any("Result  (cost=0.00..0.01 rows=1 width=4)\n").unwrap().root.node_type, "Result");
-    }
-}
-```
-
-- [ ] **Step 2: Убедиться, что тесты падают**
-
-Run: `cargo test --manifest-path crates/pg-advisor/Cargo.toml plan::text_in`
-Expected: ошибка компиляции.
-
-- [ ] **Step 3: Реализация**
-
-`crates/pg-advisor/src/plan/mod.rs` — `pub mod text_in;`. `crates/pg-advisor/src/plan/json.rs`:
-
-```rust
-/// Вставленный план любого вида: JSON (в том числе с обрамлением psql) или текст EXPLAIN.
-pub fn from_any(text: &str) -> Result<PlanTree, PlanError> {
-    let body: String = text.lines().map(|l| l.trim_matches('|').trim()).filter(|l| !l.is_empty() && *l != "QUERY PLAN").collect::<Vec<_>>().join("\n");
-    let first = body.lines().find(|l| !l.chars().all(|c| c == '-' || c == '+')).unwrap_or("");
-    if first.starts_with('[') || first.starts_with('{') {
-        from_json(&from_psql_text(text)?)
-    } else {
-        crate::plan::text_in::from_text(text)
-    }
-}
-```
-
-`crates/pg-advisor/src/plan/text_in.rs`:
-
-```rust
-//! Текстовый план psql / auto_explain (спец. P3 §9.4) → `PlanTree`. Дерево — по отступам и `->`; заголовок узла —
-//! `Тип [using idx] on [schema.]rel [alias]  (cost=a..b rows=r width=w) [(actual time=a..b rows=r loops=l) | (never executed)]`;
-//! строки деталей известных видов разбираются, прочие — в `extra["text"]`.
-
-use serde_json::{Map, Value};
-
-use crate::plan::{Actual, Buffers, Jit, PlanError, PlanNode, PlanTree, Relation, Setting, Trigger};
-
-fn err(message: &str, line: usize) -> PlanError {
-    PlanError { message: message.to_string(), line: Some(line) }
-}
-
-/// Строка заголовка узла: отступ (позиция `->` или первого символа), текст без стрелки.
-struct Head {
-    indent: usize,
-    text: String,
-    line: usize,
-}
-
-fn is_head(s: &str) -> bool {
-    s.contains("(cost=") || s.contains("(actual ")
-}
-
-/// Снимает обрамление psql, префикс auto_explain («… plan:» и «Query Text: …») и табуляции; нумерует строки.
-fn clean(text: &str) -> (Vec<(usize, String)>, Option<String>) {
-    let mut out = Vec::new();
-    let mut query_text = None;
-    let mut started = false;
-    for (i, raw) in text.lines().enumerate() {
-        let l = raw.replace('\t', "    ");
-        let t = l.trim_end().trim_end_matches('+').trim_end();
-        let tt = t.trim();
-        if tt.is_empty() || tt == "QUERY PLAN" || tt.chars().all(|c| c == '-') {
-            continue;
-        }
-        if tt.starts_with('(') && (tt.ends_with(" row)") || tt.ends_with(" rows)")) {
-            continue;
-        }
-        if !started {
-            if let Some(q) = tt.strip_prefix("Query Text:") {
-                query_text = Some(q.trim().to_string());
-                continue;
-            }
-            if !is_head(tt) {
-                continue;
-            }
-            started = true;
-        }
-        out.push((i + 1, t.trim_start_matches('|').to_string()));
-    }
-    (out, query_text)
-}
-
-fn num(s: &str) -> Option<f64> {
-    s.trim().parse().ok()
-}
-
-/// `(cost=0.00..60.00 rows=500 width=8)` и факт после него.
-fn parse_head(text: &str, line: usize) -> Result<PlanNode, PlanError> {
-    let cost_at = text.find("(cost=").ok_or_else(|| err("node without (cost=", line))?;
-    let (head, rest) = (text[..cost_at].trim(), &text[cost_at..]);
-    let costs = &rest[6..rest.find(')').ok_or_else(|| err("unclosed (cost=", line))?];
-    let mut it = costs.split_whitespace();
-    let range = it.next().unwrap_or("");
-    let (startup, total) = range.split_once("..").ok_or_else(|| err("bad cost range", line))?;
-    let kv = |prefix: &str| it.clone().find_map(|p| p.strip_prefix(prefix)).and_then(num);
-    let plan_rows = kv("rows=").unwrap_or(0.0);
-    let plan_width = kv("width=").unwrap_or(0.0) as i64;
-    let after = &rest[rest.find(')').unwrap() + 1..];
-    let (actual, never_executed) = if after.contains("(never executed)") {
-        (Some(Actual { startup_ms: 0.0, total_ms: 0.0, rows: 0.0, loops: 0 }), true)
-    } else if let Some(a) = after.find("(actual ") {
-        let inner = &after[a + 8..after[a..].find(')').map(|e| a + e).unwrap_or(after.len())];
-        let mut time = None;
-        let (mut rows, mut loops) = (0.0, 1u64);
-        for part in inner.split_whitespace() {
-            if let Some(v) = part.strip_prefix("time=") {
-                let (s, e) = v.split_once("..").unwrap_or((v, v));
-                time = Some((num(s).unwrap_or(0.0), num(e).unwrap_or(0.0)));
-            } else if let Some(v) = part.strip_prefix("rows=") {
-                rows = num(v).unwrap_or(0.0);
-            } else if let Some(v) = part.strip_prefix("loops=") {
-                loops = num(v).unwrap_or(1.0) as u64;
-            }
-        }
-        let (s, e) = time.unwrap_or((0.0, 0.0));
-        (Some(Actual { startup_ms: s, total_ms: e, rows, loops }), false)
-    } else {
-        (None, false)
-    };
-    // Заголовок: [Parallel ][Partial ]Тип [using idx] [on [schema.]rel [alias]]
-    let mut words: Vec<&str> = head.split_whitespace().collect();
-    let parallel_aware = words.first() == Some(&"Parallel");
-    if parallel_aware {
-        words.remove(0);
-    }
-    let mut strategy = None;
-    if words.first() == Some(&"Partial") {
-        strategy = Some("Partial".to_string());
-        words.remove(0);
-    }
-    let on = words.iter().position(|w| *w == "on");
-    let using = words.iter().position(|w| *w == "using");
-    let type_end = [on, using].into_iter().flatten().min().unwrap_or(words.len());
-    let node_type = words[..type_end].join(" ");
-    let index_name = using.map(|u| words.get(u + 1).copied().unwrap_or("").to_string());
-    let relation = on.map(|o| {
-        let full = words.get(o + 1).copied().unwrap_or("");
-        let (schema, name) = match full.rsplit_once('.') {
-            Some((s, n)) => (Some(s.to_string()), n.to_string()),
-            None => (None, full.to_string()),
-        };
-        let alias = words.get(o + 2).filter(|a| !a.starts_with('(')).map(|a| a.to_string());
-        Relation { schema, name, alias }
-    });
-    Ok(PlanNode {
-        id: 0,
-        node_type,
-        parent_relationship: None,
-        subplan_name: None,
-        relation,
-        index_name,
-        strategy,
-        join_type: None,
-        parallel_aware,
-        startup_cost: num(startup).unwrap_or(0.0),
-        total_cost: num(total).unwrap_or(0.0),
-        plan_rows,
-        plan_width,
-        actual,
-        never_executed,
-        workers_planned: None,
-        workers_launched: None,
-        rows_removed_by_filter: None,
-        rows_removed_by_index_recheck: None,
-        rows_removed_by_join_filter: None,
-        heap_fetches: None,
-        filter: None,
-        index_cond: None,
-        recheck_cond: None,
-        hash_cond: None,
-        join_filter: None,
-        merge_cond: None,
-        sort_key: Vec::new(),
-        group_key: Vec::new(),
-        sort_method: None,
-        sort_space_kb: None,
-        sort_space_type: None,
-        hash_batches: None,
-        hash_buckets: None,
-        peak_memory_kb: None,
-        exact_heap_blocks: None,
-        lossy_heap_blocks: None,
-        subplans_removed: None,
-        buffers: None,
-        io_read_ms: None,
-        io_write_ms: None,
-        output: Vec::new(),
-        extra: Map::new(),
-        inclusive_ms: None,
-        exclusive_ms: None,
-        share_pct: None,
-        estimate_ratio: None,
-        hot: false,
-        misestimated: false,
-        children: Vec::new(),
-    })
-}
-
-fn kb(s: &str) -> Option<i64> {
-    s.trim().trim_end_matches("kB").trim().parse().ok()
-}
-
-/// Строка деталей узла; неизвестная — в `extra["text"]`.
-fn detail(n: &mut PlanNode, line: &str) {
-    let l = line.trim();
-    let mut set = |key: &str, f: &mut dyn FnMut(&str)| -> bool {
-        match l.strip_prefix(key) {
-            Some(v) => {
-                f(v.trim());
-                true
-            }
-            None => false,
-        }
-    };
-    if set("Filter:", &mut |v| n.filter = Some(v.to_string())) { return }
-    if set("Index Cond:", &mut |v| n.index_cond = Some(v.to_string())) { return }
-    if set("Recheck Cond:", &mut |v| n.recheck_cond = Some(v.to_string())) { return }
-    if set("Hash Cond:", &mut |v| n.hash_cond = Some(v.to_string())) { return }
-    if set("Join Filter:", &mut |v| n.join_filter = Some(v.to_string())) { return }
-    if set("Merge Cond:", &mut |v| n.merge_cond = Some(v.to_string())) { return }
-    if set("Rows Removed by Filter:", &mut |v| n.rows_removed_by_filter = v.parse().ok()) { return }
-    if set("Rows Removed by Index Recheck:", &mut |v| n.rows_removed_by_index_recheck = v.parse().ok()) { return }
-    if set("Rows Removed by Join Filter:", &mut |v| n.rows_removed_by_join_filter = v.parse().ok()) { return }
-    if set("Heap Fetches:", &mut |v| n.heap_fetches = v.parse().ok()) { return }
-    if set("Sort Key:", &mut |v| n.sort_key = v.split(", ").map(str::to_string).collect()) { return }
-    if set("Group Key:", &mut |v| n.group_key = v.split(", ").map(str::to_string).collect()) { return }
-    if set("Workers Planned:", &mut |v| n.workers_planned = v.parse().ok()) { return }
-    if set("Workers Launched:", &mut |v| n.workers_launched = v.parse().ok()) { return }
-    if set("Subplans Removed:", &mut |v| n.subplans_removed = v.parse().ok()) { return }
-    if set("Output:", &mut |v| n.output = v.split(", ").map(str::to_string).collect()) { return }
-    if let Some(v) = l.strip_prefix("Sort Method:") {
-        // `top-N heapsort  Memory: 25kB` | `external merge  Disk: 2048kB`
-        let (method, space) = v.split_once("  ").unwrap_or((v, ""));
-        n.sort_method = Some(method.trim().to_string());
-        if let Some((kind, amount)) = space.trim().split_once(':') {
-            n.sort_space_type = Some(kind.trim().to_string());
-            n.sort_space_kb = kb(amount);
-        }
-        return;
-    }
-    if let Some(v) = l.strip_prefix("Buckets:") {
-        for part in v.split("  ") {
-            let p = part.trim();
-            if let Some(b) = p.strip_prefix("Batches:") {
-                n.hash_batches = b.trim().parse().ok();
-            } else if let Some(m) = p.strip_prefix("Memory Usage:") {
-                n.peak_memory_kb = kb(m);
-            } else if n.hash_buckets.is_none() {
-                n.hash_buckets = p.split_whitespace().next().and_then(|x| x.parse().ok());
-            }
-        }
-        return;
-    }
-    if let Some(v) = l.strip_prefix("Heap Blocks:") {
-        for p in v.split_whitespace() {
-            if let Some(x) = p.strip_prefix("exact=") {
-                n.exact_heap_blocks = x.parse().ok();
-            } else if let Some(x) = p.strip_prefix("lossy=") {
-                n.lossy_heap_blocks = x.parse().ok();
-            }
-        }
-        return;
-    }
-    if let Some(v) = l.strip_prefix("Buffers:") {
-        let mut b = n.buffers.unwrap_or_default();
-        let mut group = "";
-        for p in v.split([' ', ',']).filter(|p| !p.is_empty()) {
-            match p {
-                "shared" | "local" | "temp" => group = p,
-                _ => {
-                    if let Some((k, val)) = p.split_once('=') {
-                        let val: i64 = val.parse().unwrap_or(0);
-                        match (group, k) {
-                            ("shared", "hit") => b.shared_hit = val,
-                            ("shared", "read") => b.shared_read = val,
-                            ("shared", "dirtied") => b.shared_dirtied = val,
-                            ("shared", "written") => b.shared_written = val,
-                            ("local", "hit") => b.local_hit = val,
-                            ("local", "read") => b.local_read = val,
-                            ("local", "dirtied") => b.local_dirtied = val,
-                            ("local", "written") => b.local_written = val,
-                            ("temp", "read") => b.temp_read = val,
-                            ("temp", "written") => b.temp_written = val,
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-        n.buffers = Some(b);
-        return;
-    }
-    if let Some(v) = l.strip_prefix("I/O Timings:") {
-        for p in v.split_whitespace() {
-            if let Some(x) = p.strip_prefix("read=") {
-                n.io_read_ms = num(x);
-            } else if let Some(x) = p.strip_prefix("write=") {
-                n.io_write_ms = num(x);
-            }
-        }
-        return;
-    }
-    let arr = n.extra.entry("text").or_insert_with(|| Value::Array(Vec::new()));
-    if let Value::Array(a) = arr {
-        a.push(Value::String(l.to_string()));
-    }
-}
-
-pub fn from_text(text: &str) -> Result<PlanTree, PlanError> {
-    let (lines, query_text) = clean(text);
-    let first = lines.first().ok_or_else(|| err("no plan node found", 1))?;
-    let root = parse_head(first.1.trim(), first.0)?;
-    let root_indent = first.1.len() - first.1.trim_start().len();
-    let mut tree = PlanTree {
-        root: root.clone(),
-        planning_ms: None,
-        execution_ms: None,
-        triggers: Vec::new(),
-        jit: None,
-        settings: Vec::new(),
-        total_ms: None,
-    };
-    // Стек узлов по отступу: заголовок с бóльшим отступом — ребёнок последнего узла с меньшим.
-    let mut stack: Vec<(usize, PlanNode)> = vec![(root_indent, root)];
-    // `SubPlan 1` / `InitPlan 1 (returns $0)` / `CTE name` объявляются строкой над узлом: подпись ждёт следующий заголовок.
-    let mut pending: Option<(String, &'static str)> = None;
-    let mut in_jit = false;
-    let mut in_settings = false;
-    for (line_no, l) in lines.iter().skip(1) {
-        let trimmed = l.trim();
-        if let Some(v) = trimmed.strip_prefix("Planning Time:") {
-            tree.planning_ms = num(v.trim_end_matches("ms"));
-            continue;
-        }
-        if let Some(v) = trimmed.strip_prefix("Execution Time:") {
-            tree.execution_ms = num(v.trim_end_matches("ms"));
-            continue;
-        }
-        if let Some(v) = trimmed.strip_prefix("Trigger ") {
-            // `Trigger name [for constraint x] on rel: time=1.234 calls=5`
-            let (name_part, stats) = v.split_once(':').unwrap_or((v, ""));
-            let name = name_part.split(" for ").next().unwrap_or(name_part).split(" on ").next().unwrap_or(name_part).to_string();
-            let relation = name_part.split(" on ").nth(1).map(str::to_string);
-            let kv = |k: &str| stats.split_whitespace().find_map(|p| p.strip_prefix(k)).and_then(num).unwrap_or(0.0);
-            tree.triggers.push(Trigger { name, relation, time_ms: kv("time="), calls: kv("calls=") as i64 });
-            continue;
-        }
-        if trimmed == "JIT:" {
-            in_jit = true;
-            tree.jit = Some(Jit { functions: 0, generation_ms: 0.0, inlining_ms: 0.0, optimization_ms: 0.0, emission_ms: 0.0, total_ms: 0.0 });
-            continue;
-        }
-        if in_jit && let Some(j) = tree.jit.as_mut() {
-            if let Some(v) = trimmed.strip_prefix("Functions:") {
-                j.functions = v.trim().parse().unwrap_or(0);
-                continue;
-            }
-            if let Some(v) = trimmed.strip_prefix("Timing:") {
-                for part in v.split(',') {
-                    let mut it = part.split_whitespace();
-                    let (k, val) = (it.next().unwrap_or(""), it.next().and_then(num).unwrap_or(0.0));
-                    match k {
-                        "Generation" => j.generation_ms = val,
-                        "Inlining" => j.inlining_ms = val,
-                        "Optimization" => j.optimization_ms = val,
-                        "Emission" => j.emission_ms = val,
-                        "Total" => j.total_ms = val,
-                        _ => {}
-                    }
-                }
-                continue;
-            }
-            if trimmed.starts_with("Options:") {
-                continue;
-            }
-            in_jit = false;
-        }
-        if let Some(v) = trimmed.strip_prefix("Settings:") {
-            in_settings = true;
-            for kv in v.split(", ") {
-                if let Some((k, val)) = kv.split_once(" = ") {
-                    tree.settings.push(Setting { name: k.trim().to_string(), value: val.trim().trim_matches('\'').to_string() });
-                }
-            }
-            continue;
-        }
-        if in_settings && !is_head(trimmed) && !trimmed.contains(':') {
-            continue;
-        }
-        in_settings = false;
-        if trimmed.starts_with("SubPlan ") || trimmed.starts_with("InitPlan ") || trimmed.starts_with("CTE ") {
-            pending = Some((trimmed.to_string(), if trimmed.starts_with("InitPlan") { "InitPlan" } else { "SubPlan" }));
-            continue;
-        }
-        if is_head(trimmed) {
-            let indent = l.find("->").map(|a| a + 4).unwrap_or(l.len() - l.trim_start().len());
-            let mut node = parse_head(trimmed.trim_start_matches("->").trim(), *line_no)?;
-            if let Some((name, relationship)) = pending.take() {
-                node.subplan_name = Some(name);
-                node.parent_relationship = Some(relationship.to_string());
-            }
-            // Узлы с отступом не меньше нового закрываются: они — братья нового или глубже.
-            while stack.len() > 1 && stack.last().is_some_and(|(i, _)| *i >= indent) {
-                let (_, done) = stack.pop().expect("len > 1");
-                stack.last_mut().expect("root").1.children.push(done);
-            }
-            stack.push((indent, node));
-            continue;
-        }
-        if let Some((_, node)) = stack.last_mut() {
-            detail(node, trimmed);
-        }
-    }
-    while stack.len() > 1 {
-        let (_, done) = stack.pop().expect("len > 1");
-        stack.last_mut().expect("root").1.children.push(done);
-    }
-    tree.root = stack.pop().map(|(_, n)| n).expect("root");
-    if let Some(q) = query_text {
-        tree.root.extra.insert("queryText".to_string(), Value::String(q));
-    }
-    tree.finish();
-    Ok(tree)
-}
-```
-
-`src-tauri/src/commands/explain.rs` — `parse_plan`: `from_any(&text)` вместо `from_psql_text` + `from_json`. `ExplainTab`: подпись `diag.explain.pasteLabel` → "Plan (JSON or text)" / "План (JSON или текст)", `pastePlaceholder` → "Paste EXPLAIN output: JSON or text, psql framing and auto_explain lines are fine" / "Вставьте вывод EXPLAIN: JSON или текст, обрамление psql и строки auto_explain не мешают"; тест `ExplainTab.test.tsx` — подпись поля обновить.
-
-- [ ] **Step 4: Фикстуры-пары и тест эквивалентности**
-
-Снять текстовые планы тех же запросов, что JSON-фикстуры P3a (`crates/pg-advisor/tests/fixtures/plans/text/<имя>.txt`): для каждого `X name opts sql` задачи 8 плана P3a выполнить `docker exec gp-pg-perf psql -U postgres -d perf -c "EXPLAIN (<opts без FORMAT JSON>) <sql>" > $P/text/name.txt` (с обрамлением psql); для матрицы — аналогично с `gp-pg13…18`. Поскольку ANALYZE даёт разные времена при разных прогонах, пары снимаются **одним** запросом: `EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON)` и текстовый вариант — разные выполнения; тест сравнивает **форму и оценки**, не времена: в `tests/plans.rs`:
-
-```rust
-#[test]
-fn text_and_json_fixtures_agree_on_shape_and_estimates() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plans");
-    for entry in std::fs::read_dir(dir.join("text")).unwrap() {
-        let path = entry.unwrap().path();
-        let name = path.file_stem().unwrap().to_str().unwrap().to_string();
-        let text = pg_advisor::plan::text_in::from_text(&std::fs::read_to_string(&path).unwrap()).unwrap_or_else(|e| panic!("{name}: {e:?}"));
-        let json_path = dir.join("json").join(format!("{name}.json"));
-        let json = pg_advisor::plan::json::from_json(&serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap()).unwrap();
-        fn shape(n: &pg_advisor::plan::PlanNode, out: &mut Vec<(String, Option<String>, f64, f64, usize)>) {
-            out.push((n.node_type.clone(), n.relation.as_ref().map(|r| r.name.clone()), n.total_cost, n.plan_rows, n.children.len()));
-            n.children.iter().for_each(|c| shape(c, out));
-        }
-        let (mut a, mut b) = (Vec::new(), Vec::new());
-        shape(&text.root, &mut a);
-        shape(&json.root, &mut b);
-        assert_eq!(a, b, "{name}: форма дерева, отношения, стоимость и оценки совпадают");
-        assert_eq!(text.root.actual.is_some(), json.root.actual.is_some(), "{name}");
-    }
-}
-```
-
-(Стоимости и оценки детерминированы при неизменной статистике: пары снимаются подряд без `ANALYZE` между ними.)
-
-- [ ] **Step 5: Прогнать тесты**
-
-Run: `cargo test --manifest-path crates/pg-advisor/Cargo.toml && cargo clippy --manifest-path crates/pg-advisor/Cargo.toml --all-targets -- -D warnings && cargo fmt --manifest-path crates/pg-advisor/Cargo.toml --check && cargo test --manifest-path src-tauri/Cargo.toml --lib && pnpm test -- ExplainTab`
-Expected: PASS.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add crates/pg-advisor src-tauri/src/commands/explain.rs src/components/queries/ExplainTab.tsx src/components/queries/ExplainTab.test.tsx src/locales
-git commit -m "feat(plan): парсер текстовых планов psql и auto_explain в то же дерево, parse_plan принимает JSON и текст, пары фикстур
-
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
-```
+**Решение владельца (2026-11-01):** парсер текстовых планов (`plan::text_in::from_text`, `plan::json::from_any`, `parse_plan` принимает JSON и текст, пары фикстур JSON / текст) сделан в P3a по итогам смоука; задача выполнена там и в P3b не повторяется. Описание — спека §9.4 (поправка), код — `crates/pg-advisor/src/plan/text_in.rs`, фикстуры — `crates/pg-advisor/tests/fixtures/plans/text/`. Номер задачи сохранён, чтобы не сдвигать ссылки на задачи 6–11.
 
 ---
 
@@ -3351,10 +2790,6 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 Кнопка [[ui:diag.queries.snapshots]] в инструменте открывает список снимков `pg_stat_statements` подключения. [[ui:diag.snapshots.take]] сохраняет на вашем компьютере все строки статистики узла и тексты пятисот самых долгих запросов (каталог данных приложения, `snapshots/`, файл доступен только владельцу). Выберите два снимка и нажмите [[ui:diag.snapshots.compare]]: списки деградировавших (среднее время выросло вдвое и больше при достаточном числе вызовов), ускорившихся, новых и исчезнувших запросов. [[ui:diag.snapshots.between]] переводит таблицу в режим [[ui:diag.queries.modes.between]]: дельты между двумя снимками, как окно, но за любой промежуток. Если между снимками статистика сбрасывалась, сравнение об этом предупреждает. Снимки удаляются из списка; в архив диагностики они не входят.
 
-## Текстовые планы {#text-plans}
-
-Консоль принимает не только JSON: в [[ui:diag.explain.sourcePaste]] можно вставить текстовый план из psql (с заголовком `QUERY PLAN` и рамкой) или тело записи auto_explain из лога — строки `LOG: … plan:` и `Query Text:` пропускаются. Дерево, доли и рекомендации строятся так же, как для JSON; строки, которые приложение не распознало, показаны в панели узла как есть.
-
 ## Расширения {#extensions}
 
 Если в базе установлен `pg_stat_kcache`, в топе и карточке появляются колонки CPU (время процессора в пользовательском и системном режиме) и чтение с диска по данным операционной системы — в отличие от `shared read`, это настоящие дисковые чтения, а не промахи кэша PostgreSQL; доступна сортировка по CPU. Если установлен `pg_wait_sampling` с `profile_queries = on`, ожидания запроса в карточке берутся из его профиля (точные, с момента сброса профиля), а не из сэмплов вкладки «Сессии». Чек-лист подключения подсказывает, что даёт каждое расширение.
@@ -3377,10 +2812,6 @@ Rules: Seq Scan with heavy filtering — an index on the filter columns; Index S
 
 The [[ui:diag.queries.snapshots]] button in the tool opens the list of `pg_stat_statements` snapshots of the connection. [[ui:diag.snapshots.take]] saves on your computer all statistics rows of the node and the texts of the five hundred longest queries (the app's data directory, `snapshots/`, readable by the owner only). Select two snapshots and press [[ui:diag.snapshots.compare]]: lists of degraded queries (mean time doubled or worse with enough calls), improved, new and gone. [[ui:diag.snapshots.between]] switches the table to [[ui:diag.queries.modes.between]]: deltas between two snapshots, like a window, but over any interval. If statistics were reset between the snapshots the comparison warns about it. Snapshots are deleted from the list; they are not part of the diagnostics archive.
 
-## Text plans {#text-plans}
-
-The console accepts more than JSON: in [[ui:diag.explain.sourcePaste]] you can paste a text plan from psql (with the `QUERY PLAN` header and frame) or the body of an auto_explain log record — the `LOG: … plan:` and `Query Text:` lines are skipped. The tree, shares and recommendations are built as for JSON; lines the app did not recognize are shown in the node panel as they are.
-
 ## Extensions {#extensions}
 
 When `pg_stat_kcache` is installed in the database, the top and the card gain CPU columns (processor time in user and system mode) and disk reads reported by the operating system — unlike `shared read`, these are real disk reads, not PostgreSQL cache misses; sorting by CPU is available. When `pg_wait_sampling` is installed with `profile_queries = on`, the query's waits in the card come from its profile (exact, since the profile reset) rather than from the Sessions tab samples. The connection checklist tells what each extension gives.
@@ -3402,7 +2833,7 @@ When `pg_stat_kcache` is installed in the database, the top and the card gain CP
 3. **Остальные правила.** Консоль, запросы из `heavy.sql` с выполнением: сортировка на диске → «уходит на диск» с `SET work_mem`; `ORDER BY total DESC LIMIT 10` → «Индекс под ORDER BY … LIMIT»; `balances` → «VACUUM … карта видимости»; `events` без ключа → «Отсечение партиций не сработало»; агрегация → «Воркеров меньше, чем запланировано» и/или «JIT дольше самого запроса»; коррелированный подзапрос → «Подзапрос выполняется на каждую строку»; соединение с `audit` → «Оценка строк занижена».
 4. **Без ANALYZE.** Обычный «План»: блок пишет «Выполните план с выполнением, чтобы проверить ещё 9 правил».
 5. **Снимки.** Инструмент «Запросы» → «Снимки» → «Сделать снимок»; подождать минуту под нагрузкой → второй снимок; выбрать оба → «Сравнить»: списки деградировавших/ускорившихся/новых/исчезнувших; «Топ между снимками» → режим «Между снимками» с покрытием «1 мин между снимками». Файл в каталоге данных `snapshots/<id>/<узел>/…json` с правами 0600. «Удалить» → подтверждение → строка исчезает.
-6. **Текстовый план.** Консоль → «Вставить план» ← вывод `docker exec gp-pg-perf psql -U postgres -d perf -c "EXPLAIN (ANALYZE) SELECT count(*) FROM shop.orders WHERE status = 'disputed'"` → дерево Seq Scan с фактом и рекомендация.
+6. **Текстовый план.** Перенесён в смоук P3a (шаг 12).
 7. **kcache и wait_sampling.** Топ: колонки «CPU» и «Чтение с диска» заполнены, сортировка по CPU работает; карточка тяжёлого запроса: блок «Ожидания» с подписью «профиль pg_wait_sampling…». На `localhost:5470` (pg-lab) колонки CPU — прочерки, сортировка серая.
 8. **Готовность.** Форма подключения → «Проверить»: у пунктов hypopg, pg_stat_kcache, pg_wait_sampling — подсказки, что они дают.
 ```
@@ -3415,7 +2846,7 @@ Run: `pnpm test -- guide help && pnpm i18n:check && pnpm build`; пройти с
 
 ```bash
 git add docs
-git commit -m "docs(queries): разделы P3b главы «Запросы» (рекомендации, hypopg, снимки, текстовые планы, расширения), admin.md, смоук P3b, правки спеки
+git commit -m "docs(queries): разделы P3b главы «Запросы» (рекомендации, hypopg, снимки, расширения), admin.md, смоук P3b, правки спеки
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
@@ -3424,8 +2855,8 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ## Самопроверка плана
 
-- **Покрытие части P3b спецификации:** §1 п. 7 (11 правил, hypopg) — задачи 1, 2, 3, 4; п. 8 (снимки, сравнение, «между снимками») — 6, 7; п. 9 (текстовый парсер) — 5; п. 10 (`pg_stat_kcache`, `pg_wait_sampling`, подсказки готовности) — 8, 9, 10; п. 11 (документация) — 11. §9.1 таблица правил — 1, 2 (пороги в `thresholds`, тексты в 4); §9.2 — 3, 4; §9.3 — 6, 7; §9.4 — 5; §9.5 — 8, 9; §9.6 — 10; §10 (IPC P3b) — 3, 5, 6; §11 (`FEATURE_UNAVAILABLE` hypopg, `INVALID_INPUT` `badDdl`/`badFile`, `NOT_FOUND` снимка) — 3, 6; §13.2 P3b (положительная/отрицательная фикстура на правило — 1, 2; пары JSON/текст — 5; сравнение — 6; `it_hypopg`, `it_snapshots`, kcache — 3, 6, 8); §16 критерии P3b: 1 — 1, 2 (проверка по фикстурам P3a) и смоук; 2 — 3, 4; 3 — 6, 7; 4 — 5; 5 — 8, 9; 6 — 10 и CI.
-- **Типы между задачами:** `Recommendation`/`Report`/`HypoIndex` (1) → `ExplainResult` (3) → TS (4); `columns_of`/`index_recommendation` (1) → правила 2; `explain_in_tx`/`classify`/`Step` `pub(crate)` (3) → `hypopg.rs` (3); `from_any` (5) → `parse_plan` (5); `compare::{deltas, compare, Comparison}` (6) → `report_between` (6) → TS `Comparison` (7); `SnapshotStore`/`valid_file` (6) → `validate` (6), команды (6), TS `SnapshotInfo` (7); `KcacheCaps`/`statements_sql` с четвёртым параметром (8) → все вызовы P3a (8); `WaitsSource::PgWaitSampling` (P3a) → 9; `readiness` `hint` (10) → `TestPanel` (10).
+- **Покрытие части P3b спецификации:** §1 п. 7 (11 правил, hypopg) — задачи 1, 2, 3, 4; п. 8 (снимки, сравнение, «между снимками») — 6, 7; п. 9 (текстовый парсер) — перенесён в P3a (решение 2026-11-01); п. 10 (`pg_stat_kcache`, `pg_wait_sampling`, подсказки готовности) — 8, 9, 10; п. 11 (документация) — 11. §9.1 таблица правил — 1, 2 (пороги в `thresholds`, тексты в 4); §9.2 — 3, 4; §9.3 — 6, 7; §9.4 — P3a; §9.5 — 8, 9; §9.6 — 10; §10 (IPC P3b) — 3, 6; §11 (`FEATURE_UNAVAILABLE` hypopg, `INVALID_INPUT` `badDdl`/`badFile`, `NOT_FOUND` снимка) — 3, 6; §13.2 P3b (положительная/отрицательная фикстура на правило — 1, 2; пары JSON/текст — P3a; сравнение — 6; `it_hypopg`, `it_snapshots`, kcache — 3, 6, 8); §16 критерии P3b: 1 — 1, 2 (проверка по фикстурам P3a) и смоук; 2 — 3, 4; 3 — 6, 7; 4 — P3a; 5 — 8, 9; 6 — 10 и CI.
+- **Типы между задачами:** `Recommendation`/`Report`/`HypoIndex` (1) → `ExplainResult` (3) → TS (4); `columns_of`/`index_recommendation` (1) → правила 2; `explain_in_tx`/`classify`/`Step` `pub(crate)` (3) → `hypopg.rs` (3); `compare::{deltas, compare, Comparison}` (6) → `report_between` (6) → TS `Comparison` (7); `SnapshotStore`/`valid_file` (6) → `validate` (6), команды (6), TS `SnapshotInfo` (7); `KcacheCaps`/`statements_sql` с четвёртым параметром (8) → все вызовы P3a (8); `WaitsSource::PgWaitSampling` (P3a) → 9; `readiness` `hint` (10) → `TestPanel` (10).
 - **Плейсхолдеры:** нет; шаблон `(<columns>)` в команде — осознанный текст для пользователя, когда колонки не разобраны.
-- **Порядок:** 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11; 3 зависит от 1–2, 4 — от 3, 7 — от 6, 11 — последняя; 5, 8, 9, 10 независимы между собой и могут идти параллельно после 4.
+- **Порядок:** 1 → 2 → 3 → 4 → (5 перенесена в P3a) → 6 → 7 → 8 → 9 → 10 → 11; 3 зависит от 1–2, 4 — от 3, 7 — от 6, 11 — последняя; 8, 9, 10 независимы между собой и могут идти параллельно после 4.
 - **Риски:** пары JSON/текст фикстур должны сниматься без ANALYZE таблиц между ними (оценки совпадают только при одной статистике); `hypopg_create_index` вне транзакции `READ ONLY` — виртуальный индекс живёт в сессии и удаляется `hypopg_reset()` даже при ошибке плана (вызов — до возврата ошибки); сортировка по CPU между снимками недоступна (признак `kcache` в снимке не хранится); `profile_queries` у `pg_wait_sampling` по умолчанию может быть выключен — тогда карточка честно показывает сэмплы и подсказку.
