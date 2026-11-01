@@ -215,7 +215,7 @@ fn jit_generation_total_is_read_from_pg17_object() {
         (14, Some(0.469), Some(158.756))
     );
     let j = load("parallel_jit_analyze").jit.expect("JIT");
-    assert_eq!(j.generation_ms, Some(0.226));
+    assert_eq!(j.generation_ms, Some(0.319));
 }
 
 #[test]
@@ -248,4 +248,48 @@ fn to_text_uses_psql_node_names_on_fixtures() {
         text.contains("\n  SubPlan 1\n    ->  Aggregate  (cost="),
         "{text}"
     );
+}
+
+/// Каждая фикстура `*_analyze` со стенда даёт хотя бы одну рекомендацию из ожидаемого набора (задача 2 плана P3b).
+/// Фикстуры `index_only_heap_fetches_analyze`, `parallel_jit_analyze` и `append_partitions_analyze` пересняты на pg-perf
+/// (PG 17) под правила: прежние давали Bitmap Heap Scan без `Heap Fetches`, агрегат без Gather и Append без пустых
+/// партиций (фильтр не по ключу секционирования — читать все партиции нужно, правило верно молчит). Новые запросы:
+/// - `SET enable_bitmapscan = off; … SELECT count(*) FROM shop.balances WHERE customer_id BETWEEN 1000 AND 20000`
+///   (у `balances` не проходил VACUUM — карта видимости пуста);
+/// - `SET max_parallel_workers_per_gather = 4; SET min_parallel_table_scan_size = '64kB'; SET parallel_setup_cost = 0;
+///   SET parallel_tuple_cost = 0; … SELECT customer_id % 1000, sum(total * 1.07 + 3), avg(total) FROM shop.orders GROUP BY 1`
+///   (на стенде `max_parallel_workers = 2`: запланировано 4, запущено 2; JIT по всем процессам — больше половины выполнения);
+/// - `SELECT count(*) FROM shop.events WHERE happened_at::date = date '2026-03-05'` (приведение ключа мешает pruning).
+#[test]
+fn analyze_fixtures_trigger_expected_recommendations() {
+    let expected: [(&str, &[&str]); 8] = [
+        ("seq_scan_filter_analyze", &["plan_seq_scan_filter"]),
+        (
+            "nested_loop_misestimate_analyze",
+            &["plan_misestimate", "plan_nested_loop_seq"],
+        ),
+        ("sort_limit_analyze", &["plan_sort_limit"]),
+        ("sort_spill_analyze", &["plan_spill"]),
+        ("index_only_heap_fetches_analyze", &["plan_heap_fetches"]),
+        ("subplan_per_row_analyze", &["plan_subplan_per_row"]),
+        ("append_partitions_analyze", &["plan_no_pruning"]),
+        (
+            "parallel_jit_analyze",
+            &["plan_workers_short", "plan_jit_heavy"],
+        ),
+    ];
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plans/json");
+    for (name, ids) in expected {
+        let text = std::fs::read_to_string(dir.join(format!("{name}.json"))).unwrap();
+        let t = from_json(&serde_json::from_str(&text).unwrap()).unwrap();
+        let got: Vec<String> = pg_advisor::plan_rules::evaluate(&t)
+            .recommendations
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert!(
+            ids.iter().any(|id| got.iter().any(|g| g == id)),
+            "{name}: ждали одно из {ids:?}, получили {got:?}"
+        );
+    }
 }

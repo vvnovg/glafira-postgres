@@ -1,6 +1,7 @@
 //! Рекомендации по плану (спец. P3 §9.1): правила над `PlanTree`, доказательство — цифры узла, готовая команда
 //! (приложение её не выполняет), индекс-гипотеза для hypopg. Тексты — во фронтенде по `id` и `params`.
 
+mod exec;
 mod scan;
 
 use std::collections::HashSet;
@@ -76,12 +77,17 @@ pub struct Report {
     pub skipped: Vec<String>,
 }
 
-/// Правила, которым нужен факт выполнения (задача 2 дополняет список правилами выполнения).
-pub const FACT_RULES: [&str; 4] = [
+/// Правила, которым нужен факт выполнения; `plan_sort_limit` и `plan_no_pruning` работают и по оценке.
+pub const FACT_RULES: [&str; 9] = [
     "plan_seq_scan_filter",
     "plan_index_filter",
     "plan_nested_loop_seq",
     "plan_misestimate",
+    "plan_spill",
+    "plan_heap_fetches",
+    "plan_workers_short",
+    "plan_subplan_per_row",
+    "plan_jit_heavy",
 ];
 
 pub fn evaluate(t: &PlanTree) -> Report {
@@ -94,8 +100,17 @@ pub fn evaluate(t: &PlanTree) -> Report {
             out.extend(scan::index_filter(n));
             out.extend(scan::nested_loop_seq(n));
             out.extend(scan::misestimate(n, early.contains(&n.id)));
+            out.extend(exec::spill(n));
+            out.extend(exec::heap_fetches(n));
+            out.extend(exec::workers_short(n));
+            out.extend(exec::subplan_per_row(n));
         }
+        out.extend(exec::sort_limit(n));
+        out.extend(exec::no_pruning(n, with_actual));
     });
+    if with_actual {
+        out.extend(exec::jit_heavy(t));
+    }
     out.sort_by(|a, b| {
         b.severity
             .cmp(&a.severity)
@@ -430,6 +445,11 @@ mod tests {
         assert!(
             r.skipped.contains(&"plan_seq_scan_filter".to_string())
                 && r.skipped.contains(&"plan_misestimate".to_string())
+        );
+        assert_eq!(r.skipped.len(), 9);
+        assert!(
+            !r.skipped.contains(&"plan_sort_limit".to_string())
+                && !r.skipped.contains(&"plan_no_pruning".to_string())
         );
     }
 

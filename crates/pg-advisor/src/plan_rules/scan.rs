@@ -7,7 +7,7 @@ use crate::plan_rules::{Recommendation, columns_of, index_recommendation, qualif
 use crate::rules::sessions::quote_ident;
 
 /// Псевдоним отношения в условиях узла: `Alias`, иначе имя таблицы.
-fn alias(n: &PlanNode) -> Option<&str> {
+pub(super) fn alias(n: &PlanNode) -> Option<&str> {
     n.relation
         .as_ref()
         .map(|r| r.alias.as_deref().unwrap_or(r.name.as_str()))
