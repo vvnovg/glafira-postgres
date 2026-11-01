@@ -152,7 +152,9 @@ pub fn early_stop_nodes(root: &PlanNode) -> HashSet<u32> {
         if under {
             out.insert(n.id);
         }
-        let blocking = matches!(n.node_type.as_str(), "Sort" | "Hash" | "HashSetOp")
+        // HashSetOp разбирается как `SetOp` со стратегией `Hashed`.
+        let blocking = matches!(n.node_type.as_str(), "Sort" | "Hash")
+            || (n.node_type == "SetOp" && n.strategy.as_deref() == Some("Hashed"))
             || (n.node_type == "Aggregate" && n.strategy.as_deref() != Some("Sorted"));
         let next = (under || n.node_type == "Limit") && !blocking;
         for c in &n.children {
@@ -291,9 +293,53 @@ const OPERATORS: [&str; 13] = [
     "=", "<>", "!=", "<=", ">=", "<", ">", "~~", "!~~", "~~*", "!~~*", "IS", "IN",
 ];
 
-/// Колонка конъюнкта `col op …` (в том числе `alias.col` своего псевдонима и `(col)::type`) и признак равенства.
+/// Колонка конъюнкта `col op …` (в том числе `alias.col` своего псевдонима и `(col)::type`) и признак равенства; для
+/// ключа соединения `other.col op alias.col` — колонка правой стороны.
 fn conjunct_column(c: &str, alias: Option<&str>) -> Option<(String, bool)> {
     let s = strip_parens(c);
+    leading_column(s, alias).or_else(|| join_key_rhs(s, alias?))
+}
+
+/// Ключ соединения `other.col op alias.col[::type]`: слева — колонка чужого псевдонима, справа — своего (так сервер
+/// печатает `Join Filter`, когда внутренняя сторона стоит справа).
+fn join_key_rhs(s: &str, alias: &str) -> Option<(String, bool)> {
+    let (first, rest) = ident(s)?;
+    if first == alias {
+        return None;
+    }
+    let (_, rest) = ident(rest.strip_prefix('.')?)?;
+    let (op, rhs) = rest.trim_start().split_once(' ')?;
+    if !OPERATORS.contains(&op) || matches!(op, "IS" | "IN") {
+        return None;
+    }
+    let rhs = strip_parens(rhs);
+    // `(alias.col)::type` — колонка в скобках, приведение после.
+    let (rhs, after) = match closing(rhs).filter(|_| rhs.starts_with('(')) {
+        Some(j) => (strip_parens(&rhs[1..j]), &rhs[j + 1..]),
+        None => (rhs, ""),
+    };
+    let (q, r) = ident(rhs)?;
+    if q != alias {
+        return None;
+    }
+    let (col, tail) = ident(r.strip_prefix('.')?)?;
+    if !after.is_empty() && !tail.trim().is_empty() {
+        return None;
+    }
+    let tail = if after.is_empty() {
+        tail.trim()
+    } else {
+        after.trim()
+    };
+    let cast_only = tail.strip_prefix("::").is_some_and(|t| {
+        t.chars()
+            .all(|c| c.is_alphanumeric() || " _[]\"().,".contains(c))
+    });
+    (tail.is_empty() || cast_only).then(|| (col, op == "="))
+}
+
+/// Ведущая колонка конъюнкта `col op …` своего псевдонима.
+fn leading_column(s: &str, alias: Option<&str>) -> Option<(String, bool)> {
     let (col, rest) = if s.starts_with('(') {
         // `(col)::type op …` — приведение снимается.
         let j = closing(s)?;
@@ -508,5 +554,39 @@ mod tests {
         let mut ids: Vec<u32> = early_stop_nodes(&t.root).into_iter().collect();
         ids.sort();
         assert_eq!(ids, [1, 2, 3]);
+    }
+
+    #[test]
+    fn hashed_set_op_blocks_early_stop() {
+        let plan = |strategy: &str| {
+            crate::plan::json::from_json(&serde_json::json!({"Plan": {"Node Type": "Limit", "Plans": [
+                {"Node Type": "SetOp", "Strategy": strategy, "Parent Relationship": "Outer", "Plans": [
+                    {"Node Type": "Seq Scan", "Parent Relationship": "Outer", "Relation Name": "a"}
+                ]}
+            ]}}))
+            .unwrap()
+        };
+        let mut ids: Vec<u32> = early_stop_nodes(&plan("Hashed").root).into_iter().collect();
+        assert_eq!(ids, [1], "HashSetOp читает вход целиком");
+        ids = early_stop_nodes(&plan("Sorted").root).into_iter().collect();
+        ids.sort();
+        assert_eq!(ids, [1, 2]);
+    }
+
+    #[test]
+    fn join_key_is_taken_from_the_right_side() {
+        assert_eq!(columns_of("(a.order_id = o.id)", Some("o")), ["id"]);
+        assert_eq!(
+            columns_of("((a.x = 1) AND (a.order_id < (o.id)::bigint))", Some("o")),
+            ["id"]
+        );
+        assert!(
+            columns_of("(a.order_id = b.id)", Some("o")).is_empty(),
+            "обе стороны чужие"
+        );
+        assert!(
+            columns_of("(a.order_id = (o.id + 1))", Some("o")).is_empty(),
+            "выражение справа"
+        );
     }
 }

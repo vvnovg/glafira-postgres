@@ -102,7 +102,9 @@ pub fn nested_loop_seq(n: &PlanNode) -> Option<Recommendation> {
 /// двух и более колонках — CREATE STATISTICS. `early_stop` — узел под `Limit` без блокирующего узла между ними: там
 /// факт меньше оценки — не ошибка статистики (поправка 8 плана P3b), такую «переоценку» правило пропускает.
 pub fn misestimate(n: &PlanNode, early_stop: bool) -> Option<Recommendation> {
-    // `misestimated` уже исключает не выполнявшийся узел и нулевые оценку и факт (поправка 4).
+    // Порог отношения — флаг P3a `misestimated` (×`plan::MISESTIMATE_RATIO`, равен `PLAN_MISESTIMATE_RATIO`; тест
+    // `misestimate_threshold_matches_p3a_flag`): он же исключает не выполнявшийся узел и нулевые оценку и факт
+    // (поправка 4). При объёме ≥ `PLAN_MISESTIMATE_MIN_ROWS` (≥ 1000 > 10) конечное `ratio` ниже не меньше отношения флага.
     if !n.misestimated {
         return None;
     }
@@ -118,9 +120,6 @@ pub fn misestimate(n: &PlanNode, early_stop: bool) -> Option<Recommendation> {
     // Конечное отношение (оценка 0 даёт бесконечность, а она в JSON — `null`).
     let ratio = a.rows.max(1.0) / n.plan_rows.max(1.0);
     let ratio = if ratio >= 1.0 { ratio } else { 1.0 / ratio };
-    if ratio < th::PLAN_MISESTIMATE_RATIO {
-        return None;
-    }
     let cols = columns_from(&[n.filter.as_deref(), n.index_cond.as_deref()], alias(n));
     let target = qualified(rel.schema.as_deref(), &rel.name);
     let mut cmd = format!("ANALYZE {target};");
@@ -329,6 +328,102 @@ mod tests {
                 .contains("CREATE STATISTICS"),
             "одна колонка"
         );
+    }
+
+    #[test]
+    fn misestimate_threshold_matches_p3a_flag() {
+        assert_eq!(
+            crate::findings::thresholds::PLAN_MISESTIMATE_RATIO,
+            crate::plan::MISESTIMATE_RATIO
+        );
+        const {
+            assert!(
+                crate::findings::thresholds::PLAN_MISESTIMATE_MIN_ROWS
+                    >= crate::plan::MISESTIMATE_MIN_ROWS
+            )
+        };
+    }
+
+    #[test]
+    fn nested_loop_join_filter_key_on_the_right_side() {
+        let v = json!({"Plan": {"Node Type": "Nested Loop", "Join Type": "Inner", "Startup Cost": 0.0, "Total Cost": 1000.0, "Plan Rows": 100, "Plan Width": 8,
+        "Actual Startup Time": 0.1, "Actual Total Time": 900.0, "Actual Rows": 2000, "Actual Loops": 1, "Join Filter": "(a.order_id = o.id)", "Rows Removed by Join Filter": 999_000, "Plans": [
+          {"Node Type": "Index Scan", "Parent Relationship": "Outer", "Relation Name": "audit", "Schema": "shop", "Alias": "a", "Startup Cost": 0.0, "Total Cost": 10.0, "Plan Rows": 2000, "Plan Width": 8, "Actual Startup Time": 0.1, "Actual Total Time": 1.0, "Actual Rows": 2000, "Actual Loops": 1},
+          {"Node Type": "Seq Scan", "Parent Relationship": "Inner", "Relation Name": "orders", "Schema": "shop", "Alias": "o", "Startup Cost": 0.0, "Total Cost": 5.0, "Plan Rows": 500, "Plan Width": 8, "Actual Startup Time": 0.0, "Actual Total Time": 0.4, "Actual Rows": 500, "Actual Loops": 2000}
+        ]}});
+        let r = evaluate(&from_json(&v).unwrap());
+        let rec = r
+            .recommendations
+            .iter()
+            .find(|r| r.id == "plan_nested_loop_seq")
+            .unwrap();
+        assert_eq!(
+            rec.hypo.as_ref().unwrap().index_ddl,
+            "CREATE INDEX ON \"shop\".\"orders\" (\"id\")"
+        );
+        assert_eq!(rec.params["rowsPerLoop"], 500);
+    }
+
+    fn bitmap(removed: i64, rows: f64) -> Value {
+        json!({"Plan": {"Node Type": "Bitmap Heap Scan", "Relation Name": "orders", "Schema": "shop", "Alias": "o",
+            "Startup Cost": 0.0, "Total Cost": 100.0, "Plan Rows": rows, "Plan Width": 8, "Actual Startup Time": 0.1, "Actual Total Time": 30.0, "Actual Rows": rows, "Actual Loops": 1,
+            "Recheck Cond": "(o.customer_id = 5)", "Filter": "(o.status = 'new'::text)", "Rows Removed by Filter": removed, "Plans": [
+            {"Node Type": "Bitmap Index Scan", "Parent Relationship": "Outer", "Index Name": "orders_customer_idx", "Startup Cost": 0.0, "Total Cost": 10.0, "Plan Rows": 5000, "Plan Width": 0,
+             "Actual Startup Time": 0.1, "Actual Total Time": 1.0, "Actual Rows": 5000, "Actual Loops": 1, "Index Cond": "(o.customer_id = 5)"}]}})
+    }
+
+    #[test]
+    fn bitmap_heap_scan_filter_uses_recheck_cond_and_thresholds() {
+        let r = evaluate(&from_json(&bitmap(5000, 10.0)).unwrap());
+        let rec = r
+            .recommendations
+            .iter()
+            .find(|r| r.id == "plan_index_filter")
+            .unwrap();
+        assert_eq!(
+            rec.hypo.as_ref().unwrap().index_ddl,
+            "CREATE INDEX ON \"shop\".\"orders\" (\"customer_id\", \"status\")"
+        );
+        assert!(
+            !ids(&bitmap(900, 10.0)).contains(&"plan_index_filter".to_string()),
+            "отсев меньше 1000"
+        );
+        assert!(
+            !ids(&bitmap(5000, 600.0)).contains(&"plan_index_filter".to_string()),
+            "отсев меньше 10 × rows"
+        );
+    }
+
+    #[test]
+    fn never_executed_node_is_silent() {
+        // Без проверки `never_executed` index_filter сработал бы: отсев не умножается на циклы.
+        let mut v = bitmap(5000, 0.0);
+        v["Plan"]["Actual Loops"] = json!(0);
+        v["Plan"]["Plans"][0]["Actual Loops"] = json!(0);
+        assert!(ids(&v).is_empty(), "{:?}", ids(&v));
+    }
+
+    #[test]
+    fn seq_scan_rows_read_multiply_by_loops() {
+        // 5 циклов по 3000 прочитанных строк: 15 000 ≥ 10 000, хотя один цикл — меньше порога.
+        let mut v = seq(100.0, 2_900, 100.0);
+        v["Plan"]["Actual Loops"] = json!(5);
+        let r = evaluate(&from_json(&v).unwrap());
+        let rec = r
+            .recommendations
+            .iter()
+            .find(|r| r.id == "plan_seq_scan_filter")
+            .unwrap();
+        assert_eq!(
+            (
+                rec.params["rowsRead"].as_i64(),
+                rec.params["rowsReturned"].as_i64(),
+                rec.params["loops"].as_u64()
+            ),
+            (Some(15_000), Some(500), Some(5))
+        );
+        v["Plan"]["Actual Loops"] = json!(1);
+        assert!(!ids(&v).contains(&"plan_seq_scan_filter".to_string()));
     }
 
     #[test]
