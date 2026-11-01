@@ -20,6 +20,7 @@ use crate::explain::run::{
     within,
 };
 use crate::explain::{ExplainRequest, Mode, PROBE_TIMEOUT_S, Params, validate};
+use crate::product::SQL_MARKER;
 use crate::state::AppState;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -116,8 +117,31 @@ pub fn uses_index(t: &PlanTree, name: &str) -> bool {
     walk(&t.root, name)
 }
 
-const SCHEMA_SQL: &str = "SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace \
-                          WHERE e.extname = 'hypopg'";
+const SCHEMA_SQL: &str = marked_sql!(
+    "SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace \
+    WHERE e.extname = 'hypopg'"
+);
+
+/// Служебные запросы гипотезы к функциям hypopg в схеме расширения, с меткой `/* glafira */` (в топе «Запросов» они —
+/// собственные). EXPLAIN самого запроса пользователя метки не получает, как в P3a.
+struct ServiceSql {
+    create: String,
+    size: String,
+    reset: String,
+}
+
+impl ServiceSql {
+    fn new(schema: &str) -> Self {
+        let s = quote_ident(schema);
+        Self {
+            create: format!(
+                "{SQL_MARKER}SELECT indexrelid, indexname FROM {s}.hypopg_create_index($1)"
+            ),
+            size: format!("{SQL_MARKER}SELECT {s}.hypopg_relation_size($1)"),
+            reset: format!("{SQL_MARKER}SELECT {s}.hypopg_reset()"),
+        }
+    }
+}
 
 fn quote_ident(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
@@ -253,10 +277,11 @@ pub async fn hypothesize(
 ) -> AppResult<Hypothesis> {
     let options = probe_options(&req.params);
     let ctx = probe_ctx(&req.sql, &req.params);
-    let s = quote_ident(schema);
-    let create_sql = format!("SELECT indexrelid, indexname FROM {s}.hypopg_create_index($1)");
-    let size_sql = format!("SELECT {s}.hypopg_relation_size($1)");
-    let reset_sql = format!("SELECT {s}.hypopg_reset()");
+    let ServiceSql {
+        create: create_sql,
+        size: size_sql,
+        reset: reset_sql,
+    } = ServiceSql::new(schema);
     let ddl = normalize(&req.index_ddl);
     let work = within(PROBE_TIMEOUT_S, async {
         begin_tx(c, ctx, PROBE_TIMEOUT_S, req.search_path.as_deref()).await?;
@@ -334,6 +359,24 @@ fn rejects_ddl(code: &str, message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Служебные запросы гипотезы помечены `/* glafira */`: в топе «Запросов» они — собственные, а не чужие.
+    #[test]
+    fn service_sql_is_marked() {
+        let q = ServiceSql::new("hy\"po");
+        for sql in [SCHEMA_SQL, &q.create, &q.size, &q.reset] {
+            assert!(crate::product::is_marked_sql(sql), "{sql}");
+        }
+        assert_eq!(q.reset, "/* glafira */ SELECT \"hy\"\"po\".hypopg_reset()");
+        assert!(
+            q.create
+                .ends_with("FROM \"hy\"\"po\".hypopg_create_index($1)")
+        );
+        assert!(
+            q.size
+                .ends_with("SELECT \"hy\"\"po\".hypopg_relation_size($1)")
+        );
+    }
 
     #[test]
     fn ddl_must_be_a_single_create_index_without_concurrently() {
