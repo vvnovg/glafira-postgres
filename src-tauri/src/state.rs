@@ -44,6 +44,8 @@ pub struct AppState {
     pub secrets_lock: Arc<std::sync::Mutex<()>>,
     /// Журнал выполненных действий (`actions.jsonl` в каталоге данных).
     pub actions: Arc<crate::actions::journal::ActionJournal>,
+    /// Снимки `pg_stat_statements` (`snapshots/` в каталоге данных; P3b).
+    pub snapshots: Arc<crate::snapshots::SnapshotStore>,
 }
 
 impl AppState {
@@ -102,6 +104,7 @@ impl AppState {
             tunnels,
             secrets_lock: Arc::new(std::sync::Mutex::new(())),
             actions: Arc::new(crate::actions::journal::ActionJournal::new(data_dir)),
+            snapshots: Arc::new(crate::snapshots::SnapshotStore::new(data_dir)),
         })
     }
 

@@ -1,6 +1,7 @@
 //! Топ запросов (спец. P3 §4): ключ строки `pg_stat_statements`, аддитивные счётчики, строка отчёта, итоги и
 //! сортировки. Эвристики без плана — `rules`.
 
+pub mod compare;
 pub mod rules;
 
 use serde::{Deserialize, Serialize};

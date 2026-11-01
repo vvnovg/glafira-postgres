@@ -20,6 +20,7 @@ pub mod sampler;
 pub mod secrets;
 pub mod session;
 pub mod settings;
+pub mod snapshots;
 pub mod state;
 pub mod storage;
 pub mod sync;
@@ -143,6 +144,10 @@ pub fn run() {
             commands::folders::export_connections,
             commands::folders::preview_import,
             commands::folders::apply_import,
+            commands::snapshots::snapshot_take,
+            commands::snapshots::snapshot_list,
+            commands::snapshots::snapshot_delete,
+            commands::snapshots::snapshot_compare,
             commands::settings::get_policy_status,
             commands::settings::get_language_settings,
             commands::settings::set_language,

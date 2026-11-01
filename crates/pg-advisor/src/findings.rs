@@ -229,6 +229,11 @@ pub mod thresholds {
     pub const PLAN_APPEND_EMPTY_SHARE: f64 = 0.5;
     pub const PLAN_SUBPLAN_LOOPS: f64 = 1_000.0;
     pub const PLAN_JIT_SHARE: f64 = 0.5;
+    /// Сравнение снимков pgss (спец. §9.3): средняя дельты к средней накопительной `from` — во сколько раз.
+    pub const COMPARE_DEGRADED_RATIO: f64 = 2.0;
+    pub const COMPARE_IMPROVED_RATIO: f64 = 0.5;
+    /// Меньше вызовов (в `from` или в дельте) — среднее неустойчиво, строка не сравнивается.
+    pub const COMPARE_MIN_CALLS: i64 = 50;
 }
 
 #[cfg(test)]

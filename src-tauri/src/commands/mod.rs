@@ -7,6 +7,7 @@ pub mod explain;
 pub mod folders;
 pub mod queries;
 pub mod settings;
+pub mod snapshots;
 pub mod topology;
 
 use crate::error::{AppResult, ErrorCode};

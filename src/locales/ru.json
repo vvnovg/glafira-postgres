@@ -204,7 +204,6 @@
     "queries": {
       "paramsRequired": "Инструменту «Запросы» нужны его параметры",
       "badLimit": "Предел строк — 50, 100 или 200",
-      "betweenUnsupported": "Сравнение снимков пока недоступно",
       "sortUnavailable": "Эта сортировка недоступна для этой версии или режима",
       "pgssMissing": "pg_stat_statements не установлен в этой базе",
       "pgssTooOld": "pg_stat_statements {{version}} старше 1.8",
@@ -264,6 +263,11 @@
       "nothingScheduled": "Ничего не запланировано",
       "pauseUnchanged": "Кластер уже в этом состоянии",
       "patroniOnly": "Действия Patroni доступны только у подключения к кластеру Patroni"
+    },
+    "snapshots": {
+      "badFile": "Неверное имя файла снимка",
+      "notFound": "Файл снимка исчез",
+      "differentMembers": "Снимки разных узлов сравнить нельзя"
     }
   },
   "connections": {
@@ -889,6 +893,7 @@
       "statementsOld": "{{part}}: pg_stat_statements {{version}} старше 1.8",
       "statementsHidden": "{{part}}: нужна роль pg_read_all_stats",
       "statementsStarting": "{{part}}: сэмплер запросов запускается",
+      "betweenReset": "{{part}}: статистика сбрасывалась между снимками",
       "parts": {
         "queryId": "Идентификатор запроса (query_id)",
         "walDir": "Размер pg_wal",
@@ -904,7 +909,8 @@
         "statements": "Статистика запросов (pg_stat_statements)",
         "others": "Запросы других ролей",
         "window": "Данные окна",
-        "running": "Выполняющиеся экземпляры (query_id)"
+        "running": "Выполняющиеся экземпляры (query_id)",
+        "between": "Сравнение"
       }
     },
     "tools": {

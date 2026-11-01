@@ -202,7 +202,6 @@
     "queries": {
       "paramsRequired": "The queries tool needs its parameters",
       "badLimit": "The row limit must be 50, 100 or 200",
-      "betweenUnsupported": "Comparing snapshots is not available yet",
       "sortUnavailable": "This sort order is not available for this version or mode",
       "pgssMissing": "pg_stat_statements is not installed in this database",
       "pgssTooOld": "pg_stat_statements {{version}} is older than 1.8",
@@ -262,6 +261,11 @@
       "nothingScheduled": "Nothing is scheduled",
       "pauseUnchanged": "The cluster is already in this state",
       "patroniOnly": "Patroni actions need a Patroni cluster connection"
+    },
+    "snapshots": {
+      "badFile": "Bad snapshot file name",
+      "notFound": "The snapshot file is gone",
+      "differentMembers": "Snapshots of different nodes cannot be compared"
     }
   },
   "connections": {
@@ -867,6 +871,7 @@
       "statementsOld": "{{part}}: pg_stat_statements {{version}} is older than 1.8",
       "statementsHidden": "{{part}}: needs the pg_read_all_stats role",
       "statementsStarting": "{{part}}: the statements sampler is starting",
+      "betweenReset": "{{part}}: statistics were reset between the snapshots",
       "parts": {
         "queryId": "Query ID (query_id)",
         "walDir": "pg_wal size",
@@ -882,7 +887,8 @@
         "statements": "Query statistics (pg_stat_statements)",
         "others": "Other roles' queries",
         "window": "Window data",
-        "running": "Running instances (query_id)"
+        "running": "Running instances (query_id)",
+        "between": "Comparison"
       }
     },
     "tools": {

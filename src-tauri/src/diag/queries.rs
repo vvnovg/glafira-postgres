@@ -321,7 +321,7 @@ pub enum QueriesMode {
     Window {
         s: u32,
     },
-    /// Между снимками — P3b; в P3a отклоняется `validate`.
+    /// Между снимками (P3b): `from` / `to` — адреса файлов `<member>/<время>.json` (`snapshots::valid_file`).
     Between {
         from: String,
         to: String,
@@ -369,11 +369,12 @@ pub fn validate(p: &QueriesParams) -> AppResult<()> {
             "errors.diag.badWindow",
             "The window must be 300, 900 or 3600 seconds"
         )),
-        QueriesMode::Between { .. } => Err(app_err!(
-            ErrorCode::FeatureUnavailable,
-            "errors.queries.betweenUnsupported",
-            "Comparing snapshots is not available yet"
-        )),
+        QueriesMode::Between { from, to }
+            if crate::snapshots::valid_file(from) && crate::snapshots::valid_file(to) =>
+        {
+            Ok(())
+        }
+        QueriesMode::Between { .. } => Err(crate::snapshots::store::bad_file()),
     }
 }
 
@@ -673,9 +674,7 @@ pub async fn report(
     match &p.mode {
         QueriesMode::SinceReset => report_since_reset(st, id, target, p).await,
         QueriesMode::Window { s } => report_window(st, id, target, p, *s).await,
-        QueriesMode::Between { .. } => {
-            Err(AppError::internal_with("between mode passed validation"))
-        }
+        QueriesMode::Between { from, to } => report_between(st, id, target, p, from, to).await,
     }
 }
 
@@ -909,6 +908,127 @@ async fn report_window(
         findings,
         unavailable,
     ))
+}
+
+/// Строки режима «между снимками»: дельты `to − from` (`compare::deltas`), имена — из `to`, без строк без изменений
+/// (как в окне: тик несёт только изменившиеся ключи), после фильтра базы и верхнего уровня.
+pub fn entries_between(
+    a: &crate::snapshots::Snapshot,
+    b: &crate::snapshots::Snapshot,
+    reset: bool,
+    p: &QueriesParams,
+) -> Vec<Entry> {
+    let names: HashMap<QueryKey, (Option<String>, Option<String>)> = b
+        .rows
+        .iter()
+        .map(|c| (c.key, (c.datname.clone(), c.rolname.clone())))
+        .collect();
+    pg_advisor::queries::compare::deltas(&a.rows, &b.rows, reset)
+        .into_iter()
+        .filter(|(_, c)| c.changed_since(&Counters::default()))
+        .map(|(key, counters)| {
+            let (datname, rolname) = names.get(&key).cloned().unwrap_or_default();
+            Entry {
+                key,
+                datname,
+                rolname,
+                counters,
+                minmax: None,
+            }
+        })
+        .filter(|e| keep(&e.key, e.datname.as_deref(), p))
+        .collect()
+}
+
+fn between_reset() -> Unavailable {
+    Unavailable {
+        part: "between".into(),
+        member: None,
+        reason: ltext!(
+            "diag.unavailable.betweenReset",
+            "{{part}}: statistics were reset between the snapshots",
+            part = "between"
+        ),
+    }
+}
+
+/// Между снимками (спец. §9.3, уточнение 6): дельты `to − from` без обращения к серверу; узел, шапка и состояние
+/// расширения — из снимка `to`, покрытие — разница времён снятия. Свои запросы Глафиры и поиск — по текстам снимков
+/// (у строк без текста в снимках поиск не находит, и они не считаются своими).
+async fn report_between(
+    st: &AppState,
+    id: &str,
+    target: &DiagTarget,
+    p: &QueriesParams,
+    from: &str,
+    to: &str,
+) -> AppResult<DiagReport> {
+    let (a, b) = crate::snapshots::read_pair(st, id, from, to).await?;
+    let caps = PgssCaps::from_version(&b.pgss_version)
+        .ok_or_else(|| AppError::internal_with("snapshot pgss version"))?;
+    if !p.sort.available(&caps, true) {
+        return Err(sort_unavailable());
+    }
+    let reset = a.stats_reset_ms != b.stats_reset_ms;
+    let entries = entries_between(&a, &b, reset, p);
+    let text = crate::snapshots::text_lookup(&a, &b);
+    let own = own_keys(&entries, &text);
+    let matched = p.search().map(|s| cached_matches(&entries, s, &text));
+    let (mut rows, t) = build(&entries, &own, matched.as_ref(), p);
+    attach_texts(&mut rows, |k| {
+        crate::snapshots::text_of(&a, &b, k).map(|(t, tr)| (Arc::from(t), tr))
+    });
+    let mut unavailable = Vec::new();
+    if reset {
+        unavailable.push(between_reset());
+    }
+    if b.hidden {
+        unavailable.push(hidden_rows());
+    }
+    let state = PgssState {
+        track_planning: b.track_planning,
+        dealloc: b.dealloc,
+        dealloc_grew: !reset && matches!((a.dealloc, b.dealloc), (Some(x), Some(y)) if y > x),
+        max: b.max,
+    };
+    let findings = rules::evaluate(Some(&b.member), &rows, &t, &state, Mode::Window);
+    let h = Head {
+        version_num: b.server_version_num,
+        in_recovery: b.in_recovery,
+        now_ms: b.taken_at_ms,
+    };
+    let info = PgssInfo {
+        stats_reset_ms: b.stats_reset_ms,
+        dealloc: b.dealloc,
+        max: b.max,
+        track_planning: b.track_planning,
+    };
+    let pgss = PgssInstalled {
+        schema: String::new(),
+        version: b.pgss_version.clone(),
+        caps,
+    };
+    let mut report = make_report(
+        Tool::Queries,
+        target,
+        Some(&h),
+        DiagData::Queries(QueriesData {
+            mode: p.mode.clone(),
+            coverage_s: Some(
+                u32::try_from((b.taken_at_ms - a.taken_at_ms).max(0) / 1000).unwrap_or(u32::MAX),
+            ),
+            ticks: None,
+            pgss: Some(PgssMeta::of(&pgss, &info)),
+            totals: t,
+            rows,
+        }),
+        findings,
+        unavailable,
+    );
+    // Узел отчёта — узел снимков, а не выбранный во вкладке.
+    report.member = Some(b.member.clone());
+    report.follows_leader = false;
+    Ok(report)
 }
 
 /// Текст из кеша узла (буфер сэмплера pgss, спец. §4.6).
@@ -1327,11 +1447,93 @@ mod tests {
         let e = validate(&between).unwrap_err();
         assert_eq!(
             (e.code, e.key.as_str()),
-            (
-                ErrorCode::FeatureUnavailable,
-                "errors.queries.betweenUnsupported"
-            )
+            (ErrorCode::InvalidInput, "errors.snapshots.badFile")
         );
+        let between = params(QueriesMode::Between {
+            from: "pg-1/2025-10-29T11-00-00.json".into(),
+            to: "pg-1/2025-10-29T12-00-00.json".into(),
+        });
+        assert!(validate(&between).is_ok());
+        let between = params(QueriesMode::Between {
+            from: "pg-1/2025-10-29T11-00-00.json".into(),
+            to: "../pg-1/x.json".into(),
+        });
+        assert_eq!(
+            validate(&between).unwrap_err().key,
+            "errors.snapshots.badFile"
+        );
+    }
+
+    fn snapshot(rows: Vec<Cumulative>) -> crate::snapshots::Snapshot {
+        crate::snapshots::Snapshot {
+            v: 1,
+            taken_at_ms: 0,
+            connection: crate::actions::journal::RecordConnection {
+                id: "c".into(),
+                name: "C".into(),
+                environment: crate::conn::profile::Environment::Dev,
+            },
+            member: "pg-1".into(),
+            server_version_num: 170_000,
+            in_recovery: false,
+            pgss_version: "1.11".into(),
+            stats_reset_ms: None,
+            dealloc: None,
+            max: 5000,
+            track_planning: false,
+            hidden: false,
+            rows,
+            texts: Default::default(),
+            truncated: Default::default(),
+        }
+    }
+
+    /// Между снимками: дельты без неизменившихся строк, фильтр уровня, имена из `to`; свои и поиск — по текстам снимков.
+    #[test]
+    fn between_entries_are_deltas_with_snapshot_texts() {
+        let mut a = snapshot(vec![
+            cumulative(1, true, "perf", 100, 1000.0),
+            cumulative(2, true, "perf", 100, 1000.0),
+            cumulative(3, true, "perf", 100, 1000.0),
+        ]);
+        let mut b = snapshot(vec![
+            cumulative(1, true, "perf", 150, 1600.0),
+            cumulative(2, true, "perf", 100, 1000.0),
+            cumulative(3, true, "perf", 5000, 1050.0),
+            cumulative(4, false, "perf", 7, 70.0),
+            cumulative(5, true, "other", 3, 30.0),
+        ]);
+        let p = params(QueriesMode::Between {
+            from: "pg-1/a.json".into(),
+            to: "pg-1/b.json".into(),
+        });
+        let entries = entries_between(&a, &b, false, &p);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| (e.key.query_id, e.counters.calls))
+                .collect::<Vec<_>>(),
+            [(1, 50), (3, 4900), (5, 3)],
+            "2 не менялся, 4 — не верхнего уровня"
+        );
+        assert!(entries.iter().all(|e| e.minmax.is_none()));
+        assert_eq!(entries[2].datname.as_deref(), Some("other"));
+        a.texts
+            .insert("1".into(), "SELECT * FROM shop.orders".into());
+        b.texts.insert("3".into(), "/* glafira */ SELECT 1".into());
+        let text = crate::snapshots::text_lookup(&a, &b);
+        let own = own_keys(&entries, &text);
+        assert_eq!(own, HashSet::from([entries[1].key]));
+        assert_eq!(
+            cached_matches(&entries, "ORDERS", &text),
+            HashSet::from([entries[0].key])
+        );
+        let (rows, t) = build(&entries, &own, None, &p);
+        assert_eq!((t.calls, t.total_exec_ms), (53, 630.0), "итоги без своих");
+        assert!(rows.iter().any(|r| r.own && r.key.query_id == 3));
+        // После сброса — значения `to` целиком, и неизменившиеся тоже.
+        let entries = entries_between(&a, &b, true, &p);
+        assert_eq!(entries.len(), 4);
     }
 
     #[test]
