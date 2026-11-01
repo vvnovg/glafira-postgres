@@ -1,6 +1,6 @@
 import type { TFunction } from "i18next";
 import type { LlmBundle, QueryStat } from "../api/types";
-import { BLOCK_BYTES } from "../components/queries/queriesText";
+import { BLOCK_BYTES, cpuMs } from "../components/queries/queriesText";
 import { formatBytes, formatCount, formatMs, formatPercent } from "./format";
 
 /** Ключи предупреждений сборки — литералами (правило словарей); неизвестный ключ попадает в текст как есть. */
@@ -42,6 +42,10 @@ function statsTable(s: QueryStat, t: TFunction): string {
     [t("llm.stats.wal"), formatBytes(s.walBytes)],
   ];
   if (s.plans !== 0 || s.totalPlanMs !== 0) rows.push([t("llm.stats.planning"), formatMs(s.totalPlanMs)]);
+  // `pg_stat_kcache`: строки — только когда расширение дало значения.
+  const cpu = cpuMs(s);
+  if (cpu !== null) rows.push([t("llm.stats.cpu"), formatMs(cpu)]);
+  if (s.diskReadBytes !== null && s.diskWriteBytes !== null) rows.push([t("llm.stats.disk"), `${formatBytes(s.diskReadBytes)} / ${formatBytes(s.diskWriteBytes)}`]);
   return [`| ${t("llm.stats.metric")} | ${t("llm.stats.value")} |`, "|---|---|", ...rows.map(([k, v]) => `| ${k} | ${plain(v)} |`)].join("\n");
 }
 

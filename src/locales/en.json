@@ -1298,7 +1298,9 @@
         "plan": "Planning",
         "jit": "JIT",
         "stddev": "Stddev",
-        "max": "Max"
+        "max": "Max",
+        "cpu": "CPU",
+        "disk": "Disk read"
       },
       "betweenCoverage": "{{duration}} between snapshots",
       "snapshots": "Snapshots",
@@ -1333,7 +1335,9 @@
         "temp": "Temp written",
         "wal": "WAL",
         "planning": "Planning",
-        "jit": "JIT"
+        "jit": "JIT",
+        "cpu": "CPU (user + sys)",
+        "disk": "Disk read / written"
       },
       "history": "History (60 min)",
       "historyCalls": "Calls per minute",
@@ -1910,7 +1914,9 @@
       "read": "Read from disk",
       "temp": "Temp written",
       "wal": "WAL",
-      "planning": "Planning"
+      "planning": "Planning",
+      "cpu": "CPU (user + sys)",
+      "disk": "Disk read / written (OS level)"
     }
   },
   "hints": {

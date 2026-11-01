@@ -7,10 +7,10 @@ import { FindingsPanel } from "../diag/FindingsPanel";
 import { unavailableText } from "../diag/unavailable";
 import { CopyLlmButton } from "./CopyLlmButton";
 import { Sparkline } from "./Sparkline";
-import { BLOCK_BYTES } from "./queriesText";
+import { BLOCK_BYTES, cpuMs } from "./queriesText";
 
 /** Строки метрик: ключ подписи — литералом (правило словарей), значение — из строки pgss. */
-const METRICS: { id: string; labelKey: string; of: (s: QueryStat, trackPlanning: boolean) => string }[] = [
+const METRICS: { id: string; labelKey: string; of: (s: QueryStat, trackPlanning: boolean) => string; kcache?: true }[] = [
   { id: "calls", labelKey: "diag.query.metric.calls", of: (s) => formatCount(s.calls) },
   { id: "total", labelKey: "diag.query.metric.total", of: (s) => formatMs(s.totalExecMs) },
   { id: "mean", labelKey: "diag.query.metric.mean", of: (s) => formatMs(s.meanExecMs) },
@@ -23,6 +23,13 @@ const METRICS: { id: string; labelKey: string; of: (s: QueryStat, trackPlanning:
   { id: "wal", labelKey: "diag.query.metric.wal", of: (s) => formatBytes(s.walBytes) },
   { id: "planning", labelKey: "diag.query.metric.planning", of: (s, trackPlanning) => (trackPlanning ? formatMs(s.totalPlanMs) : "—") },
   { id: "jit", labelKey: "diag.query.metric.jit", of: (s) => (s.jitMs === null ? "—" : formatMs(s.jitMs)) },
+  { id: "cpu", labelKey: "diag.query.metric.cpu", kcache: true, of: (s) => { const v = cpuMs(s); return v === null ? "—" : formatMs(v); } },
+  {
+    id: "disk",
+    labelKey: "diag.query.metric.disk",
+    kcache: true,
+    of: (s) => (s.diskReadBytes === null || s.diskWriteBytes === null ? "—" : `${formatBytes(s.diskReadBytes)} / ${formatBytes(s.diskWriteBytes)}`),
+  },
 ];
 
 /**
@@ -108,7 +115,8 @@ export function QueryOverview({
                 </tr>
               </thead>
               <tbody>
-                {METRICS.map((m) => (
+                {/* Строки `pg_stat_kcache` — только когда расширение дало значения (без него — `null`). */}
+                {METRICS.filter((m) => !m.kcache || sinceReset.cpuUserMs !== null).map((m) => (
                   <tr key={m.id}>
                     <th scope="row">{t(m.labelKey)}</th>
                     <td className="num">{m.of(sinceReset, detail.trackPlanning)}</td>

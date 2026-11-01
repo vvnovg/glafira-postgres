@@ -1,5 +1,6 @@
 //! Инструмент «Запросы» на стенде: топ «с момента сброса» на pg-perf (`GPG_IT_PERF`), SQL pgss на матрице
-//! 13–18 (`GPG_IT_MATRIX`), отсутствие расширения на pg-single, скрытые строки под ролью без pg_read_all_stats.
+//! 13–18 (`GPG_IT_MATRIX`), отсутствие расширения на pg-single, скрытые строки под ролью без pg_read_all_stats,
+//! колонки `pg_stat_kcache` на pg-perf и их отсутствие на узлах без расширения (`GPG_IT_LAB`).
 //! Запускать с `--test-threads=1`. Нагрузка `heavy.sql` не нужна: строки pgss дают запросы самих тестов (и стенда), а
 //! нужные тестам запросы тесты выполняют сами.
 
@@ -295,9 +296,17 @@ async fn statements_sql_runs_on_every_version() {
             _ => "1.12",
         };
         assert_eq!(pgss.version, expected, "{addr}");
+        // pg_stat_kcache есть только на pg-perf: там колонки CPU заполнены, на остальных — NULL.
+        let perf = common::perf_addr().as_deref() == Some(addr.as_str());
+        assert_eq!(pgss.kcache.is_some(), perf, "{addr}");
         let snap = queries::read_cumulative(&c, &pgss)
             .await
             .unwrap_or_else(|e| panic!("{addr}: {e:?}"));
+        assert_eq!(
+            snap.rows.iter().any(|r| r.counters.cpu_user_ms.is_some()),
+            perf,
+            "{addr}"
+        );
         assert!(
             !snap.rows.is_empty(),
             "{addr}: хотя бы запрос самого detect"
@@ -455,7 +464,15 @@ async fn query_detail_text_goes_through_the_sampler_cache() {
     let DiagData::Queries(d) = &r.data else {
         unreachable!()
     };
-    let query_id = d.rows[0].key.query_id;
+    // Карточка — по базе perf; опрос теста свойств (`it_own_probe`, база postgres) с повторными прогонами обгоняет её
+    // строки по вызовам.
+    let query_id = d
+        .rows
+        .iter()
+        .find(|x| x.datname.as_deref() == Some("perf"))
+        .expect("строка базы perf")
+        .key
+        .query_id;
     let buffer = st.statements.buffer("it", &member).expect("буфер узла");
     let first = query_detail::detail(&st, "it", &member, "perf", query_id)
         .await
@@ -504,7 +521,11 @@ async fn query_detail_on_perf_and_on_pg13() {
         let DiagData::Queries(d) = &r.data else {
             unreachable!()
         };
-        let top = &d.rows[0];
+        let top = d
+            .rows
+            .iter()
+            .find(|x| x.datname.as_deref() == Some("perf"))
+            .expect("строка базы perf");
         let detail = query_detail::detail(&st, "it", &member, "perf", top.key.query_id)
             .await
             .unwrap();
@@ -713,4 +734,59 @@ async fn query_detail_of_a_missing_query_does_not_read_texts() {
         after_present,
         "карточка отсутствующего запроса файл текстов не читает"
     );
+}
+
+#[tokio::test]
+async fn kcache_columns_on_perf() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st) = common::open_server_in(&perf, "perf").await;
+    let p = since_reset(QuerySort::CpuTime);
+    let r = diag::run(&st, "it", request(p)).await.unwrap();
+    let DiagData::Queries(d) = &r.data else {
+        unreachable!()
+    };
+    assert!(d.pgss.as_ref().is_some_and(|m| m.kcache));
+    assert!(
+        d.rows
+            .iter()
+            .any(|x| x.cpu_user_ms.is_some_and(|c| c > 0.0)),
+        "CPU заполнен"
+    );
+    assert!(
+        d.rows
+            .windows(2)
+            .all(|w| QuerySort::CpuTime.value(&w[0]) >= QuerySort::CpuTime.value(&w[1]))
+    );
+    // Карточка: CPU и диск — суммой строк запроса.
+    let member = st.runtimes.view("it").topology.unwrap().members[0]
+        .name
+        .clone();
+    let top = d
+        .rows
+        .iter()
+        .find(|x| x.datname.as_deref() == Some("perf"))
+        .expect("строка базы perf");
+    let detail = query_detail::detail(&st, "it", &member, "perf", top.key.query_id)
+        .await
+        .unwrap();
+    let since = detail.since_reset.expect("строка pgss есть");
+    assert!(since.cpu_user_ms.is_some() && since.disk_read_bytes.is_some());
+    // На узле без kcache сортировка по CPU — INVALID_INPUT, строки без полей.
+    if let Some(lab) = common::lab_addr() {
+        let (_dir, st) = common::open_server_in(&lab, "postgres").await;
+        let err = diag::run(&st, "it", request(since_reset(QuerySort::CpuTime)))
+            .await
+            .unwrap_err();
+        assert_eq!(err.key, "errors.queries.sortUnavailable");
+        let r = diag::run(&st, "it", request(since_reset(QuerySort::TotalTime)))
+            .await
+            .unwrap();
+        let DiagData::Queries(d) = &r.data else {
+            unreachable!()
+        };
+        assert!(d.pgss.as_ref().is_some_and(|m| !m.kcache));
+        assert!(!d.rows.is_empty() && d.rows.iter().all(|x| x.cpu_user_ms.is_none()));
+    }
 }

@@ -20,7 +20,8 @@ pub struct QueryKey {
 }
 
 /// Аддитивные счётчики строки pgss: накопительные с момента сброса или дельта за тик / окно. `Option` — колонки,
-/// которых нет у версии расширения (`PgssCaps`).
+/// которых нет у версии расширения (`PgssCaps`), и колонки `pg_stat_kcache` (`None` без расширения или без строки
+/// kcache у ключа). Поля kcache — `serde(default)`: файлы снимков, записанные без них, читаются.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Counters {
@@ -49,6 +50,16 @@ pub struct Counters {
     pub jit_ms: Option<f64>,
     pub parallel_planned: Option<i64>,
     pub parallel_launched: Option<i64>,
+    /// `pg_stat_kcache`: процессорное время пользователя и ядра, мс (в расширении — секунды).
+    #[serde(default)]
+    pub cpu_user_ms: Option<f64>,
+    #[serde(default)]
+    pub cpu_sys_ms: Option<f64>,
+    /// `pg_stat_kcache`: байты, прочитанные с диска и записанные на диск (физический ввод-вывод, мимо кеша ОС).
+    #[serde(default)]
+    pub disk_read_bytes: Option<i64>,
+    #[serde(default)]
+    pub disk_write_bytes: Option<i64>,
 }
 
 fn sub_opt<T: std::ops::Sub<Output = T>>(a: Option<T>, b: Option<T>) -> Option<T> {
@@ -64,6 +75,15 @@ fn add_opt<T: std::ops::Add<Output = T>>(a: Option<T>, b: Option<T>) -> Option<T
         (Some(a), Some(b)) => Some(a + b),
         (a, None) => a,
         (None, b) => b,
+    }
+}
+
+/// `sub_opt` для счётчиков `pg_stat_kcache`: у расширения свой сброс (`pg_stat_kcache_reset()`), и уменьшившееся
+/// значение при неизменных счётчиках pgss — накопленное с этого сброса, а не отрицательная дельта.
+fn sub_kcache<T: std::ops::Sub<Output = T> + PartialOrd>(a: Option<T>, b: Option<T>) -> Option<T> {
+    match (a, b) {
+        (Some(a), Some(b)) if a < b => Some(a),
+        (a, b) => sub_opt(a, b),
     }
 }
 
@@ -106,6 +126,10 @@ impl Counters {
             jit_ms: sub_opt(self.jit_ms, p.jit_ms),
             parallel_planned: sub_opt(self.parallel_planned, p.parallel_planned),
             parallel_launched: sub_opt(self.parallel_launched, p.parallel_launched),
+            cpu_user_ms: sub_kcache(self.cpu_user_ms, p.cpu_user_ms),
+            cpu_sys_ms: sub_kcache(self.cpu_sys_ms, p.cpu_sys_ms),
+            disk_read_bytes: sub_kcache(self.disk_read_bytes, p.disk_read_bytes),
+            disk_write_bytes: sub_kcache(self.disk_write_bytes, p.disk_write_bytes),
         }
     }
 
@@ -135,6 +159,20 @@ impl Counters {
         self.jit_ms = add_opt(self.jit_ms, o.jit_ms);
         self.parallel_planned = add_opt(self.parallel_planned, o.parallel_planned);
         self.parallel_launched = add_opt(self.parallel_launched, o.parallel_launched);
+        self.cpu_user_ms = add_opt(self.cpu_user_ms, o.cpu_user_ms);
+        self.cpu_sys_ms = add_opt(self.cpu_sys_ms, o.cpu_sys_ms);
+        self.disk_read_bytes = add_opt(self.disk_read_bytes, o.disk_read_bytes);
+        self.disk_write_bytes = add_opt(self.disk_write_bytes, o.disk_write_bytes);
+    }
+
+    /// Счётчики без колонок `pg_stat_kcache`: расширение было не на обоих концах дельты, и значение одного конца
+    /// выдавало бы себя за дельту.
+    pub fn without_kcache(mut self) -> Counters {
+        self.cpu_user_ms = None;
+        self.cpu_sys_ms = None;
+        self.disk_read_bytes = None;
+        self.disk_write_bytes = None;
+        self
     }
 }
 
@@ -207,6 +245,15 @@ pub struct QueryStat {
     pub jit_ms: Option<f64>,
     pub parallel_planned: Option<i64>,
     pub parallel_launched: Option<i64>,
+    /// `pg_stat_kcache` (`None` без расширения): CPU пользователя и ядра, мс; байты с диска и на диск.
+    #[serde(default)]
+    pub cpu_user_ms: Option<f64>,
+    #[serde(default)]
+    pub cpu_sys_ms: Option<f64>,
+    #[serde(default)]
+    pub disk_read_bytes: Option<i64>,
+    #[serde(default)]
+    pub disk_write_bytes: Option<i64>,
     /// Доля в `totals.total_exec_ms`, проценты.
     pub share_pct: f64,
     /// `hit / (hit + read)`; `None` — блоков не читали.
@@ -264,6 +311,10 @@ pub fn stat(
         jit_ms: c.jit_ms,
         parallel_planned: c.parallel_planned,
         parallel_launched: c.parallel_launched,
+        cpu_user_ms: c.cpu_user_ms,
+        cpu_sys_ms: c.cpu_sys_ms,
+        disk_read_bytes: c.disk_read_bytes,
+        disk_write_bytes: c.disk_write_bytes,
         share_pct: if totals.total_exec_ms > 0.0 {
             c.total_exec_ms / totals.total_exec_ms * 100.0
         } else {
@@ -293,6 +344,8 @@ pub enum QuerySort {
     IoTime,
     PlanTime,
     JitTime,
+    /// CPU пользователя и ядра (`pg_stat_kcache`).
+    CpuTime,
 }
 
 impl QuerySort {
@@ -316,14 +369,20 @@ impl QuerySort {
             Self::IoTime => Some(s.io_read_ms + s.io_write_ms),
             Self::PlanTime => Some(s.total_plan_ms),
             Self::JitTime => s.jit_ms,
+            Self::CpuTime => match (s.cpu_user_ms, s.cpu_sys_ms) {
+                (Some(u), Some(k)) => Some(u + k),
+                _ => None,
+            },
         }
     }
 
-    /// Доступна ли сортировка: `min` / `max` / `stddev` нет в режиме окна, JIT — только с pgss 1.10.
-    pub fn available(self, caps: &PgssCaps, window: bool) -> bool {
+    /// Доступна ли сортировка: `min` / `max` / `stddev` нет в режиме окна, JIT — только с pgss 1.10, CPU — только с
+    /// `pg_stat_kcache` (`kcache`).
+    pub fn available(self, caps: &PgssCaps, window: bool, kcache: bool) -> bool {
         match self {
             Self::MaxTime | Self::StddevTime => !window,
             Self::JitTime => caps.jit,
+            Self::CpuTime => kcache,
             _ => true,
         }
     }
@@ -572,19 +631,76 @@ mod tests {
     fn sort_availability_depends_on_caps_and_mode() {
         let c8 = PgssCaps::from_version("1.8").unwrap();
         let c10 = PgssCaps::from_version("1.10").unwrap();
-        assert!(QuerySort::TotalTime.available(&c8, true));
+        assert!(QuerySort::TotalTime.available(&c8, true, false));
         assert!(
-            !QuerySort::StddevTime.available(&c10, true)
-                && QuerySort::StddevTime.available(&c10, false)
+            !QuerySort::StddevTime.available(&c10, true, false)
+                && QuerySort::StddevTime.available(&c10, false, false)
         );
-        assert!(!QuerySort::MaxTime.available(&c10, true));
+        assert!(!QuerySort::MaxTime.available(&c10, true, false));
         assert!(
-            !QuerySort::JitTime.available(&c8, false) && QuerySort::JitTime.available(&c10, false)
+            !QuerySort::JitTime.available(&c8, false, false)
+                && QuerySort::JitTime.available(&c10, false, false)
+        );
+        assert!(
+            QuerySort::CpuTime.available(&c10, false, true)
+                && !QuerySort::CpuTime.available(&c10, false, false)
         );
         assert!(QuerySort::HitRatio.ascending() && !QuerySort::Calls.ascending());
         assert_eq!(
             serde_json::to_value(QuerySort::RowsPerCall).unwrap(),
             "rowsPerCall"
         );
+    }
+
+    #[test]
+    fn kcache_counters_follow_the_option_rules_and_cpu_sort() {
+        let a = Counters {
+            cpu_user_ms: Some(10.0),
+            cpu_sys_ms: Some(1.0),
+            disk_read_bytes: Some(4096),
+            ..Counters::default()
+        };
+        let b = Counters {
+            cpu_user_ms: Some(15.0),
+            cpu_sys_ms: Some(1.5),
+            disk_read_bytes: Some(8192),
+            ..Counters::default()
+        };
+        let d = b.delta(&a);
+        assert_eq!(
+            (
+                d.cpu_user_ms,
+                d.cpu_sys_ms,
+                d.disk_read_bytes,
+                d.disk_write_bytes
+            ),
+            (Some(5.0), Some(0.5), Some(4096), None)
+        );
+        let mut s = a;
+        s.add(&d);
+        assert_eq!(s, b);
+        let t = Totals::default();
+        let st = stat(key(1), None, None, &b, None, &t);
+        assert_eq!(QuerySort::CpuTime.value(&st), Some(16.5));
+        assert_eq!(
+            QuerySort::CpuTime.value(&stat(key(2), None, None, &Counters::default(), None, &t)),
+            None,
+            "без kcache — значения нет"
+        );
+        assert_eq!(serde_json::to_value(QuerySort::CpuTime).unwrap(), "cpuTime");
+        // Сброс kcache при живых счётчиках pgss: уменьшившееся значение — накопленное с этого сброса.
+        let after_reset = Counters {
+            cpu_user_ms: Some(2.0),
+            ..b
+        };
+        assert_eq!(after_reset.delta(&b).cpu_user_ms, Some(2.0));
+        assert_eq!(b.without_kcache().cpu_user_ms, None);
+        // Файлы снимков без полей kcache читаются: поля — None.
+        let mut v = serde_json::to_value(Counters::default()).unwrap();
+        for f in ["cpuUserMs", "cpuSysMs", "diskReadBytes", "diskWriteBytes"] {
+            assert!(v.as_object_mut().unwrap().remove(f).is_some(), "{f}");
+        }
+        let back: Counters = serde_json::from_value(v).unwrap();
+        assert_eq!(back, Counters::default());
     }
 }

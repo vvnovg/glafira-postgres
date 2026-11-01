@@ -626,7 +626,8 @@ export type QuerySort =
   | "walBytes"
   | "ioTime"
   | "planTime"
-  | "jitTime";
+  | "jitTime"
+  | "cpuTime";
 /** Режим отчёта; `between` — дельты между двумя снимками (файлы снимков, порядок любой, Rust упорядочит). */
 export type QueriesMode = { kind: "sinceReset" } | { kind: "window"; s: 300 | 900 | 3600 } | { kind: "between"; from: string; to: string };
 export interface QueriesParams {
@@ -673,6 +674,11 @@ export interface QueryStat {
   jitMs: number | null;
   parallelPlanned: number | null;
   parallelLaunched: number | null;
+  /** `pg_stat_kcache` (`null` без расширения или без строки kcache у ключа): CPU пользователя и ядра, мс; байты с диска и на диск. */
+  cpuUserMs: number | null;
+  cpuSysMs: number | null;
+  diskReadBytes: number | null;
+  diskWriteBytes: number | null;
   /** Доля в `totals.totalExecMs`, проценты; `hitRatio` — 0..1 или null без чтений. */
   sharePct: number;
   hitRatio: number | null;
@@ -690,6 +696,8 @@ export interface PgssMeta {
   trackPlanning: boolean;
   statsResetMs: number | null;
   dealloc: number | null;
+  /** Колонки `pg_stat_kcache` (CPU, диск) заполнены: расширение установлено (между снимками — при снятии обоих). */
+  kcache: boolean;
 }
 export interface QueriesData {
   mode: QueriesMode;

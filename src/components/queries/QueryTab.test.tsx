@@ -14,7 +14,7 @@ vi.mock("../../api/client", async (importOriginal) => {
 import { api } from "../../api/client";
 import { QueryTab } from "./QueryTab";
 
-const stat = { key: { queryId: "7", dbid: 1, userid: 1, toplevel: true }, datname: "perf", rolname: "app", calls: 1200, totalExecMs: 600, meanExecMs: 0.5, minExecMs: 0.1, maxExecMs: 4, stddevExecMs: 0.3, rows: 1200, rowsPerCall: 1, plans: 0, totalPlanMs: 0, sharedHit: 5000, sharedRead: 0, sharedDirtied: 0, sharedWritten: 0, localHit: 0, localRead: 0, localDirtied: 0, localWritten: 0, tempRead: 0, tempWritten: 0, ioReadMs: 0, ioWriteMs: 0, tempIoMs: null, walRecords: 0, walFpi: 0, walBytes: 0, jitFunctions: null, jitMs: null, parallelPlanned: null, parallelLaunched: null, sharePct: 30, hitRatio: 1, text: null, textTruncated: false, own: false };
+const stat = { key: { queryId: "7", dbid: 1, userid: 1, toplevel: true }, datname: "perf", rolname: "app", calls: 1200, totalExecMs: 600, meanExecMs: 0.5, minExecMs: 0.1, maxExecMs: 4, stddevExecMs: 0.3, rows: 1200, rowsPerCall: 1, plans: 0, totalPlanMs: 0, sharedHit: 5000, sharedRead: 0, sharedDirtied: 0, sharedWritten: 0, localHit: 0, localRead: 0, localDirtied: 0, localWritten: 0, tempRead: 0, tempWritten: 0, ioReadMs: 0, ioWriteMs: 0, tempIoMs: null, walRecords: 0, walFpi: 0, walBytes: 0, jitFunctions: null, jitMs: null, parallelPlanned: null, parallelLaunched: null, cpuUserMs: null, cpuSysMs: null, diskReadBytes: null, diskWriteBytes: null, sharePct: 30, hitRatio: 1, text: null, textTruncated: false, own: false };
 
 const detail = (patch: Partial<QueryDetail> = {}): QueryDetail => ({
   text: "SELECT * FROM shop.customers WHERE id = $1", textTruncated: false, sinceReset: stat,
@@ -241,6 +241,23 @@ describe("QueryTab", () => {
     renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
     const row = (await screen.findByRole("rowheader", { name: "Планирование" })).closest("tr")!;
     expect(within(row).getAllByRole("cell").map((c) => c.textContent)).toEqual(["—", "—"]);
+  });
+
+  it("pg_stat_kcache: строки CPU и диска в метриках — только когда значения есть", async () => {
+    vi.mocked(api.queryDetail).mockResolvedValue(detail());
+    const { unmount } = renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
+    await screen.findByRole("rowheader", { name: "Вызовов" });
+    expect(screen.queryByRole("rowheader", { name: "CPU (user + sys)" })).toBeNull();
+    unmount();
+    const kc = { ...stat, cpuUserMs: 900, cpuSysMs: 100, diskReadBytes: 4096, diskWriteBytes: 0 };
+    vi.mocked(api.queryDetail).mockResolvedValue(detail({ sinceReset: kc }));
+    renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
+    const cpu = (await screen.findByRole("rowheader", { name: "CPU (user + sys)" })).closest("tr")!;
+    const cells = within(cpu).getAllByRole("cell").map((c) => c.textContent);
+    expect(cells[0]).not.toBe("—");
+    expect(cells[1]).toBe("—"); // окно часа — без kcache
+    const disk = screen.getByRole("rowheader", { name: "Диск прочитано / записано" }).closest("tr")!;
+    expect(within(disk).getAllByRole("cell")[0].textContent).toMatch(/4,0 KB \/ 0 B/);
   });
 
   it("подключение закрыто — карточка не читает сервер", async () => {

@@ -18,7 +18,7 @@ const stat = (id: string, mean: number, patch: Partial<QueryStat> = {}): QuerySt
   key: { queryId: id, dbid: 1, userid: 1, toplevel: true }, datname: "perf", rolname: "app", calls: 100, totalExecMs: mean * 100, meanExecMs: mean,
   minExecMs: null, maxExecMs: null, stddevExecMs: null, rows: 0, rowsPerCall: 0, plans: 0, totalPlanMs: 0, sharedHit: 0, sharedRead: 0, sharedDirtied: 0,
   sharedWritten: 0, localHit: 0, localRead: 0, localDirtied: 0, localWritten: 0, tempRead: 0, tempWritten: 0, ioReadMs: 0, ioWriteMs: 0, tempIoMs: null,
-  walRecords: 0, walFpi: 0, walBytes: 0, jitFunctions: null, jitMs: null, parallelPlanned: null, parallelLaunched: null, sharePct: 0, hitRatio: null,
+  walRecords: 0, walFpi: 0, walBytes: 0, jitFunctions: null, jitMs: null, parallelPlanned: null, parallelLaunched: null, cpuUserMs: null, cpuSysMs: null, diskReadBytes: null, diskWriteBytes: null, sharePct: 0, hitRatio: null,
   text: "select x", textTruncated: false, own: false, ...patch,
 });
 const comparison: Comparison = {
@@ -93,8 +93,25 @@ describe("SnapshotsPanel", () => {
     // Запрос самой Глафиры помечен.
     const fresh = screen.getByRole("table", { name: "Новые" });
     expect(within(fresh).getByText("Глафира")).toBeInTheDocument();
+    // Снимки без pg_stat_kcache — колонки CPU нет.
+    expect(within(fresh).queryByRole("columnheader", { name: "CPU" })).toBeNull();
     await user.click(screen.getByRole("button", { name: "Топ между снимками" }));
     expect(onBetween).toHaveBeenCalledWith(a, b);
+  });
+
+  it("снимки с pg_stat_kcache: у новых и исчезнувших — колонка CPU", async () => {
+    vi.mocked(api.snapshotCompare).mockResolvedValue({ ...comparison, new: [stat("5", 1, { cpuUserMs: 40, cpuSysMs: 2 }), stat("6", 1)] });
+    const user = userEvent.setup();
+    renderWithClient(<SnapshotsPanel connectionId="c" member="pg-1" onBetween={vi.fn()} />);
+    const rows = await screen.findAllByRole("row");
+    await user.click(within(rows[1]).getByRole("checkbox"));
+    await user.click(within(rows[2]).getByRole("checkbox"));
+    await user.click(screen.getByRole("button", { name: "Сравнить" }));
+    const fresh = await screen.findByRole("table", { name: "Новые" });
+    expect(within(fresh).getByRole("columnheader", { name: "CPU" })).toBeInTheDocument();
+    const cells = within(fresh).getAllByRole("row").slice(1).map((r) => { const c = within(r).getAllByRole("cell"); return c[c.length - 1].textContent; });
+    expect(cells[0]).not.toBe("—");
+    expect(cells[1]).toBe("—");
   });
 
   it("нечитаемый снимок нельзя выбрать, но можно удалить; снимки разных узлов не сравниваются", async () => {

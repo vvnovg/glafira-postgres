@@ -108,6 +108,24 @@ async fn take_compare_and_between_mode() {
     assert!(r.unavailable.is_empty(), "{:?}", r.unavailable);
     let pgss = d.pgss.as_ref().unwrap();
     assert!(pgss.max > 0, "предел pgss хранится в снимке");
+    // pg_stat_kcache на pg-perf: снимки хранят CPU и диск, между снимками — дельты и сортировка по CPU.
+    assert!(pgss.kcache, "kcache в обоих снимках");
+    assert!(st.snapshots.read("it", &b.file).unwrap().kcache);
+    let mut p = params(None);
+    p.sort = QuerySort::CpuTime;
+    let r = run(p).await;
+    let DiagData::Queries(d) = &r.data else {
+        unreachable!()
+    };
+    assert!(
+        d.rows.iter().any(|x| x.cpu_user_ms.is_some()),
+        "CPU между снимками"
+    );
+    assert!(
+        d.rows
+            .windows(2)
+            .all(|w| QuerySort::CpuTime.value(&w[0]) >= QuerySort::CpuTime.value(&w[1]))
+    );
     // Поиск — по текстам снимков.
     let r = run(params(Some("STATUS = $1"))).await;
     let DiagData::Queries(d) = &r.data else {

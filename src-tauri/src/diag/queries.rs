@@ -36,6 +36,39 @@ pub struct PgssInstalled {
     pub schema: String,
     pub version: String,
     pub caps: PgssCaps,
+    /// `pg_stat_kcache` в той же базе; `None` — не установлен.
+    pub kcache: Option<KcacheCaps>,
+}
+
+/// Установленный `pg_stat_kcache`: 2.2+ — колонки `exec_*` и `top`, старше — `user_time` и без `top`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KcacheCaps {
+    pub schema: String,
+    pub exec_prefix: bool,
+    pub has_top: bool,
+}
+
+impl KcacheCaps {
+    /// Возможности по `extversion` (`major.minor…`); не разобралась — `None` (расширение не используется).
+    pub fn from_version(version: &str, schema: String) -> Option<Self> {
+        let mut it = version.split('.');
+        let major: u32 = it.next()?.trim().parse().ok()?;
+        let minor: u32 = it
+            .next()
+            .map(|m| {
+                m.chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+            })
+            .and_then(|m| m.parse().ok())
+            .unwrap_or(0);
+        let new = (major, minor) >= (2, 2);
+        Some(Self {
+            schema,
+            exec_prefix: new,
+            has_top: new,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +84,26 @@ const DETECT_SQL: &str = marked_sql!(
     JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'pg_stat_statements'"
 );
 
+/// `pg_stat_kcache`: версия, схема, `shared_preload_libraries` (из `pg_settings`: без `pg_read_all_settings` строки
+/// нет — NULL) и право вызова функции. Расширение без загруженной библиотеки или без права вызова роняло бы чтение
+/// всего топа — такое расширение не используется (`kcache_usable`).
+const DETECT_KCACHE_SQL: &str = marked_sql!(
+    "SELECT e.extversion::text, n.nspname::text, \
+    (SELECT setting FROM pg_settings WHERE name = 'shared_preload_libraries'), \
+    has_function_privilege(format('%I.pg_stat_kcache()', n.nspname), 'EXECUTE') \
+    FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'pg_stat_kcache'"
+);
+
+/// Можно ли читать `pg_stat_kcache()`: есть право вызова и библиотека в `shared_preload_libraries` (настройка не видна
+/// роли — считается загруженной).
+pub fn kcache_usable(preload: Option<&str>, can_execute: bool) -> bool {
+    can_execute
+        && preload.is_none_or(|p| {
+            p.split(',')
+                .any(|l| l.trim().trim_matches('"') == "pg_stat_kcache")
+        })
+}
+
 pub async fn detect(c: &Client) -> AppResult<Detect> {
     let Some(r) = c
         .query_opt(DETECT_SQL, &[])
@@ -60,19 +113,40 @@ pub async fn detect(c: &Client) -> AppResult<Detect> {
         return Ok(Detect::Missing);
     };
     let (version, schema): (String, String) = (r.get(0), r.get(1));
-    Ok(match PgssCaps::from_version(&version) {
-        Some(caps) => Detect::Installed(PgssInstalled {
-            schema: quote_ident(&schema),
-            version,
-            caps,
-        }),
-        None => Detect::TooOld(version),
-    })
+    let Some(caps) = PgssCaps::from_version(&version) else {
+        return Ok(Detect::TooOld(version));
+    };
+    let kcache = c
+        .query_opt(DETECT_KCACHE_SQL, &[])
+        .await
+        .map_err(|e| from_pg(&e))?
+        .filter(|k| {
+            kcache_usable(
+                k.get::<_, Option<String>>(2).as_deref(),
+                k.get::<_, Option<bool>>(3).unwrap_or(false),
+            )
+        })
+        .and_then(|k| {
+            KcacheCaps::from_version(&k.get::<_, String>(0), quote_ident(&k.get::<_, String>(1)))
+        });
+    Ok(Detect::Installed(PgssInstalled {
+        schema: quote_ident(&schema),
+        version,
+        caps,
+        kcache,
+    }))
 }
 
 /// Строки pgss без текстов (`showtext := false`): файл текстов не читается. `where_clause` — пусто или
-/// ` WHERE s.queryid = $1 AND d.datname = $2` (карточка). Порядок колонок — `row_from`.
-pub fn statements_sql(ns: &str, caps: PgssCaps, where_clause: &str) -> String {
+/// ` WHERE s.queryid = $1 AND d.datname = $2` (карточка). Порядок колонок — `row_from`: 35 колонок pgss и 4 колонки
+/// `pg_stat_kcache` (CPU в мс, байты диска; без расширения — NULL). kcache присоединяется `LEFT JOIN` по
+/// `(queryid, userid, dbid[, top])`: строка pgss без строки kcache остаётся, её колонки kcache — NULL.
+pub fn statements_sql(
+    ns: &str,
+    caps: PgssCaps,
+    kcache: Option<&KcacheCaps>,
+    where_clause: &str,
+) -> String {
     let toplevel = if caps.toplevel { "s.toplevel" } else { "true" };
     let (read_ms, write_ms) = if caps.shared_io_names {
         ("s.shared_blk_read_time", "s.shared_blk_write_time")
@@ -101,6 +175,38 @@ pub fn statements_sql(ns: &str, caps: PgssCaps, where_clause: &str) -> String {
     } else {
         ("NULL::bigint", "NULL::bigint")
     };
+    let (kcols, kjoin) = match kcache {
+        Some(k) => {
+            let (u, sys, r, w) = if k.exec_prefix {
+                (
+                    "k.exec_user_time",
+                    "k.exec_system_time",
+                    "k.exec_reads",
+                    "k.exec_writes",
+                )
+            } else {
+                ("k.user_time", "k.system_time", "k.reads", "k.writes")
+            };
+            // pgss без `toplevel` (1.8) складывает вложенные с верхними: строк kcache с `top` у ключа может быть две, и
+            // join без условия задвоил бы строку pgss — берётся только верхний уровень.
+            let top = match (k.has_top, caps.toplevel) {
+                (true, true) => " AND k.top = s.toplevel",
+                (true, false) => " AND k.top",
+                (false, _) => "",
+            };
+            (
+                format!("{u} * 1000, {sys} * 1000, {r}, {w}"),
+                format!(
+                    " LEFT JOIN {}.pg_stat_kcache() k ON k.queryid = s.queryid AND k.userid = s.userid AND k.dbid = s.dbid{top}",
+                    k.schema
+                ),
+            )
+        }
+        None => (
+            "NULL::float8, NULL::float8, NULL::bigint, NULL::bigint".to_string(),
+            String::new(),
+        ),
+    };
     format!(
         "{SQL_MARKER}SELECT s.userid, s.dbid, s.queryid, {toplevel}, d.datname::text, r.rolname::text, \
          s.calls, s.total_exec_time, s.min_exec_time, s.max_exec_time, s.mean_exec_time, s.stddev_exec_time, s.rows, \
@@ -108,10 +214,11 @@ pub fn statements_sql(ns: &str, caps: PgssCaps, where_clause: &str) -> String {
          s.shared_blks_hit, s.shared_blks_read, s.shared_blks_dirtied, s.shared_blks_written, \
          s.local_blks_hit, s.local_blks_read, s.local_blks_dirtied, s.local_blks_written, \
          s.temp_blks_read, s.temp_blks_written, {read_ms}, {write_ms}, {temp_io}, \
-         s.wal_records, s.wal_fpi, s.wal_bytes::bigint, {jit_functions}, {jit_ms}, {par_planned}, {par_launched} \
+         s.wal_records, s.wal_fpi, s.wal_bytes::bigint, {jit_functions}, {jit_ms}, {par_planned}, {par_launched}, \
+         {kcols} \
          FROM {ns}.pg_stat_statements(false) s \
          LEFT JOIN pg_database d ON d.oid = s.dbid \
-         LEFT JOIN pg_roles r ON r.oid = s.userid{where_clause}"
+         LEFT JOIN pg_roles r ON r.oid = s.userid{kjoin}{where_clause}"
     )
 }
 
@@ -279,6 +386,10 @@ pub fn row_from(r: &Row) -> Option<Cumulative> {
             jit_ms: r.get(32),
             parallel_planned: r.get(33),
             parallel_launched: r.get(34),
+            cpu_user_ms: r.get(35),
+            cpu_sys_ms: r.get(36),
+            disk_read_bytes: r.get(37),
+            disk_write_bytes: r.get(38),
         },
         min_exec_ms: r.get(8),
         max_exec_ms: r.get(9),
@@ -289,7 +400,10 @@ pub fn row_from(r: &Row) -> Option<Cumulative> {
 pub async fn read_cumulative(c: &Client, pgss: &PgssInstalled) -> AppResult<Snapshot> {
     let pg = |e: tokio_postgres::Error| from_pg(&e);
     let raw = c
-        .query(&statements_sql(&pgss.schema, pgss.caps, ""), &[])
+        .query(
+            &statements_sql(&pgss.schema, pgss.caps, pgss.kcache.as_ref(), ""),
+            &[],
+        )
         .await
         .map_err(pg)?;
     let mut hidden = false;
@@ -390,11 +504,14 @@ pub struct PgssMeta {
     pub track_planning: bool,
     pub stats_reset_ms: Option<i64>,
     pub dealloc: Option<i64>,
+    /// Колонки `pg_stat_kcache` (CPU, диск) заполнены: расширение установлено (между снимками — в обоих снимках).
+    pub kcache: bool,
 }
 
 impl PgssMeta {
     pub fn of(pgss: &PgssInstalled, info: &PgssInfo) -> Self {
         Self {
+            kcache: pgss.kcache.is_some(),
             version: pgss.version.clone(),
             has_info: pgss.caps.info,
             max: info.max,
@@ -717,7 +834,7 @@ async fn report_since_reset(
     let mut unavailable = Vec::new();
     let (data, findings) = match (detected, snapshot) {
         (Detect::Installed(pgss), Some((snap, matched))) => {
-            if !p.sort.available(&pgss.caps, false) {
+            if !p.sort.available(&pgss.caps, false, pgss.kcache.is_some()) {
                 return Err(sort_unavailable());
             }
             let entries = entries_since_reset(&snap.rows, p);
@@ -834,7 +951,7 @@ async fn report_window(
             vec![window_starting()],
         ));
     };
-    if !p.sort.available(&pgss.caps, true) {
+    if !p.sort.available(&pgss.caps, true, pgss.kcache.is_some()) {
         return Err(sort_unavailable());
     }
     let h = head_of(h).await?;
@@ -912,7 +1029,9 @@ async fn report_window(
 }
 
 /// Строки режима «между снимками»: дельты `to − from` (`compare::deltas`), имена — из `to`, без строк без изменений
-/// (как в окне: тик несёт только изменившиеся ключи), после фильтра базы и верхнего уровня.
+/// (как в окне: тик несёт только изменившиеся ключи), после фильтра базы и верхнего уровня. Колонки `pg_stat_kcache`
+/// остаются, только если расширение было при снятии обоих снимков (`kcache_between`): иначе «дельтой» стало бы
+/// накопленное значение одного снимка.
 pub fn entries_between(
     a: &crate::snapshots::Snapshot,
     b: &crate::snapshots::Snapshot,
@@ -924,10 +1043,16 @@ pub fn entries_between(
         .iter()
         .map(|c| (c.key, (c.datname.clone(), c.rolname.clone())))
         .collect();
+    let kcache = kcache_between(a, b);
     pg_advisor::queries::compare::deltas(&a.rows, &b.rows, reset)
         .into_iter()
         .filter(|(_, c)| c.changed_since(&Counters::default()))
         .map(|(key, counters)| {
+            let counters = if kcache {
+                counters
+            } else {
+                counters.without_kcache()
+            };
             let (datname, rolname) = names.get(&key).cloned().unwrap_or_default();
             Entry {
                 key,
@@ -939,6 +1064,11 @@ pub fn entries_between(
         })
         .filter(|e| keep(&e.key, e.datname.as_deref(), p))
         .collect()
+}
+
+/// Колонки `pg_stat_kcache` между снимками: расширение было при снятии обоих.
+pub fn kcache_between(a: &crate::snapshots::Snapshot, b: &crate::snapshots::Snapshot) -> bool {
+    a.kcache && b.kcache
 }
 
 fn between_reset() -> Unavailable {
@@ -982,7 +1112,8 @@ pub async fn report_between(
     let (a, b) = crate::snapshots::read_pair(st, id, from, to).await?;
     let caps = PgssCaps::from_version(&b.pgss_version)
         .ok_or_else(|| AppError::internal_with("snapshot pgss version"))?;
-    if !p.sort.available(&caps, true) {
+    let kcache = kcache_between(&a, &b);
+    if !p.sort.available(&caps, true, kcache) {
         return Err(sort_unavailable());
     }
     let reset = a.stats_reset_ms != b.stats_reset_ms;
@@ -1023,6 +1154,11 @@ pub async fn report_between(
         schema: String::new(),
         version: b.pgss_version.clone(),
         caps,
+        kcache: None,
+    };
+    let meta = PgssMeta {
+        kcache,
+        ..PgssMeta::of(&pgss, &info)
     };
     let mut findings = findings;
     pg_advisor::findings::sort(&mut findings);
@@ -1038,7 +1174,7 @@ pub async fn report_between(
             mode: p.mode.clone(),
             coverage_s: Some(between_coverage_s(&a, &b, reset)),
             ticks: None,
-            pgss: Some(PgssMeta::of(&pgss, &info)),
+            pgss: Some(meta),
             totals: t,
             rows,
         }),
@@ -1199,7 +1335,7 @@ mod tests {
 
     #[test]
     fn sql_follows_the_extension_version() {
-        let old = statements_sql("public", caps("1.8"), "");
+        let old = statements_sql("public", caps("1.8"), None, "");
         assert!(
             old.contains("true, d.datname") && !old.contains("s.toplevel"),
             "{old}"
@@ -1213,7 +1349,7 @@ mod tests {
             "{old}"
         );
         assert!(old.contains("FROM public.pg_stat_statements(false) s"));
-        let v10 = statements_sql("public", caps("1.10"), "");
+        let v10 = statements_sql("public", caps("1.10"), None, "");
         assert!(
             v10.contains("s.toplevel")
                 && v10.contains("s.temp_blk_read_time + s.temp_blk_write_time"),
@@ -1223,6 +1359,7 @@ mod tests {
         let v11 = statements_sql(
             "\"my schema\"",
             caps("1.11"),
+            None,
             " WHERE s.queryid = $1 AND d.datname = $2",
         );
         assert!(
@@ -1233,7 +1370,7 @@ mod tests {
             v11.contains("FROM \"my schema\".pg_stat_statements(false) s")
                 && v11.ends_with("WHERE s.queryid = $1 AND d.datname = $2")
         );
-        let v12 = statements_sql("public", caps("1.12"), "");
+        let v12 = statements_sql("public", caps("1.12"), None, "");
         assert!(
             v12.contains("s.parallel_workers_to_launch, s.parallel_workers_launched"),
             "{v12}"
@@ -1248,7 +1385,7 @@ mod tests {
         );
         // Периодические запросы Глафиры — с меткой: `pg_stat_statements` хранит её в тексте строки.
         for sql in [
-            statements_sql("public", caps("1.8"), ""),
+            statements_sql("public", caps("1.8"), None, ""),
             texts_sql("public", caps("1.9")),
             DETECT_SQL.to_string(),
         ] {
@@ -1507,6 +1644,7 @@ mod tests {
             max: 5000,
             track_planning: false,
             hidden: false,
+            kcache: false,
             row_count: 0,
             rows,
             texts: Default::default(),
@@ -1571,6 +1709,130 @@ mod tests {
                 .collect::<Vec<_>>(),
             [(7, 70.0)]
         );
+    }
+
+    #[test]
+    fn kcache_join_depends_on_its_version() {
+        let new = KcacheCaps {
+            schema: "public".into(),
+            exec_prefix: true,
+            has_top: true,
+        };
+        let sql = statements_sql("public", caps("1.11"), Some(&new), "");
+        assert!(
+            sql.contains("LEFT JOIN public.pg_stat_kcache() k ON k.queryid = s.queryid AND k.userid = s.userid AND k.dbid = s.dbid AND k.top = s.toplevel"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                "k.exec_user_time * 1000, k.exec_system_time * 1000, k.exec_reads, k.exec_writes"
+            ),
+            "{sql}"
+        );
+        assert!(crate::product::is_marked_sql(&sql), "{sql}");
+        let old = KcacheCaps {
+            schema: "public".into(),
+            exec_prefix: false,
+            has_top: false,
+        };
+        let sql = statements_sql("public", caps("1.9"), Some(&old), "");
+        assert!(
+            sql.contains("k.user_time * 1000, k.system_time * 1000, k.reads, k.writes")
+                && !sql.contains("k.top"),
+            "{sql}"
+        );
+        let none = statements_sql("public", caps("1.9"), None, "");
+        assert!(
+            none.contains("NULL::float8, NULL::float8, NULL::bigint, NULL::bigint")
+                && !none.contains("pg_stat_kcache"),
+            "{none}"
+        );
+        // pgss 1.8 без `toplevel`, kcache с `top`: только верхний уровень, иначе строка pgss задвоится.
+        let sql = statements_sql("public", caps("1.8"), Some(&new), "");
+        assert!(sql.contains("k.dbid = s.dbid AND k.top"), "{sql}");
+        // Карточка: условие отбора — после join kcache.
+        let sql = statements_sql(
+            "public",
+            caps("1.11"),
+            Some(&new),
+            " WHERE s.queryid = $1 AND d.datname = $2",
+        );
+        assert!(
+            sql.ends_with("k.top = s.toplevel WHERE s.queryid = $1 AND d.datname = $2"),
+            "{sql}"
+        );
+        assert!(DETECT_KCACHE_SQL.starts_with("/* glafira */"));
+        assert_eq!(
+            KcacheCaps::from_version("2.3.2", "public".into()),
+            Some(new.clone())
+        );
+        assert_eq!(
+            KcacheCaps::from_version("2.1.3", "public".into()),
+            Some(old.clone())
+        );
+        assert_eq!(
+            KcacheCaps::from_version("2.2", "public".into()).map(|k| k.has_top),
+            Some(true)
+        );
+        assert_eq!(KcacheCaps::from_version("x", "public".into()), None);
+        assert!(kcache_usable(
+            Some("pg_stat_statements, pg_stat_kcache"),
+            true
+        ));
+        assert!(
+            kcache_usable(None, true),
+            "настройка не видна — считается загруженной"
+        );
+        assert!(!kcache_usable(Some("pg_stat_statements"), true));
+        assert!(!kcache_usable(Some("pg_stat_kcache"), false));
+    }
+
+    /// Между снимками колонки kcache — только если расширение было при снятии обоих; иначе сортировка по CPU недоступна.
+    #[tokio::test]
+    async fn between_kcache_needs_both_snapshots() {
+        let with_cpu = |calls: i64, cpu: f64| {
+            let mut c = cumulative(1, true, "perf", calls, calls as f64);
+            c.counters.cpu_user_ms = Some(cpu);
+            c.counters.cpu_sys_ms = Some(1.0);
+            c
+        };
+        let mut a = snapshot(vec![with_cpu(10, 100.0)]);
+        let mut b = snapshot(vec![with_cpu(20, 150.0)]);
+        let p = params(QueriesMode::Between {
+            from: "pg-1/a.json".into(),
+            to: "pg-1/b.json".into(),
+        });
+        a.kcache = true;
+        b.kcache = true;
+        let e = entries_between(&a, &b, false, &p);
+        assert_eq!(
+            (e[0].counters.cpu_user_ms, e[0].counters.cpu_sys_ms),
+            (Some(50.0), Some(0.0))
+        );
+        a.kcache = false;
+        let e = entries_between(&a, &b, false, &p);
+        assert_eq!(e[0].counters.cpu_user_ms, None, "kcache только в `to`");
+        // Отчёт: сортировка по CPU без kcache в одном из снимков — отказ; с обоими — `pgss.kcache`.
+        let dir = tempfile::tempdir().unwrap();
+        let st =
+            AppState::new(dir.path(), Arc::new(crate::secrets::MemoryStore::default())).unwrap();
+        a.taken_at_ms = 1_761_735_600_000;
+        b.taken_at_ms = 1_761_735_660_000;
+        let fa = st.snapshots.write("c1", &a).unwrap().file;
+        let fb = st.snapshots.write("c1", &b).unwrap().file;
+        let mut p = p;
+        p.sort = QuerySort::CpuTime;
+        let err = report_between(&st, "c1", &p, &fa, &fb).await.unwrap_err();
+        assert_eq!(err.key, "errors.queries.sortUnavailable");
+        a.kcache = true;
+        st.snapshots.delete("c1", &fa).unwrap();
+        st.snapshots.write("c1", &a).unwrap();
+        let r = report_between(&st, "c1", &p, &fa, &fb).await.unwrap();
+        let DiagData::Queries(d) = &r.data else {
+            unreachable!()
+        };
+        assert!(d.pgss.as_ref().is_some_and(|m| m.kcache));
+        assert_eq!(d.rows[0].cpu_user_ms, Some(50.0));
     }
 
     #[test]
@@ -1704,6 +1966,7 @@ mod tests {
             schema: "public".into(),
             version: "1.8".into(),
             caps: caps("1.8"),
+            kcache: None,
         };
         let meta = serde_json::to_value(PgssMeta::of(&pgss, &PgssInfo::default())).unwrap();
         assert_eq!(
@@ -1714,6 +1977,7 @@ mod tests {
             ),
             (&false.into(), &serde_json::Value::Null, &false.into())
         );
+        assert_eq!(meta["kcache"], false);
     }
 
     #[test]

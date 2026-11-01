@@ -1,4 +1,4 @@
-import type { PgssMeta, QueryKey, QuerySort } from "../../api/types";
+import type { PgssMeta, QueryKey, QuerySort, QueryStat } from "../../api/types";
 
 /** Размер блока PostgreSQL, байты: счётчики блоков pgss переводятся в байты по нему. */
 export const BLOCK_BYTES = 8192;
@@ -16,14 +16,20 @@ export function pgssVersion(v: string | null | undefined): [number, number] | nu
   return m ? [Number(m[1]), Number(m[2])] : null;
 }
 
-/** Зеркало `QuerySort::available`: min/max/stddev нет в окне, JIT — только с pgss 1.10. */
+/** Зеркало `QuerySort::available`: min/max/stddev нет в окне, JIT — только с pgss 1.10, CPU — только с `pg_stat_kcache`. */
 export function sortAvailable(sort: QuerySort, pgss: PgssMeta | null, window: boolean): boolean {
   if (sort === "maxTime" || sort === "stddevTime") return !window;
+  if (sort === "cpuTime") return pgss?.kcache === true;
   if (sort === "jitTime") {
     const v = pgssVersion(pgss?.version);
     return v !== null && (v[0] > 1 || v[1] >= 10);
   }
   return true;
+}
+
+/** CPU строки (user + sys), мс; `null` — колонок `pg_stat_kcache` нет. */
+export function cpuMs(s: Pick<QueryStat, "cpuUserMs" | "cpuSysMs">): number | null {
+  return s.cpuUserMs === null || s.cpuSysMs === null ? null : s.cpuUserMs + s.cpuSysMs;
 }
 
 /** Ключ строки pgss одной строкой (для `Map`, `Set` и `key` списка). */

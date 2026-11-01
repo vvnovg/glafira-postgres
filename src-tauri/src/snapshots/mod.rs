@@ -45,6 +45,10 @@ pub struct Snapshot {
     pub track_planning: bool,
     /// Были строки со скрытым `queryid` (чужие без `pg_read_all_stats`).
     pub hidden: bool,
+    /// При снятии был `pg_stat_kcache`: в счётчиках строк есть CPU и диск. Поле добавлено без смены `v` (файлы без
+    /// него читаются как «без kcache», старые версии приложения поле и колонки kcache пропускают).
+    #[serde(default)]
+    pub kcache: bool,
     /// Число строк — для списка без разбора `rows` (`store::Header`); выставляется при записи.
     #[serde(default)]
     pub row_count: usize,
@@ -134,6 +138,7 @@ pub async fn take(st: &AppState, id: &str, member: &str) -> AppResult<SnapshotIn
                 max: snap.info.max,
                 track_planning: snap.info.track_planning,
                 hidden: snap.hidden,
+                kcache: pgss.kcache.is_some(),
                 row_count: snap.rows.len(),
                 rows: snap.rows,
                 texts,
@@ -299,6 +304,7 @@ mod tests {
             max: 0,
             track_planning: false,
             hidden: false,
+            kcache: false,
             row_count: 0,
             rows: vec![],
             texts: BTreeMap::new(),
@@ -321,5 +327,21 @@ mod tests {
         let mut s3 = pg_advisor::queries::stat(key(3), None, None, &Counters::default(), None, &t);
         annotate(&a, &b, &mut s3);
         assert_eq!((s3.text, s3.own), (None, false));
+        // Файл без полей `pg_stat_kcache` (записан до задачи 8, `v` тот же): читается как «без kcache».
+        let mut c = b.clone();
+        c.rows = vec![row(1, 1, 1.0)];
+        c.rows[0].counters.cpu_user_ms = Some(2.0);
+        c.kcache = true;
+        let mut v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["kcache"], true);
+        assert_eq!(v["rows"][0]["counters"]["cpuUserMs"], 2.0);
+        v.as_object_mut().unwrap().remove("kcache");
+        let counters = v["rows"][0]["counters"].as_object_mut().unwrap();
+        for f in ["cpuUserMs", "cpuSysMs", "diskReadBytes", "diskWriteBytes"] {
+            counters.remove(f);
+        }
+        let back: Snapshot = serde_json::from_value(v).unwrap();
+        assert!(!back.kcache && back.v == SNAPSHOT_VERSION);
+        assert_eq!(back.rows[0].counters.cpu_user_ms, None);
     }
 }

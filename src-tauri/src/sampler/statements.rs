@@ -710,6 +710,7 @@ mod tests {
                 schema: "public".into(),
                 version: "1.11".into(),
                 caps: PgssCaps::from_version("1.11").unwrap(),
+                kcache: None,
             },
             snapshot: Snapshot {
                 rows,
@@ -1109,6 +1110,7 @@ mod tests {
             schema: schema.into(),
             version: version.into(),
             caps: PgssCaps::from_version(version).unwrap(),
+            kcache: None,
         }
     }
 

@@ -393,6 +393,7 @@ mod tests {
             max: 5000,
             track_planning: false,
             hidden: false,
+            kcache: false,
             row_count: 0,
             rows: vec![],
             texts: Default::default(),

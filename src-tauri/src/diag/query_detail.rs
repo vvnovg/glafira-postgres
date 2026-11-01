@@ -337,6 +337,7 @@ async fn fetch(
                     &statements_sql(
                         &pgss.schema,
                         pgss.caps,
+                        pgss.kcache.as_ref(),
                         " WHERE s.queryid = $1 AND d.datname = $2",
                     ),
                     &[&query_id, &database],

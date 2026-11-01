@@ -1,7 +1,7 @@
 import { useTranslation } from "react-i18next";
 import type { Change, Comparison, QueryStat } from "../../api/types";
 import { formatCount, formatMs } from "../../lib/format";
-import { QUERY_KEY_ID, queryTitle } from "./queriesText";
+import { QUERY_KEY_ID, cpuMs, queryTitle } from "./queriesText";
 
 /** Ячейка запроса: начало текста (или queryId) и пометка запроса самой Глафиры — такие строки приглушены. */
 function QueryCell({ stat }: { stat: QueryStat }) {
@@ -20,6 +20,8 @@ function QueryCell({ stat }: { stat: QueryStat }) {
 
 function Plain({ title, rows }: { title: string; rows: QueryStat[] }) {
   const { t } = useTranslation();
+  // Колонка CPU — когда снимки сняты с `pg_stat_kcache` (у строк есть значения).
+  const cpu = rows.some((r) => cpuMs(r) !== null);
   return (
     <section>
       <h4>
@@ -38,6 +40,11 @@ function Plain({ title, rows }: { title: string; rows: QueryStat[] }) {
               <th scope="col" className="num">
                 {t("diag.queries.columns.total")}
               </th>
+              {cpu && (
+                <th scope="col" className="num">
+                  {t("diag.queries.columns.cpu")}
+                </th>
+              )}
             </tr>
           </thead>
           <tbody>
@@ -46,6 +53,7 @@ function Plain({ title, rows }: { title: string; rows: QueryStat[] }) {
                 <QueryCell stat={r} />
                 <td className="num">{formatCount(r.calls)}</td>
                 <td className="num">{formatMs(r.totalExecMs)}</td>
+                {cpu && <td className="num">{cpuMs(r) === null ? "—" : formatMs(cpuMs(r)!)}</td>}
               </tr>
             ))}
           </tbody>

@@ -10,7 +10,7 @@ import { ErrorBanner } from "../common/ErrorBanner";
 import { DiagHeader } from "../diag/DiagHeader";
 import { FindingsPanel } from "../diag/FindingsPanel";
 import { unavailableText } from "../diag/unavailable";
-import { BLOCK_BYTES, QUERY_KEY_ID, queryTitle, sortAvailable } from "./queriesText";
+import { BLOCK_BYTES, QUERY_KEY_ID, cpuMs, queryTitle, sortAvailable } from "./queriesText";
 import { SnapshotsPanel } from "./SnapshotsPanel";
 
 /** Интервал обновления режима «с момента сброса» по умолчанию, с. */
@@ -26,6 +26,8 @@ interface Col {
   sort: QuerySort | null;
   labelKey: string;
   cell(r: QueryStat, trackPlanning: boolean): string;
+  /** Колонка `pg_stat_kcache`: показывается, только когда расширение есть (`pgss.kcache`). */
+  kcache?: true;
 }
 
 const COLS: Col[] = [
@@ -39,6 +41,8 @@ const COLS: Col[] = [
   { id: "temp", sort: "tempWritten", labelKey: "diag.queries.columns.temp", cell: (r) => formatBytes(r.tempWritten * BLOCK_BYTES) },
   { id: "wal", sort: "walBytes", labelKey: "diag.queries.columns.wal", cell: (r) => formatBytes(r.walBytes) },
   { id: "io", sort: "ioTime", labelKey: "diag.queries.columns.io", cell: (r) => formatMs(r.ioReadMs + r.ioWriteMs) },
+  { id: "cpu", sort: "cpuTime", labelKey: "diag.queries.columns.cpu", kcache: true, cell: (r) => { const v = cpuMs(r); return v === null ? "—" : formatMs(v); } },
+  { id: "disk", sort: null, labelKey: "diag.queries.columns.disk", kcache: true, cell: (r) => (r.diskReadBytes === null ? "—" : formatBytes(r.diskReadBytes)) },
   { id: "plan", sort: "planTime", labelKey: "diag.queries.columns.plan", cell: (r, trackPlanning) => (trackPlanning ? formatMs(r.totalPlanMs) : "—") },
   { id: "jit", sort: "jitTime", labelKey: "diag.queries.columns.jit", cell: (r) => (r.jitMs === null ? "—" : formatMs(r.jitMs)) },
   { id: "stddev", sort: "stddevTime", labelKey: "diag.queries.columns.stddev", cell: (r) => (r.stddevExecMs === null ? "—" : formatMs(r.stddevExecMs)) },
@@ -202,6 +206,8 @@ export function QueriesView({
   };
   // Стрелка — у колонки, по которой щёлкнули, если её сортировка ещё действует; иначе (сброс сортировки сменой режима) — у первой подходящей.
   const activeCol = COLS.find((c) => c.id === sortCol && c.sort === params.sort) ?? COLS.find((c) => c.sort === params.sort);
+  // Колонки CPU и диска — только с `pg_stat_kcache` у отчёта.
+  const cols = COLS.filter((c) => !c.kcache || data?.pgss?.kcache === true);
   // Подпись пары: местное время снятия и узел один раз; без сведений о снимках (не должно случаться) — имена файлов.
   const betweenLabel = (from: string, to: string) => {
     const known = pair && pair.from.file === from && pair.to.file === to ? pair : null;
@@ -212,7 +218,8 @@ export function QueriesView({
   const offline = !live;
   const enterBetween = (from: SnapshotInfo, to: SnapshotInfo) => {
     setPair({ from, to });
-    setParams((p) => ({ ...p, mode: { kind: "between", from: from.file, to: to.file }, sort: sortAvailable(p.sort, data?.pgss ?? null, true) ? p.sort : "totalTime" }));
+    // Есть ли kcache в снимках, до отчёта неизвестно: сортировка по CPU сбрасывается, чтобы не получить отказ.
+    setParams((p) => ({ ...p, mode: { kind: "between", from: from.file, to: to.file }, sort: p.sort !== "cpuTime" && sortAvailable(p.sort, data?.pgss ?? null, true) ? p.sort : "totalTime" }));
     setShowSnapshots(false);
   };
   const onSnapshotDeleted = (file: string) => {
@@ -365,7 +372,7 @@ export function QueriesView({
                 <thead>
                   <tr>
                     <th scope="col">{t("diag.queries.columns.query")}</th>
-                    {COLS.map((c) => {
+                    {cols.map((c) => {
                       const enabled = c.sort !== null && sortAvailable(c.sort, data.pgss, deltas);
                       const current = c === activeCol;
                       // Hit % сортируется по возрастанию (худшие сверху), остальные — по убыванию.
@@ -401,7 +408,7 @@ export function QueriesView({
                         )}
                         {r.textTruncated && <span className="muted"> {t("diag.queries.truncated")}</span>}
                       </td>
-                      {COLS.map((c) => (
+                      {cols.map((c) => (
                         <td key={c.id} className="num">
                           {c.cell(r, data.pgss?.trackPlanning ?? true)}
                         </td>

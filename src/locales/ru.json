@@ -1320,7 +1320,9 @@
         "plan": "Планирование",
         "jit": "JIT",
         "stddev": "Stddev",
-        "max": "Max"
+        "max": "Max",
+        "cpu": "CPU",
+        "disk": "Чтение с диска"
       },
       "betweenCoverage": "{{duration}} между снимками",
       "snapshots": "Снимки",
@@ -1355,7 +1357,9 @@
         "temp": "Temp записано",
         "wal": "WAL",
         "planning": "Планирование",
-        "jit": "JIT"
+        "jit": "JIT",
+        "cpu": "CPU (user + sys)",
+        "disk": "Диск прочитано / записано"
       },
       "history": "История (60 мин)",
       "historyCalls": "Вызовов в минуту",
@@ -1940,7 +1944,9 @@
       "read": "Прочитано с диска",
       "temp": "Temp записано",
       "wal": "WAL",
-      "planning": "Планирование"
+      "planning": "Планирование",
+      "cpu": "CPU (user + sys)",
+      "disk": "Диск прочитано / записано (уровень ОС)"
     }
   },
   "hints": {

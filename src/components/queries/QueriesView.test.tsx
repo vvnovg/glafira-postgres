@@ -23,14 +23,14 @@ function row(id: string, patch: Partial<QueryStat> = {}): QueryStat {
     calls: 100, totalExecMs: 1000, meanExecMs: 10, minExecMs: 1, maxExecMs: 50, stddevExecMs: 5, rows: 100, rowsPerCall: 1,
     plans: 0, totalPlanMs: 0, sharedHit: 900, sharedRead: 100, sharedDirtied: 0, sharedWritten: 0, localHit: 0, localRead: 0, localDirtied: 0, localWritten: 0,
     tempRead: 0, tempWritten: 0, ioReadMs: 0, ioWriteMs: 0, tempIoMs: null, walRecords: 0, walFpi: 0, walBytes: 0,
-    jitFunctions: null, jitMs: null, parallelPlanned: null, parallelLaunched: null, sharePct: 50, hitRatio: 0.9, text: null, textTruncated: false, own: false, ...patch,
+    jitFunctions: null, jitMs: null, parallelPlanned: null, parallelLaunched: null, cpuUserMs: null, cpuSysMs: null, diskReadBytes: null, diskWriteBytes: null, sharePct: 50, hitRatio: 0.9, text: null, textTruncated: false, own: false, ...patch,
   };
 }
 
 function data(patch: Partial<QueriesData> = {}): { kind: "queries" } & QueriesData {
   return {
     kind: "queries", mode: { kind: "sinceReset" }, coverageS: null, ticks: null,
-    pgss: { version: "1.11", max: 5000, trackPlanning: true, hasInfo: true, statsResetMs: 1_700_000_000_000, dealloc: 0 },
+    pgss: { version: "1.11", max: 5000, trackPlanning: true, hasInfo: true, statsResetMs: 1_700_000_000_000, dealloc: 0, kcache: false },
     totals: { calls: 200, totalExecMs: 2000, rows: 200 }, rows: [row("1"), row("2", { totalExecMs: 500, sharePct: 25, text: "select 2" })], ...patch,
   };
 }
@@ -263,13 +263,41 @@ describe("QueriesView", () => {
   });
 
   it("pgss без pg_stat_statements_info: подвал без «сброс статистики —»; track_planning выключен — «Планирование» «—»", async () => {
-    vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport(data({ pgss: { version: "1.8", hasInfo: false, max: 5000, trackPlanning: false, statsResetMs: null, dealloc: null }, rows: [row("1", { totalPlanMs: 7, text: "select 1" })] }), { member: "pg-1" }));
+    vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport(data({ pgss: { version: "1.8", hasInfo: false, max: 5000, trackPlanning: false, statsResetMs: null, dealloc: null, kcache: false }, rows: [row("1", { totalPlanMs: 7, text: "select 1" })] }), { member: "pg-1" }));
     renderWithClient(view());
     await screen.findByText("select 1");
     expect(screen.getByText(/время сброса недоступно/)).toBeInTheDocument();
     expect(screen.queryByText(/сброс статистики/)).toBeNull();
     const col = screen.getAllByRole("columnheader").findIndex((h) => /Планирование/.test(h.textContent ?? ""));
     expect(within(screen.getByText("select 1").closest("tr")!).getAllByRole("cell")[col].textContent).toBe("—");
+  });
+
+  it("pg_stat_kcache: колонки CPU и «Чтение с диска» есть только с расширением, сортировка по CPU уходит в запрос", async () => {
+    vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport(data(), { member: "pg-1" }));
+    const user = userEvent.setup();
+    const { unmount } = renderWithClient(view());
+    await screen.findByText("select 2");
+    expect(screen.queryByRole("columnheader", { name: /CPU/ })).toBeNull();
+    expect(screen.queryByRole("columnheader", { name: /Чтение с диска/ })).toBeNull();
+    unmount();
+    const kc = data({
+      pgss: { version: "1.11", max: 5000, trackPlanning: true, hasInfo: true, statsResetMs: null, dealloc: 0, kcache: true },
+      rows: [row("1", { text: "select 1", cpuUserMs: 1500, cpuSysMs: 500, diskReadBytes: 2048, diskWriteBytes: 0 }), row("2", { text: "select 2" })],
+    });
+    vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport(kc, { member: "pg-1" }));
+    renderWithClient(view());
+    await screen.findByText("select 1");
+    const headers = screen.getAllByRole("columnheader");
+    const cpu = headers.findIndex((h) => /CPU/.test(h.textContent ?? ""));
+    const disk = headers.findIndex((h) => /Чтение с диска/.test(h.textContent ?? ""));
+    expect(cpu).toBeGreaterThan(0);
+    expect(within(headers[disk]).getByRole("button")).toBeDisabled();
+    const cells = within(screen.getByText("select 1").closest("tr")!).getAllByRole("cell");
+    expect(cells[cpu].textContent).not.toBe("—");
+    expect(cells[disk].textContent).not.toBe("—");
+    expect(within(screen.getByText("select 2").closest("tr")!).getAllByRole("cell")[cpu].textContent).toBe("—");
+    await user.click(within(headers[cpu]).getByRole("button"));
+    await waitFor(() => expect(vi.mocked(api.runDiagnostic).mock.lastCall![1].queries?.sort).toBe("cpuTime"));
   });
 
   it("«между снимками»: пара из панели снимков; подпись местным временем, покрытие, без stddev и без запроса текстов; удаление снимка пары и выход", async () => {

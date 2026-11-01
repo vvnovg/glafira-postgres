@@ -150,7 +150,7 @@ describe("DiagTab", () => {
         mode: { kind: "sinceReset" },
         coverageS: null,
         ticks: null,
-        pgss: { version: "1.11", max: 5000, trackPlanning: true, hasInfo: true, statsResetMs: null, dealloc: 0 },
+        pgss: { version: "1.11", max: 5000, trackPlanning: true, hasInfo: true, statsResetMs: null, dealloc: 0, kcache: false },
         totals: { calls: 0, totalExecMs: 0, rows: 0 },
         rows: [],
       }),
@@ -257,7 +257,7 @@ describe("DiagTab", () => {
       mode,
       coverageS: mode.kind === "between" ? 3600 : null,
       ticks: null,
-      pgss: { version: "1.11", max: 5000, trackPlanning: true, hasInfo: true, statsResetMs: null, dealloc: 0 },
+      pgss: { version: "1.11", max: 5000, trackPlanning: true, hasInfo: true, statsResetMs: null, dealloc: 0, kcache: false },
       totals: { calls: 1, totalExecMs: 1, rows: 1 },
       rows: [{ ...sinceResetRow, text: mode.kind === "between" ? "select from snapshot" : "select live" }],
     });
@@ -265,7 +265,7 @@ describe("DiagTab", () => {
       key: { queryId: "1", dbid: 5, userid: 10, toplevel: true }, datname: "perf", rolname: "app", calls: 1, totalExecMs: 1, meanExecMs: 1, minExecMs: null, maxExecMs: null, stddevExecMs: null,
       rows: 1, rowsPerCall: 1, plans: 0, totalPlanMs: 0, sharedHit: 0, sharedRead: 0, sharedDirtied: 0, sharedWritten: 0, localHit: 0, localRead: 0, localDirtied: 0, localWritten: 0,
       tempRead: 0, tempWritten: 0, ioReadMs: 0, ioWriteMs: 0, tempIoMs: null, walRecords: 0, walFpi: 0, walBytes: 0, jitFunctions: null, jitMs: null, parallelPlanned: null,
-      parallelLaunched: null, sharePct: 100, hitRatio: null, text: null, textTruncated: false, own: false,
+      parallelLaunched: null, cpuUserMs: null, cpuSysMs: null, diskReadBytes: null, diskWriteBytes: null, sharePct: 100, hitRatio: null, text: null, textTruncated: false, own: false,
     };
     beforeEach(() => {
       vi.mocked(api.snapshotList).mockResolvedValue([b, a]);

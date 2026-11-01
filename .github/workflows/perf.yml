@@ -56,6 +56,7 @@ jobs:
           GPG_IT_SINGLE: localhost:5460
           GPG_IT_PRIMARY: localhost:5451
           GPG_IT_REPLICA: localhost:5452
+          GPG_IT_LAB: localhost:5470
           GPG_IT_PERF: localhost:5471
           GPG_IT_MATRIX: localhost:5513,localhost:5514,localhost:5515,localhost:5516,localhost:5517,localhost:5518
       - name: Логи стенда при сбое
