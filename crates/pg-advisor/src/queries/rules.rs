@@ -23,7 +23,21 @@ pub struct PgssState {
     pub max: i64,
 }
 
-/// Эвристики топа без плана. `rows` — строки уже обрезанного отчёта; `totals` — итоги того же набора.
+/// Доля вызовов строки, если строка проходит правило N+1: доля вызовов не меньше порога, микроскопическое среднее и
+/// заметный объём. По этому же условию отчёт ищет среди строк кандидатов в собственные запросы Глафиры.
+pub fn n_plus_one_share(calls: i64, mean_exec_ms: f64, totals: &Totals) -> Option<f64> {
+    if totals.calls <= 0 {
+        return None;
+    }
+    let share = calls as f64 / totals.calls as f64;
+    (share >= th::QUERY_N1_CALLS_SHARE
+        && mean_exec_ms <= th::QUERY_N1_MEAN_MS
+        && calls >= th::QUERY_N1_MIN_CALLS)
+        .then_some(share)
+}
+
+/// Эвристики топа без плана. `rows` — строки уже обрезанного отчёта; `totals` — итоги того же набора без собственных
+/// запросов Глафиры. Строки `own` правил не проходят.
 pub fn evaluate(
     member: Option<&str>,
     rows: &[QueryStat],
@@ -32,7 +46,7 @@ pub fn evaluate(
     mode: Mode,
 ) -> Vec<Finding> {
     let mut out = Vec::new();
-    for r in rows {
+    for r in rows.iter().filter(|r| !r.own) {
         let qid = r.key.query_id.to_string();
         let db = r.datname.clone().unwrap_or_default();
         let finding = |id: &str, severity: Severity| {
@@ -45,19 +59,13 @@ pub fn evaluate(
                 .link_query(&qid, &db, member)
         };
         // N+1: большая доля вызовов при микроскопическом среднем и заметном объёме.
-        if totals.calls > 0 {
-            let share = r.calls as f64 / totals.calls as f64;
-            if share >= th::QUERY_N1_CALLS_SHARE
-                && r.mean_exec_ms <= th::QUERY_N1_MEAN_MS
-                && r.calls >= th::QUERY_N1_MIN_CALLS
-            {
-                out.push(
-                    finding("query_n_plus_one", Severity::Warning)
-                        .param("callsSharePct", share * 100.0)
-                        .param("meanMs", r.mean_exec_ms)
-                        .param("calls", r.calls),
-                );
-            }
+        if let Some(share) = n_plus_one_share(r.calls, r.mean_exec_ms, totals) {
+            out.push(
+                finding("query_n_plus_one", Severity::Warning)
+                    .param("callsSharePct", share * 100.0)
+                    .param("meanMs", r.mean_exec_ms)
+                    .param("calls", r.calls),
+            );
         }
         // Нестабильный план: stddev есть только у накопительных данных.
         if mode == Mode::SinceReset
@@ -214,6 +222,48 @@ mod tests {
             crate::findings::FindingLink::OpenQuery { query_id, member: Some(m), .. }
                 if query_id == "1" && m == "pg-1"
         ));
+    }
+
+    /// Собственные запросы Глафиры правил не проходят, даже если по счётчикам сработали бы.
+    #[test]
+    fn own_rows_give_no_findings() {
+        let totals = Totals {
+            calls: 10_000,
+            total_exec_ms: 10_000.0,
+            rows: 0,
+        };
+        let hot = Counters {
+            calls: 3000,
+            total_exec_ms: 1500.0,
+            temp_written: 3000 * 128,
+            ..Counters::default()
+        };
+        let mut own = row(1, hot, Some((1.0, 500.0, 50.0)), &totals);
+        own.own = true;
+        let f = evaluate(
+            None,
+            &[own, row(2, hot, None, &totals)],
+            &totals,
+            &pgss(),
+            Mode::SinceReset,
+        );
+        assert_eq!(ids(&f), ["query_n_plus_one", "query_temp"]);
+        assert!(f.iter().all(
+            |x| matches!(&x.target, Some(FindingTarget::Query { query_id, .. }) if query_id == "2")
+        ));
+        assert_eq!(n_plus_one_share(3000, 0.5, &totals), Some(0.3));
+        assert_eq!(n_plus_one_share(3000, 0.5, &Totals::default()), None);
+        assert_eq!(
+            n_plus_one_share(
+                999,
+                0.001,
+                &Totals {
+                    calls: 1000,
+                    ..totals
+                }
+            ),
+            None
+        );
     }
 
     #[test]

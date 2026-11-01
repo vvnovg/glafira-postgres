@@ -213,6 +213,9 @@ pub struct QueryStat {
     /// Текст из кеша; `None` — ещё не запрашивался.
     pub text: Option<String>,
     pub text_truncated: bool,
+    /// Запрос самой Глафиры (текст с её меткой): не участвует в правилах находок и в итогах, по которым считаются доли.
+    #[serde(default)]
+    pub own: bool,
 }
 
 /// Строка отчёта из счётчиков; `minmax` — `(min, max, stddev)` только у накопительных данных.
@@ -268,6 +271,7 @@ pub fn stat(
         hit_ratio: (blocks > 0).then(|| c.shared_hit as f64 / blocks as f64),
         text: None,
         text_truncated: false,
+        own: false,
     }
 }
 
@@ -452,7 +456,8 @@ mod tests {
             (s.min_exec_ms, s.max_exec_ms, s.stddev_exec_ms),
             (Some(1.0), Some(50.0), Some(7.5))
         );
-        assert_eq!((s.text, s.text_truncated), (None, false));
+        assert_eq!((&s.text, s.text_truncated, s.own), (&None, false, false));
+        assert_eq!(serde_json::to_value(&s).unwrap()["own"], false);
         // Без чтений hit ratio не определён; без вызовов среднее — 0; без итогов доля — 0.
         let z = stat(
             key(2),
