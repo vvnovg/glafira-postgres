@@ -18,7 +18,7 @@ use crate::product::is_marked_sql;
 use crate::sampler::statements::{pgss_missing, pgss_too_old};
 use crate::state::AppState;
 use crate::topology::probe::is_unmarked_poll_sql;
-pub use store::{SnapshotInfo, SnapshotStore, Unreadable, file_name, valid_file};
+pub use store::{SnapshotInfo, SnapshotStore, Unreadable, file_name, member_dir, valid_file};
 
 /// Текстов в снимке — у верхних запросов по общему времени и, отдельно, по числу вызовов (по ним узнаются частые
 /// собственные запросы Глафиры и кандидаты N+1).

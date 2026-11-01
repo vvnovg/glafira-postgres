@@ -34,3 +34,20 @@ export function cpuMs(s: Pick<QueryStat, "cpuUserMs" | "cpuSysMs">): number | nu
 
 /** Ключ строки pgss одной строкой (для `Map`, `Set` и `key` списка). */
 export const QUERY_KEY_ID = (k: QueryKey) => `${k.queryId}:${k.dbid}:${k.userid}:${k.toplevel ? 1 : 0}`;
+
+/**
+ * Узел и время по адресу файла снимка `<каталог узла>/<время>.json` (зеркало `member_of_dir`): каталог — имя узла в
+ * `%XX`-форме; не код (старый каталог, `%` без двух цифр) — как есть. Для подписи, когда сведений о снимке нет.
+ */
+export function snapshotFileParts(file: string): { member: string; stamp: string } {
+  const slash = file.indexOf("/");
+  const dir = slash < 0 ? "" : file.slice(0, slash);
+  const stamp = file.slice(slash + 1).replace(/\.json$/, "");
+  let member = dir;
+  try {
+    member = decodeURIComponent(dir);
+  } catch {
+    // Не код — имя каталога как есть.
+  }
+  return { member, stamp };
+}

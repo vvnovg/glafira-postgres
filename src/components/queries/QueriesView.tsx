@@ -10,7 +10,7 @@ import { ErrorBanner } from "../common/ErrorBanner";
 import { DiagHeader } from "../diag/DiagHeader";
 import { FindingsPanel } from "../diag/FindingsPanel";
 import { unavailableText } from "../diag/unavailable";
-import { BLOCK_BYTES, QUERY_KEY_ID, cpuMs, queryTitle, sortAvailable } from "./queriesText";
+import { BLOCK_BYTES, QUERY_KEY_ID, cpuMs, queryTitle, snapshotFileParts, sortAvailable } from "./queriesText";
 import { SnapshotsPanel } from "./SnapshotsPanel";
 
 /** Интервал обновления режима «с момента сброса» по умолчанию, с. */
@@ -213,7 +213,10 @@ export function QueriesView({
     const known = pair && pair.from.file === from && pair.to.file === to ? pair : null;
     return known
       ? t("diag.queries.betweenLabel", { member: known.from.member, from: formatTimestamp(known.from.takenAtMs), to: formatTimestamp(known.to.takenAtMs) })
-      : t("diag.queries.betweenLabel", { member: from.split("/")[0], from: from.replace(/\.json$/, ""), to: to.replace(/\.json$/, "") });
+      : (() => {
+          const a = snapshotFileParts(from);
+          return t("diag.queries.betweenLabel", { member: a.member, from: a.stamp, to: snapshotFileParts(to).stamp });
+        })();
   };
   const offline = !live;
   const enterBetween = (from: SnapshotInfo, to: SnapshotInfo) => {

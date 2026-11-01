@@ -1,4 +1,7 @@
 //! Файлы снимков: `data_dir/snapshots/<connectionId>/<member>/<yyyy-mm-ddThh-mm-ss>.json`, каталоги 0700, файлы 0600.
+//! Каталог узла — имя узла в переносимой форме (`member_dir`: `db1:5432` → `db1%3A5432`, на Windows `:` в имени
+//! нельзя); настоящее имя узла — в содержимом файла. Каталоги, созданные до кодирования (на unix — имя как есть),
+//! читаются и удаляются как раньше: адрес файла — имя каталога на диске, а не имя узла.
 //! В архив диагностики не входят (`diagnostics::write_archive` берёт только сведения, профили и логи).
 
 use std::path::{Component, Path, PathBuf};
@@ -14,7 +17,7 @@ use crate::storage::fs::{atomic_write, newer_schema_error};
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotInfo {
-    /// `<member>/<имя>.json` — адрес файла в командах.
+    /// `<каталог узла>/<имя>.json` — адрес файла в командах (каталог — `member_dir(member)` или старое имя как есть).
     pub file: String,
     pub member: String,
     pub taken_at_ms: i64,
@@ -96,6 +99,70 @@ fn single_component(s: &str) -> bool {
         && !s.contains(['/', '\\'])
         && parts.len() == 1
         && matches!(parts[0], Component::Normal(_))
+}
+
+/// Имена устройств Windows: каталог с таким именем (и с любым расширением) создать нельзя.
+const WINDOWS_DEVICES: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
+
+fn is_windows_device(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    WINDOWS_DEVICES.contains(&stem.as_str())
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.as_bytes()[3].is_ascii_digit())
+}
+
+fn push_encoded(out: &mut String, c: char) {
+    let mut buf = [0u8; 4];
+    for b in c.encode_utf8(&mut buf).bytes() {
+        out.push_str(&format!("%{b:02X}"));
+    }
+}
+
+/// Имя каталога узла, допустимое на Windows, macOS и Linux: ASCII-буквы и цифры, `-`, `_`, `.`, пробел и не-ASCII
+/// символы — как есть, остальное (в том числе `%`, `:`, `[`, `]`, разделители и управляющие) — `%XX` по байтам UTF-8.
+/// Точка или пробел в конце и имя устройства Windows (`CON`, `nul.txt`) кодируются тоже. Обратное — `member_of_dir`.
+pub fn member_dir(member: &str) -> String {
+    let chars: Vec<char> = member.chars().collect();
+    let mut out = String::with_capacity(member.len());
+    for (i, &c) in chars.iter().enumerate() {
+        let last = i + 1 == chars.len();
+        let keep =
+            (c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ' ') || !c.is_ascii())
+                && !c.is_control()
+                && !(last && matches!(c, '.' | ' '))
+                && !(i == 0 && is_windows_device(member));
+        if keep {
+            out.push(c);
+        } else {
+            push_encoded(&mut out, c);
+        }
+    }
+    out
+}
+
+/// Имя узла по имени каталога (`member_dir` наоборот). Каталог не в закодированной форме (создан до кодирования или
+/// чужой: `%` без двух шестнадцатеричных цифр, не UTF-8 после раскодирования) — имя как есть.
+pub fn member_of_dir(dir: &str) -> String {
+    let b = dir.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            let hex = dir
+                .get(i + 1..i + 3)
+                .and_then(|h| u8::from_str_radix(h, 16).ok());
+            let Some(v) = hex else {
+                return dir.to_string();
+            };
+            out.push(v);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| dir.to_string())
 }
 
 /// Ровно два обычных компонента: `<member>/<name>.json`, без `..` и абсолютных путей.
@@ -206,13 +273,14 @@ impl SnapshotStore {
         Ok(self.dir.join(connection_id))
     }
 
-    /// Каталог подключения и узла; на unix — 0700 у `snapshots/`, каталога подключения и узла, даже если они уже были.
-    fn ensure_dir(&self, connection_id: &str, member: &str) -> AppResult<PathBuf> {
-        if !single_component(member) {
+    /// Каталог подключения и узла (`member_dir`); на unix — 0700 у `snapshots/`, каталога подключения и узла, даже
+    /// если они уже были.
+    fn ensure_dir(&self, connection_id: &str, member_dir: &str) -> AppResult<PathBuf> {
+        if !single_component(member_dir) {
             return Err(bad_file());
         }
         let conn = self.connection_dir(connection_id)?;
-        let dir = conn.join(member);
+        let dir = conn.join(member_dir);
         let mut b = std::fs::DirBuilder::new();
         b.recursive(true);
         #[cfg(unix)]
@@ -227,7 +295,8 @@ impl SnapshotStore {
     /// Запись снимка (временный файл 0600 → rename). Снимок того же узла в ту же секунду уже есть — отказ: имя файла
     /// с точностью до секунды, а молча заменять снимок нельзя.
     pub fn write(&self, connection_id: &str, snap: &Snapshot) -> AppResult<SnapshotInfo> {
-        let dir = self.ensure_dir(connection_id, &snap.member)?;
+        let member_dir = member_dir(&snap.member);
+        let dir = self.ensure_dir(connection_id, &member_dir)?;
         let name = file_name(snap.taken_at_ms);
         let path = dir.join(&name);
         if path.exists() {
@@ -243,7 +312,7 @@ impl SnapshotStore {
         };
         atomic_write(&path, &bytes)?;
         Ok(SnapshotInfo {
-            file: format!("{}/{name}", snap.member),
+            file: format!("{member_dir}/{name}"),
             member: snap.member.clone(),
             taken_at_ms: snap.taken_at_ms,
             rows: Some(snap.rows.len()),
@@ -289,7 +358,7 @@ impl SnapshotStore {
                     },
                     // Нечитаемый файл — по имени каталога, имени файла (или времени изменения) и размеру.
                     Err(_) => SnapshotInfo {
-                        member: m.file_name().to_string_lossy().into_owned(),
+                        member: member_of_dir(&m.file_name().to_string_lossy()),
                         taken_at_ms: time_of_name(&f.file_name().to_string_lossy())
                             .or_else(|| {
                                 let t = meta.modified().ok()?;
@@ -479,7 +548,12 @@ mod tests {
             "errors.snapshots.badFile",
             "id подключения — один компонент"
         );
-        assert!(store.write("c1", &snapshot("../x", 1)).is_err());
+        let odd = store.write("c1", &snapshot("../x", 1)).unwrap();
+        assert_eq!(
+            odd.file, "..%2Fx/1970-01-01T00-00-00.json",
+            "имя узла не выходит из каталога"
+        );
+        assert!(store.delete("c1", &odd.file).unwrap());
         assert!(store.delete("c1", &info.file).unwrap());
         assert!(!store.delete("c1", &info.file).unwrap());
         assert!(store.delete("c1", &later.file).unwrap());
@@ -533,6 +607,92 @@ mod tests {
         );
         assert!(store.delete("c1", &list[0].file).unwrap());
         assert_eq!(store.list("c1").unwrap(), [good]);
+    }
+
+    #[test]
+    fn member_dir_names_are_portable_and_reversible() {
+        for (member, dir) in [
+            ("pg-1", "pg-1"),
+            ("db1:5432", "db1%3A5432"),
+            ("[::1]:5432", "%5B%3A%3A1%5D%3A5432"),
+            ("c:5432", "c%3A5432"),
+            ("my node", "my node"),
+            ("node. ", "node.%20"),
+            ("..", ".%2E"),
+            ("a/b\\c*?\"<>|", "a%2Fb%5Cc%2A%3F%22%3C%3E%7C"),
+            ("100%", "100%25"),
+            ("CON", "%43ON"),
+            ("nul.txt", "%6Eul.txt"),
+            ("узел-1", "узел-1"),
+        ] {
+            assert_eq!(member_dir(member), dir, "{member}");
+            assert_eq!(member_of_dir(dir), member, "{dir}");
+            assert!(single_component(dir), "{dir}");
+            assert!(
+                !dir.contains([':', '/', '\\', '*', '?', '"', '<', '>', '|']),
+                "{dir}"
+            );
+        }
+        assert_eq!(member_of_dir("db1:5432"), "db1:5432", "старый каталог");
+        assert_eq!(member_of_dir("50%zz"), "50%zz", "не код — как есть");
+    }
+
+    /// `host:port`, IPv6 и имя с пробелом: запись, список, чтение и удаление; в каталоге — закодированное имя.
+    #[test]
+    fn host_port_members_round_trip_through_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SnapshotStore::new(dir.path());
+        for member in ["db1:5432", "[::1]:5432", "my node"] {
+            let snap = snapshot(member, 1_761_735_600_000);
+            let info = store.write("c1", &snap).unwrap();
+            let enc = member_dir(member);
+            assert_eq!(info.file, format!("{enc}/2025-10-29T11-00-00.json"));
+            assert_eq!(info.member, member);
+            assert!(dir.path().join("snapshots/c1").join(&enc).is_dir());
+            let list = store.list("c1").unwrap();
+            assert_eq!(list, std::slice::from_ref(&info));
+            assert_eq!(store.read("c1", &info.file).unwrap(), snap);
+            assert!(store.delete("c1", &info.file).unwrap());
+            assert!(store.list("c1").unwrap().is_empty());
+        }
+    }
+
+    /// Файлы, записанные на unix до кодирования (каталог — имя узла как есть), читаются и удаляются по-прежнему;
+    /// нечитаемый файл показывает узел по имени каталога.
+    #[cfg(unix)]
+    #[test]
+    fn legacy_raw_member_dirs_are_still_listed_and_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SnapshotStore::new(dir.path());
+        let snap = snapshot("db1:5432", 1_761_735_600_000);
+        let legacy = dir.path().join("snapshots/c1/db1:5432");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(
+            legacy.join("2025-10-29T11-00-00.json"),
+            serde_json::to_vec(&snap).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(legacy.join("2025-10-29T12-00-00.json"), b"{").unwrap();
+        let list = store.list("c1").unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(
+            (list[0].member.as_str(), list[0].unreadable),
+            ("db1:5432", Some(Unreadable::Corrupt))
+        );
+        assert_eq!(
+            (list[1].file.as_str(), list[1].member.as_str()),
+            ("db1:5432/2025-10-29T11-00-00.json", "db1:5432")
+        );
+        assert_eq!(store.read("c1", &list[1].file).unwrap(), snap);
+        let new = store
+            .write("c1", &snapshot("db1:5432", 1_761_735_660_000))
+            .unwrap();
+        assert_eq!(new.file, "db1%3A5432/2025-10-29T11-01-00.json");
+        assert_eq!(store.list("c1").unwrap().len(), 3);
+        for i in store.list("c1").unwrap() {
+            assert!(store.delete("c1", &i.file).unwrap());
+        }
+        assert!(!legacy.exists());
     }
 
     #[test]

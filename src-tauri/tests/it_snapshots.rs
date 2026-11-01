@@ -23,8 +23,12 @@ async fn take_compare_and_between_mode() {
         a.rows.is_some_and(|r| r > 0)
             && a.unreadable.is_none()
             && a.bytes > 0
-            && a.file.starts_with(&format!("{member}/"))
+            && a.member == member
+            && a.file
+                .starts_with(&format!("{}/", snapshots::member_dir(&member)))
     );
+    // Узел «сервера» — `host:port`: в имени каталога двоеточия нет (на Windows оно запрещено).
+    assert!(!a.file.contains(':'), "{}", a.file);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

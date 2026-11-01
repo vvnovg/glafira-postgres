@@ -711,7 +711,7 @@ export interface QueriesData {
 }
 /** Снимок pgss на диске (`snapshot_list`, новые первыми). `rows: null` и `unreadable` — файл не читается: его можно только удалить. */
 export interface SnapshotInfo {
-  /** Путь относительно каталога снимков подключения: `<member>/<yyyy-mm-ddThh-mm-ss>.json`. */
+  /** Путь относительно каталога снимков подключения: `<каталог узла>/<yyyy-mm-ddThh-mm-ss>.json`; каталог — имя узла в `%XX`-форме (`db1%3A5432`), имя узла — в `member`. */
   file: string;
   member: string;
   takenAtMs: number;
