@@ -188,6 +188,16 @@ describe("TestPanel", () => {
     expect(missing).toEqual([]);
   });
 
+  it("подсказка расширения показывает, что оно даёт", () => {
+    render(
+      <TestPanel
+        events={[]}
+        report={{ ok: true, topology: null, readiness: [{ id: "extension", status: "missing", params: { name: "hypopg", hint: "hypopg" }, fix: null }] }}
+      />,
+    );
+    expect(screen.getByText("Проверка гипотез индексов («Проверить гипотезу» в плане)")).toBeInTheDocument();
+  });
+
   it("значки статусов читаются как текст", () => {
     render(
       <TestPanel

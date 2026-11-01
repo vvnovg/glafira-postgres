@@ -254,26 +254,29 @@ pub fn evaluate(f: &ReadinessFacts) -> Vec<ReadinessItem> {
         )
     });
 
+    const HINTED: [&str; 3] = ["hypopg", "pg_stat_kcache", "pg_wait_sampling"];
     for name in OPTIONAL_EXTENSIONS {
         let fact = f.extensions.iter().find(|e| e.name == name);
+        let mut params: Vec<(&str, String)> = vec![("name", name.into())];
+        if HINTED.contains(&name) {
+            params.push(("hint", name.into()));
+        }
         out.push(match fact {
             Some(ExtensionFact {
                 installed: Some(v), ..
-            }) => item(
-                "extension",
-                Status::Ok,
-                &[("name", name.into()), ("version", v.clone())],
-                None,
-            ),
+            }) => {
+                params.push(("version", v.clone()));
+                item("extension", Status::Ok, &params, None)
+            }
             Some(ExtensionFact {
                 available: true, ..
             }) => item(
                 "extension",
                 Status::Warn,
-                &[("name", name.into())],
+                &params,
                 Some(format!("CREATE EXTENSION IF NOT EXISTS {name};")),
             ),
-            _ => item("extension", Status::Missing, &[("name", name.into())], None),
+            _ => item("extension", Status::Missing, &params, None),
         });
     }
     out
@@ -365,6 +368,16 @@ mod tests {
         );
         assert_eq!(ext(&items, "pg_qualstats").status, Status::Missing);
         assert_eq!(ext(&items, "pg_qualstats").fix, None);
+    }
+
+    #[test]
+    fn extension_items_carry_a_hint_for_p3_extensions() {
+        let items = evaluate(&facts());
+        assert_eq!(
+            ext(&items, "hypopg").params.get("hint").map(String::as_str),
+            Some("hypopg")
+        );
+        assert_eq!(ext(&items, "pgstattuple").params.get("hint"), None);
     }
 
     #[test]

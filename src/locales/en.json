@@ -695,7 +695,12 @@
       "ok": "Installed, version {{version}}",
       "warn": "Available but not created",
       "missing": "Not installed on the server",
-      "affects": "Advanced checks (indexes, bloat, waits) will be unavailable"
+      "affects": "Advanced checks (indexes, bloat, waits) will be unavailable",
+      "hints": {
+        "hypopg": "Index hypothesis checks (“Check hypothesis” in a plan)",
+        "pg_stat_kcache": "CPU and disk per query in the Queries tool",
+        "pg_wait_sampling": "Exact wait profile of a query in its card"
+      }
     }
   },
   "overview": {

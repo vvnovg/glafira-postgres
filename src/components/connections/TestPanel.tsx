@@ -43,7 +43,12 @@ function itemText(item: ReadinessItem, t: Translate) {
   return {
     title: t(`readiness.${item.id}.title`, item.params),
     state: t(`readiness.${item.id}.${variant}`, item.params),
-    affects: item.status === "ok" ? null : t(`readiness.${item.id}.affects`, item.params),
+    affects:
+      item.status === "ok"
+        ? null
+        : item.params.hint
+          ? t(`readiness.${item.id}.hints.${item.params.hint}`)
+          : t(`readiness.${item.id}.affects`, item.params),
   };
 }
 
