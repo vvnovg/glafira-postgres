@@ -39,9 +39,22 @@ function ancestors(n: PlanNode, id: number): number[] | null {
  * выделены классом `plan-hot`; клик по узлу выбирает его для панели деталей. Без ANALYZE вместо времени — стоимость;
  * при `TIMING OFF` (ANALYZE без времён) в колонке времени прочерк, горячие узлы определены по стоимости.
  * `reveal` — новый объект на каждый переход к узлу извне («Показать узел» рекомендации): свёрнутые предки выбранного узла
- * раскрываются, строка прокручивается в видимую часть, фокус — на её названии.
+ * и узлов `related` раскрываются, строка выбранного прокручивается в видимую часть, фокус — на её названии. `related` —
+ * узлы рекомендации: класс `plan-related` и метка (смысл не держится на одном цвете).
  */
-export function PlanTreeView({ tree, selectedId, onSelect, reveal }: { tree: PlanTree; selectedId: number | null; onSelect: (id: number) => void; reveal?: object | null }) {
+export function PlanTreeView({
+  tree,
+  selectedId,
+  onSelect,
+  reveal,
+  related,
+}: {
+  tree: PlanTree;
+  selectedId: number | null;
+  onSelect: (id: number) => void;
+  reveal?: object | null;
+  related?: ReadonlySet<number>;
+}) {
   const { t } = useTranslation();
   // Развёртка сбрасывается при смене плана (номера узлов нового плана — другие): состояние хранит план, к которому относится.
   const [state, setState] = useState<Collapsed>(() => ({ tree, ids: NONE }));
@@ -59,8 +72,9 @@ export function PlanTreeView({ tree, selectedId, onSelect, reveal }: { tree: Pla
   const pendingScroll = useRef<number | null>(null);
   useEffect(() => {
     if (!reveal || selectedId === null) return;
-    const path = ancestors(tree.root, selectedId);
-    if (!path) return;
+    const own = ancestors(tree.root, selectedId);
+    if (!own) return;
+    const path = [...own, ...[...(related ?? [])].flatMap((id) => ancestors(tree.root, id) ?? [])];
     pendingScroll.current = selectedId;
     setState((prev) => {
       const ids = prev.tree === tree ? prev.ids : NONE;
@@ -69,7 +83,7 @@ export function PlanTreeView({ tree, selectedId, onSelect, reveal }: { tree: Pla
       path.forEach((id) => next.delete(id));
       return { tree, ids: next };
     });
-  }, [reveal, selectedId, tree]);
+  }, [reveal, selectedId, tree, related]);
   // После раскрытия строка уже в DOM: прокрутка и фокус — один раз на переход.
   useEffect(() => {
     const id = pendingScroll.current;
@@ -98,7 +112,8 @@ export function PlanTreeView({ tree, selectedId, onSelect, reveal }: { tree: Pla
             const est = estimateLabel(n);
             const severity = estimateSeverity(n);
             const isCollapsed = collapsed.has(n.id);
-            const classes = [n.hot ? "plan-hot" : "", n.id === selectedId ? "plan-selected" : ""].filter(Boolean).join(" ") || undefined;
+            const isRelated = related?.has(n.id) ?? false;
+            const classes = [n.hot ? "plan-hot" : "", isRelated ? "plan-related" : "", n.id === selectedId ? "plan-selected" : ""].filter(Boolean).join(" ") || undefined;
             return (
               <tr key={n.id} data-node-id={n.id} className={classes} aria-level={depth + 1} aria-expanded={n.children.length ? !isCollapsed : undefined} aria-selected={n.id === selectedId}>
                 <td style={{ paddingLeft: `${8 + depth * 18}px` }}>
@@ -142,6 +157,7 @@ export function PlanTreeView({ tree, selectedId, onSelect, reveal }: { tree: Pla
                   {n.buffers && n.buffers.tempWritten > 0 && <span className="muted"> temp {formatCount(n.buffers.tempWritten)}</span>}
                 </td>
                 <td>
+                  {isRelated && <span className="kind-badge plan-related-mark">{t("recommend.related")}</span>}
                   {marks(n).map((m) => (
                     <span key={m} className="kind-badge">{t(`diag.plan.marks.${m}`)}</span>
                   ))}

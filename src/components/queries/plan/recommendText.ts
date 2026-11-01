@@ -60,3 +60,13 @@ export const recommendTitle = (r: Recommendation) => text(r, "title");
 export const recommendEvidence = (r: Recommendation) => text(r, "evidence");
 export const recommendEffect = (r: Recommendation) => text(r, "effect");
 export const recommendRisks = (r: Recommendation) => text(r, "risks");
+
+/** Места для значений пользователя в командах `pg_advisor::plan_rules` (колонки индекса, размер work_mem). */
+export const TEMPLATE_TOKENS = ["<columns>", "<work_mem>"] as const;
+
+/** Команда — шаблон: в ней есть место для значения пользователя. */
+export const isTemplate = (command: string) => TEMPLATE_TOKENS.some((tok) => command.includes(tok));
+
+/** У рекомендации есть тексты в словаре; правило из более новой версии бэкенда — нет (карточка показывает id и команду). */
+export const isKnownRecommendation = (r: Recommendation) =>
+  (["title", "evidence", "effect", "risks"] as const).every((f) => i18n.exists(`recommend.${r.id}.${f}`));

@@ -364,6 +364,9 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .plan-tree tr.plan-hot { background: color-mix(in srgb, var(--warn) 14%, transparent); }
 .plan-tree tr.plan-hot td:first-child { font-weight: 600; }
 .plan-tree tr.plan-hot .kind-badge:first-child { background: color-mix(in srgb, var(--warn) 30%, transparent); font-weight: 600; }
+/* Узлы рекомендации («Показать узел»): полоса слева и метка «рекомендация»; выбранный из них — ещё и фоном. */
+.plan-tree tr.plan-related td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.plan-tree .plan-related-mark { background: color-mix(in srgb, var(--accent) 20%, transparent); }
 .plan-tree tr.plan-selected { background: color-mix(in srgb, var(--accent) 15%, transparent); }
 .plan-node { display: flex; align-items: baseline; gap: 4px; }
 .plan-node .link { text-align: left; }

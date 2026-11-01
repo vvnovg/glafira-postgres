@@ -490,7 +490,7 @@ describe("countParams", () => {
 
   it("рекомендации под сводкой: «Показать узел» раскрывает свёрнутого предка и выбирает узел; гипотеза — на входе запуска, не текущих полях", async () => {
     const rec: Recommendation = {
-      id: "plan_seq_scan_filter", severity: "warning", nodeIds: [1], params: { table: "shop.orders", rowsRead: 500_000, rowsReturned: 500, loops: 1, columns: "status" },
+      id: "plan_seq_scan_filter", severity: "warning", nodeIds: [1, 2], params: { table: "shop.orders", rowsRead: 500_000, rowsReturned: 500, loops: 1, columns: "status" },
       command: "CREATE INDEX CONCURRENTLY ON \"shop\".\"orders\" (\"status\");", hypo: { indexDdl: "CREATE INDEX ON \"shop\".\"orders\" (\"status\")" },
     };
     vi.mocked(api.explain).mockResolvedValue(result({ recommendations: [rec], recommendationsSkipped: ["plan_spill"] }));
@@ -512,6 +512,13 @@ describe("countParams", () => {
     const selected = within(tree).getAllByRole("row").find((r) => r.getAttribute("aria-selected") === "true");
     expect(selected).toHaveAttribute("data-node-id", "1");
     expect(within(tree).getAllByRole("row")).toHaveLength(4);
+    // Узлы рекомендации помечены; клик по строке пометку снимает.
+    expect(within(selected!).getByText("рекомендация")).toBeInTheDocument();
+    expect(within(tree).getAllByText("рекомендация")).toHaveLength(2);
+    const second = within(tree).getAllByRole("row").find((r) => r.getAttribute("data-node-id") === "2")!;
+    await user.click(second.querySelector<HTMLButtonElement>("button.link")!);
+    expect(second).toHaveAttribute("aria-selected", "true");
+    expect(within(tree).queryAllByText("рекомендация")).toHaveLength(0);
     // Поле search_path правится после запуска — гипотеза идёт с тем, что было у запуска.
     await user.clear(screen.getByRole("textbox", { name: "search_path" }));
     await user.click(within(block).getByRole("button", { name: "Проверить гипотезу" }));

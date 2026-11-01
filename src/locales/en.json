@@ -1910,6 +1910,11 @@
     "effect": "Effect",
     "risks": "Risks",
     "showNode": "Show node",
+    "related": "recommendation",
+    "unknown": {
+      "title": "Recommendation {{id}}",
+      "evidence": "This version of the app has no description for this rule: update the app"
+    },
     "direction": {
       "under": "underestimated",
       "over": "overestimated"
