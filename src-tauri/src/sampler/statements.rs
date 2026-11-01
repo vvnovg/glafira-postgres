@@ -94,6 +94,12 @@ pub struct KeysWindow {
     pub totals: Totals,
 }
 
+struct TickNames {
+    datname: Option<String>,
+    rolname: Option<String>,
+    ticks: usize,
+}
+
 pub struct StatementsBuffer {
     latest: HashMap<QueryKey, Cumulative>,
     ticks: VecDeque<Tick>,
@@ -106,6 +112,9 @@ pub struct StatementsBuffer {
     hidden: bool,
     /// Текст и признак обрезки по ключу; `None` — текст уже читался, и у строки pgss его нет (NULL).
     texts: HashMap<QueryKey, Option<(Arc<str>, bool)>>,
+    /// Имена базы и роли ключей, на которые ссылаются тики, и число таких тиков: ключ может уйти из pgss (сброс,
+    /// вытеснение), а его дельты — остаться в окне.
+    tick_names: HashMap<QueryKey, TickNames>,
     max_entries: usize,
     max_age_ms: i64,
 }
@@ -129,6 +138,7 @@ impl StatementsBuffer {
             pgss: None,
             hidden: false,
             texts: HashMap::new(),
+            tick_names: HashMap::new(),
             max_entries,
             max_age_ms,
         }
@@ -167,6 +177,14 @@ impl StatementsBuffer {
                     continue;
                 }
                 deltas.push((row.key, delta));
+                let names = self.tick_names.entry(row.key).or_insert(TickNames {
+                    datname: None,
+                    rolname: None,
+                    ticks: 0,
+                });
+                names.datname.clone_from(&row.datname);
+                names.rolname.clone_from(&row.rolname);
+                names.ticks += 1;
             }
         }
         // Вытеснений за тик: рост `dealloc`; на тике сброса `dealloc` обнулён вместе со статистикой, и новая база
@@ -213,6 +231,14 @@ impl StatementsBuffer {
         {
             let t = self.ticks.pop_front().expect("front checked");
             self.entries -= t.deltas.len();
+            for (k, _) in &t.deltas {
+                if let Some(n) = self.tick_names.get_mut(k) {
+                    n.ticks -= 1;
+                    if n.ticks == 0 {
+                        self.tick_names.remove(k);
+                    }
+                }
+            }
         }
         self.gaps.retain(|(_, to)| now_ms - to <= self.max_age_ms);
     }
@@ -228,41 +254,41 @@ impl StatementsBuffer {
         ))
     }
 
-    /// Покрытие — от первого тика окна до последнего плюс минута первого тика, не больше окна.
-    fn span_s(until_ms: i64, first_at: i64, window_s: u32) -> u32 {
-        (((until_ms - first_at) / 1000) as u32 + INTERVAL.as_secs() as u32).min(window_s)
+    /// Покрытие — собранное: каждый тик с дельтами покрывает свой интервал, не больше окна. Пролёт от первого тика до
+    /// последнего засчитал бы и паузу сэмплера внутри окна (вкладка была закрыта).
+    fn covered_s(ticks: u32, window_s: u32) -> u32 {
+        ticks
+            .saturating_mul(INTERVAL.as_secs() as u32)
+            .min(window_s)
     }
 
     /// Тиков с дельтами в окне и покрытие окна; `None` — тиков с дельтами в окне нет.
     fn coverage(&self, window_s: u32) -> Option<(u32, u32)> {
-        let (_, until_ms, ticks) = self.in_window(window_s)?;
-        let (mut n, mut first_at) = (0u32, None);
-        for t in ticks {
-            n += 1;
-            first_at.get_or_insert(t.at_ms);
-        }
-        Some((n, Self::span_s(until_ms, first_at?, window_s)))
+        let (_, _, ticks) = self.in_window(window_s)?;
+        let n = ticks.count() as u32;
+        (n > 0).then(|| (n, Self::covered_s(n, window_s)))
     }
 
     /// Сумма дельт по тикам в `(последний − window_s, последний]`; `None` — тиков с дельтами в окне нет.
     pub fn window(&self, window_s: u32) -> Option<WindowSum> {
         let (since_ms, until_ms, in_window) = self.in_window(window_s)?;
         let mut sums: HashMap<QueryKey, Counters> = HashMap::new();
-        let (mut ticks, mut first_at, mut dealloc_grew) = (0u32, None, false);
+        let (mut ticks, mut dealloc_grew) = (0u32, false);
         for t in in_window {
             ticks += 1;
-            first_at.get_or_insert(t.at_ms);
             dealloc_grew |= t.dealloc_delta > 0;
             for (k, d) in &t.deltas {
                 sums.entry(*k).or_default().add(d);
             }
         }
-        let first_at = first_at?;
+        if ticks == 0 {
+            return None;
+        }
         Some(WindowSum {
             since_ms,
             until_ms,
             ticks,
-            coverage_s: Self::span_s(until_ms, first_at, window_s),
+            coverage_s: Self::covered_s(ticks, window_s),
             dealloc_grew,
             sums,
         })
@@ -287,10 +313,14 @@ impl StatementsBuffer {
         any.then_some(KeysWindow { sum, totals })
     }
 
+    /// Имена базы и роли ключа: из последнего сэмпла, а ушедшего из pgss ключа — из тиков, которые на него ссылаются.
     pub fn names(&self, key: &QueryKey) -> (Option<String>, Option<String>) {
-        self.latest
+        if let Some(c) = self.latest.get(key) {
+            return (c.datname.clone(), c.rolname.clone());
+        }
+        self.tick_names
             .get(key)
-            .map(|c| (c.datname.clone(), c.rolname.clone()))
+            .map(|n| (n.datname.clone(), n.rolname.clone()))
             .unwrap_or_default()
     }
 
@@ -777,6 +807,83 @@ mod tests {
             (h[0].at_ms, h[0].calls, h[0].mean_exec_ms),
             (2 * M, 10, 10.0)
         );
+    }
+
+    /// Покрытие — собранное, а не пролёт: пауза сэмплера внутри окна (вкладка была закрыта) его уменьшает.
+    #[test]
+    fn coverage_counts_collected_ticks_not_the_span() {
+        let mut b = StatementsBuffer::default();
+        for i in 1..=3 {
+            b.push(i * M, sample(vec![row(1, 10 * i, 10.0 * i as f64)], 1, 0));
+        }
+        // Пауза дольше GAP_AFTER_MS: тик на 6-й минуте — новая база, на 7-й — снова дельта.
+        b.push(6 * M, sample(vec![row(1, 100, 1000.0)], 1, 0));
+        let e = b.push(7 * M, sample(vec![row(1, 110, 1100.0)], 1, 0));
+        // Окно 5 мин от 7-й минуты: тики с дельтами на 3-й и 7-й минутах — 2 минуты сбора, а не 5.
+        let w = b.window(300).unwrap();
+        assert_eq!((w.ticks, w.coverage_s), (2, 120));
+        assert!(
+            matches!(
+                e.last(),
+                Some(StatementsEvent::Tick {
+                    ticks: 3,
+                    coverage_s: 180,
+                    ..
+                })
+            ),
+            "часовое окно: три тика с дельтами — {e:?}"
+        );
+        // Покрытие не больше окна.
+        let mut b = StatementsBuffer::default();
+        for i in 1..=10 {
+            b.push(i * M, sample(vec![row(1, i, i as f64)], 1, 0));
+        }
+        assert_eq!(
+            b.window(300).map(|w| (w.ticks, w.coverage_s)),
+            Some((5, 300))
+        );
+    }
+
+    /// Ключ ушёл из pgss (сброс, вытеснение), а его дельты ещё в окне: имена базы и роли остаются, пока на ключ
+    /// ссылаются тики; после вытеснения этих тиков — забываются.
+    #[test]
+    fn names_outlive_the_key_while_ticks_reference_it() {
+        let mut b = StatementsBuffer::default();
+        let other = |id: i64| Cumulative {
+            datname: Some("shop".into()),
+            rolname: Some("web".into()),
+            ..row(id, 1, 1.0)
+        };
+        b.push(M, sample(vec![row(1, 1, 1.0), other(2)], 1, 0));
+        b.push(2 * M, sample(vec![row(1, 2, 2.0), other(2)], 1, 0));
+        b.push(
+            3 * M,
+            sample(
+                vec![
+                    row(1, 3, 3.0),
+                    Cumulative {
+                        counters: Counters {
+                            calls: 5,
+                            total_exec_ms: 5.0,
+                            ..Counters::default()
+                        },
+                        ..other(2)
+                    },
+                ],
+                1,
+                0,
+            ),
+        );
+        // Сброс: в pgss только ключ 1, ключ 2 остался лишь в тиках окна.
+        b.push(4 * M, sample(vec![row(1, 1, 1.0)], 2, 0));
+        assert!(b.window(300).unwrap().sums.contains_key(&key(2)));
+        assert_eq!(b.names(&key(2)), (Some("shop".into()), Some("web".into())));
+        assert_eq!(b.names(&key(1)), (Some("perf".into()), Some("app".into())));
+        // Тики с ключом 2 вытеснены возрастом (после паузы — новая база): имён больше нет.
+        b.push(4 * M + MAX_AGE_MS + 1, sample(vec![row(1, 2, 2.0)], 2, 0));
+        assert!(b.window(3600).is_none());
+        assert_eq!(b.names(&key(2)), (None, None));
+        assert!(b.tick_names.is_empty(), "имена без ссылок тиков не копятся");
     }
 
     #[test]
