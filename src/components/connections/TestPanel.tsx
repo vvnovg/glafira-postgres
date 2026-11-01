@@ -49,6 +49,7 @@ function itemText(item: ReadinessItem, t: Translate) {
         : item.params.hint
           ? t(`readiness.${item.id}.hints.${item.params.hint}`)
           : t(`readiness.${item.id}.affects`, item.params),
+    enable: item.status === "ok" || !item.params.hint ? null : t(`readiness.${item.id}.enable.${item.params.hint}`),
   };
 }
 
@@ -113,6 +114,7 @@ export function TestPanel({ events, report }: { events: TestEvent[]; report: Tes
                       <strong>{text.title}</strong>
                       <div className="muted">{text.state}</div>
                       {text.affects && <div className="muted">{text.affects}</div>}
+                      {text.enable && <div className="muted">{text.enable}</div>}
                     </td>
                     <td>
                       {item.fix && (

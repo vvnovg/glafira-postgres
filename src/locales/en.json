@@ -700,6 +700,11 @@
         "hypopg": "Index hypothesis checks (“Check hypothesis” in a plan)",
         "pg_stat_kcache": "CPU and disk per query in the Queries tool",
         "pg_wait_sampling": "Exact wait profile of a query in its card"
+      },
+      "enable": {
+        "hypopg": "Enable: CREATE EXTENSION only, no preload or restart.",
+        "pg_stat_kcache": "Enable: add pg_stat_kcache (after pg_stat_statements) to shared_preload_libraries and restart the server, then CREATE EXTENSION in this database. If the role lacks EXECUTE on pg_stat_kcache(), grant it.",
+        "pg_wait_sampling": "Enable: add pg_wait_sampling to shared_preload_libraries and restart the server, then CREATE EXTENSION in this database. For the per-query profile set pg_wait_sampling.profile_queries = top (on for old versions); needs version 1.1+. If the role lacks EXECUTE on the profile functions, grant it."
       }
     }
   },
