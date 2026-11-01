@@ -14,20 +14,19 @@ fn err(message: impl Into<String>) -> PlanError {
 }
 
 /// Снимает обрамление psql (заголовок `QUERY PLAN`, разделитель, `(N rows)`, переносы `+` и рамки `|`) и разбирает JSON.
+/// Снятые и пустые строки остаются пустыми: номер строки ошибки — в исходном тексте.
 pub fn from_psql_text(text: &str) -> Result<Value, PlanError> {
     let mut body = String::new();
     for line in text.lines() {
         let t = line.trim();
-        if t.is_empty() || t == "QUERY PLAN" || t.chars().all(|c| c == '-' || c == '+') {
-            continue;
-        }
-        if t.starts_with('(') && t.ends_with(')') && (t.ends_with(" row)") || t.ends_with(" rows)"))
+        let footer = t.starts_with('(')
+            && t.ends_with(')')
+            && (t.ends_with(" row)") || t.ends_with(" rows)"));
+        if !(t.is_empty() || t == "QUERY PLAN" || t.chars().all(|c| c == '-' || c == '+') || footer)
         {
-            continue;
+            let t = t.trim_matches('|').trim();
+            body.push_str(t.strip_suffix('+').map(str::trim_end).unwrap_or(t));
         }
-        let t = t.trim_matches('|').trim();
-        let t = t.strip_suffix('+').map(str::trim_end).unwrap_or(t);
-        body.push_str(t);
         body.push('\n');
     }
     serde_json::from_str(&body).map_err(|e| PlanError {
@@ -47,18 +46,56 @@ fn starts_json(line: &str) -> bool {
             .is_none_or(|c| matches!(c, '{' | '"' | '+'))
 }
 
+/// Номер строки, где закрывается первая скобка JSON (скобки внутри строк JSON не считаются); не закрылась — `None`.
+/// За записью auto_explain в выдержке журнала идут другие записи — они в JSON не входят.
+fn json_end(lines: &[&str]) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut in_str = false;
+    let mut escaped = false;
+    for (i, l) in lines.iter().enumerate() {
+        for c in l.chars() {
+            if in_str {
+                match c {
+                    _ if escaped => escaped = false,
+                    '\\' => escaped = true,
+                    '"' => in_str = false,
+                    _ => {}
+                }
+                continue;
+            }
+            match c {
+                '"' => in_str = true,
+                '[' | '{' => depth += 1,
+                ']' | '}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
 /// Вставленный план любого вида: JSON (с обрамлением psql или без, в том числе после префикса записи auto_explain)
-/// или текстовый EXPLAIN (`text_in`). JSON — если строка с `[` / `{` встречается раньше заголовка узла текстового плана.
+/// или текстовый EXPLAIN (`text_in`). JSON — если строка с `[` / `{` встречается раньше заголовка узла текстового плана
+/// и раньше строки `Query Text:` текстовой записи auto_explain (в тексте запроса бывают строки `{` и `[`).
 pub fn from_any(text: &str) -> Result<PlanTree, PlanError> {
     let lines: Vec<&str> = text.lines().collect();
     let json_at = lines.iter().position(|l| starts_json(l));
     let head_at = lines.iter().position(|l| {
-        l.contains("(cost=") || l.contains("(actual ") || l.trim_start().starts_with("->")
+        l.contains("(cost=")
+            || l.contains("(actual ")
+            || l.trim_start().starts_with("->")
+            || l.trim_start().starts_with("Query Text:")
     });
     match json_at {
         Some(j) if head_at.is_none_or(|h| j < h) => {
             // Строки до JSON — заголовок psql или префикс журнала; номер строки ошибки — в исходном тексте.
-            let body = lines[j..].join("\n");
+            let end = json_end(&lines[j..]).map_or(lines.len(), |e| j + e + 1);
+            let body = lines[j..end].join("\n");
             from_psql_text(&body)
                 .and_then(|v| from_json(&v))
                 .map_err(|e| PlanError {
@@ -584,5 +621,43 @@ mod tests {
         assert!(seq.misestimated);
         // Горячие — по стоимости без детей, как у обычного EXPLAIN: Seq Scan (60), корень (100 − 64 = 36), Index Scan (4).
         assert!(seq.hot && t.root.hot && t.root.children[1].hot);
+    }
+
+    #[test]
+    fn query_text_lines_do_not_switch_to_json() {
+        // Многострочный текст запроса auto_explain со строкой `{` — всё равно текстовый план.
+        let text = "2026-11-01 10:00:00 UTC [1] LOG:  duration: 1.000 ms  plan:\n\
+            \tQuery Text: SELECT '\n\
+            \t{\n\
+            \t\"a\": 1}'::jsonb\n\
+            \tResult  (cost=0.00..0.01 rows=1 width=32)\n";
+        let t = from_any(text).unwrap();
+        assert_eq!(t.root.node_type, "Result");
+        assert_eq!(
+            t.root.extra["Query Text"],
+            json!("SELECT '\n{\n\"a\": 1}'::jsonb")
+        );
+    }
+
+    #[test]
+    fn json_error_lines_count_blank_lines() {
+        let e = from_any("[\n\n\n  {\"Plan\": oops}\n]").unwrap_err();
+        assert_eq!(e.line, Some(4), "{e:?}");
+        let e = from_psql_text("\n\n{\"Plan\": oops}").unwrap_err();
+        assert_eq!(e.line, Some(3), "{e:?}");
+    }
+
+    #[test]
+    fn auto_explain_json_entry_ends_where_brackets_balance() {
+        // За записью auto_explain в выдержке журнала — следующие записи; строки со скобками внутри строк JSON не считаются.
+        let log = "2026-11-01 10:00:00 UTC [1] LOG:  duration: 1.000 ms  plan:\n\
+            \t{\n\
+            \t  \"Query Text\": \"SELECT '}{' \\\"x\\\"\",\n\
+            \t  \"Plan\": {\"Node Type\": \"Result\"}\n\
+            \t}\n\
+            2026-11-01 10:00:01 UTC [1] LOG:  statement: SELECT 2\n";
+        let t = from_any(log).unwrap();
+        // Скобки внутри строки `Query Text` конец JSON не сдвигают: иначе разбор упал бы на обрезанном объекте.
+        assert_eq!(t.root.node_type, "Result");
     }
 }

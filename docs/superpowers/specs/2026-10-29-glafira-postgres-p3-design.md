@@ -762,8 +762,8 @@ interface Snapshot {
 `plan::json::from_any(&str)` (JSON, в том числе внутри обрамления psql или записи auto_explain, иначе текст), Tauri-команда `parse_plan`; ошибка
 разбора — `errors.plan.unparsed` с номером строки исходного текста. Поддержаны вывод psql (выровненный и невыровненный режимы, `+`, `(N rows)`),
 голый текст, запись auto_explain из лога сервера и в виде, полученном клиентом (`Query Text:` и `Query Parameters:` — в `extra`); форматы ANALYZE, BUFFERS,
-VERBOSE, SETTINGS, WAL, TIMING OFF, `never executed`, параллельные воркеры, InitPlan / SubPlan / CTE. Не поддержаны рамка psql `\pset border 2`,
-юникодные линии, `\x` и копии из pgAdmin / DBeaver с кавычками. Фикстуры — пары `<имя>.txt` / `<имя>.json` одного запроса с `pg-perf`
+VERBOSE, SETTINGS, WAL, TIMING OFF, `never executed`, параллельные воркеры, InitPlan / SubPlan / CTE, рамка psql `\pset border 2`
+и копии из pgAdmin / DBeaver с кавычками. Не поддержаны юникодные линии и `\x`; тип узла не с буквы — ошибка разбора. Фикстуры — пары `<имя>.txt` / `<имя>.json` одного запроса с `pg-perf`
 (`crates/pg-advisor/tests/fixtures/plans/text/`, PG 17) и круговой тест `from_json → to_text → from_text` по всем JSON-фикстурам PG 13–18; тест сравнивает
 типы узлов, отношения, стоимости, оценки, условия, ключи, факт, буферы, JIT и итоги дерева. Ниже — исходный замысел разбора.*
 

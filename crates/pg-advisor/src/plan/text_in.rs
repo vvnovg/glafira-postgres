@@ -1,8 +1,9 @@
 //! Разбор текстового `EXPLAIN` (формат TEXT) в тот же `PlanTree`, что из JSON (спец. P3 §8.5).
 //!
 //! Принимается вывод psql (заголовок `QUERY PLAN`, разделитель `----`, строка `(N rows)`, хвосты `+` у плана одной
-//! строкой), «голый» текст и запись auto_explain (строки до плана — `LOG:  duration: … plan:`, `Query Text: …` — служебные;
-//! текст запроса уходит в `extra["Query Text"]` корня). Дерево строится по отступам: заголовок узла — первая строка плана
+//! строкой, рамка `\pset border 2`), строки в кавычках (копия из pgAdmin / DBeaver), «голый» текст и запись
+//! auto_explain (строки до плана — `LOG:  duration: … plan:`, `Query Text: …` — служебные; текст запроса уходит в
+//! `extra["Query Text"]` корня). Дерево строится по отступам: заголовок узла — первая строка плана
 //! и строки `->  …`; подписи `InitPlan N` / `SubPlan N` / `CTE имя` относятся к следующему узлу; строки `Ключ: значение`
 //! с отступом атрибутов — свойства узла; строки на уровне корня после дерева — итоги (`Planning Time`, `JIT` …).
 //! Нераспознанные свойства узла сохраняются в `extra` под своим ключом (строкой; вложенные строки блока, как у
@@ -45,15 +46,62 @@ fn is_footer(t: &str) -> bool {
         .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
 }
 
-/// Снимает обрамление psql: всё до разделителя (заголовок столбца), подвал, хвосты `+` у многострочного значения.
-/// Ведущие табуляции (auto_explain в журнале) заменяются пробелами; пустые строки отбрасываются.
+/// Строка таблицы psql с рамкой (`\pset border 2`): `| текст |` → `текст` (пробел за левой чертой — часть рамки).
+fn unframe(l: &str) -> Option<&str> {
+    let inner = l.trim_end().strip_prefix('|')?.strip_suffix('|')?;
+    Some(inner.strip_prefix(' ').unwrap_or(inner))
+}
+
+/// Строка копии из графического клиента (pgAdmin, DBeaver): `"текст"` с начала строки, кавычки внутри удвоены.
+fn unquote(l: &str) -> Option<String> {
+    let t = l.trim_end();
+    let inner = t.strip_prefix('"')?.strip_suffix('"')?;
+    Some(inner.replace("\"\"", "\""))
+}
+
+/// Разделитель psql под заголовком столбца — только в начале текста: первая непустая строка (заголовка нет), вторая
+/// (под заголовком; не под строкой плана или `Query Text:` — в тексте запроса бывают линейки `-----`) или, у таблицы с
+/// рамкой, третья (под заголовком между двумя линиями рамки). Номер строки и признак рамки.
+fn separator(raw: &[&str]) -> (Option<usize>, bool) {
+    let head: Vec<usize> = (0..raw.len())
+        .filter(|&i| !raw[i].trim().is_empty())
+        .take(3)
+        .collect();
+    let sep = |k: usize| {
+        head.get(k)
+            .copied()
+            .filter(|&i| is_separator(raw[i].trim()))
+    };
+    let Some(first) = head.first().map(|&i| raw[i].trim()) else {
+        return (None, false);
+    };
+    if sep(0).is_some() && first.starts_with('+') {
+        return (sep(2).or(sep(0)), true);
+    }
+    let header = !has_head_marker(first) && !first.contains("Query Text:");
+    (sep(0).or(sep(1).filter(|_| header)), false)
+}
+
+/// Снимает обрамление psql: всё до разделителя (заголовок столбца), подвал, хвосты `+` у многострочного значения,
+/// рамку `| … |` (`\pset border 2`) и кавычки вокруг строк (копия из графического клиента). Ведущие табуляции
+/// (auto_explain в журнале) заменяются пробелами; пустые строки отбрасываются. Отступ — в символах: неразрывный
+/// пробел (план со страницы) занимает одну колонку, как обычный.
 fn clean(text: &str) -> Vec<Line> {
     let raw: Vec<&str> = text.lines().collect();
-    let sep = raw.iter().position(|l| is_separator(l.trim()));
+    let (sep, bordered) = separator(&raw);
     let start = sep.map_or(0, |i| i + 1);
     let framed = sep.is_some();
     let mut out = Vec::new();
     for (i, l) in raw.iter().enumerate().skip(start) {
+        let mut l: &str = l;
+        if bordered {
+            if is_separator(l.trim()) {
+                continue;
+            }
+            l = unframe(l).unwrap_or(l);
+        }
+        let unquoted = unquote(l);
+        let l = unquoted.as_deref().unwrap_or(l);
         let lead = l.len() - l.trim_start_matches('\t').len();
         let s = format!("{}{}", "    ".repeat(lead), &l[lead..]);
         let mut t = s.trim_end();
@@ -67,7 +115,7 @@ fn clean(text: &str) -> Vec<Line> {
         }
         out.push(Line {
             no: i + 1,
-            col: t.len() - trimmed.len(),
+            col: t[..t.len() - trimmed.len()].chars().count(),
             text: trimmed.to_string(),
         });
     }
@@ -315,6 +363,13 @@ fn parse_head(text: &str, line: usize) -> Result<PlanNode, PlanError> {
     let name = text[..name_end].trim();
     if name.is_empty() {
         return Err(err("plan node without a type", line));
+    }
+    // Тип узла — слова (`Seq Scan`, `Hash Join`); иное начало — обрамление, которое разбор не знает.
+    if !name.starts_with(|c: char| c.is_alphabetic()) {
+        return Err(err(
+            format!("unsupported plan format: the node type starts with \"{name}\""),
+            line,
+        ));
     }
     let mut n = PlanNode::default();
     describe(&mut n, name);
@@ -787,7 +842,7 @@ pub fn from_text(text: &str) -> Result<PlanTree, PlanError> {
         }
         if let Some(rest) = t.strip_prefix("->") {
             let name = rest.trim_start();
-            let col = l.col + (t.len() - name.len());
+            let col = l.col + t[..t.len() - name.len()].chars().count();
             close(&mut stack, l.col);
             let mut node = parse_head(name, l.no)?;
             if let Some((label, rel)) = pending.take() {
@@ -1311,5 +1366,79 @@ Execution Time: 0.100 ms
         assert_eq!(t.jit.map(|j| (j.functions, j.total_ms)), Some((2, None)));
         assert_eq!(t.execution_ms, Some(0.1));
         assert!(t.root.share_pct.is_none());
+    }
+
+    #[test]
+    fn nbsp_indent_counts_characters() {
+        // План со страницы или из чата: отступы — неразрывные пробелы (U+00A0, два байта), колонка — в символах.
+        let text = "Limit  (cost=0.00..0.02 rows=1 width=4)\n\
+            \u{a0}\u{a0}->\u{a0}\u{a0}Seq Scan on t  (cost=0.00..35.50 rows=2550 width=4)\n\
+            \u{a0}\u{a0}\u{a0}\u{a0}\u{a0}\u{a0}\u{a0}\u{a0}Filter: (a > 1)\n";
+        let t = from_text(text).unwrap();
+        let seq = &t.root.children[0];
+        assert_eq!(seq.filter.as_deref(), Some("(a > 1)"));
+        assert!(seq.extra.is_empty(), "{:?}", seq.extra);
+        let t = from_text(
+            "Seq Scan on t  (cost=0.00..35.50 rows=2550 width=4)\n\u{a0}\u{a0}Filter: (a > 1)\n",
+        )
+        .unwrap();
+        assert_eq!(t.root.filter.as_deref(), Some("(a > 1)"));
+    }
+
+    #[test]
+    fn psql_border_2_frame_is_stripped() {
+        let text = "\
++-------------------------------------------------------------+
+|                         QUERY PLAN                          |
++-------------------------------------------------------------+
+| Limit  (cost=0.00..0.02 rows=1 width=4)                     |
+|   ->  Seq Scan on t  (cost=0.00..35.50 rows=2550 width=4)   |
+|         Filter: (a > 1)                                     |
++-------------------------------------------------------------+
+(3 rows)
+";
+        let t = from_text(text).unwrap();
+        assert_eq!(t.root.node_type, "Limit");
+        assert_eq!(t.root.children.len(), 1);
+        assert_eq!(t.root.children[0].filter.as_deref(), Some("(a > 1)"));
+    }
+
+    #[test]
+    fn quoted_lines_of_graphical_clients_are_unquoted() {
+        // pgAdmin / DBeaver: каждая строка в кавычках, кавычки внутри удвоены.
+        let text = "\"QUERY PLAN\"\n\
+            \"Limit  (cost=0.00..0.02 rows=1 width=4)\"\n\
+            \"  ->  Seq Scan on \"\"T\"\"  (cost=0.00..35.50 rows=2550 width=4)\"\n\
+            \"        Filter: (a > 1)\"\n";
+        let t = from_text(text).unwrap();
+        assert_eq!(t.root.node_type, "Limit");
+        let seq = &t.root.children[0];
+        assert_eq!(seq.relation.as_ref().map(|r| r.name.as_str()), Some("T"));
+        assert_eq!(seq.filter.as_deref(), Some("(a > 1)"));
+    }
+
+    #[test]
+    fn node_type_must_start_with_a_letter() {
+        // Обрамление, которое разбор не снял, не превращается молча в узел `* Limit`.
+        let e = from_text("* Limit  (cost=0.00..0.02 rows=1 width=4)\n").unwrap_err();
+        assert_eq!(e.line, Some(1), "{e:?}");
+        assert!(e.message.contains("unsupported"), "{e:?}");
+    }
+
+    #[test]
+    fn dashes_inside_query_text_are_not_the_psql_separator() {
+        let text = "2026-11-01 14:23:40.262 UTC [175440] LOG:  duration: 1.000 ms  plan:\n\
+            \tQuery Text: SELECT 1\n\
+            \t---------------\n\
+            \tFROM t\n\
+            \tSeq Scan on t  (cost=0.00..35.50 rows=2550 width=4)\n\
+            \t  Filter: (a > 1)+\n";
+        let t = from_text(text).unwrap();
+        assert_eq!(
+            t.root.extra["Query Text"],
+            json!("SELECT 1\n---------------\nFROM t")
+        );
+        // Не psql: хвост `+` не снимается как перенос.
+        assert_eq!(t.root.filter.as_deref(), Some("(a > 1)+"));
     }
 }
