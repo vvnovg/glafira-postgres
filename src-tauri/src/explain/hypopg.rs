@@ -1,9 +1,8 @@
-//! Проверка гипотезы hypopg (спец. P3 §9.2): виртуальный индекс в сессии, план до и после, `hypopg_reset()`.
-//! Индекс создаётся в транзакции `READ ONLY` (он живёт в памяти сессии и на диск не пишет), планы — пробами
-//! `explain_in_tx` в `READ ONLY`; соединение EXPLAIN закрывается после проверки — на сервере не остаётся ничего.
-
-use std::future::Future;
-use std::time::Duration;
+//! Проверка гипотезы hypopg (спец. P3 §9.2): план до, виртуальный индекс, план после, `hypopg_reset()`.
+//! Гипотеза — одна транзакция `READ ONLY`: `SET LOCAL` (срок, тот же `search_path`, что у пробы), `hypopg_create_index`,
+//! EXPLAIN «после», `hypopg_reset()`, `ROLLBACK`. Сброс пробуется и при ошибке (в прерванной транзакции — ещё раз после
+//! отката: виртуальный индекс живёт в памяти сессии и откатом не снимается); последняя гарантия — `check` закрывает
+//! соединение EXPLAIN. Функции hypopg вызываются со схемой расширения (`extnamespace`), а не через `search_path`.
 
 use pg_advisor::plan::json::from_json;
 use pg_advisor::plan::{PlanNode, PlanTree};
@@ -17,7 +16,8 @@ use crate::diag::head;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::explain::params::normalize;
 use crate::explain::run::{
-    Context, Origin, Step, classify, explain_in_tx, explain_timeout, probe_options, within,
+    Context, Origin, Step, begin_tx, classify, explain_in_open_tx, explain_in_tx, probe_options,
+    within,
 };
 use crate::explain::{ExplainRequest, Mode, PROBE_TIMEOUT_S, Params, validate};
 use crate::state::AppState;
@@ -49,12 +49,37 @@ pub struct HypoResult {
     pub plan_after: PlanTree,
 }
 
+/// Гипотеза в одной транзакции: имя и размер виртуального индекса, план после.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Hypothesis {
+    pub index_name: String,
+    pub estimated_bytes: i64,
+    pub plan_after: PlanTree,
+}
+
 fn bad_ddl() -> AppError {
     app_err!(
         ErrorCode::InvalidInput,
         "errors.hypo.badDdl",
         "The hypothesis must be a single CREATE INDEX ON … statement without CONCURRENTLY or UNIQUE"
     )
+}
+
+/// `;` вне кавычек: в строковых литералах `'…'` и идентификаторах `"…"` (удвоенная кавычка — та же логика: закрыть и
+/// открыть) точка с запятой допустима. Осторожно в сторону отказа: `;` в комментарии, в `$$…$$` или после `\'` в
+/// `E'…'` считается внешним — такой DDL отклоняется, хотя был бы безопасен (в предложенных командах их нет).
+fn has_outer_semicolon(s: &str) -> bool {
+    let mut quote: Option<char> = None;
+    for ch in s.chars() {
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) => {}
+            None if ch == '\'' || ch == '"' => quote = Some(ch),
+            None if ch == ';' => return true,
+            None => {}
+        }
+    }
+    false
 }
 
 /// `CREATE INDEX ON …`: одна инструкция, без `CONCURRENTLY` и `UNIQUE` (hypopg их не принимает / не проверяет).
@@ -66,7 +91,7 @@ pub fn validate_ddl(ddl: &str) -> AppResult<()> {
         || words[0] != "CREATE"
         || words[1] != "INDEX"
         || words[2] != "ON"
-        || s.contains(';')
+        || has_outer_semicolon(&s)
     {
         return Err(bad_ddl());
     }
@@ -81,44 +106,67 @@ pub fn uses_index(t: &PlanTree, name: &str) -> bool {
     walk(&t.root, name)
 }
 
-const INSTALLED_SQL: &str = "SELECT 1 FROM pg_extension WHERE extname = 'hypopg'";
+const SCHEMA_SQL: &str = "SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace \
+                          WHERE e.extname = 'hypopg'";
 
-/// Сетевой шаг hypopg со сроком пробы: ошибка сервера — через `from_pg`.
-async fn step<T>(f: impl Future<Output = Result<T, tokio_postgres::Error>>) -> AppResult<T> {
-    match tokio::time::timeout(Duration::from_secs(u64::from(PROBE_TIMEOUT_S) + 5), f).await {
-        Ok(r) => r.map_err(|e| from_pg(&e)),
-        Err(_) => Err(explain_timeout()),
+fn quote_ident(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
+}
+
+fn not_installed() -> AppError {
+    app_err!(
+        ErrorCode::FeatureUnavailable,
+        "errors.hypo.notInstalled",
+        "hypopg is not installed in this database"
+    )
+}
+
+/// Ошибка шага: сырая ошибка сервера переводится в контексте пробы.
+fn app(s: Step, ctx: Context) -> AppError {
+    match s {
+        Step::Pg(e) => classify(&e, ctx),
+        Step::App(e) => e,
     }
 }
 
-/// План без выполнения в `READ ONLY` и его стоимость; позиция ошибки — в тексте пользователя (`original`).
-async fn plan_cost(
-    c: &Client,
-    original: &str,
-    sql: &str,
-    params: &Params,
-    search_path: Option<&str>,
-) -> AppResult<(PlanTree, f64)> {
-    let options = probe_options(params);
-    let ctx = Context {
-        origin: Some(Origin::new(&options, original)),
+/// Истёк клиентский срок `within`: соединение, возможно, висит — ни отката, ни сброса не ждём, его закроет `check`.
+fn client_deadline(s: &Step) -> bool {
+    matches!(s, Step::App(e) if e.key == "errors.explain.timeout")
+}
+
+/// Схема расширения hypopg в базе соединения; `None` — не установлено.
+pub async fn schema_of(c: &Client) -> AppResult<Option<String>> {
+    within(PROBE_TIMEOUT_S, async {
+        Ok(c.query_opt(SCHEMA_SQL, &[]).await?.map(|r| r.get(0)))
+    })
+    .await
+    .map_err(|e| app(e, probe_ctx("", &Params::None)))
+}
+
+fn probe_ctx(original: &str, params: &Params) -> Context {
+    Context {
+        origin: Some(Origin::new(&probe_options(params), original)),
         write: false,
         read_only: true,
-    };
-    let raw = match within(
+    }
+}
+
+/// План без выполнения в `READ ONLY` и его стоимость.
+async fn plan_cost(c: &Client, req: &HypoRequest, sql: &str) -> AppResult<f64> {
+    let options = probe_options(&req.params);
+    let ctx = probe_ctx(&req.sql, &req.params);
+    let sp = req.search_path.as_deref();
+    let raw = within(
         PROBE_TIMEOUT_S,
-        explain_in_tx(c, ctx, PROBE_TIMEOUT_S, search_path, &options, sql, params),
+        explain_in_tx(c, ctx, PROBE_TIMEOUT_S, sp, &options, sql, &req.params),
     )
     .await
-    {
-        Ok(v) => v,
-        Err(Step::Pg(e)) => return Err(classify(&e, ctx)),
-        Err(Step::App(e)) => return Err(e),
-    };
-    let tree = from_json(&raw)
-        .map_err(|e| AppError::internal_with(format!("plan JSON: {}", e.message)))?;
-    let cost = tree.root.total_cost;
-    Ok((tree, cost))
+    .map_err(|e| app(e, ctx))?;
+    Ok(parse(&raw)?.root.total_cost)
+}
+
+fn parse(raw: &serde_json::Value) -> AppResult<PlanTree> {
+    from_json(raw).map_err(|e| AppError::internal_with(format!("plan JSON: {}", e.message)))
 }
 
 /// Проверки запроса — те же, что у пробного плана EXPLAIN (текст, длина, число параметров, `search_path`).
@@ -139,102 +187,128 @@ fn validate_request(req: &HypoRequest) -> AppResult<String> {
 }
 
 pub async fn check(st: &AppState, id: &str, req: &HypoRequest) -> AppResult<HypoResult> {
-    let sql = validate_request(req)?;
+    validate_request(req)?;
     let client =
         crate::actions::conn::open_explain(st, id, &req.member, Some(&req.database)).await?;
-    let c = &client.client;
-    if step(c.query_opt(INSTALLED_SQL, &[])).await?.is_none() {
-        return Err(app_err!(
-            ErrorCode::FeatureUnavailable,
-            "errors.hypo.notInstalled",
-            "hypopg is not installed in this database"
-        ));
-    }
-    if req.params == Params::Generic && step_head(c).await?.version_num < V16 {
-        return Err(app_err!(
-            ErrorCode::FeatureUnavailable,
-            "errors.explain.genericUnsupported",
-            "GENERIC_PLAN needs PostgreSQL 16 or newer: enter parameter values"
-        ));
-    }
-    let sp = req.search_path.as_deref();
-    let (_, cost_before) = plan_cost(c, &req.sql, &sql, &req.params, sp).await?;
-    // Гипотеза живёт в памяти сессии и не откатывается транзакцией: создаётся в READ ONLY (проверка, что сервер
-    // ничего не пишет), видна пробе «после» на том же соединении и снимается `hypopg_reset()` при любом исходе.
-    let outcome = match create(c, &normalize(&req.index_ddl)).await {
-        Ok(created) => plan_cost(c, &req.sql, &sql, &req.params, sp)
+    // Соединение закрывается при выходе (`Drop` у `ActionClient`) — последняя гарантия, что гипотез не осталось.
+    check_on(&client.client, req).await
+}
+
+/// Проверка на готовом соединении EXPLAIN: после неё в сессии нет виртуальных индексов (при любом исходе, кроме
+/// истёкшего клиентского срока — тогда соединение закрывает вызывающий).
+pub async fn check_on(c: &Client, req: &HypoRequest) -> AppResult<HypoResult> {
+    let sql = validate_request(req)?;
+    let schema = schema_of(c).await?.ok_or_else(not_installed)?;
+    if req.params == Params::Generic {
+        let h = within(PROBE_TIMEOUT_S, async { head(c).await.map_err(Step::App) })
             .await
-            .map(|after| (created, after)),
-        Err(e) => Err(e),
-    };
-    let _ = step(c.batch_execute("SELECT hypopg_reset()")).await;
-    let ((index_name, estimated_bytes), (plan_after, cost_after)) = outcome?;
+            .map_err(|e| app(e, probe_ctx(&req.sql, &req.params)))?;
+        if h.version_num < V16 {
+            return Err(app_err!(
+                ErrorCode::FeatureUnavailable,
+                "errors.explain.genericUnsupported",
+                "GENERIC_PLAN needs PostgreSQL 16 or newer: enter parameter values"
+            ));
+        }
+    }
+    let cost_before = plan_cost(c, req, &sql).await?;
+    let h = hypothesize(c, &schema, req, &sql).await?;
     Ok(HypoResult {
-        used: uses_index(&plan_after, &index_name),
-        index_name,
-        estimated_bytes,
+        used: uses_index(&h.plan_after, &h.index_name),
+        cost_after: h.plan_after.root.total_cost,
+        index_name: h.index_name,
+        estimated_bytes: h.estimated_bytes,
         cost_before,
-        cost_after,
-        plan_after,
+        plan_after: h.plan_after,
     })
 }
 
-async fn step_head(c: &Client) -> AppResult<crate::diag::Head> {
-    match tokio::time::timeout(Duration::from_secs(u64::from(PROBE_TIMEOUT_S) + 5), head(c)).await {
-        Ok(h) => h,
-        Err(_) => Err(explain_timeout()),
-    }
-}
-
-/// Виртуальный индекс и оценка его размера — в транзакции `READ ONLY`. Ошибка разбора DDL сервером (hypopg разбирает
-/// его сам: неизвестная таблица или колонка) — `INVALID_INPUT` с сообщением сервера.
-async fn create(c: &Client, ddl: &str) -> AppResult<(String, i64)> {
-    step(c.batch_execute("BEGIN READ ONLY")).await?;
-    let made = async {
+/// Гипотеза в одной транзакции `READ ONLY` (`schema` — схема hypopg, `sql` — нормализованный текст запроса):
+/// `begin_tx` (срок, `search_path` запроса), индекс, размер, EXPLAIN «после», `hypopg_reset()`, `ROLLBACK`.
+pub async fn hypothesize(
+    c: &Client,
+    schema: &str,
+    req: &HypoRequest,
+    sql: &str,
+) -> AppResult<Hypothesis> {
+    let options = probe_options(&req.params);
+    let ctx = probe_ctx(&req.sql, &req.params);
+    let s = quote_ident(schema);
+    let create_sql = format!("SELECT indexrelid, indexname FROM {s}.hypopg_create_index($1)");
+    let size_sql = format!("SELECT {s}.hypopg_relation_size($1)");
+    let reset_sql = format!("SELECT {s}.hypopg_reset()");
+    let ddl = normalize(&req.index_ddl);
+    let work = within(PROBE_TIMEOUT_S, async {
+        begin_tx(c, ctx, PROBE_TIMEOUT_S, req.search_path.as_deref()).await?;
         let row = c
-            .query_one(
-                "SELECT indexrelid, indexname FROM hypopg_create_index($1)",
-                &[&ddl],
-            )
-            .await?;
-        let (indexrelid, name): (u32, String) = (row.get(0), row.get(1));
-        let size: i64 = c
-            .query_one("SELECT hypopg_relation_size($1)", &[&indexrelid])
-            .await?
-            .get(0);
-        Ok::<_, tokio_postgres::Error>((name, size))
+            .query_one(&create_sql, &[&ddl])
+            .await
+            .map_err(|e| Step::App(ddl_error(&e)))?;
+        let (indexrelid, index_name): (u32, String) = (row.get(0), row.get(1));
+        let estimated_bytes: i64 = c.query_one(&size_sql, &[&indexrelid]).await?.get(0);
+        let raw = explain_in_open_tx(c, &options, sql, &req.params).await?;
+        Ok((index_name, estimated_bytes, raw))
+    })
+    .await;
+    let work = match work {
+        Err(e) if client_deadline(&e) => return Err(app(e, ctx)),
+        w => w,
     };
-    let made = match tokio::time::timeout(Duration::from_secs(u64::from(PROBE_TIMEOUT_S) + 5), made)
-        .await
-    {
-        Ok(Ok(v)) => Ok(v),
-        Ok(Err(e)) => Err(ddl_error(&e)),
-        Err(_) => Err(explain_timeout()),
-    };
-    let _ = step(c.batch_execute("ROLLBACK")).await;
-    made
+    let cleanup = cleanup(c, &reset_sql).await;
+    let (index_name, estimated_bytes, raw) = work.map_err(|e| app(e, ctx))?;
+    cleanup?;
+    Ok(Hypothesis {
+        index_name,
+        estimated_bytes,
+        plan_after: parse(&raw)?,
+    })
 }
 
-/// Ошибка `hypopg_create_index`: разбор и проверки самого сервера (классы 42 и 22) и проверки hypopg (XX000 с
-/// сообщением «hypopg: …», например неизвестная колонка) — отказ гипотезе; прочее — через `from_pg`.
+/// `hypopg_reset()` до `ROLLBACK`; если транзакция прервана ошибкой и сброс не прошёл — ещё раз после отката.
+async fn cleanup(c: &Client, reset_sql: &str) -> AppResult<()> {
+    let ctx = Context {
+        origin: None,
+        write: false,
+        read_only: true,
+    };
+    let run = |q: &str| {
+        let q = q.to_string();
+        async move { within(PROBE_TIMEOUT_S, async { Ok(c.batch_execute(&q).await?) }).await }
+    };
+    let reset = run(reset_sql).await;
+    let reset = match reset {
+        Err(e) if client_deadline(&e) => return Err(app(e, ctx)),
+        r => r,
+    };
+    run("ROLLBACK").await.map_err(|e| app(e, ctx))?;
+    if reset.is_err() {
+        run(reset_sql).await.map_err(|e| app(e, ctx))?;
+    }
+    Ok(())
+}
+
+/// Ошибка `hypopg_create_index` из-за самого DDL — отказ гипотезе: синтаксис (42601), нет таблицы, колонки, объекта
+/// или функции (42P01, 42703, 42704, 42883), не тот тип объекта (42809, индекс на представлении), неверное
+/// определение (42P17, например изменчивая функция в выражении), а также проверки hypopg (XX000 с «hypopg: …»).
+/// Права (42501) и прочее — через `from_pg`.
 fn ddl_error(e: &tokio_postgres::Error) -> AppError {
     match e.as_db_error() {
-        Some(db) if rejects_ddl(db.code().code(), db.message()) => {
-            app_err!(
-                ErrorCode::InvalidInput,
-                "errors.hypo.rejected",
-                "The server rejected the hypothetical index: {{message}}",
-                message = db.message()
-            )
-        }
+        Some(db) if rejects_ddl(db.code().code(), db.message()) => app_err!(
+            ErrorCode::InvalidInput,
+            "errors.hypo.rejected",
+            "The server rejected the hypothetical index: {{message}}",
+            message = db.message()
+        ),
         _ => from_pg(e),
     }
 }
 
+const DDL_REJECTED: [&str; 7] = [
+    "42601", "42P01", "42703", "42704", "42883", "42809", "42P17",
+];
+
 fn rejects_ddl(code: &str, message: &str) -> bool {
-    code.starts_with("42")
-        || code.starts_with("22")
-        || (code == "XX000" && message.starts_with("hypopg"))
+    DDL_REJECTED.contains(&code) || (code == "XX000" && message.starts_with("hypopg"))
 }
 
 #[cfg(test)]
@@ -271,6 +345,22 @@ mod tests {
     }
 
     #[test]
+    fn semicolon_inside_quotes_is_allowed() {
+        assert!(validate_ddl("CREATE INDEX ON \"a;b\" (c) WHERE d = 'x;y'").is_ok());
+        assert!(validate_ddl("CREATE INDEX ON t (a) WHERE b = 'it''s;'").is_ok());
+        assert!(
+            validate_ddl("CREATE INDEX ON \"q\"\"\" (a);").is_ok(),
+            "хвостовая `;` снимается"
+        );
+        assert!(validate_ddl("CREATE INDEX ON t (a) WHERE b = 'x'; DROP TABLE t").is_err());
+        assert!(validate_ddl("CREATE INDEX ON \"t\"; DROP TABLE t").is_err());
+        assert!(
+            validate_ddl("CREATE INDEX ON t (a) /* ; */").is_err(),
+            "в комментарии — осторожно, отказ"
+        );
+    }
+
+    #[test]
     fn uses_index_finds_the_hypothetical_name_in_the_plan() {
         let t = pg_advisor::plan::json::from_json(&serde_json::json!({"Plan": {"Node Type": "Index Scan", "Index Name": "<13543>btree_orders_status", "Relation Name": "orders", "Startup Cost": 0.0, "Total Cost": 8.0, "Plan Rows": 1, "Plan Width": 4}})).unwrap();
         assert!(uses_index(&t, "<13543>btree_orders_status"));
@@ -280,12 +370,24 @@ mod tests {
     #[test]
     fn hypopg_and_parse_errors_reject_the_hypothesis() {
         assert!(rejects_ddl("42P01", "relation \"t\" does not exist"));
+        assert!(rejects_ddl("42703", "column \"x\" does not exist"));
+        assert!(
+            !rejects_ddl("42501", "permission denied for table t"),
+            "права — не ошибка гипотезы"
+        );
+        assert!(!rejects_ddl("22023", "invalid parameter"));
         assert!(rejects_ddl("XX000", "hypopg: column \"x\" does not exist"));
         assert!(!rejects_ddl("XX000", "could not read block"));
         assert!(!rejects_ddl(
             "57014",
             "canceling statement due to statement timeout"
         ));
+    }
+
+    #[test]
+    fn schema_is_quoted() {
+        assert_eq!(quote_ident("public"), "\"public\"");
+        assert_eq!(quote_ident("we\"ird"), "\"we\"\"ird\"");
     }
 
     #[test]

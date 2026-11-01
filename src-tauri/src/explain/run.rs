@@ -249,7 +249,7 @@ pub(crate) async fn within<T>(
         .unwrap_or_else(|_| Err(Step::App(explain_timeout())))
 }
 
-/// Один EXPLAIN внутри транзакции: `BEGIN [READ ONLY]` (по `ctx.read_only`), `SET LOCAL`, EXPLAIN, `ROLLBACK`.
+/// Один EXPLAIN внутри транзакции: `begin_tx`, EXPLAIN, `ROLLBACK`.
 /// Ошибка самой команды EXPLAIN возвращается сырой (`Step::Pg`): её переводит вызывающий.
 pub(crate) async fn explain_in_tx(
     c: &Client,
@@ -260,6 +260,23 @@ pub(crate) async fn explain_in_tx(
     sql: &str,
     params: &Params,
 ) -> Result<serde_json::Value, Step> {
+    let result = match begin_tx(c, ctx, timeout_s, search_path).await {
+        Err(e) => Err(e),
+        Ok(()) => explain_in_open_tx(c, options, sql, params).await,
+    };
+    // Откат — страховка: при ошибке транзакция уже прервана сервером, при обрыве соединение закроется.
+    let _ = c.batch_execute("ROLLBACK").await;
+    result
+}
+
+/// Начало транзакции EXPLAIN: `BEGIN [READ ONLY]` (по `ctx.read_only`), `SET LOCAL` сроков и `search_path`. Ошибка
+/// начала (например, `search_path`) переводится сразу и без позиции: она не в тексте пользователя.
+pub(crate) async fn begin_tx(
+    c: &Client,
+    ctx: Context,
+    timeout_s: u32,
+    search_path: Option<&str>,
+) -> Result<(), Step> {
     let mut begin = format!(
         "BEGIN{}; SET LOCAL statement_timeout = '{timeout_s}s'; SET LOCAL lock_timeout = '1s'",
         if ctx.read_only { " READ ONLY" } else { "" }
@@ -267,20 +284,25 @@ pub(crate) async fn explain_in_tx(
     if let Some(sp) = search_path {
         begin.push_str(&format!("; SET LOCAL search_path = {sp}"));
     }
-    let result = match c.batch_execute(&begin).await {
-        // Ошибка начала (например, `search_path`) — без позиции: она не в тексте пользователя.
-        Err(e) => Err(Step::App(classify(
+    c.batch_execute(&begin).await.map_err(|e| {
+        Step::App(classify(
             &e,
             Context {
                 origin: None,
                 ..ctx
             },
-        ))),
-        Ok(()) => explain_query(c, &format!("{}{sql}", explain_prefix(options)), params).await,
-    };
-    // Откат — страховка: при ошибке транзакция уже прервана сервером, при обрыве соединение закроется.
-    let _ = c.batch_execute("ROLLBACK").await;
-    result
+        ))
+    })
+}
+
+/// EXPLAIN в уже открытой транзакции (`begin_tx`): проба гипотезы hypopg идёт в одной транзакции с виртуальным индексом.
+pub(crate) async fn explain_in_open_tx(
+    c: &Client,
+    options: &str,
+    sql: &str,
+    params: &Params,
+) -> Result<serde_json::Value, Step> {
+    explain_query(c, &format!("{}{sql}", explain_prefix(options)), params).await
 }
 
 /// Сама команда EXPLAIN — одна инструкция расширенным протоколом (вторую сервер отвергнет при разборе).
@@ -349,7 +371,8 @@ fn probe_context(force_write: bool, options: &str, original: &str, sql: &str) ->
     }
 }
 
-/// Ограда яруса записи до сервера: профиль (read-only, подтверждение prod) и реплика (запись не примет).
+/// Ограда яруса записи до выполнения: профиль (read-only, подтверждение prod), подтверждение в интерфейсе
+/// (`write_confirmed`) и реплика (запись не примет). С `force_write` — до пробного плана, иначе — после него.
 fn ensure_write_allowed(
     profile: &ConnectionProfile,
     req: &ExplainRequest,
