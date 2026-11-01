@@ -810,7 +810,8 @@ JSON), файл новее `SNAPSHOT_VERSION` — `errors.storage.newerSchema`. 
 Пара читается `read_pair`: тот же файл дважды — `errors.snapshots.samePair`; снимки **разных узлов** отклоняются
 (`errors.snapshots.differentMembers`, `INVALID_INPUT`: счётчики не связаны), а не сравниваются с пометкой; порядок `from` / `to` любой —
 пара упорядочивается по времени (старший — начало). Сравнение (`queries::compare`, по ключу): `new` (есть только в `to`), `gone` (только в
-`from`), `degraded` (`meanExecMs` ≥ ×2 при `calls ≥ 50` — `COMPARE_*`), `improved` (≤ ×0,5 при тех же условиях), `totalsFrom` / `totalsTo`,
+`from`; оба — не больше `COMPARE_LIST_LIMIT = 200` самых долгих по `totalExecMs`, остаток — числом `newMore` / `goneMore`, под
+списком «… ещё N запросов — показаны самые долгие», в заголовке — все), `degraded` (`meanExecMs` ≥ ×2 при `calls ≥ 50` — `COMPARE_*`), `improved` (≤ ×0,5 при тех же условиях), `totalsFrom` / `totalsTo`,
 `reset` — `stats_reset` различается («статистика сбрасывалась, надёжны только новые и исчезнувшие»). `before` — накопленное значение `from`,
 `after` — дельта; у строк — `text`, `textTruncated`, `own` из текстов снимков (свои строки не отбрасываются, фронтенд их приглушает).
 

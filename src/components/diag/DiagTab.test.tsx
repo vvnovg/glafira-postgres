@@ -269,7 +269,7 @@ describe("DiagTab", () => {
     };
     beforeEach(() => {
       vi.mocked(api.snapshotList).mockResolvedValue([b, a]);
-      vi.mocked(api.snapshotCompare).mockResolvedValue({ new: [], gone: [], degraded: [], improved: [], totalsFrom: { calls: 1, totalExecMs: 1, rows: 0 }, totalsTo: { calls: 2, totalExecMs: 2, rows: 0 }, reset: false });
+      vi.mocked(api.snapshotCompare).mockResolvedValue({ new: [], gone: [], newMore: 0, goneMore: 0, degraded: [], improved: [], totalsFrom: { calls: 1, totalExecMs: 1, rows: 0 }, totalsTo: { calls: 2, totalExecMs: 2, rows: 0 }, reset: false });
       vi.mocked(api.runDiagnostic).mockImplementation(async (_id, req) => diagReport(queriesData(req.queries!.mode), { member: "pg-1", followsLeader: req.queries!.mode.kind !== "between" }));
       vi.mocked(api.startStatementsSampler).mockResolvedValue("s-1");
       vi.mocked(api.stopSession).mockResolvedValue(true);

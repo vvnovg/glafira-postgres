@@ -24,6 +24,8 @@ const stat = (id: string, mean: number, patch: Partial<QueryStat> = {}): QuerySt
 const comparison: Comparison = {
   new: [stat("5", 1), stat("6", 1, { text: "/* glafira */ select 1", own: true })],
   gone: [],
+  newMore: 0,
+  goneMore: 0,
   degraded: [{ key: stat("1", 1).key, datname: "perf", rolname: "app", before: stat("1", 10), after: stat("1", 30), ratio: 3 }],
   improved: [],
   totalsFrom: { calls: 1, totalExecMs: 1, rows: 0 },
@@ -97,6 +99,21 @@ describe("SnapshotsPanel", () => {
     expect(within(fresh).queryByRole("columnheader", { name: "CPU" })).toBeNull();
     await user.click(screen.getByRole("button", { name: "Топ между снимками" }));
     expect(onBetween).toHaveBeenCalledWith(a, b);
+  });
+
+  it("новых и исчезнувших сверх предела — числом под списком, заголовок — со всеми", async () => {
+    vi.mocked(api.snapshotCompare).mockResolvedValue({ ...comparison, gone: [stat("7", 1)], newMore: 3, goneMore: 21 });
+    const user = userEvent.setup();
+    renderWithClient(<SnapshotsPanel connectionId="c" member="pg-1" onBetween={vi.fn()} />);
+    const rows = await screen.findAllByRole("row");
+    await user.click(within(rows[1]).getByRole("checkbox"));
+    await user.click(within(rows[2]).getByRole("checkbox"));
+    await user.click(screen.getByRole("button", { name: "Сравнить" }));
+    expect(await screen.findByRole("heading", { name: "Новые (5)" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Исчезли (22)" })).toBeInTheDocument();
+    expect(screen.getByText("… ещё 3 запроса — показаны самые долгие")).toBeInTheDocument();
+    expect(screen.getByText("… ещё 21 запрос — показаны самые долгие")).toBeInTheDocument();
+    expect(screen.queryAllByText(/показаны самые долгие/)).toHaveLength(2);
   });
 
   it("снимки с pg_stat_kcache: у новых и исчезнувших — колонка CPU", async () => {

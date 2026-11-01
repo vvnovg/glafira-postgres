@@ -30,6 +30,10 @@ pub struct Comparison {
     pub new: Vec<QueryStat>,
     /// Ключи только в `from` — накопительные значения `from`, доли от `totals_from`.
     pub gone: Vec<QueryStat>,
+    /// Новых сверх `COMPARE_LIST_LIMIT` (в `new` — самые долгие).
+    pub new_more: usize,
+    /// Исчезнувших сверх `COMPARE_LIST_LIMIT`.
+    pub gone_more: usize,
     /// По убыванию `ratio`.
     pub degraded: Vec<Change>,
     /// По возрастанию `ratio`.
@@ -61,6 +65,13 @@ fn cumulative_stat(c: &Cumulative, t: &Totals) -> QueryStat {
         Some((c.min_exec_ms, c.max_exec_ms, c.stddev_exec_ms)),
         t,
     )
+}
+
+/// Оставляет первые `COMPARE_LIST_LIMIT` строк; сколько отброшено.
+fn cap(rows: &mut Vec<QueryStat>) -> usize {
+    let more = rows.len().saturating_sub(th::COMPARE_LIST_LIMIT);
+    rows.truncate(th::COMPARE_LIST_LIMIT);
+    more
 }
 
 /// Сравнение снимков: `*_reset_ms` — `stats_reset` каждого снимка; различаются — `reset`, и деградации с ускорениями
@@ -133,6 +144,8 @@ pub fn compare(
     let by_time = |a: &QueryStat, b: &QueryStat| b.total_exec_ms.total_cmp(&a.total_exec_ms);
     out.new.sort_by(by_time);
     out.gone.sort_by(by_time);
+    out.new_more = cap(&mut out.new);
+    out.gone_more = cap(&mut out.gone);
     out.degraded
         .sort_by(|a, b| b.ratio.partial_cmp(&a.ratio).unwrap_or(Ordering::Equal));
     out.improved
@@ -164,6 +177,24 @@ mod tests {
             max_exec_ms: 0.0,
             stddev_exec_ms: 0.0,
         }
+    }
+
+    /// Новые и исчезнувшие — не больше `COMPARE_LIST_LIMIT` самых долгих, остаток — числом (`newMore`, `goneMore`).
+    #[test]
+    fn new_and_gone_are_capped_with_a_remainder_count() {
+        let limit = th::COMPARE_LIST_LIMIT;
+        let n = limit as i64 + 5;
+        let from: Vec<Cumulative> = (0..n).map(|i| row(i, 10, i as f64)).collect();
+        let to: Vec<Cumulative> = (n..n * 2).map(|i| row(i, 10, i as f64)).collect();
+        let c = compare(&from, Some(1), &to, Some(1));
+        assert_eq!((c.new.len(), c.new_more), (limit, 5));
+        assert_eq!((c.gone.len(), c.gone_more), (limit, 5));
+        assert_eq!(c.new[0].key.query_id, n * 2 - 1, "самые долгие остаются");
+        assert_eq!(c.gone.last().unwrap().key.query_id, 5);
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!((&v["newMore"], &v["goneMore"]), (&5.into(), &5.into()));
+        let small = compare(&from[..3], Some(1), &to[..2], Some(1));
+        assert_eq!((small.new_more, small.gone_more), (0, 0));
     }
 
     #[test]

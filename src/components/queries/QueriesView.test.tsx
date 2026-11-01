@@ -305,7 +305,7 @@ describe("QueriesView", () => {
     const b = { file: "pg-1/2026-10-29T11-00-00.json", member: "pg-1", takenAtMs: 1_761_735_600_000, rows: 130, bytes: 42_000 };
     vi.mocked(api.snapshotList).mockResolvedValue([b, a]);
     vi.mocked(api.snapshotDelete).mockResolvedValue(true);
-    vi.mocked(api.snapshotCompare).mockResolvedValue({ new: [], gone: [], degraded: [], improved: [], totalsFrom: { calls: 1, totalExecMs: 1, rows: 0 }, totalsTo: { calls: 2, totalExecMs: 2, rows: 0 }, reset: false });
+    vi.mocked(api.snapshotCompare).mockResolvedValue({ new: [], gone: [], newMore: 0, goneMore: 0, degraded: [], improved: [], totalsFrom: { calls: 1, totalExecMs: 1, rows: 0 }, totalsTo: { calls: 2, totalExecMs: 2, rows: 0 }, reset: false });
     const between = diagReport(
       data({ mode: { kind: "between", from: a.file, to: b.file }, coverageS: 3600, rows: [row("1", { own: true, text: "/* glafira */ select 1", stddevExecMs: null, maxExecMs: null, minExecMs: null }), row("2")] }),
       { member: "pg-1", followsLeader: false, unavailable: [{ part: "between", reason: { key: "diag.unavailable.betweenReset", params: { part: "between" }, text: "x" } }] },

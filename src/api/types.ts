@@ -730,8 +730,11 @@ export interface Change {
 }
 /** Сравнение двух снимков (`snapshot_compare`); строки несут `text` и `own` из снимков. */
 export interface Comparison {
+  /** Не больше 200 самых долгих; остаток — `newMore`. */
   new: QueryStat[];
   gone: QueryStat[];
+  newMore: number;
+  goneMore: number;
   degraded: Change[];
   improved: Change[];
   totalsFrom: { calls: number; totalExecMs: number; rows: number };

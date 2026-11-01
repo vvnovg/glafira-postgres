@@ -18,14 +18,15 @@ function QueryCell({ stat }: { stat: QueryStat }) {
   );
 }
 
-function Plain({ title, rows }: { title: string; rows: QueryStat[] }) {
+/** `more` — строк сверх предела Rust (`COMPARE_LIST_LIMIT`): в списке самые долгие, остаток — числом под таблицей. */
+function Plain({ title, rows, more }: { title: string; rows: QueryStat[]; more: number }) {
   const { t } = useTranslation();
   // Колонка CPU — когда снимки сняты с `pg_stat_kcache` (у строк есть значения).
   const cpu = rows.some((r) => cpuMs(r) !== null);
   return (
     <section>
       <h4>
-        {title} ({rows.length})
+        {title} ({rows.length + more})
       </h4>
       {rows.length === 0 ? (
         <p className="muted">—</p>
@@ -59,6 +60,7 @@ function Plain({ title, rows }: { title: string; rows: QueryStat[] }) {
           </tbody>
         </table>
       )}
+      {more > 0 && <p className="muted">{t("diag.snapshots.more", { count: more })}</p>}
     </section>
   );
 }
@@ -131,8 +133,8 @@ export function SnapshotCompare({ comparison, title, onBetween }: { comparison: 
       {comparison.reset && <p className="diag-note">{t("diag.snapshots.reset")}</p>}
       <Changes title={t("diag.snapshots.degraded")} rows={comparison.degraded} />
       <Changes title={t("diag.snapshots.improved")} rows={comparison.improved} />
-      <Plain title={t("diag.snapshots.new")} rows={comparison.new} />
-      <Plain title={t("diag.snapshots.gone")} rows={comparison.gone} />
+      <Plain title={t("diag.snapshots.new")} rows={comparison.new} more={comparison.newMore} />
+      <Plain title={t("diag.snapshots.gone")} rows={comparison.gone} more={comparison.goneMore} />
     </div>
   );
 }

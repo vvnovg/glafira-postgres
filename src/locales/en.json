@@ -1543,6 +1543,8 @@
       "improved": "Improved",
       "new": "New",
       "gone": "Gone",
+      "more_one": "… {{count}} more query — the longest are shown",
+      "more_other": "… {{count}} more queries — the longest are shown",
       "before": "Mean before",
       "after": "Mean after",
       "ratio": "Ratio",
