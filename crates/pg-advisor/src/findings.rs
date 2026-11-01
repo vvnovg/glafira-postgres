@@ -213,6 +213,22 @@ pub mod thresholds {
     pub const QUERY_PLANNING_MIN_PLANS: i64 = 100;
     /// Блок PostgreSQL, байты.
     pub const BLOCK_BYTES: i64 = 8192;
+    /// Рекомендации по плану (спец. P3 §9.1). Циклы — `f64`, как `plan::Actual::loops`.
+    pub const PLAN_SEQ_SCAN_ROWS_READ: f64 = 10_000.0;
+    pub const PLAN_FILTER_RATIO: f64 = 10.0;
+    pub const PLAN_INDEX_FILTER_MIN_REMOVED: f64 = 1_000.0;
+    pub const PLAN_NESTED_LOOP_LOOPS: f64 = 1_000.0;
+    pub const PLAN_MISESTIMATE_RATIO: f64 = 10.0;
+    pub const PLAN_MISESTIMATE_MIN_ROWS: f64 = 1_000.0;
+    pub const PLAN_WORK_MEM_FACTOR: f64 = 1.5;
+    pub const PLAN_WORK_MEM_MAX_KB: i64 = 1024 * 1024;
+    pub const PLAN_SORT_LIMIT_FACTOR: f64 = 100.0;
+    pub const PLAN_HEAP_FETCH_SHARE: f64 = 0.1;
+    pub const PLAN_HEAP_FETCH_MIN: f64 = 1_000.0;
+    pub const PLAN_APPEND_MIN_CHILDREN: usize = 10;
+    pub const PLAN_APPEND_EMPTY_SHARE: f64 = 0.5;
+    pub const PLAN_SUBPLAN_LOOPS: f64 = 1_000.0;
+    pub const PLAN_JIT_SHARE: f64 = 0.5;
 }
 
 #[cfg(test)]

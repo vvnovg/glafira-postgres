@@ -9,6 +9,7 @@ pub mod findings;
 pub mod locktree;
 pub mod pgss;
 pub mod plan;
+pub mod plan_rules;
 pub mod queries;
 pub mod rates;
 pub mod readiness;
