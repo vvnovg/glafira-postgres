@@ -1,7 +1,7 @@
 //! Сэмплер `pg_stat_statements` (спец. P3 §5): раз в минуту `pg_stat_statements(showtext := false)` на соединении
 //! пула `Sampler`, буфер дельт на 60 мин; живёт, пока подписаны инструмент «Запросы» или карточки запроса узла.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -100,6 +100,15 @@ struct TickNames {
     ticks: usize,
 }
 
+/// Скан текстов поиском: строка поиска, `stats_reset` и `dealloc` на момент скана, ключи pgss, прочитанные до скана
+/// (их тексты проверены), и найденные ключи.
+struct SearchHit {
+    needle: String,
+    reset: (Option<i64>, Option<i64>),
+    checked: HashSet<QueryKey>,
+    matched: HashSet<QueryKey>,
+}
+
 pub struct StatementsBuffer {
     latest: HashMap<QueryKey, Cumulative>,
     ticks: VecDeque<Tick>,
@@ -115,6 +124,8 @@ pub struct StatementsBuffer {
     /// Имена базы и роли ключей, на которые ссылаются тики, и число таких тиков: ключ может уйти из pgss (сброс,
     /// вытеснение), а его дельты — остаться в окне.
     tick_names: HashMap<QueryKey, TickNames>,
+    /// Последний скан текстов поиском: повторный опрос с той же строкой его не повторяет, пока ключи и сброс те же.
+    search: Option<SearchHit>,
     max_entries: usize,
     max_age_ms: i64,
 }
@@ -139,6 +150,7 @@ impl StatementsBuffer {
             hidden: false,
             texts: HashMap::new(),
             tick_names: HashMap::new(),
+            search: None,
             max_entries,
             max_age_ms,
         }
@@ -399,6 +411,43 @@ impl StatementsBuffer {
             self.texts
                 .insert(k, Some((Arc::from(t.as_str()), truncated)));
         }
+    }
+
+    /// Ключи pgss последнего тика.
+    pub fn latest_keys(&self) -> HashSet<QueryKey> {
+        self.latest.keys().copied().collect()
+    }
+
+    /// Ключи, найденные прошлым сканом, если строка поиска, `stats_reset` и `dealloc` те же и среди `keys` нет
+    /// непроверенных: текст ключа в pgss не меняется, пока строку не сбросили или не вытеснили, и новый скан файла
+    /// текстов ничего бы не добавил. Иначе — `None`, нужен скан.
+    pub fn search_hit<'a>(
+        &self,
+        needle: &str,
+        info: &PgssInfo,
+        mut keys: impl Iterator<Item = &'a QueryKey>,
+    ) -> Option<HashSet<QueryKey>> {
+        let s = self.search.as_ref()?;
+        (s.needle == needle
+            && s.reset == (info.stats_reset_ms, info.dealloc)
+            && keys.all(|k| s.checked.contains(k)))
+        .then(|| s.matched.clone())
+    }
+
+    /// Итог скана: `checked` — ключи pgss, прочитанные до него.
+    pub fn remember_search(
+        &mut self,
+        needle: &str,
+        info: &PgssInfo,
+        checked: HashSet<QueryKey>,
+        matched: HashSet<QueryKey>,
+    ) {
+        self.search = Some(SearchHit {
+            needle: needle.to_string(),
+            reset: (info.stats_reset_ms, info.dealloc),
+            checked,
+            matched,
+        });
     }
 
     /// Отметка «текста нет» для ключей; известный текст она не затирает.
@@ -955,6 +1004,54 @@ mod tests {
         b.remember_no_text(&(3..=(MAX_TEXTS as i64 + 2)).map(key).collect::<Vec<_>>());
         assert!(!b.text_missing(&key(2)) && b.text(&key(1)).is_none());
         assert!(b.text_missing(&key(MAX_TEXTS as i64 + 2)));
+    }
+
+    #[test]
+    fn search_is_reused_while_keys_and_reset_stay() {
+        let mut b = StatementsBuffer::default();
+        let info = PgssInfo {
+            stats_reset_ms: Some(1),
+            dealloc: Some(0),
+            ..PgssInfo::default()
+        };
+        let checked: HashSet<QueryKey> = [key(1), key(2)].into();
+        assert_eq!(b.search_hit("orders", &info, checked.iter()), None);
+        b.remember_search("orders", &info, checked.clone(), [key(2)].into());
+        assert_eq!(
+            b.search_hit("orders", &info, [key(2)].iter()),
+            Some([key(2)].into()),
+            "те же ключи (или меньше) — без скана"
+        );
+        assert_eq!(
+            b.search_hit("Orders", &info, checked.iter()),
+            None,
+            "другая строка"
+        );
+        assert_eq!(
+            b.search_hit("orders", &info, [key(1), key(3)].iter()),
+            None,
+            "новый ключ — его текст не проверен"
+        );
+        let reset = PgssInfo {
+            stats_reset_ms: Some(2),
+            ..info
+        };
+        assert_eq!(
+            b.search_hit("orders", &reset, checked.iter()),
+            None,
+            "сброс"
+        );
+        let dealloc = PgssInfo {
+            dealloc: Some(1),
+            ..info
+        };
+        assert_eq!(
+            b.search_hit("orders", &dealloc, checked.iter()),
+            None,
+            "вытеснение"
+        );
+        b.push(M, sample(vec![row(1, 1, 1.0), row(3, 1, 1.0)], 1, 0));
+        assert_eq!(b.latest_keys(), [key(1), key(3)].into());
     }
 
     /// `window_for` — то же, что `window` с суммированием по ключам: суммы только ключей запроса, итог — по всему окну.

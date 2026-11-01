@@ -2,7 +2,7 @@
 //! сброса» и ленивые тексты. Режим «за окно» — из буфера сэмплера pgss (`sampler::statements`).
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use pg_advisor::pgss::PgssCaps;
 use pg_advisor::queries::rules::{self, Mode, PgssState, n_plus_one_share};
@@ -21,6 +21,7 @@ use crate::diag::{
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::product::SQL_MARKER;
 use crate::product::is_marked_sql;
+use crate::sampler::statements::StatementsBuffer;
 use crate::state::AppState;
 use crate::sync::MutexExt;
 use crate::topology::runtime::DiagTarget;
@@ -183,6 +184,44 @@ pub async fn search_keys(
             })
         })
         .collect())
+}
+
+/// Ключи по поиску с кешем узла: прошлый скан (`StatementsBuffer::search_hit`), если ключи pgss, прочитанные до
+/// этого вызова (`keys`), все проверены и сброс тот же; иначе — скан `search_keys`, итог запоминается. Без буфера
+/// сэмплера — всегда скан.
+async fn search_keys_cached(
+    c: &Client,
+    pgss: &PgssInstalled,
+    search: &str,
+    info: &PgssInfo,
+    keys: HashSet<QueryKey>,
+    buffer: Option<&Arc<Mutex<StatementsBuffer>>>,
+) -> AppResult<HashSet<QueryKey>> {
+    let hit = buffer.and_then(|b| b.lock_safe().search_hit(search, info, keys.iter()));
+    if let Some(hit) = hit {
+        return Ok(hit);
+    }
+    let matched = search_keys(c, pgss, search).await?;
+    if let Some(b) = buffer {
+        b.lock_safe()
+            .remember_search(search, info, keys, matched.clone());
+    }
+    Ok(matched)
+}
+
+/// Ключи набора, чей текст (`text`, кеш узла) содержит `search` без учёта регистра. В окне остаются дельты ключей,
+/// ушедших из pgss: скан текстов их не находит, а кеш узла может помнить текст.
+pub fn cached_matches(
+    entries: &[Entry],
+    search: &str,
+    text: impl Fn(&QueryKey) -> Option<Arc<str>>,
+) -> HashSet<QueryKey> {
+    let needle = search.to_lowercase();
+    entries
+        .iter()
+        .filter(|e| text(&e.key).is_some_and(|t| t.to_lowercase().contains(&needle)))
+        .map(|e| e.key)
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -644,17 +683,26 @@ async fn report_since_reset(
 ) -> AppResult<DiagReport> {
     let member = member_name(target)?;
     let search = p.search().map(str::to_string);
+    let buffer = st.statements.buffer(id, &member);
     let (h, detected, snapshot) = on_member(st, id, target, |c| {
         Box::pin(async move {
             let h = head(c).await?;
             let d = detect(c).await?;
             let snap = match &d {
                 Detect::Installed(pgss) => {
+                    // Сначала строки: их ключи существовали до скана текстов, и он их проверит.
+                    let snap = read_cumulative(c, pgss).await?;
                     let matched = match &search {
-                        Some(s) => Some(search_keys(c, pgss, s).await?),
+                        Some(s) => {
+                            let keys = snap.rows.iter().map(|r| r.key).collect();
+                            Some(
+                                search_keys_cached(c, pgss, s, &snap.info, keys, buffer.as_ref())
+                                    .await?,
+                            )
+                        }
                         None => None,
                     };
-                    Some((read_cumulative(c, pgss).await?, matched))
+                    Some((snap, matched))
                 }
                 _ => None,
             };
@@ -721,6 +769,8 @@ struct WindowSlice {
     hidden: bool,
     window: Option<crate::sampler::statements::WindowSum>,
     names: std::collections::HashMap<QueryKey, (Option<String>, Option<String>)>,
+    /// Ключи pgss последнего тика — существовали до скана текстов поиском.
+    latest: HashSet<QueryKey>,
 }
 
 fn window_slice(st: &AppState, id: &str, member: &str, window_s: u32) -> Option<WindowSlice> {
@@ -739,6 +789,7 @@ fn window_slice(st: &AppState, id: &str, member: &str, window_s: u32) -> Option<
         hidden: b.hidden(),
         window,
         names,
+        latest: b.latest_keys(),
     })
 }
 
@@ -766,6 +817,7 @@ async fn report_window(
         hidden,
         window: Some(w),
         names,
+        latest,
     }) = slice
     else {
         let h = head_of(slice.as_ref().and_then(|s| s.head)).await?;
@@ -785,9 +837,12 @@ async fn report_window(
     let matched = match p.search().map(str::to_string) {
         Some(s) => {
             let pgss = pgss.clone();
+            let buffer = st.statements.buffer(id, &member);
             Some(
                 on_member(st, id, target, |c| {
-                    Box::pin(async move { search_keys(c, &pgss, &s).await })
+                    Box::pin(async move {
+                        search_keys_cached(c, &pgss, &s, &info, latest, buffer.as_ref()).await
+                    })
                 })
                 .await?,
             )
@@ -810,6 +865,18 @@ async fn report_window(
         .filter(|e| keep(&e.key, e.datname.as_deref(), p))
         .collect();
     let (own, fetched) = resolve_own(st, id, target, &member, &entries).await;
+    // Ключи окна, ушедшие из pgss, скан не находит — их ищем по текстам, которые помнит кеш узла.
+    let matched = matched.map(|mut m| {
+        if let Some(s) = p.search() {
+            let buffer = st.statements.buffer(id, &member);
+            let b = buffer.as_ref().map(|b| b.lock_safe());
+            m.extend(cached_matches(&entries, s, |k| match fetched.get(k) {
+                Some(Some((t, _))) => Some(Arc::clone(t)),
+                _ => b.as_ref().and_then(|b| b.text(k)).map(|(t, _)| t),
+            }));
+        }
+        m
+    });
     let (mut rows, t) = build(&entries, &own, matched.as_ref(), p);
     attach_texts(&mut rows, |k| report_text(st, id, &member, &fetched, k));
     let mut unavailable = Vec::new();
@@ -1171,6 +1238,24 @@ mod tests {
         assert_eq!(out[0].share_pct, 25.0);
         let (out, _) = build(&entries, &HashSet::new(), Some(&HashSet::new()), &p);
         assert!(out.is_empty());
+    }
+
+    /// Окно: ключ ушёл из pgss (скан текстов его не найдёт), но его текст есть в кеше узла — он находится по кешу.
+    #[test]
+    fn cached_texts_find_keys_gone_from_pgss() {
+        let rows = vec![
+            cumulative(1, true, "perf", 10, 100.0),
+            cumulative(2, true, "perf", 10, 300.0),
+            cumulative(3, true, "perf", 10, 300.0),
+        ];
+        let entries = entries_since_reset(&rows, &params(QueriesMode::SinceReset));
+        let texts: HashMap<QueryKey, Arc<str>> = HashMap::from([
+            (rows[0].key, Arc::from("SELECT * FROM shop.ORDERS o")),
+            (rows[1].key, Arc::from("SELECT 1")),
+        ]);
+        let found = cached_matches(&entries, "Orders o", |k| texts.get(k).cloned());
+        assert_eq!(found, HashSet::from([rows[0].key]));
+        assert!(cached_matches(&entries, "x%", |k| texts.get(k).cloned()).is_empty());
     }
 
     #[test]
