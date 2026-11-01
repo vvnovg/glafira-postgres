@@ -391,6 +391,15 @@ describe("PlanSummary: прочее", () => {
     expect(screen.queryByText(/Ярус/)).not.toBeInTheDocument();
   });
 
+  it("JIT без времён (без ANALYZE или TIMING OFF): в сводке только функции, в тексте нет строки Timing", () => {
+    const jit = { functions: 6, generationMs: null, inliningMs: null, optimizationMs: null, emissionMs: null, totalMs: null };
+    render(<PlanSummary tree={planTree({ jit })} />);
+    expect(screen.getByText("JIT: функций 6")).toBeInTheDocument();
+    const text = renderText(planTree({ jit, executionMs: null }));
+    expect(text).toContain("JIT:\n  Functions: 6\n");
+    expect(text).not.toContain("Timing");
+  });
+
   it("план без времени планирования и выполнения: частей сводки нет", () => {
     render(<PlanSummary tree={planTree({ planningMs: null, executionMs: null, settings: [] })} tier="write" />);
     expect(screen.queryByText(/Планирование/)).not.toBeInTheDocument();

@@ -68,14 +68,15 @@ pub fn from_json(v: &Value) -> Result<PlanTree, PlanError> {
     let jit = obj.get("JIT").and_then(Value::as_object).map(|j| {
         let timing = j.get("Timing").and_then(Value::as_object);
         // С PG 17 `Generation` — объект `{"Deform": …, "Total": …}` (Deform входит в Total); раньше — число.
+        // Без ANALYZE и при `TIMING OFF` блока `Timing` нет: времена — `None`, не ноль.
         let t = |k: &str| {
-            timing
-                .and_then(|t| t.get(k))
-                .and_then(|v| match v {
+            timing.and_then(|t| t.get(k)).map(|v| {
+                match v {
                     Value::Object(o) => o.get("Total").and_then(Value::as_f64),
                     other => other.as_f64(),
-                })
+                }
                 .unwrap_or(0.0)
+            })
         };
         Jit {
             functions: j.get("Functions").and_then(Value::as_i64).unwrap_or(0),
@@ -308,7 +309,7 @@ mod tests {
         );
         assert_eq!(
             t.jit.as_ref().map(|j| (j.functions, j.total_ms)),
-            Some((3, 6.0))
+            Some((3, Some(6.0)))
         );
         let root = &t.root;
         assert_eq!(
@@ -489,11 +490,11 @@ mod tests {
         let j = from_json(&v).unwrap().jit.unwrap();
         assert_eq!(
             (j.functions, j.generation_ms, j.total_ms),
-            (5, 0.469, 6.469)
+            (5, Some(0.469), Some(6.469))
         );
         assert_eq!(
             (j.inlining_ms, j.optimization_ms, j.emission_ms),
-            (1.0, 2.0, 3.0)
+            (Some(1.0), Some(2.0), Some(3.0))
         );
     }
 

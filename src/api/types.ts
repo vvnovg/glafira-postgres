@@ -792,11 +792,12 @@ export interface Buffers {
 }
 export interface Jit {
   functions: number;
-  generationMs: number;
-  inliningMs: number;
-  optimizationMs: number;
-  emissionMs: number;
-  totalMs: number;
+  /** Времена JIT — только при ANALYZE с TIMING; иначе `null` (а не 0). */
+  generationMs: number | null;
+  inliningMs: number | null;
+  optimizationMs: number | null;
+  emissionMs: number | null;
+  totalMs: number | null;
 }
 export interface Trigger {
   name: string;

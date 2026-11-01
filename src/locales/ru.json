@@ -1424,7 +1424,8 @@
         "execution": "Выполнение: {{ms}}",
         "tier": "Ярус: {{tier}}",
         "elapsed": "Полный цикл: {{ms}}",
-        "jit": "JIT: функций {{functions}}, {{ms}}"
+        "jit": "JIT: функций {{functions}}, {{ms}}",
+        "jitFunctions": "JIT: функций {{functions}}"
       },
       "tiers": {
         "read": "чтение",

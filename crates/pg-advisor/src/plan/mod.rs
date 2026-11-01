@@ -61,11 +61,12 @@ pub struct Buffers {
 #[serde(rename_all = "camelCase")]
 pub struct Jit {
     pub functions: i64,
-    pub generation_ms: f64,
-    pub inlining_ms: f64,
-    pub optimization_ms: f64,
-    pub emission_ms: f64,
-    pub total_ms: f64,
+    /// Времена JIT — только при ANALYZE с TIMING (у сервера есть блок `Timing`); иначе `None`, а не ноль.
+    pub generation_ms: Option<f64>,
+    pub inlining_ms: Option<f64>,
+    pub optimization_ms: Option<f64>,
+    pub emission_ms: Option<f64>,
+    pub total_ms: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

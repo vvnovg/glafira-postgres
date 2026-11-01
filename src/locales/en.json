@@ -1402,7 +1402,8 @@
         "execution": "Execution: {{ms}}",
         "tier": "Tier: {{tier}}",
         "elapsed": "Round trip: {{ms}}",
-        "jit": "JIT: {{functions}} functions, {{ms}}"
+        "jit": "JIT: {{functions}} functions, {{ms}}",
+        "jitFunctions": "JIT: {{functions}} functions"
       },
       "tiers": {
         "read": "read",

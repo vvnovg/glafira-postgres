@@ -212,10 +212,10 @@ fn jit_generation_total_is_read_from_pg17_object() {
     let j = load("seq_scan_filter_analyze").jit.expect("JIT");
     assert_eq!(
         (j.functions, j.generation_ms, j.total_ms),
-        (14, 0.469, 158.756)
+        (14, Some(0.469), Some(158.756))
     );
     let j = load("parallel_jit_analyze").jit.expect("JIT");
-    assert_eq!(j.generation_ms, 0.226);
+    assert_eq!(j.generation_ms, Some(0.226));
 }
 
 #[test]

@@ -31,11 +31,19 @@ pub fn to_text(t: &PlanTree) -> String {
     if let Some(j) = &t.jit {
         let _ = writeln!(out, "JIT:");
         let _ = writeln!(out, "  Functions: {}", j.functions);
-        let _ = writeln!(
-            out,
-            "  Timing: Generation {:.3} ms, Inlining {:.3} ms, Optimization {:.3} ms, Emission {:.3} ms, Total {:.3} ms",
-            j.generation_ms, j.inlining_ms, j.optimization_ms, j.emission_ms, j.total_ms
-        );
+        // Строка времён — только когда они есть (ANALYZE с TIMING), как в psql.
+        if j.total_ms.is_some() {
+            let ms = |v: Option<f64>| v.unwrap_or(0.0);
+            let _ = writeln!(
+                out,
+                "  Timing: Generation {:.3} ms, Inlining {:.3} ms, Optimization {:.3} ms, Emission {:.3} ms, Total {:.3} ms",
+                ms(j.generation_ms),
+                ms(j.inlining_ms),
+                ms(j.optimization_ms),
+                ms(j.emission_ms),
+                ms(j.total_ms)
+            );
+        }
     }
     if let Some(e) = t.execution_ms {
         let _ = writeln!(out, "Execution Time: {e:.3} ms");
@@ -560,6 +568,33 @@ mod tests {
         assert_eq!(lines[2], "Planning Time: 0.100 ms");
         let v = json!({"Plan": n("Result", json!({}), vec![]), "Settings": {}});
         assert!(!to_text(&from_json(&v).unwrap()).contains("Settings"));
+    }
+
+    /// Времена JIT есть только при ANALYZE с TIMING: без них psql печатает одну строку `Functions: N`.
+    #[test]
+    fn jit_timing_line_only_when_timings_exist() {
+        let plain = json!({"Plan": n("Result", json!({}), vec![]),
+            "JIT": {"Functions": 6, "Options": {"Inlining": true, "Optimization": true, "Expressions": true, "Deforming": true}}});
+        let t = from_json(&plain).unwrap();
+        let j = t.jit.unwrap();
+        assert_eq!((j.functions, j.total_ms, j.generation_ms), (6, None, None));
+        let text = to_text(&t);
+        assert!(text.ends_with("JIT:\n  Functions: 6\n"), "{text}");
+        assert!(!text.contains("Timing"), "{text}");
+        // `ANALYZE, TIMING OFF`: Execution Time есть, времён JIT нет.
+        let off = json!({"Plan": n("Result", json!({"Actual Rows": 1, "Actual Loops": 1}), vec![]),
+            "JIT": {"Functions": 2, "Options": {"Inlining": false}}, "Execution Time": 3.0});
+        let text = to_text(&from_json(&off).unwrap());
+        assert!(
+            text.contains("JIT:\n  Functions: 2\nExecution Time: 3.000 ms"),
+            "{text}"
+        );
+        // С временами — строка `Timing:`, нулевые времена печатаются как нули.
+        let on = json!({"Plan": n("Result", json!({}), vec![]),
+            "JIT": {"Functions": 2, "Timing": {"Generation": 0.0, "Inlining": 0.0, "Optimization": 0.0, "Emission": 0.0, "Total": 0.0}}});
+        let t = from_json(&on).unwrap();
+        assert_eq!(t.jit.unwrap().total_ms, Some(0.0));
+        assert!(to_text(&t).contains("  Timing: Generation 0.000 ms, Inlining 0.000 ms, Optimization 0.000 ms, Emission 0.000 ms, Total 0.000 ms"));
     }
 
     #[test]

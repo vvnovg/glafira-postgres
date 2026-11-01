@@ -209,7 +209,12 @@ export function renderText(t: PlanTree): string {
   for (const tr of t.triggers) lines.push(`Trigger ${tr.name}: time=${f3(tr.timeMs)} calls=${tr.calls}`);
   if (t.jit) {
     lines.push("JIT:", `  Functions: ${t.jit.functions}`);
-    lines.push(`  Timing: Generation ${f3(t.jit.generationMs)} ms, Inlining ${f3(t.jit.inliningMs)} ms, Optimization ${f3(t.jit.optimizationMs)} ms, Emission ${f3(t.jit.emissionMs)} ms, Total ${f3(t.jit.totalMs)} ms`);
+    // Строка времён — только когда они есть (ANALYZE с TIMING), как в psql.
+    const j = t.jit;
+    if (j.totalMs !== null) {
+      const ms = (v: number | null) => f3(v ?? 0);
+      lines.push(`  Timing: Generation ${ms(j.generationMs)} ms, Inlining ${ms(j.inliningMs)} ms, Optimization ${ms(j.optimizationMs)} ms, Emission ${ms(j.emissionMs)} ms, Total ${ms(j.totalMs)} ms`);
+    }
   }
   if (t.executionMs !== null) lines.push(`Execution Time: ${f3(t.executionMs)} ms`);
   return `${lines.join("\n")}\n`;

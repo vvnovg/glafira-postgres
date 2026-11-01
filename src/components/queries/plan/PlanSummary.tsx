@@ -27,7 +27,10 @@ export function PlanSummary({ tree, tier, warnings = [], raw, elapsedMs, member 
     tree.executionMs !== null && t("diag.plan.summary.execution", { ms: formatMs(tree.executionMs) }),
     tier && t("diag.plan.summary.tier", { tier: t(`diag.plan.tiers.${tier}`) }),
     elapsedMs !== undefined && t("diag.plan.summary.elapsed", { ms: formatMs(elapsedMs) }),
-    tree.jit && t("diag.plan.summary.jit", { functions: tree.jit.functions, ms: formatMs(tree.jit.totalMs) }),
+    tree.jit &&
+      (tree.jit.totalMs === null
+        ? t("diag.plan.summary.jitFunctions", { functions: tree.jit.functions })
+        : t("diag.plan.summary.jit", { functions: tree.jit.functions, ms: formatMs(tree.jit.totalMs) })),
   ].filter((p): p is string => typeof p === "string");
   return (
     <section className="plan-summary">
