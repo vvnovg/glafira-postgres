@@ -369,23 +369,29 @@ type ReadProfile = (i64, Option<QueryWaits>);
 /// записи выбрасываются при каждой записи, записи закрытого подключения и ушедшего узла — по `CloseListener`.
 #[derive(Debug, Default)]
 pub struct WaitProfiles {
-    failures: Mutex<HashMap<NodeKey, i64>>,
+    /// Узел → (время ошибки, срок отсрочки).
+    failures: Mutex<HashMap<NodeKey, (i64, i64)>>,
     results: Mutex<HashMap<(NodeKey, i64), ReadProfile>>,
 }
 
 impl WaitProfiles {
-    /// Чтение профиля узла отложено: ошибка состояния сервера случилась меньше `WAIT_SAMPLING_RETRY_MS` назад.
+    /// Чтение профиля узла отложено: ошибка случилась меньше её срока отсрочки назад (`failure_backoff_ms`).
     pub fn failed_recently(&self, node: &NodeKey, now_ms: i64) -> bool {
         self.failures
             .lock_safe()
             .get(node)
-            .is_some_and(|at| now_ms - at < WAIT_SAMPLING_RETRY_MS)
+            .is_some_and(|(at, ttl)| now_ms - at < *ttl)
     }
 
+    /// Ошибка состояния сервера: узел не читается `WAIT_SAMPLING_RETRY_MS`.
     pub fn remember_failure(&self, node: &NodeKey, now_ms: i64) {
+        self.remember_failure_for(node, now_ms, WAIT_SAMPLING_RETRY_MS);
+    }
+
+    pub fn remember_failure_for(&self, node: &NodeKey, now_ms: i64, ttl_ms: i64) {
         let mut m = self.failures.lock_safe();
-        m.retain(|_, at| now_ms - *at < WAIT_SAMPLING_RETRY_MS);
-        m.insert(node.clone(), now_ms);
+        m.retain(|_, (at, ttl)| now_ms - *at < *ttl);
+        m.insert(node.clone(), (now_ms, ttl_ms));
     }
 
     /// Прочитанный меньше `WAIT_PROFILE_TTL_MS` назад профиль запроса (`Some(None)` — запроса в профиле не было).
@@ -442,8 +448,19 @@ pub fn server_state_error(code: Option<&str>, message: &str) -> bool {
     }
 }
 
+/// Отсрочка чтения профиля узла после ошибки: от состояния сервера (`server_state_error`) — `WAIT_SAMPLING_RETRY_MS`,
+/// разовая (отмена `57014`, нехватка ресурсов и прочее) — `WAIT_PROFILE_TTL_MS`: опрос карточки раз в 5 с не пишет
+/// ERROR в лог сервера на каждом обновлении, а сбой проходит быстро.
+pub fn failure_backoff_ms(code: Option<&str>, message: &str) -> i64 {
+    if server_state_error(code, message) {
+        WAIT_SAMPLING_RETRY_MS
+    } else {
+        WAIT_PROFILE_TTL_MS
+    }
+}
+
 /// Профиль ожиданий запроса: `Ok(None)` — читать нечего. Ошибка чтения не ломает карточку: ожидания берутся из
-/// сэмплов, а при ошибке состояния сервера (`server_state_error`) узел на `WAIT_SAMPLING_RETRY_MS` запоминается.
+/// сэмплов, а узел запоминается на срок `failure_backoff_ms` (ошибка состояния сервера — 10 минут, разовая — 30 с).
 /// Обрыв соединения — ошибка карточки, как у остальных её запросов. Инструкции — вне транзакции: ошибка не обрывает
 /// следующие запросы.
 async fn read_waits_profile(
@@ -496,9 +513,9 @@ async fn read_waits_profile(
         Err(e) => {
             tracing::debug!(error = %e, "pg_wait_sampling profile read failed; waits from the sampler");
             let db = e.as_db_error();
-            if server_state_error(db.map(|d| d.code().code()), db.map_or("", |d| d.message())) {
-                cache.remember_failure(node, now);
-            }
+            let backoff =
+                failure_backoff_ms(db.map(|d| d.code().code()), db.map_or("", |d| d.message()));
+            cache.remember_failure_for(node, now, backoff);
             Ok(None)
         }
     }
@@ -1068,6 +1085,41 @@ mod tests {
             &node("d", 1, "pg-1"),
             5_001 + WAIT_SAMPLING_RETRY_MS - 10_000
         ));
+    }
+
+    /// Разовая ошибка чтения профиля (отмена по `statement_timeout` и прочее не от состояния сервера) откладывает
+    /// чтение узла на `WAIT_PROFILE_TTL_MS`, а не на `WAIT_SAMPLING_RETRY_MS`: каждый опрос карточки раз в 5 с не
+    /// добавляет ERROR в лог сервера, а сбой быстро проходит.
+    #[test]
+    fn transient_profile_errors_back_off_briefly() {
+        assert_eq!(
+            failure_backoff_ms(
+                Some("57014"),
+                "canceling statement due to statement timeout"
+            ),
+            WAIT_PROFILE_TTL_MS
+        );
+        assert_eq!(failure_backoff_ms(None, ""), WAIT_PROFILE_TTL_MS);
+        assert_eq!(
+            failure_backoff_ms(Some("55000"), "pg_wait_sampling collector is not running"),
+            WAIT_SAMPLING_RETRY_MS
+        );
+        let p = WaitProfiles::default();
+        let a = node("c", 1, "pg-1");
+        p.remember_failure_for(&a, 1_000, WAIT_PROFILE_TTL_MS);
+        assert!(p.failed_recently(&a, 1_000 + WAIT_PROFILE_TTL_MS - 1));
+        assert!(!p.failed_recently(&a, 1_000 + WAIT_PROFILE_TTL_MS));
+        // Короткая запись не вытесняет долгую раньше её срока и сама выбрасывается по своему сроку.
+        let b = node("c", 1, "pg-2");
+        p.remember_failure(&b, 1_000);
+        p.remember_failure_for(&a, 1_000 + WAIT_PROFILE_TTL_MS, WAIT_PROFILE_TTL_MS);
+        p.remember_failure_for(
+            &node("d", 1, "x"),
+            1_000 + 2 * WAIT_PROFILE_TTL_MS,
+            WAIT_PROFILE_TTL_MS,
+        );
+        assert_eq!(p.len().0, 2, "короткая запись a устарела, долгая b — нет");
+        assert!(p.failed_recently(&b, 1_000 + WAIT_SAMPLING_RETRY_MS - 1));
     }
 
     #[test]
