@@ -1,6 +1,7 @@
 //! EXPLAIN и EXPLAIN ANALYZE (спец. P3 §8): запрос, результат, проверки до сервера. Ход — `run`, параметры —
 //! `params`, ярус — `tier`, данные для LLM — `llm`.
 
+pub mod hypopg;
 pub mod llm;
 pub mod params;
 pub mod run;
@@ -56,6 +57,10 @@ pub struct ExplainRequest {
     /// Выполнить как запись, хотя пробный план — чтение (кнопка после `EXPLAIN_WRITES`).
     #[serde(default)]
     pub force_write: bool,
+    /// Ярус записи подтверждён в интерфейсе («Выполнить и откатить»): без него ANALYZE записи и `force_write`
+    /// отклоняются до сервера на любом окружении (спец. §15 п. 17).
+    #[serde(default)]
+    pub write_confirmed: bool,
 }
 
 pub use tier::Tier;
@@ -72,6 +77,23 @@ pub struct ExplainResult {
     pub elapsed_ms: u64,
     /// Ключи предупреждений интерфейса: `genericPlan`, `probeWithoutReadOnly`, `adminFunction`.
     pub warnings: Vec<String>,
+    /// Рекомендации по плану (P3b, `pg_advisor::plan_rules`).
+    pub recommendations: Vec<pg_advisor::plan_rules::Recommendation>,
+    /// Правила «факт», пропущенные без ANALYZE.
+    pub recommendations_skipped: Vec<String>,
+}
+
+/// Ярус записи выполняется только по подтверждению из интерфейса: без `write_confirmed` — отказ до сервера, как у
+/// `ensure_mutation_allowed`, на любом окружении (подтверждение имени prod проверяется отдельно).
+pub fn ensure_write_confirmed(req: &ExplainRequest) -> AppResult<()> {
+    if req.write_confirmed {
+        return Ok(());
+    }
+    Err(app_err!(
+        ErrorCode::ConfirmationRequired,
+        "errors.explain.writeNotConfirmed",
+        "Executing a write needs confirmation: run it with “Execute and roll back”"
+    ))
 }
 
 /// Проверки до сервера; возвращает нормализованный SQL (без хвостовых `;`).
@@ -115,6 +137,10 @@ pub fn validate(req: &ExplainRequest) -> AppResult<String> {
             "errors.explain.forceWritePlan",
             "Running as a write applies only to the plan with execution"
         ));
+    }
+    // «Выполнить как запись» без подтверждения — отказ до соединения с сервером.
+    if req.force_write {
+        ensure_write_confirmed(req)?;
     }
     if req.params == Params::Generic && req.mode == Mode::Analyze {
         return Err(app_err!(
@@ -162,6 +188,7 @@ mod tests {
                 typed_name: None,
             },
             force_write: false,
+            write_confirmed: false,
         }
     }
 
@@ -182,10 +209,18 @@ mod tests {
         );
         let r: ExplainRequest = serde_json::from_value(serde_json::json!({"member": "m", "database": "d", "sql": "SELECT 1", "mode": "plan", "params": {"kind": "generic"}})).unwrap();
         assert_eq!(
-            (r.params, r.timeout_s, r.search_path, r.force_write),
-            (Params::Generic, DEFAULT_TIMEOUT_S, None, false),
-            "срок, search_path и forceWrite по умолчанию"
+            (
+                r.params,
+                r.timeout_s,
+                r.search_path,
+                r.force_write,
+                r.write_confirmed
+            ),
+            (Params::Generic, DEFAULT_TIMEOUT_S, None, false, false),
+            "срок, search_path, forceWrite и writeConfirmed по умолчанию"
         );
+        let r: ExplainRequest = serde_json::from_value(serde_json::json!({"member": "m", "database": "d", "sql": "UPDATE t SET a = 1", "mode": "analyze", "params": {"kind": "none"}, "writeConfirmed": true})).unwrap();
+        assert!(r.write_confirmed);
     }
 
     #[test]
@@ -261,6 +296,32 @@ mod tests {
             (ErrorCode::InvalidInput, "errors.explain.forceWritePlan")
         );
         r.mode = Mode::Analyze;
+        r.write_confirmed = true;
+        assert!(validate(&r).is_ok());
+    }
+
+    /// Ярус записи — только по подтверждению из интерфейса: `forceWrite` без `writeConfirmed` отклоняется проверкой
+    /// запроса (до соединения), сама ограда — и для яруса, определённого пробным планом.
+    #[test]
+    fn write_tier_needs_write_confirmed() {
+        let mut r = req("UPDATE t SET a = 1", Mode::Analyze, Params::None);
+        let e = ensure_write_confirmed(&r).unwrap_err();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (
+                ErrorCode::ConfirmationRequired,
+                "errors.explain.writeNotConfirmed"
+            )
+        );
+        assert!(validate(&r).is_ok(), "ярус известен только после пробы");
+        r.force_write = true;
+        assert_eq!(
+            validate(&r).unwrap_err().key,
+            "errors.explain.writeNotConfirmed",
+            "forceWrite без подтверждения — отказ до сервера"
+        );
+        r.write_confirmed = true;
+        assert!(ensure_write_confirmed(&r).is_ok());
         assert!(validate(&r).is_ok());
     }
 

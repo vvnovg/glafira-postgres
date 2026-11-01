@@ -224,7 +224,13 @@
       "notAuthorizedWrite": "Not enough privileges: EXPLAIN of a write statement needs INSERT/UPDATE/DELETE privileges on its tables even without executing it",
       "writes": "The query writes data (a volatile function or trigger): run it as a write with confirmation",
       "writeOnReplica": "A write cannot be executed on a replica: choose the primary",
-      "serverReadOnly": "The server does not accept writes in this session (read-only transaction default or standby)"
+      "serverReadOnly": "The server does not accept writes in this session (read-only transaction default or standby)",
+      "writeNotConfirmed": "Executing a write needs confirmation: run it with “Execute and roll back”"
+    },
+    "hypo": {
+      "badDdl": "The hypothesis must be a single CREATE INDEX ON … statement without CONCURRENTLY or UNIQUE",
+      "notInstalled": "hypopg is not installed in this database",
+      "rejected": "The server rejected the hypothetical index: {{message}}"
     },
     "plan": {
       "unparsed": "The plan could not be parsed (line {{line}}): {{message}}"

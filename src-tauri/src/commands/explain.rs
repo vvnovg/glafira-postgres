@@ -5,6 +5,7 @@ use pg_advisor::plan::{PlanError, PlanTree};
 use tauri::State;
 
 use crate::error::{AppResult, ErrorCode};
+use crate::explain::hypopg::{self, HypoRequest, HypoResult};
 use crate::explain::{ExplainRequest, ExplainResult};
 use crate::state::AppState;
 
@@ -15,6 +16,16 @@ pub async fn explain(
     request: ExplainRequest,
 ) -> AppResult<ExplainResult> {
     crate::explain::run::run(&state, &id, &request).await
+}
+
+/// Проверка гипотезы hypopg: стоимость до и после, использован ли индекс, размер.
+#[tauri::command]
+pub async fn hypo_check(
+    state: State<'_, AppState>,
+    id: String,
+    request: HypoRequest,
+) -> AppResult<HypoResult> {
+    hypopg::check(&state, &id, &request).await
 }
 
 /// Вставленный план: JSON или текстовый EXPLAIN (psql, auto_explain), формат определяется сам (`from_any`). Без сервера;

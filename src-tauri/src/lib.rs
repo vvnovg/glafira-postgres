@@ -127,6 +127,7 @@ pub fn run() {
             commands::queries::query_llm_bundle,
             commands::explain::explain,
             commands::explain::parse_plan,
+            commands::explain::hypo_check,
             commands::actions::list_actions,
             commands::actions::preview_session_action,
             commands::actions::execute_session_action,

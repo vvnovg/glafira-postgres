@@ -219,6 +219,7 @@ export function PlanRunner({
     searchPath: from.searchPath.trim() || null,
     confirmation,
     forceWrite,
+    writeConfirmed: false,
   });
 
   const remember = (result: ExplainResult, on: string) => {
@@ -317,10 +318,11 @@ export function PlanRunner({
     if (!confirm) return;
     const { force, inputs: from } = confirm;
     // Подтверждение остаётся открытым (кнопки ждут), пока ANALYZE идёт; закрывается итогом — результатом или ошибкой.
-    // Запрос — из входа пробы: подтверждали именно его. Ярус записи — на узле вкладки; журнал действий перечитывается.
+    // Запрос — из входа пробы: подтверждали именно его (`writeConfirmed` — без него Rust откажет записи). Ярус записи — на
+    // узле вкладки; журнал действий перечитывается.
     return guarded(from, async () => {
       try {
-        remember(await explain.mutateAsync(request("analyze", c, force, from)), member);
+        remember(await explain.mutateAsync({ ...request("analyze", c, force, from), writeConfirmed: true }), member);
       } finally {
         void qc.invalidateQueries({ queryKey: ["actions", connectionId] });
         if (alive.current) setConfirm(null);

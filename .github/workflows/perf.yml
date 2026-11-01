@@ -51,7 +51,7 @@ jobs:
           scripts/wait-matrix.sh
           scripts/wait-perf.sh
       - name: it_queries и it_explain
-        run: cargo test --manifest-path src-tauri/Cargo.toml --test it_queries --test it_explain -- --test-threads=1
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test it_queries --test it_explain --test it_hypopg -- --test-threads=1
         env:
           GPG_IT_SINGLE: localhost:5460
           GPG_IT_PRIMARY: localhost:5451

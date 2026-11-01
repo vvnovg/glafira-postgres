@@ -45,7 +45,7 @@ describe("PlanRunner", () => {
     await user.type(screen.getByRole("textbox", { name: "$1" }), "7");
     vi.mocked(api.explain).mockResolvedValue(result({ mode: "analyze" }));
     await user.click(screen.getByRole("button", { name: "План с выполнением" }));
-    await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("c", expect.objectContaining({ mode: "analyze", params: { kind: "values", values: ["7", null] }, timeoutS: 30, forceWrite: false })));
+    await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("c", expect.objectContaining({ mode: "analyze", params: { kind: "values", values: ["7", null] }, timeoutS: 30, forceWrite: false, writeConfirmed: false })));
     // Проба яруса перед ANALYZE — «План» по флажку (GENERIC_PLAN, без значений); значения уходят в само выполнение.
     const calls = vi.mocked(api.explain).mock.calls;
     expect(calls[calls.length - 2][1]).toMatchObject({ mode: "plan", params: { kind: "generic" } });
@@ -89,7 +89,7 @@ describe("PlanRunner", () => {
     expect(within(dialog).getByText(/NOTIFY не доставляется/)).toBeInTheDocument();
     expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["actions", "c"] });
     await user.click(within(dialog).getByRole("button", { name: "Выполнить и откатить" }));
-    await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("c", expect.objectContaining({ mode: "analyze", confirmation: { confirm: null, typedName: null } })));
+    await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("c", expect.objectContaining({ mode: "analyze", confirmation: { confirm: null, typedName: null }, writeConfirmed: true })));
     await waitFor(() => expect(screen.queryByRole("group", CONFIRM)).not.toBeInTheDocument());
     // Ярус записи пишет журнал действий — его список перечитывается, как после диалогов P2.
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["actions", "c"] });
@@ -103,7 +103,7 @@ describe("PlanRunner", () => {
     const again = await screen.findByRole("group", CONFIRM);
     expect(within(again).getByText("shop.orders")).toBeInTheDocument();
     await user.click(within(again).getByRole("button", { name: "Выполнить и откатить" }));
-    await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("c", expect.objectContaining({ mode: "analyze", forceWrite: true, confirmation: { confirm: null, typedName: null } })));
+    await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("c", expect.objectContaining({ mode: "analyze", forceWrite: true, confirmation: { confirm: null, typedName: null }, writeConfirmed: true })));
     expect(api.explain).toHaveBeenCalledTimes(5);
   });
 
@@ -209,7 +209,7 @@ describe("PlanRunner: вход пробы, реплика, загрузка пр
     expect(within(dialog).getByText("Данные изменятся и откатятся.")).toBeInTheDocument();
     vi.mocked(api.explain).mockResolvedValueOnce(result({ mode: "analyze", tier: "write", relations: [] }));
     await user.click(within(dialog).getByRole("button", { name: "Выполнить и откатить" }));
-    await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("c", expect.objectContaining({ mode: "analyze", forceWrite: true, sql: "SELECT f()" })));
+    await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("c", expect.objectContaining({ mode: "analyze", forceWrite: true, sql: "SELECT f()", writeConfirmed: true })));
   });
 
   it("профиль ещё читается: кнопки выключены, подсказки read-only нет", async () => {

@@ -33,7 +33,14 @@ fn req(member: &str, database: &str, sql: &str, mode: Mode, params: Params) -> E
             typed_name: None,
         },
         force_write: false,
+        write_confirmed: false,
     }
+}
+
+/// Запуск, подтверждённый в интерфейсе («Выполнить и откатить»): ярус записи выполняется только с `writeConfirmed`.
+fn confirmed(mut r: ExplainRequest) -> ExplainRequest {
+    r.write_confirmed = true;
+    r
 }
 
 fn values(v: &[&str]) -> Params {
@@ -71,6 +78,34 @@ async fn plan_and_analyze_read_tier_on_perf() {
     .unwrap();
     assert_eq!((r.mode, r.tier), (Mode::Plan, Tier::Read));
     assert!(r.plan.root.actual.is_none());
+    assert_eq!(
+        r.recommendations_skipped.len(),
+        9,
+        "без ANALYZE правила «факт» пропущены: {:?}",
+        r.recommendations_skipped
+    );
+    // Тот же запрос с ANALYZE: Seq Scan с фильтром — рекомендация индекса, пропусков нет.
+    let a = explain::run::run(
+        &st,
+        "it",
+        &req(
+            &m,
+            "perf",
+            "SELECT count(*) FROM shop.orders WHERE status = $1",
+            Mode::Analyze,
+            values(&["disputed"]),
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(
+        a.recommendations
+            .iter()
+            .any(|x| x.id == "plan_seq_scan_filter"),
+        "{:?}",
+        a.recommendations
+    );
+    assert!(a.recommendations_skipped.is_empty());
     assert!(
         r.relations
             .iter()
@@ -246,7 +281,8 @@ async fn plan_and_analyze_read_tier_on_perf() {
         (e.code, e.key.as_str()),
         (ErrorCode::ExplainWrites, "errors.explain.writes")
     );
-    // «Выполнить как запись»: тот же запрос с forceWrite идёт ярусом записи (dev — без подтверждения) и пишется в журнал.
+    // «Выполнить как запись» без подтверждения в интерфейсе (`writeConfirmed`) — отказ проверкой запроса, до сервера, и
+    // на dev; с подтверждением — ярус записи (dev — без ввода имени), строка журнала.
     let mut forced = req(
         &m,
         "perf",
@@ -255,7 +291,18 @@ async fn plan_and_analyze_read_tier_on_perf() {
         Params::None,
     );
     forced.force_write = true;
-    let r = explain::run::run(&st, "it", &forced).await.unwrap();
+    let e = explain::run::run(&st, "it", &forced).await.unwrap_err();
+    assert_eq!(
+        (e.code, e.key.as_str()),
+        (
+            ErrorCode::ConfirmationRequired,
+            "errors.explain.writeNotConfirmed"
+        )
+    );
+    assert!(st.actions.list(Some("it"), 10).is_empty());
+    let r = explain::run::run(&st, "it", &confirmed(forced))
+        .await
+        .unwrap();
     assert_eq!(r.tier, Tier::Write);
     let records = st.actions.list(Some("it"), 10);
     assert_eq!(records.len(), 1, "ярус записи — строка журнала");
@@ -386,11 +433,28 @@ async fn write_tier_rolls_back_journals_and_respects_guard() {
             .collect::<Vec<_>>(),
         ["balances"]
     );
-    // Dev-профиль: подтверждения не нужно; выполнено и откатано; строка журнала.
-    let r = explain::run::run(
+    // Без подтверждения в интерфейсе (`writeConfirmed`) ANALYZE записи отклонён и на dev — до выполнения: строка не
+    // менялась, журнала нет.
+    let e = explain::run::run(
         &st,
         "it",
         &req(&m, "perf", sql, Mode::Analyze, values(&["1"])),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        (e.code, e.key.as_str()),
+        (
+            ErrorCode::ConfirmationRequired,
+            "errors.explain.writeNotConfirmed"
+        )
+    );
+    assert!(st.actions.list(Some("it"), 10).is_empty());
+    // Dev-профиль: ввода имени не нужно; выполнено и откатано; строка журнала.
+    let r = explain::run::run(
+        &st,
+        "it",
+        &confirmed(req(&m, "perf", sql, Mode::Analyze, values(&["1"]))),
     )
     .await
     .unwrap();
@@ -425,12 +489,15 @@ async fn write_tier_rolls_back_journals_and_respects_guard() {
     let e = explain::run::run(
         &st,
         "it",
-        &req(&m, "perf", sql, Mode::Analyze, values(&["1"])),
+        &confirmed(req(&m, "perf", sql, Mode::Analyze, values(&["1"]))),
     )
     .await
     .unwrap_err();
-    assert_eq!(e.code, ErrorCode::ConfirmationRequired);
-    let mut ok = req(&m, "perf", sql, Mode::Analyze, values(&["1"]));
+    assert_eq!(
+        (e.code, e.key.as_str()),
+        (ErrorCode::ConfirmationRequired, "errors.guard.prodConfirm")
+    );
+    let mut ok = confirmed(req(&m, "perf", sql, Mode::Analyze, values(&["1"])));
     ok.confirmation.confirm = Some("it".into());
     let r = explain::run::run(&st, "it", &ok).await.unwrap();
     assert_eq!(r.tier, Tier::Write);
@@ -442,7 +509,7 @@ async fn write_tier_rolls_back_journals_and_respects_guard() {
     let e = explain::run::run(
         &st,
         "it",
-        &req(&m, "perf", sql, Mode::Analyze, values(&["1"])),
+        &confirmed(req(&m, "perf", sql, Mode::Analyze, values(&["1"]))),
     )
     .await
     .unwrap_err();
@@ -511,13 +578,18 @@ async fn force_write_checks_the_guard_first_and_probes_outside_read_only() {
         "без forceWrite — сначала проба"
     );
     broken.force_write = true;
+    broken.write_confirmed = true;
     let e = explain::run::run(&st, "it", &broken).await.unwrap_err();
-    assert_eq!(e.code, ErrorCode::ConfirmationRequired, "{e:?}");
+    assert_eq!(
+        (e.code, e.key.as_str()),
+        (ErrorCode::ConfirmationRequired, "errors.guard.prodConfirm"),
+        "{e:?}"
+    );
     // С подтверждением: проба и ANALYZE вне READ ONLY, ярус записи, строка журнала.
-    let mut confirmed = req(&m, "perf", sql, Mode::Analyze, Params::None);
-    confirmed.force_write = true;
-    confirmed.confirmation.confirm = Some("it".into());
-    let r = explain::run::run(&st, "it", &confirmed).await.unwrap();
+    let mut ok = confirmed(req(&m, "perf", sql, Mode::Analyze, Params::None));
+    ok.force_write = true;
+    ok.confirmation.confirm = Some("it".into());
+    let r = explain::run::run(&st, "it", &ok).await.unwrap();
     assert_eq!((r.mode, r.tier), (Mode::Analyze, Tier::Write));
     assert_eq!(
         (
@@ -546,7 +618,7 @@ async fn force_write_checks_the_guard_first_and_probes_outside_read_only() {
     p.environment = Environment::Dev;
     p.read_only = true;
     st.connections.upsert(p).unwrap();
-    let mut ro = req(&m, "perf", sql, Mode::Analyze, Params::None);
+    let mut ro = confirmed(req(&m, "perf", sql, Mode::Analyze, Params::None));
     ro.force_write = true;
     let e = explain::run::run(&st, "it", &ro).await.unwrap_err();
     assert_eq!(e.code, ErrorCode::ReadOnly);
@@ -604,7 +676,7 @@ async fn generic_plan_is_refused_before_16_and_writes_are_refused_on_a_replica()
         let e = explain::run::run(
             &st,
             "it",
-            &req(&m, "orders", sql, Mode::Analyze, Params::None),
+            &confirmed(req(&m, "orders", sql, Mode::Analyze, Params::None)),
         )
         .await
         .unwrap_err();
@@ -629,7 +701,7 @@ async fn generic_plan_is_refused_before_16_and_writes_are_refused_on_a_replica()
             (e.code, e.key.as_str()),
             (ErrorCode::ExplainWrites, "errors.explain.writes")
         );
-        let mut forced = lo.clone();
+        let mut forced = confirmed(lo.clone());
         forced.force_write = true;
         let e = explain::run::run(&st, "it", &forced).await.unwrap_err();
         assert_eq!(

@@ -215,6 +215,7 @@ pub async fn bundle(
                         search_path: None,
                         confirmation: Confirmation::default(),
                         force_write: false,
+                        write_confirmed: false,
                     };
                     plan_or_warning(run::run(st, id, &req).await, id, member, &mut warnings)
                 }

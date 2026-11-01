@@ -18,11 +18,13 @@ use crate::diag::head;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::explain::params::first_word;
 use crate::explain::tier::{Tier, admin_calls, tier_of};
-use crate::explain::{ExplainRequest, ExplainResult, Mode, PROBE_TIMEOUT_S, Params, validate};
+use crate::explain::{
+    ExplainRequest, ExplainResult, Mode, PROBE_TIMEOUT_S, Params, ensure_write_confirmed, validate,
+};
 use crate::guard::ensure_mutation_allowed;
 use crate::state::AppState;
 
-const PROBE_OPTIONS: &str = "FORMAT JSON, VERBOSE, SETTINGS";
+pub(crate) const PROBE_OPTIONS: &str = "FORMAT JSON, VERBOSE, SETTINGS";
 const ANALYZE_OPTIONS: &str = "ANALYZE, BUFFERS, WAL, VERBOSE, SETTINGS, FORMAT JSON";
 /// Запас клиентского срока над серверным `statement_timeout`: сервер успевает прервать запрос сам.
 const CLIENT_MARGIN_S: u64 = 5;
@@ -30,7 +32,7 @@ const CLIENT_MARGIN_S: u64 = 5;
 const WRITE_WORDS: [&str; 5] = ["insert", "update", "delete", "merge", "create"];
 
 /// Ошибка одного EXPLAIN: сырая ошибка сервера нужна до перевода в `AppError` (25006, «вторая инструкция»).
-enum Step {
+pub(crate) enum Step {
     Pg(tokio_postgres::Error),
     App(AppError),
 }
@@ -78,13 +80,13 @@ fn is_read_only_violation(e: &tokio_postgres::Error) -> bool {
 }
 
 /// Начало текста команды EXPLAIN перед SQL пользователя.
-fn explain_prefix(options: &str) -> String {
+pub(crate) fn explain_prefix(options: &str) -> String {
     format!("EXPLAIN ({options}) ")
 }
 
 /// Где SQL пользователя в команде EXPLAIN: позиция ошибки сервера пересчитывается в позицию в исходном тексте.
 #[derive(Debug, Clone, Copy)]
-struct Origin {
+pub(crate) struct Origin {
     /// Символов `EXPLAIN (…) ` перед SQL.
     prefix: usize,
     /// Ведущих пробельных символов исходного текста, снятых `normalize`.
@@ -92,7 +94,7 @@ struct Origin {
 }
 
 impl Origin {
-    fn new(options: &str, original: &str) -> Self {
+    pub(crate) fn new(options: &str, original: &str) -> Self {
         Self {
             prefix: explain_prefix(options).chars().count(),
             leading: original.chars().take_while(|c| c.is_whitespace()).count(),
@@ -117,14 +119,14 @@ fn is_write_statement(tier: Option<Tier>, sql: &str) -> bool {
 
 /// Что известно о команде при переводе ошибки сервера.
 #[derive(Debug, Clone, Copy)]
-struct Context {
+pub(crate) struct Context {
     /// Где SQL пользователя в тексте команды; `None` — ошибка не в команде EXPLAIN (`BEGIN`, `SET LOCAL`).
-    origin: Option<Origin>,
+    pub(crate) origin: Option<Origin>,
     /// Пишущая инструкция (`is_write_statement`): подсказка о правах записи, а не чтения.
-    write: bool,
+    pub(crate) write: bool,
     /// Транзакция `READ ONLY` (пробный план, ярус чтения): 25006 в ней — `EXPLAIN_WRITES`; вне её — сервер не
     /// принимает запись вообще (повтор «как запись» ничего бы не дал).
-    read_only: bool,
+    pub(crate) read_only: bool,
 }
 
 /// Поля ошибки сервера, по которым она переводится.
@@ -138,7 +140,7 @@ struct ServerError<'a> {
 }
 
 /// Перевод ошибки сервера; не ответ сервера и прочие коды — через `from_pg`.
-fn classify(e: &tokio_postgres::Error, ctx: Context) -> AppError {
+pub(crate) fn classify(e: &tokio_postgres::Error, ctx: Context) -> AppError {
     e.as_db_error()
         .and_then(|db| {
             classify_server(
@@ -228,7 +230,7 @@ fn explain_writes() -> AppError {
     )
 }
 
-fn explain_timeout() -> AppError {
+pub(crate) fn explain_timeout() -> AppError {
     app_err!(
         ErrorCode::Timeout,
         "errors.explain.timeout",
@@ -238,7 +240,10 @@ fn explain_timeout() -> AppError {
 
 /// Клиентский срок сетевого шага: серверный срок `secs` плюс `CLIENT_MARGIN_S`. По истечении вызывающий возвращает
 /// ошибку и закрывает соединение (`Drop` у `ActionClient`), а сервер откатывает открытую транзакцию.
-async fn within<T>(secs: u32, step: impl Future<Output = Result<T, Step>>) -> Result<T, Step> {
+pub(crate) async fn within<T>(
+    secs: u32,
+    step: impl Future<Output = Result<T, Step>>,
+) -> Result<T, Step> {
     tokio::time::timeout(Duration::from_secs(u64::from(secs) + CLIENT_MARGIN_S), step)
         .await
         .unwrap_or_else(|_| Err(Step::App(explain_timeout())))
@@ -246,7 +251,7 @@ async fn within<T>(secs: u32, step: impl Future<Output = Result<T, Step>>) -> Re
 
 /// Один EXPLAIN внутри транзакции: `BEGIN [READ ONLY]` (по `ctx.read_only`), `SET LOCAL`, EXPLAIN, `ROLLBACK`.
 /// Ошибка самой команды EXPLAIN возвращается сырой (`Step::Pg`): её переводит вызывающий.
-async fn explain_in_tx(
+pub(crate) async fn explain_in_tx(
     c: &Client,
     ctx: Context,
     timeout_s: u32,
@@ -351,6 +356,7 @@ fn ensure_write_allowed(
     in_recovery: bool,
 ) -> AppResult<()> {
     ensure_mutation_allowed(profile, req.confirmation.confirm.as_deref())?;
+    ensure_write_confirmed(req)?;
     if in_recovery {
         return Err(app_err!(
             ErrorCode::FeatureUnavailable,
@@ -361,7 +367,7 @@ fn ensure_write_allowed(
     Ok(())
 }
 
-fn probe_options(params: &Params) -> String {
+pub(crate) fn probe_options(params: &Params) -> String {
     match params {
         Params::Generic => format!("{PROBE_OPTIONS}, GENERIC_PLAN"),
         _ => PROBE_OPTIONS.to_string(),
@@ -377,6 +383,7 @@ fn result(
     warnings: Vec<String>,
 ) -> ExplainResult {
     let relations = relations(&tree);
+    let report = pg_advisor::plan_rules::evaluate(&tree);
     ExplainResult {
         mode,
         tier,
@@ -385,6 +392,8 @@ fn result(
         relations,
         elapsed_ms: started.elapsed().as_millis() as u64,
         warnings,
+        recommendations: report.recommendations,
+        recommendations_skipped: report.skipped,
     }
 }
 

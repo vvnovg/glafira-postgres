@@ -893,6 +893,8 @@ export interface ExplainRequest {
   confirmation: Confirmation;
   /** Выполнить как запись, хотя пробный план — чтение (после `EXPLAIN_WRITES`). */
   forceWrite: boolean;
+  /** Ярус записи подтверждён в `AnalyzeConfirm` («Выполнить и откатить»); без него Rust отказывает записи и `forceWrite`. */
+  writeConfirmed: boolean;
 }
 export interface ExplainResult {
   mode: ExplainMode;
