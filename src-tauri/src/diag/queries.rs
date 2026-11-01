@@ -98,11 +98,13 @@ const DETECT_KCACHE_SQL: &str = marked_sql!(
 /// Можно ли читать `pg_stat_kcache()` по каталогу: есть право вызова и библиотека в `shared_preload_libraries` (настройка
 /// не видна роли — решает проба).
 pub fn kcache_usable(preload: Option<&str>, can_execute: bool) -> bool {
-    can_execute
-        && preload.is_none_or(|p| {
-            p.split(',')
-                .any(|l| l.trim().trim_matches('"') == "pg_stat_kcache")
-        })
+    can_execute && preloaded(preload, "pg_stat_kcache")
+}
+
+/// Библиотека `lib` есть в `shared_preload_libraries`; настройка не видна роли (`None`) — считается загруженной (решает
+/// проба или само чтение).
+pub fn preloaded(preload: Option<&str>, lib: &str) -> bool {
+    preload.is_none_or(|p| p.split(',').any(|l| l.trim().trim_matches('"') == lib))
 }
 
 /// Проба `pg_stat_kcache()` отдельной инструкцией (вне транзакции: ошибка не обрывает следующие запросы). Нужен

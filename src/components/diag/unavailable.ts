@@ -23,6 +23,7 @@ export const UNAVAILABLE_PARTS: Record<string, string> = {
   window: "diag.unavailable.parts.window",
   running: "diag.unavailable.parts.running",
   between: "diag.unavailable.parts.between",
+  waitsProfile: "diag.unavailable.parts.waitsProfile",
 };
 
 /** Текст строки «недоступно»: причина из Rust с подписью части вместо её внутреннего имени. */

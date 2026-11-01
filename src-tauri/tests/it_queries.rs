@@ -791,3 +791,58 @@ async fn kcache_columns_on_perf() {
         assert!(!d.rows.is_empty() && d.rows.iter().all(|x| x.cpu_user_ms.is_none()));
     }
 }
+
+/// Профиль `pg_wait_sampling` на pg-perf (`profile_queries = top`): ожидания самого долгого запроса базы `perf` берутся из
+/// профиля (накопительного с его сброса, `sinceMs = 0`). На pg-lab расширения нет — пометки `waitsProfile` нет.
+#[tokio::test]
+async fn wait_sampling_profile_on_perf() {
+    if let Some(perf) = common::perf_addr() {
+        let (_dir, st) = common::open_server_in(&perf, "perf").await;
+        let member = st.runtimes.view("it").topology.unwrap().members[0]
+            .name
+            .clone();
+        let r = diag::run(&st, "it", request(since_reset(QuerySort::TotalTime)))
+            .await
+            .unwrap();
+        let DiagData::Queries(d) = &r.data else {
+            unreachable!()
+        };
+        let top = d
+            .rows
+            .iter()
+            .find(|x| x.datname.as_deref() == Some("perf"))
+            .expect("строка базы perf");
+        let detail = query_detail::detail(&st, "it", &member, "perf", top.key.query_id)
+            .await
+            .unwrap();
+        match &detail.waits {
+            Some(w) => {
+                assert_eq!(w.source, query_detail::WaitsSource::PgWaitSampling);
+                assert_eq!(w.since_ms, 0);
+                assert!(w.total > 0 && !w.items.is_empty());
+            }
+            None => assert!(
+                detail.unavailable.iter().any(|u| u.part == "waitsProfile"),
+                "{:?}",
+                detail.unavailable
+            ),
+        }
+        // Запроса нет в профиле — ожиданий нет (сэмплер активности не запускался), пометки тоже нет.
+        let gone = query_detail::detail(&st, "it", &member, "perf", 1)
+            .await
+            .unwrap();
+        assert!(gone.waits.is_none());
+        assert!(gone.unavailable.iter().all(|u| u.part != "waitsProfile"));
+    }
+    if let Some(lab) = common::lab_addr() {
+        let (_dir, st) = common::open_server_in(&lab, "postgres").await;
+        let member = st.runtimes.view("it").topology.unwrap().members[0]
+            .name
+            .clone();
+        let detail = query_detail::detail(&st, "it", &member, "postgres", 1)
+            .await
+            .unwrap();
+        assert!(detail.waits.is_none());
+        assert!(detail.unavailable.iter().all(|u| u.part != "waitsProfile"));
+    }
+}

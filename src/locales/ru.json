@@ -897,6 +897,7 @@
       "statementsHidden": "{{part}}: нужна роль pg_read_all_stats",
       "statementsStarting": "{{part}}: сэмплер запросов запускается",
       "betweenReset": "{{part}}: статистика сбрасывалась между снимками",
+      "waitsProfileOff": "{{part}}: pg_wait_sampling.profile_queries выключен, ожидания — по сэмплам «Сессий»",
       "parts": {
         "queryId": "Идентификатор запроса (query_id)",
         "walDir": "Размер pg_wal",
@@ -913,7 +914,8 @@
         "others": "Запросы других ролей",
         "window": "Данные окна",
         "running": "Выполняющиеся экземпляры (query_id)",
-        "between": "Сравнение"
+        "between": "Сравнение",
+        "waitsProfile": "Профиль ожиданий (pg_wait_sampling)"
       }
     },
     "tools": {
@@ -1378,6 +1380,10 @@
       "openSessions": "Открыть «{{tool}}»",
       "waits": "Ожидания",
       "noWaitsBuffer": "Откройте «Профиль ожиданий», чтобы собирать ожидания этого запроса",
+      "waitsSource": {
+        "sampler": "По сэмплам «Сессий», 60 мин",
+        "pgWaitSampling": "Профиль pg_wait_sampling с момента его сброса"
+      },
       "waitEvent": "Событие",
       "share": "Доля",
       "samples": "Сэмплов",

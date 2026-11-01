@@ -1,8 +1,9 @@
 //! Карточка запроса (спец. P3 §7.2): накопительные строки pgss по ролям и `toplevel`, окна и история из буфера
-//! сэмплера pgss, выполняющиеся экземпляры из `pg_stat_activity` (14+), ожидания из буфера сэмплера активности.
+//! сэмплера pgss, выполняющиеся экземпляры из `pg_stat_activity` (14+), ожидания из профиля `pg_wait_sampling` (P3b),
+//! а без него — из буфера сэмплера активности.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use pg_advisor::ash::Sample;
 use pg_advisor::findings::Finding;
@@ -12,10 +13,12 @@ use pg_advisor::queries::{Counters, Cumulative, QueryKey, QueryStat, Totals, sta
 use serde::Serialize;
 use tokio_postgres::Client;
 
+use crate::catalog::ddl::quote_ident;
 use crate::conn::errors::from_pg;
 use crate::diag::caps::{Caps, V14};
 use crate::diag::queries::{
-    Detect, PgssInfo, PgssInstalled, detect, info_sql, missing, row_from, statements_sql, too_old,
+    Detect, PgssInfo, PgssInstalled, detect, info_sql, missing, preloaded, row_from,
+    statements_sql, too_old,
 };
 use crate::diag::sessions::QUERY_LIMIT;
 use crate::diag::sql::BACKEND_START_US;
@@ -113,7 +116,8 @@ pub struct QueryDetail {
     pub history: Vec<HistoryPoint>,
     pub gaps: Vec<Gap>,
     pub running: Vec<RunningInstance>,
-    /// `None` — буфера сэмплера активности на узле нет (вкладка «Профиль ожиданий» не открывалась).
+    /// Профиль `pg_wait_sampling` (если расширение читается и в нём есть запрос), иначе сэмплы активности; `None` —
+    /// ни того, ни другого (буфера сэмплера на узле нет: вкладка «Профиль ожиданий» не открывалась).
     pub waits: Option<QueryWaits>,
     pub findings: Vec<Finding>,
     pub unavailable: Vec<Unavailable>,
@@ -231,6 +235,190 @@ pub fn waits_of(samples: &[Sample<'_>], query_id: i64, since_ms: i64) -> Option<
     })
 }
 
+/// Профиль `pg_wait_sampling` запроса по типу и событию, сумма по процессам (`profile_pid`). Строки без ожидания
+/// (`sample_cpu`, NULL в `event_type`) — `CPU`, как у сэмплов активности. `queryid` профиля — запрос верхнего уровня
+/// при `profile_queries = top` (ожидания вложенных инструкций приписаны вызывающей) и текущая инструкция при `all`.
+pub fn waits_sql(ns: &str) -> String {
+    format!(
+        "{SQL_MARKER}SELECT COALESCE(event_type, 'CPU')::text, event::text, sum(count)::bigint \
+         FROM {ns}.pg_wait_sampling_profile WHERE queryid = $1 GROUP BY 1, 2 ORDER BY 3 DESC, 1, 2"
+    )
+}
+
+/// Профиль `pg_wait_sampling` (накопительный с момента `pg_wait_sampling_reset_profile()`, поэтому `since_ms: 0`):
+/// доли по типу и событию. Пусто — `None` (карточка возьмёт сэмплы активности).
+pub fn waits_from_profile(rows: Vec<(String, Option<String>, i64)>) -> Option<QueryWaits> {
+    let total: u64 = rows.iter().map(|r| r.2.max(0) as u64).sum();
+    if total == 0 {
+        return None;
+    }
+    let mut items: Vec<WaitItem> = rows
+        .into_iter()
+        .filter(|r| r.2 > 0)
+        .map(|(event_type, event, count)| WaitItem {
+            event_type,
+            event,
+            count: count as u64,
+            share_pct: count as f64 * 100.0 / total as f64,
+        })
+        .collect();
+    items.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then_with(|| a.event_type.cmp(&b.event_type))
+            .then_with(|| a.event.cmp(&b.event))
+    });
+    Some(QueryWaits {
+        source: WaitsSource::PgWaitSampling,
+        since_ms: 0,
+        total,
+        items,
+    })
+}
+
+/// Расширение `pg_wait_sampling` в базе: схема, `profile_queries` (NULL — библиотека не загружена: параметр не
+/// определён), `shared_preload_libraries` (NULL — не видна роли), право читать профиль и колонка `queryid` у профиля
+/// (её нет в 1.0).
+const WAIT_SAMPLING_SQL: &str = marked_sql!(
+    "SELECT n.nspname::text, current_setting('pg_wait_sampling.profile_queries', true), \
+    (SELECT setting FROM pg_settings WHERE name = 'shared_preload_libraries'), \
+    COALESCE(has_function_privilege(to_regprocedure(format('%I.pg_wait_sampling_get_profile()', n.nspname)), 'EXECUTE') \
+      AND has_table_privilege(to_regclass(format('%I.pg_wait_sampling_profile', n.nspname)), 'SELECT'), false), \
+    EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = to_regclass(format('%I.pg_wait_sampling_profile', n.nspname)) \
+      AND a.attname = 'queryid' AND NOT a.attisdropped) \
+    FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'pg_wait_sampling'"
+);
+
+/// Что делать с профилем `pg_wait_sampling` в карточке.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WaitSampling {
+    /// Не трогать: расширения нет, библиотека не загружена, нет прав или `queryid`. Ожидания — из сэмплов, без пометки.
+    Skip,
+    /// `profile_queries` выключен: профиль есть, но без запросов — пометка `waitsProfile`, ожидания из сэмплов.
+    Off,
+    /// Читать профиль из схемы (уже в кавычках).
+    Read(String),
+}
+
+/// Решение по строке `WAIT_SAMPLING_SQL`. `profile_queries` в 1.1.4+ — перечисление `none`/`top`/`all` (с синонимами
+/// булевых значений), раньше — булев параметр: `on`/`off`.
+pub fn wait_sampling_plan(
+    schema: &str,
+    profile_queries: Option<&str>,
+    preload: Option<&str>,
+    can_read: bool,
+    has_queryid: bool,
+) -> WaitSampling {
+    if !can_read || !has_queryid || !preloaded(preload, "pg_wait_sampling") {
+        return WaitSampling::Skip;
+    }
+    match profile_queries
+        .map(|v| v.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("none" | "off" | "no" | "false" | "0") => WaitSampling::Off,
+        Some("top" | "all" | "on" | "yes" | "true" | "1") => {
+            WaitSampling::Read(quote_ident(schema))
+        }
+        _ => WaitSampling::Skip,
+    }
+}
+
+fn waits_profile_off() -> Unavailable {
+    Unavailable {
+        part: "waitsProfile".into(),
+        member: None,
+        reason: ltext!(
+            "diag.unavailable.waitsProfileOff",
+            "{{part}}: pg_wait_sampling.profile_queries is off, waits come from the Sessions sampler",
+            part = "waitsProfile"
+        ),
+    }
+}
+
+/// Сколько карточка не читает профиль `pg_wait_sampling` узла после ошибки чтения (расширение создано, но не читается):
+/// каждая ошибка — строка ERROR в логе сервера, а карточка опрашивается каждые 5 с.
+pub const WAIT_SAMPLING_RETRY_MS: i64 = 600_000;
+
+/// Ошибки чтения профиля по подключению и узлу: время последней.
+#[derive(Debug, Default)]
+pub struct ProfileFailures(Mutex<HashMap<String, i64>>);
+
+impl ProfileFailures {
+    /// Чтение отложено: последняя ошибка случилась меньше `WAIT_SAMPLING_RETRY_MS` назад.
+    pub fn blocked(&self, key: &str, now_ms: i64) -> bool {
+        let mut m = self.0.lock_safe();
+        match m.get(key) {
+            Some(at) if now_ms - at < WAIT_SAMPLING_RETRY_MS => true,
+            Some(_) => {
+                m.remove(key);
+                false
+            }
+            None => false,
+        }
+    }
+
+    pub fn remember(&self, key: &str, now_ms: i64) {
+        self.0.lock_safe().insert(key.to_string(), now_ms);
+    }
+}
+
+static PROFILE_FAILURES: LazyLock<ProfileFailures> = LazyLock::new(ProfileFailures::default);
+
+/// Ключ узла для `ProfileFailures`.
+fn failures_key(id: &str, member: &str) -> String {
+    format!("{id}\u{0}{member}")
+}
+
+/// Профиль ожиданий запроса: `Ok(None)` — читать нечего. Ошибка чтения (библиотека не загружена при невидимой
+/// `shared_preload_libraries`, повреждённое расширение) не ломает карточку: ожидания берутся из сэмплов, а узел на
+/// `WAIT_SAMPLING_RETRY_MS` запоминается. Инструкции — вне транзакции: ошибка не обрывает следующие запросы.
+async fn read_waits_profile(
+    c: &Client,
+    query_id: i64,
+    failures_key: &str,
+    unavailable: &mut Vec<Unavailable>,
+) -> AppResult<Option<QueryWaits>> {
+    let Some(r) = c
+        .query_opt(WAIT_SAMPLING_SQL, &[])
+        .await
+        .map_err(|e| from_pg(&e))?
+    else {
+        return Ok(None);
+    };
+    let plan = wait_sampling_plan(
+        &r.get::<_, String>(0),
+        r.get::<_, Option<String>>(1).as_deref(),
+        r.get::<_, Option<String>>(2).as_deref(),
+        r.get::<_, Option<bool>>(3).unwrap_or(false),
+        r.get::<_, Option<bool>>(4).unwrap_or(false),
+    );
+    let schema = match plan {
+        WaitSampling::Skip => return Ok(None),
+        WaitSampling::Off => {
+            unavailable.push(waits_profile_off());
+            return Ok(None);
+        }
+        WaitSampling::Read(schema) => schema,
+    };
+    let now = crate::topology::model::now_ms();
+    if PROFILE_FAILURES.blocked(failures_key, now) {
+        return Ok(None);
+    }
+    match c.query(&waits_sql(&schema), &[&query_id]).await {
+        Ok(rows) => Ok(waits_from_profile(
+            rows.iter()
+                .map(|r| (r.get(0), r.get(1), r.get(2)))
+                .collect(),
+        )),
+        Err(e) => {
+            tracing::debug!(error = %e, "pg_wait_sampling profile read failed; waits from the sampler");
+            PROFILE_FAILURES.remember(failures_key, now);
+            Ok(None)
+        }
+    }
+}
+
 /// Выполняющиеся экземпляры (14+): `$1` — `query_id`, `$2` — база. Перечисляются только активные ведущие бэкенды
 /// (`state = 'active'`, `leader_pid IS NULL`), как и у сэмплера ожиданий: `query_id` в `pg_stat_activity` сохраняется
 /// и после завершения инструкции (простаивающая сессия не выполняется), а параллельные воркеры несут `query_id`
@@ -318,6 +506,7 @@ struct Fetched {
     totals: Totals,
     info: PgssInfo,
     running: Vec<RunningInstance>,
+    waits_profile: Option<QueryWaits>,
     unavailable: Vec<Unavailable>,
 }
 
@@ -328,6 +517,7 @@ async fn fetch(
     database: &str,
     query_id: i64,
     cache: Option<&Mutex<StatementsBuffer>>,
+    failures_key: &str,
 ) -> AppResult<Fetched> {
     let pg = |e: tokio_postgres::Error| from_pg(&e);
     let h = head(c).await?;
@@ -456,6 +646,7 @@ async fn fetch(
         unavailable.extend(caps.missing(V14, "running"));
         Vec::new()
     };
+    let waits_profile = read_waits_profile(c, query_id, failures_key, &mut unavailable).await?;
     Ok(Fetched {
         head: h,
         pgss,
@@ -464,6 +655,7 @@ async fn fetch(
         totals: t,
         info,
         running,
+        waits_profile,
         unavailable,
     })
 }
@@ -479,8 +671,9 @@ pub async fn detail(
     // Замыкание отдаёт будущее на любое время жизни соединения, поэтому база и буфер уходят в него владеемыми.
     let database = database.to_string();
     let cache = st.statements.buffer(id, member);
+    let key = failures_key(id, member);
     let f = on_member(st, id, &target, |c| {
-        Box::pin(async move { fetch(c, &database, query_id, cache.as_deref()).await })
+        Box::pin(async move { fetch(c, &database, query_id, cache.as_deref(), &key).await })
     })
     .await?;
     let mut d = QueryDetail::empty(&f.head);
@@ -559,7 +752,10 @@ pub async fn detail(
             .map(|(from_ms, to_ms)| Gap { from_ms, to_ms })
             .collect();
     }
-    if let Some(b) = st.samplers.buffer(id, member) {
+    d.waits = f.waits_profile;
+    if d.waits.is_none()
+        && let Some(b) = st.samplers.buffer(id, member)
+    {
         let b = b.lock_safe();
         d.waits = waits_of(
             &b.samples(now_ms - LOOKBACK_MS),
@@ -618,6 +814,104 @@ mod tests {
             max_exec_ms: max,
             stddev_exec_ms: sd,
         }
+    }
+
+    #[test]
+    fn waits_sql_groups_the_profile_by_event() {
+        let sql = waits_sql("public");
+        assert!(
+            sql.contains("FROM public.pg_wait_sampling_profile")
+                && sql.contains("WHERE queryid = $1")
+                && sql.contains("GROUP BY 1, 2"),
+            "{sql}"
+        );
+        assert!(crate::product::is_marked_sql(&sql), "{sql}");
+        assert!(sql.contains("COALESCE(event_type, 'CPU')"), "{sql}");
+        assert!(WAIT_SAMPLING_SQL.starts_with("/* glafira */"));
+    }
+
+    #[test]
+    fn profile_rows_become_waits() {
+        let w = waits_from_profile(vec![
+            ("IO".into(), Some("DataFileRead".into()), 70),
+            ("Client".into(), Some("ClientRead".into()), 30),
+        ]);
+        let w = w.unwrap();
+        assert_eq!(
+            (w.source, w.since_ms, w.total),
+            (WaitsSource::PgWaitSampling, 0, 100)
+        );
+        assert_eq!(
+            (w.items[0].event_type.as_str(), w.items[0].share_pct),
+            ("IO", 70.0)
+        );
+        assert!(waits_from_profile(vec![]).is_none());
+        assert!(waits_from_profile(vec![("IO".into(), None, 0)]).is_none());
+        // Порядок — по числу сэмплов, независимо от порядка строк.
+        let w = waits_from_profile(vec![("CPU".into(), None, 1), ("IO".into(), None, 3)]).unwrap();
+        assert_eq!(w.items[0].event_type, "IO");
+    }
+
+    #[test]
+    fn wait_sampling_plan_follows_the_setting_and_the_catalog() {
+        let read = WaitSampling::Read("public".into());
+        let plan = |pq: Option<&str>| wait_sampling_plan("public", pq, None, true, true);
+        // 1.1.4+ — перечисление, раньше — булев параметр; синонимы булевых значений тоже.
+        for v in ["top", "all", "on", "true", "yes", "1", "TOP"] {
+            assert_eq!(plan(Some(v)), read, "{v}");
+        }
+        for v in ["none", "off", "false", "no", "0"] {
+            assert_eq!(plan(Some(v)), WaitSampling::Off, "{v}");
+        }
+        // Параметр не определён — библиотека не загружена.
+        assert_eq!(plan(None), WaitSampling::Skip);
+        assert_eq!(plan(Some("weird")), WaitSampling::Skip);
+        assert_eq!(
+            wait_sampling_plan(
+                "public",
+                Some("top"),
+                Some("pg_stat_statements"),
+                true,
+                true
+            ),
+            WaitSampling::Skip
+        );
+        assert_eq!(
+            wait_sampling_plan(
+                "public",
+                Some("top"),
+                Some("pg_stat_statements, \"pg_wait_sampling\""),
+                true,
+                true
+            ),
+            read
+        );
+        assert_eq!(
+            wait_sampling_plan("public", Some("top"), None, false, true),
+            WaitSampling::Skip
+        );
+        assert_eq!(
+            wait_sampling_plan("public", Some("top"), None, true, false),
+            WaitSampling::Skip
+        );
+        assert_eq!(
+            wait_sampling_plan("w s", Some("all"), None, true, true),
+            WaitSampling::Read("\"w s\"".into())
+        );
+        // Выключенный профиль при невидимой и не загруженной библиотеке не возникает: параметр тогда не определён.
+        assert_eq!(waits_profile_off().part, "waitsProfile");
+    }
+
+    #[test]
+    fn profile_failures_hold_off_reads_for_a_while() {
+        let f = ProfileFailures::default();
+        assert!(!f.blocked("a", 1_000));
+        f.remember("a", 1_000);
+        assert!(f.blocked("a", 1_000 + WAIT_SAMPLING_RETRY_MS - 1));
+        assert!(!f.blocked("b", 1_000), "другой узел не затронут");
+        assert!(!f.blocked("a", 1_000 + WAIT_SAMPLING_RETRY_MS));
+        assert!(!f.blocked("a", 1_000 + 1), "истёкшая запись удалена");
+        assert_ne!(failures_key("ab", "c"), failures_key("a", "bc"));
     }
 
     #[test]

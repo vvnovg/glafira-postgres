@@ -875,6 +875,7 @@
       "statementsHidden": "{{part}}: needs the pg_read_all_stats role",
       "statementsStarting": "{{part}}: the statements sampler is starting",
       "betweenReset": "{{part}}: statistics were reset between the snapshots",
+      "waitsProfileOff": "{{part}}: pg_wait_sampling.profile_queries is off, waits come from the Sessions sampler",
       "parts": {
         "queryId": "Query ID (query_id)",
         "walDir": "pg_wal size",
@@ -891,7 +892,8 @@
         "others": "Other roles' queries",
         "window": "Window data",
         "running": "Running instances (query_id)",
-        "between": "Comparison"
+        "between": "Comparison",
+        "waitsProfile": "Wait profile (pg_wait_sampling)"
       }
     },
     "tools": {
@@ -1356,6 +1358,10 @@
       "openSessions": "Open “{{tool}}”",
       "waits": "Waits",
       "noWaitsBuffer": "Open the Wait profile tab to collect waits for this query",
+      "waitsSource": {
+        "sampler": "From the Sessions sampler, last 60 min",
+        "pgWaitSampling": "pg_wait_sampling profile since its reset"
+      },
       "waitEvent": "Event",
       "share": "Share",
       "samples": "Samples",

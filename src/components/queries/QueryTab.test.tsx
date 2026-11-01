@@ -46,6 +46,7 @@ describe("QueryTab", () => {
     expect(screen.getByRole("table", { name: "Метрики" })).toHaveTextContent("60");
     expect(screen.getByRole("table", { name: "Выполняющиеся экземпляры" })).toHaveTextContent("42");
     expect(screen.getByRole("table", { name: "Ожидания" })).toHaveTextContent("IO:DataFileRead");
+    expect(screen.getByText("По сэмплам «Сессий», 60 мин")).toBeInTheDocument();
     expect(screen.getByText("Таблицы появятся после первого плана")).toBeInTheDocument();
     expect(api.startStatementsSampler).toHaveBeenCalledWith("c", "pg-1", expect.any(Function));
     // «Открыть в консоли» подставляет текст в консоль подключения.
@@ -264,6 +265,31 @@ describe("QueryTab", () => {
     expect(cells[1]).toBe("—"); // окно часа — без kcache
     const disk = screen.getByRole("rowheader", { name: "Диск прочитано / записано" }).closest("tr")!;
     expect(within(disk).getAllByRole("cell")[0].textContent).toMatch(/4,0 KB \/ 0 B/);
+  });
+
+  it("pg_wait_sampling: подпись источника ожиданий; выключенный profile_queries — пометка с подписью части", async () => {
+    vi.mocked(api.queryDetail).mockResolvedValue(
+      detail({ waits: { source: "pgWaitSampling", sinceMs: 0, total: 4, items: [{ eventType: "IO", event: "DataFileRead", count: 4, sharePct: 100 }] } }),
+    );
+    const { unmount } = renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
+    expect(await screen.findByText("Профиль pg_wait_sampling с момента его сброса")).toBeInTheDocument();
+    expect(screen.getByRole("table", { name: "Ожидания" })).toHaveTextContent("IO:DataFileRead");
+    unmount();
+    vi.mocked(api.queryDetail).mockResolvedValue(
+      detail({
+        unavailable: [
+          {
+            part: "waitsProfile",
+            reason: { key: "diag.unavailable.waitsProfileOff", params: { part: "waitsProfile" }, text: "waitsProfile: pg_wait_sampling.profile_queries is off" },
+          },
+        ],
+      }),
+    );
+    renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
+    expect(
+      await screen.findByText("Профиль ожиданий (pg_wait_sampling): pg_wait_sampling.profile_queries выключен, ожидания — по сэмплам «Сессий»"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("По сэмплам «Сессий», 60 мин")).toBeInTheDocument();
   });
 
   it("подключение закрыто — карточка не читает сервер", async () => {

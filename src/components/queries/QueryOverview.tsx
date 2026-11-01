@@ -214,30 +214,35 @@ export function QueryOverview({
         {detail.waits === null ? (
           <p className="muted">{t("diag.query.noWaitsBuffer")}</p>
         ) : (
-          <div className="table-scroll">
-            <table className="diag-table" aria-label={t("diag.query.waits")}>
-              <thead>
-                <tr>
-                  <th scope="col">{t("diag.query.waitEvent")}</th>
-                  <th scope="col" className="num">
-                    {t("diag.query.share")}
-                  </th>
-                  <th scope="col" className="num">
-                    {t("diag.query.samples")}
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {detail.waits.items.map((w) => (
-                  <tr key={`${w.eventType}:${w.event ?? ""}`}>
-                    <td>{w.event ? `${w.eventType}:${w.event}` : w.eventType}</td>
-                    <td className="num">{formatPercent(w.sharePct)}</td>
-                    <td className="num">{formatCount(w.count)}</td>
+          <>
+            <p className="muted">
+              {detail.waits.source === "pgWaitSampling" ? t("diag.query.waitsSource.pgWaitSampling") : t("diag.query.waitsSource.sampler")}
+            </p>
+            <div className="table-scroll">
+              <table className="diag-table" aria-label={t("diag.query.waits")}>
+                <thead>
+                  <tr>
+                    <th scope="col">{t("diag.query.waitEvent")}</th>
+                    <th scope="col" className="num">
+                      {t("diag.query.share")}
+                    </th>
+                    <th scope="col" className="num">
+                      {t("diag.query.samples")}
+                    </th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {detail.waits.items.map((w) => (
+                    <tr key={`${w.eventType}:${w.event ?? ""}`}>
+                      <td>{w.event ? `${w.eventType}:${w.event}` : w.eventType}</td>
+                      <td className="num">{formatPercent(w.sharePct)}</td>
+                      <td className="num">{formatCount(w.count)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
       </section>
       <section>
