@@ -48,6 +48,8 @@ pub struct AppState {
     pub snapshots: Arc<crate::snapshots::SnapshotStore>,
     /// Кеши профиля `pg_wait_sampling` карточек запросов (P3b): прочитанные профили и ошибки чтения по узлам.
     pub wait_profiles: Arc<crate::diag::query_detail::WaitProfiles>,
+    /// Итоги поиска и пробы `pg_stat_kcache` по узлам (P3b): проба не повторяется на каждом обновлении.
+    pub kcache_probes: Arc<crate::diag::kcache::KcacheProbes>,
 }
 
 impl AppState {
@@ -80,6 +82,8 @@ impl AppState {
         runtimes.add_close_listener(counters.clone());
         let wait_profiles = Arc::new(crate::diag::query_detail::WaitProfiles::default());
         runtimes.add_close_listener(wait_profiles.clone());
+        let kcache_probes = Arc::new(crate::diag::kcache::KcacheProbes::default());
+        runtimes.add_close_listener(kcache_probes.clone());
         let sessions = Arc::new(SessionRegistry::default());
         let samplers = SamplerRegistry::new(
             Activity {
@@ -110,6 +114,7 @@ impl AppState {
             actions: Arc::new(crate::actions::journal::ActionJournal::new(data_dir)),
             snapshots: Arc::new(crate::snapshots::SnapshotStore::new(data_dir)),
             wait_profiles,
+            kcache_probes,
         })
     }
 

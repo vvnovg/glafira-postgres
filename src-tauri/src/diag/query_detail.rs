@@ -16,6 +16,7 @@ use tokio_postgres::Client;
 use crate::catalog::ddl::quote_ident;
 use crate::conn::errors::from_pg;
 use crate::diag::caps::{Caps, V14};
+use crate::diag::kcache::KcacheNode;
 use crate::diag::queries::{
     Detect, PgssInfo, PgssInstalled, detect, info_sql, missing, preloaded, row_from,
     statements_sql, too_old,
@@ -617,12 +618,13 @@ async fn fetch(
     cache: Option<&Mutex<StatementsBuffer>>,
     node: &NodeKey,
     profiles: &WaitProfiles,
+    kcache: &KcacheNode,
 ) -> AppResult<Fetched> {
     let pg = |e: tokio_postgres::Error| from_pg(&e);
     let h = head(c).await?;
     let caps = Caps::new(h.version_num);
     let mut unavailable = Vec::new();
-    let (pgss, rows, text, t, info) = match detect(c).await? {
+    let (pgss, rows, text, t, info) = match detect(c, Some(kcache)).await? {
         Detect::Installed(pgss) => {
             let raw = c
                 .query(
@@ -635,6 +637,12 @@ async fn fetch(
                     &[&query_id, &database],
                 )
                 .await
+                .inspect_err(|_| {
+                    // Чтение с kcache упало — итог поиска kcache узла больше не действует.
+                    if pgss.kcache.is_some() {
+                        kcache.forget();
+                    }
+                })
                 .map_err(pg)?;
             let rows: Vec<Cumulative> = raw.iter().filter_map(row_from).collect();
             let keys: Vec<QueryKey> = rows.iter().map(|r| r.key).collect();
@@ -776,10 +784,20 @@ pub async fn detail(
         member: member.to_string(),
     };
     let profiles = st.wait_profiles.clone();
+    let kcache = KcacheNode::new(&st.kcache_probes, id, target.generation, member);
     let f = on_member(st, id, &target, |c| {
-        Box::pin(
-            async move { fetch(c, &database, query_id, cache.as_deref(), &node, &profiles).await },
-        )
+        Box::pin(async move {
+            fetch(
+                c,
+                &database,
+                query_id,
+                cache.as_deref(),
+                &node,
+                &profiles,
+                &kcache,
+            )
+            .await
+        })
     })
     .await?;
     let mut d = QueryDetail::empty(&f.head);

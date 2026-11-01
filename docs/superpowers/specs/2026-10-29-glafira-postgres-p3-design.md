@@ -861,7 +861,13 @@ Memory Usage: … kB`, `Heap Blocks: exact=… lossy=…`, `Buffers: shared hit=
   `shared_preload_libraries` и `has_function_privilege(… 'EXECUTE')` (через `to_regprocedure`, сломанное расширение даёт `false`);
   `kcache_usable` отбрасывает расширение, если список preload виден и библиотеки в нём нет или нет права. Затем — проба
   `SELECT 1 FROM <schema>.pg_stat_kcache() LIMIT 1` (`LIMIT 0` не вызвал бы функцию, и ошибка «must be loaded via shared_preload_libraries»
-  не сработала бы), в автокоммите; любая ошибка — расширения нет (лог debug), отчёт строится как без него. Итог — `KcacheCaps { schema,
+  не сработала бы), в автокоммите; любая ошибка — расширения нет (лог debug), отчёт строится как без него. Итог поиска kcache
+  кешируется по узлу (`diag::kcache::KcacheProbes`, ключ `(подключение, generation, узел)`, сброс по `CloseListener`): пригодно или
+  не установлено — 60 с (`KCACHE_TTL_MS`), отказ пробы от состояния сервера (`classify_probe_error`: `55…`, `42…`, `3F000`, `58P01`,
+  `XX000` о `shared_preload_libraries`/`pg_stat_kcache`) — 10 минут (`KCACHE_REFUSED_TTL_MS`); разовый сбой (`57014`, обрыв, прочее)
+  не запоминается, и следующий поиск пробует снова. Чтение с kcache упало — итог узла забывается (`read_cumulative_on`). Сэмплер pgss
+  держит найденное расширение в своём кеше, только если итог kcache известен: после разового сбоя пробы следующий сэмпл ищет заново.
+  Тексты и поиск по тексту kcache не ищут (`detect(c, None)`). Итог — `KcacheCaps { schema,
   exec_prefix, has_top }` в `PgssInstalled.kcache` (2.2+ — `exec_*` и `top`). `statements_sql(ns, caps, kcache, where)`: `LEFT JOIN
   pg_stat_kcache() k ON (queryid, userid, dbid)` плюс `AND k.top = s.toplevel`; с pgss 1.8 (нет `toplevel`) и kcache 2.2+ — `AND k.top`,
   иначе строки верхнего уровня и вложенные задвоили бы строку pgss (при `pg_stat_kcache.track = all` CPU вложенных инструкций тогда не

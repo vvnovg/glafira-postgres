@@ -14,6 +14,7 @@ use tokio_postgres::{Client, Row};
 
 use crate::catalog::ddl::quote_ident;
 use crate::conn::errors::from_pg;
+use crate::diag::kcache::{KcacheNode, ProbeOutcome, classify_probe_error};
 use crate::diag::sessions::QUERY_LIMIT;
 use crate::diag::{
     DiagData, DiagReport, Head, Tool, Unavailable, WINDOWS_S, head, make_report, on_member,
@@ -115,13 +116,9 @@ pub fn kcache_probe_sql(schema: &str) -> String {
     format!("{SQL_MARKER}SELECT 1 FROM {schema}.pg_stat_kcache() LIMIT 1")
 }
 
-/// Итог пробы: ошибка вызова (библиотека не загружена, нет прав, повреждённое расширение) — kcache не используется,
-/// топ читается без него.
-pub fn kcache_after_probe<E>(caps: KcacheCaps, probe: Result<(), E>) -> Option<KcacheCaps> {
-    probe.ok().map(|()| caps)
-}
-
-pub async fn detect(c: &Client) -> AppResult<Detect> {
+/// Поиск `pg_stat_statements` и, если `kcache` задан, `pg_stat_kcache` на узле. Без `kcache` (тексты, поиск по
+/// тексту) расширение kcache не ищется и не пробуется: `PgssInstalled::kcache` — `None`.
+pub async fn detect(c: &Client, kcache: Option<&KcacheNode>) -> AppResult<Detect> {
     let Some(r) = c
         .query_opt(DETECT_SQL, &[])
         .await
@@ -133,6 +130,26 @@ pub async fn detect(c: &Client) -> AppResult<Detect> {
     let Some(caps) = PgssCaps::from_version(&version) else {
         return Ok(Detect::TooOld(version));
     };
+    let kcache = match kcache {
+        Some(k) => detect_kcache(c, k).await?,
+        None => None,
+    };
+    Ok(Detect::Installed(PgssInstalled {
+        schema: quote_ident(&schema),
+        version,
+        caps,
+        kcache,
+    }))
+}
+
+/// `pg_stat_kcache` узла: действующий итог из кеша (`KcacheProbes`) или поиск по каталогу и проба. Итог
+/// запоминается, кроме разового сбоя пробы (`classify_probe_error`): тогда kcache в этом чтении не используется, а
+/// следующий поиск пробует снова.
+async fn detect_kcache(c: &Client, k: &KcacheNode) -> AppResult<Option<KcacheCaps>> {
+    let now = crate::topology::model::now_ms();
+    if let Some(cached) = k.probes.cached(&k.node, now) {
+        return Ok(cached);
+    }
     let candidate = c
         .query_opt(DETECT_KCACHE_SQL, &[])
         .await
@@ -146,22 +163,26 @@ pub async fn detect(c: &Client) -> AppResult<Detect> {
         .and_then(|k| {
             KcacheCaps::from_version(&k.get::<_, String>(0), quote_ident(&k.get::<_, String>(1)))
         });
-    let kcache = match candidate {
-        Some(k) => {
-            let probe = c.query(&kcache_probe_sql(&k.schema), &[]).await;
-            if let Err(e) = &probe {
-                tracing::debug!(error = %e, "pg_stat_kcache probe failed; reading without it");
-            }
-            kcache_after_probe(k, probe.map(|_| ()))
-        }
-        None => None,
+    let Some(caps) = candidate else {
+        k.probes.remember(&k.node, now, None);
+        return Ok(None);
     };
-    Ok(Detect::Installed(PgssInstalled {
-        schema: quote_ident(&schema),
-        version,
-        caps,
-        kcache,
-    }))
+    match c.query(&kcache_probe_sql(&caps.schema), &[]).await {
+        Ok(_) => {
+            k.probes.remember(&k.node, now, Some(caps.clone()));
+            Ok(Some(caps))
+        }
+        Err(e) => {
+            let db = e.as_db_error();
+            let outcome =
+                classify_probe_error(db.map(|d| d.code().code()), db.map_or("", |d| d.message()));
+            tracing::debug!(error = %e, ?outcome, "pg_stat_kcache probe failed; reading without it");
+            if outcome == ProbeOutcome::Refused {
+                k.probes.remember_refused(&k.node, now);
+            }
+            Ok(None)
+        }
+    }
 }
 
 /// Строки pgss без текстов (`showtext := false`): файл текстов не читается. `where_clause` — пусто или
@@ -424,6 +445,20 @@ pub fn row_from(r: &Row) -> Option<Cumulative> {
         max_exec_ms: r.get(9),
         stddev_exec_ms: r.get(11),
     })
+}
+
+/// `read_cumulative` узла: чтение с kcache упало — итог поиска kcache узла забывается (расширение могли удалить или
+/// сломать после пробы), следующий поиск проверит заново.
+pub async fn read_cumulative_on(
+    c: &Client,
+    pgss: &PgssInstalled,
+    kcache: &KcacheNode,
+) -> AppResult<Snapshot> {
+    let r = read_cumulative(c, pgss).await;
+    if r.is_err() && pgss.kcache.is_some() {
+        kcache.forget();
+    }
+    r
 }
 
 pub async fn read_cumulative(c: &Client, pgss: &PgssInstalled) -> AppResult<Snapshot> {
@@ -834,14 +869,15 @@ async fn report_since_reset(
     let member = member_name(target)?;
     let search = p.search().map(str::to_string);
     let buffer = st.statements.buffer(id, &member);
+    let kcache = KcacheNode::new(&st.kcache_probes, id, target.generation, &member);
     let (h, detected, snapshot) = on_member(st, id, target, |c| {
         Box::pin(async move {
             let h = head(c).await?;
-            let d = detect(c).await?;
+            let d = detect(c, Some(&kcache)).await?;
             let snap = match &d {
                 Detect::Installed(pgss) => {
                     // Сначала строки: их ключи существовали до скана текстов, и он их проверит.
-                    let snap = read_cumulative(c, pgss).await?;
+                    let snap = read_cumulative_on(c, pgss, &kcache).await?;
                     let matched = match &search {
                         Some(s) => {
                             let keys = snap.rows.iter().map(|r| r.key).collect();
@@ -1271,7 +1307,8 @@ async fn fetch_texts(
     let ids: Vec<i64> = keys.iter().map(|k| k.query_id).collect();
     let rows = on_member(st, id, target, |c| {
         Box::pin(async move {
-            let Detect::Installed(pgss) = detect(c).await? else {
+            // Текстам kcache не нужен: без поиска и пробы.
+            let Detect::Installed(pgss) = detect(c, None).await? else {
                 return Ok(Vec::new());
             };
             let rows = c
@@ -1814,17 +1851,13 @@ mod tests {
         );
         assert!(!kcache_usable(Some("pg_stat_statements"), true));
         assert!(!kcache_usable(Some("pg_stat_kcache"), false));
-        // Проба: ошибка вызова (библиотека не загружена при невидимой настройке) — топ без kcache.
-        let preload_error = app_err!(
-            ErrorCode::Internal,
-            "errors.pg.serverError",
-            "PostgreSQL error {{code}}",
-            code = "55000"
-        );
-        assert_eq!(kcache_after_probe(new.clone(), Err(preload_error)), None);
+        // Проба: ошибка вызова (библиотека не загружена при невидимой настройке) — отказ, топ без kcache.
         assert_eq!(
-            kcache_after_probe::<AppError>(new.clone(), Ok(())),
-            Some(new.clone())
+            crate::diag::kcache::classify_probe_error(
+                Some("55000"),
+                "pg_stat_kcache must be loaded via shared_preload_libraries"
+            ),
+            crate::diag::kcache::ProbeOutcome::Refused
         );
         let probe = kcache_probe_sql("\"k s\"");
         assert!(

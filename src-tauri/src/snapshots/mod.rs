@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::actions::journal::RecordConnection;
 use crate::conn::errors::from_pg;
-use crate::diag::queries::{Detect, detect, read_cumulative, texts_sql};
+use crate::diag::kcache::KcacheNode;
+use crate::diag::queries::{Detect, detect, read_cumulative_on, texts_sql};
 use crate::diag::{head, on_member};
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::product::is_marked_sql;
@@ -94,16 +95,17 @@ pub fn text_ids(rows: &[Cumulative]) -> Vec<i64> {
 pub async fn take(st: &AppState, id: &str, member: &str) -> AppResult<SnapshotInfo> {
     let profile = st.profile(id)?;
     let target = st.runtimes.diag_target(id, Some(member), false)?;
+    let kcache = KcacheNode::new(&st.kcache_probes, id, target.generation, member);
     let member = member.to_string();
     let snapshot = on_member(st, id, &target, |c| {
         Box::pin(async move {
             let h = head(c).await?;
-            let pgss = match detect(c).await? {
+            let pgss = match detect(c, Some(&kcache)).await? {
                 Detect::Installed(p) => p,
                 Detect::Missing => return Err(pgss_missing()),
                 Detect::TooOld(v) => return Err(pgss_too_old(&v)),
             };
-            let snap = read_cumulative(c, &pgss).await?;
+            let snap = read_cumulative_on(c, &pgss, &kcache).await?;
             let ids = text_ids(&snap.rows);
             let mut texts = BTreeMap::new();
             let mut truncated = BTreeSet::new();

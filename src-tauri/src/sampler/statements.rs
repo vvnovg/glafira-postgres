@@ -12,7 +12,8 @@ use tokio_postgres::Client;
 
 use crate::commands::catalog::{catalog_limit, on_catalog_node_split};
 use crate::conn::pool::PoolPurpose;
-use crate::diag::queries::{Detect, PgssInfo, PgssInstalled, Snapshot, detect, read_cumulative};
+use crate::diag::kcache::KcacheNode;
+use crate::diag::queries::{Detect, PgssInfo, PgssInstalled, Snapshot, detect, read_cumulative_on};
 use crate::diag::{Head, head};
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::sampler::registry::{
@@ -560,6 +561,15 @@ impl SampleSource<StatementsSample> for PoolStatementsSource {
     fn sample<'a>(&'a self) -> BoxFuture<'a, AppResult<StatementsSample>> {
         Box::pin(async move {
             let cache = Arc::clone(&self.pgss);
+            let kcache = KcacheNode::new(
+                &self.st.kcache_probes,
+                &self.connection_id,
+                self.st
+                    .runtimes
+                    .generation(&self.connection_id)
+                    .unwrap_or(0),
+                &self.member,
+            );
             on_catalog_node_split(
                 self.acquire_limit(),
                 SAMPLE_TIMEOUT,
@@ -572,7 +582,7 @@ impl SampleSource<StatementsSample> for PoolStatementsSource {
                 move |c| {
                     Box::pin(async move {
                         let head = head(c).await?;
-                        let (pgss, snapshot) = read_known_or_detect(c, &cache).await?;
+                        let (pgss, snapshot) = read_known_or_detect(c, &cache, &kcache).await?;
                         Ok(StatementsSample {
                             head,
                             pgss,
@@ -626,33 +636,53 @@ pub fn after_read_error(
     }
 }
 
+/// Найденное расширение запоминается в кеше источника, только если итог kcache узла известен (`settled`): после
+/// разового сбоя пробы kcache (отмена, тайм-аут) кеш остаётся пустым, и следующий сэмпл ищет снова, а не живёт без
+/// колонок kcache до перезапуска сэмплера.
+pub fn remember_detected(
+    cache: &Mutex<Option<PgssInstalled>>,
+    found: &PgssInstalled,
+    settled: bool,
+) {
+    *cache.lock_safe() = (settled || found.kcache.is_some()).then(|| found.clone());
+}
+
 /// Чтение строк pgss: расширение берётся из кеша источника; нет кеша — ищется. Ошибка чтения при кеше — повторный
 /// поиск на том же соединении (`after_read_error`): «расширение исчезло» останавливает сэмплер, а не повторяется.
 async fn read_known_or_detect(
     c: &Client,
     cache: &Mutex<Option<PgssInstalled>>,
+    kcache: &KcacheNode,
 ) -> AppResult<(PgssInstalled, Snapshot)> {
     // Копия под короткой блокировкой: защёлка не доживает до `await`.
     let known = cache.lock_safe().clone();
     let Some(known) = known else {
-        let found = require_installed(detect(c).await?)?;
-        *cache.lock_safe() = Some(found.clone());
-        let snapshot = read_cumulative(c, &found).await?;
+        let found = require_installed(detect(c, Some(kcache)).await?)?;
+        remember_detected(
+            cache,
+            &found,
+            kcache.settled(crate::topology::model::now_ms()),
+        );
+        let snapshot = read_cumulative_on(c, &found, kcache).await?;
         return Ok((found, snapshot));
     };
-    match read_cumulative(c, &known).await {
+    match read_cumulative_on(c, &known, kcache).await {
         Ok(snapshot) => Ok((known, snapshot)),
         Err(original) => {
             // Сбой самого поиска — тот же временный сбой: возвращается исходная ошибка чтения.
-            let step = match detect(c).await {
+            let step = match detect(c, Some(kcache)).await {
                 Ok(redetected) => after_read_error(&known, redetected, original),
                 Err(_) => ReadRetry::Fail(original),
             };
             match step {
                 ReadRetry::Fail(error) => Err(error),
                 ReadRetry::Retry(found) => {
-                    *cache.lock_safe() = Some(found.clone());
-                    let snapshot = read_cumulative(c, &found).await?;
+                    remember_detected(
+                        cache,
+                        &found,
+                        kcache.settled(crate::topology::model::now_ms()),
+                    );
+                    let snapshot = read_cumulative_on(c, &found, kcache).await?;
                     Ok((found, snapshot))
                 }
             }
@@ -1162,6 +1192,41 @@ mod tests {
             caps: PgssCaps::from_version(version).unwrap(),
             kcache: None,
         }
+    }
+
+    /// Разовый сбой пробы kcache (итога узла нет) не закрепляется в кеше сэмплера: следующий сэмпл ищет снова.
+    #[test]
+    fn transient_kcache_probe_failure_is_not_kept_for_the_sampler_lifetime() {
+        let cache = Mutex::new(None);
+        let found = installed("1.11", "public");
+        remember_detected(&cache, &found, false);
+        assert_eq!(
+            *cache.lock_safe(),
+            None,
+            "итог kcache неизвестен — поиск повторится"
+        );
+        remember_detected(&cache, &found, true);
+        assert_eq!(
+            *cache.lock_safe(),
+            Some(found.clone()),
+            "отказ или «не установлено» — итог"
+        );
+        let with = PgssInstalled {
+            kcache: Some(crate::diag::queries::KcacheCaps {
+                schema: "public".into(),
+                exec_prefix: true,
+                has_top: true,
+            }),
+            ..found.clone()
+        };
+        remember_detected(&cache, &with, false);
+        assert_eq!(*cache.lock_safe(), Some(with));
+        remember_detected(&cache, &found, false);
+        assert_eq!(
+            *cache.lock_safe(),
+            None,
+            "повтор после ошибки чтения с разовым сбоем"
+        );
     }
 
     /// Обычная ошибка PostgreSQL после `DROP EXTENSION`: `undefined_function` (42883), код — не `FEATURE_UNAVAILABLE`.

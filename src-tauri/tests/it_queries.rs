@@ -283,9 +283,21 @@ async fn statements_sql_runs_on_every_version() {
             "postgres"
         };
         let c = common::connect_as(&addr, db, common::PG_USER, common::PG_PASSWORD_VALUE).await;
-        let Detect::Installed(pgss) = queries::detect(&c).await.unwrap() else {
+        let probes = Arc::new(glafira_pg_lib::diag::kcache::KcacheProbes::default());
+        let node = glafira_pg_lib::diag::kcache::KcacheNode::new(&probes, "it", 1, &addr);
+        let Detect::Installed(pgss) = queries::detect(&c, Some(&node)).await.unwrap() else {
             panic!("{addr}: pgss не найден")
         };
+        // Итог kcache запомнен на узел (и «нет» тоже); без узла kcache не ищется вовсе.
+        assert_eq!(
+            probes.cached(&node.node, glafira_pg_lib::topology::model::now_ms()),
+            Some(pgss.kcache.clone()),
+            "{addr}"
+        );
+        let Detect::Installed(bare) = queries::detect(&c, None).await.unwrap() else {
+            panic!("{addr}: pgss не найден")
+        };
+        assert_eq!(bare.kcache, None, "{addr}");
         let version = diag::head(&c).await.unwrap().version_num;
         // Версия расширения растёт вместе с сервером: 13 → 1.8, 14 → 1.9, 15/16 → 1.10, 17 → 1.11, 18 → 1.12.
         let expected = match version / 10_000 {

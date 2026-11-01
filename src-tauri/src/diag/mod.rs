@@ -3,6 +3,7 @@
 
 pub mod caps;
 pub mod horizon;
+pub mod kcache;
 pub mod locks;
 pub mod memory;
 pub mod patroni;
