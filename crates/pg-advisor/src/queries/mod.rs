@@ -136,7 +136,9 @@ impl Counters {
     /// Новая база pgss (сброс `pg_stat_statements_reset()` или вытесненная и вернувшаяся строка): счётчики pgss — `self`
     /// целиком, а колонки `pg_stat_kcache` — дельтой против `prev` (замечание 15 смоука P3b). Сброс pgss счётчики kcache
     /// не обнуляет: целиком они дали бы накопленное с прошлого сброса kcache. Уменьшились — сброшен и kcache, значение
-    /// целиком (`sub_kcache`).
+    /// целиком (`sub_kcache`). Ограничение: сброшенный kcache, набравший к концу промежутка больше прежнего значения,
+    /// так не отличить — дельта занижена; когда время сброса kcache известно, его колонки берутся целиком
+    /// (`with_kcache_of`, `compare::deltas_with`).
     pub fn rebased_with_kcache_delta(&self, prev: &Counters) -> Counters {
         Counters {
             cpu_user_ms: sub_kcache(self.cpu_user_ms, prev.cpu_user_ms),
@@ -144,6 +146,18 @@ impl Counters {
             disk_read_bytes: sub_kcache(self.disk_read_bytes, prev.disk_read_bytes),
             disk_write_bytes: sub_kcache(self.disk_write_bytes, prev.disk_write_bytes),
             ..*self
+        }
+    }
+
+    /// Колонки `pg_stat_kcache` — из `src` целиком: известно, что kcache сбрасывался в этом промежутке (начало
+    /// накопления его строк позже начала промежутка), и значение — накопленное с его сброса, а не дельта.
+    pub fn with_kcache_of(self, src: &Counters) -> Counters {
+        Counters {
+            cpu_user_ms: src.cpu_user_ms,
+            cpu_sys_ms: src.cpu_sys_ms,
+            disk_read_bytes: src.disk_read_bytes,
+            disk_write_bytes: src.disk_write_bytes,
+            ..self
         }
     }
 

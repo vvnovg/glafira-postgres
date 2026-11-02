@@ -1183,7 +1183,8 @@ pub fn entries_between(
         .map(|c| (c.key, (c.datname.clone(), c.rolname.clone())))
         .collect();
     let kcache = kcache_between(a, b);
-    pg_advisor::queries::compare::deltas(&a.rows, &b.rows, reset)
+    let kcache_reset = crate::snapshots::kcache_reset_between(a, b);
+    pg_advisor::queries::compare::deltas_with(&a.rows, &b.rows, reset, kcache_reset)
         .into_iter()
         .filter(|(_, c)| c.changed_since(&Counters::default()))
         .map(|(key, counters)| {
@@ -1816,6 +1817,7 @@ mod tests {
             track_planning: false,
             hidden: false,
             kcache: false,
+            kcache_since_ms: None,
             row_count: 0,
             rows,
             texts: Default::default(),
@@ -2035,6 +2037,22 @@ mod tests {
             (e[0].counters.cpu_user_ms, e[0].counters.cpu_sys_ms),
             (Some(50.0), Some(0.0))
         );
+        // M5 ревью: строки kcache в `to` накоплены с момента позже снятия `from` — kcache сбрасывался между снимками,
+        // CPU — значение `to` целиком (по значениям 150 > 100 сброс не виден).
+        a.taken_at_ms = 1_000;
+        b.kcache_since_ms = Some(1_000);
+        assert!(
+            !crate::snapshots::kcache_reset_between(&a, &b),
+            "не позже снятия"
+        );
+        b.kcache_since_ms = Some(2_000);
+        assert!(crate::snapshots::kcache_reset_between(&a, &b));
+        let e = entries_between(&a, &b, false, &p);
+        assert_eq!(
+            (e[0].counters.calls, e[0].counters.cpu_user_ms),
+            (10, Some(150.0))
+        );
+        b.kcache_since_ms = None;
         a.kcache = false;
         let e = entries_between(&a, &b, false, &p);
         assert_eq!(e[0].counters.cpu_user_ms, None, "kcache только в `to`");

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::actions::journal::RecordConnection;
 use crate::conn::errors::from_pg;
 use crate::diag::kcache::KcacheNode;
-use crate::diag::queries::{Detect, detect, read_cumulative_on, texts_sql};
+use crate::diag::queries::{Detect, detect, kcache_since_sql, read_cumulative_on, texts_sql};
 use crate::diag::{head, on_member};
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::sampler::statements::{pgss_missing, pgss_too_old};
@@ -48,6 +48,10 @@ pub struct Snapshot {
     /// него читаются как «без kcache», старые версии приложения поле и колонки kcache пропускают).
     #[serde(default)]
     pub kcache: bool,
+    /// Начало накопления строк `pg_stat_kcache` при снятии (самая ранняя `stats_since`, kcache 2.3+; иначе или при сбое
+    /// чтения — нет): позже снятия предыдущего снимка — kcache сбрасывался между ними (`kcache_reset_between`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kcache_since_ms: Option<i64>,
     /// Число строк — для списка без разбора `rows` (`store::Header`); выставляется при записи.
     #[serde(default)]
     pub row_count: usize,
@@ -104,6 +108,15 @@ pub async fn take(st: &AppState, id: &str, member: &str) -> AppResult<SnapshotIn
                 Detect::TooOld(v) => return Err(pgss_too_old(&v)),
             };
             let snap = read_cumulative_on(c, &pgss, &kcache).await?;
+            // Начало накопления kcache — для выбора базы его колонок между снимками; сбой чтения снимок не роняет.
+            let kcache_since_ms = match pgss.kcache.as_ref().and_then(kcache_since_sql) {
+                Some(sql) => c
+                    .query_one(&sql, &[])
+                    .await
+                    .ok()
+                    .and_then(|r| r.get::<_, Option<i64>>(0)),
+                None => None,
+            };
             let ids = text_ids(&snap.rows);
             let mut texts = BTreeMap::new();
             let mut truncated = BTreeSet::new();
@@ -139,6 +152,7 @@ pub async fn take(st: &AppState, id: &str, member: &str) -> AppResult<SnapshotIn
                 track_planning: snap.info.track_planning,
                 hidden: snap.hidden,
                 kcache: pgss.kcache.is_some(),
+                kcache_since_ms,
                 row_count: snap.rows.len(),
                 rows: snap.rows,
                 texts,
@@ -222,6 +236,14 @@ pub async fn compare(st: &AppState, id: &str, from: &str, to: &str) -> AppResult
     Ok(compare_pair(&a, &b))
 }
 
+/// `pg_stat_kcache` сбрасывался между снимками (старший первым): начало накопления его строк в `b` позже снятия `a`
+/// (M5 ревью волны смоука P3b) — колонки kcache берутся значениями `b` целиком. Начало неизвестно (kcache старше 2.3,
+/// снимок старой версии, сбой чтения) — `false`, и сброс kcache виден только по уменьшению значений. Ограничение: если
+/// все строки kcache, бывшие при `a`, вытеснены его собственным пределом, это тоже выглядит как сброс.
+pub fn kcache_reset_between(a: &Snapshot, b: &Snapshot) -> bool {
+    b.kcache_since_ms.is_some_and(|s| s > a.taken_at_ms)
+}
+
 /// Сравнение пары, старший первым. Колонки `pg_stat_kcache` остаются, только если расширение было при снятии обоих
 /// (`kcache_between`), как в режиме «между снимками».
 pub fn compare_pair(a: &Snapshot, b: &Snapshot) -> Comparison {
@@ -234,7 +256,13 @@ pub fn compare_pair(a: &Snapshot, b: &Snapshot) -> Comparison {
             .collect()
     };
     let mut c = if crate::diag::queries::kcache_between(a, b) {
-        pg_advisor::queries::compare::compare(&a.rows, a.stats_reset_ms, &b.rows, b.stats_reset_ms)
+        pg_advisor::queries::compare::compare_with(
+            &a.rows,
+            a.stats_reset_ms,
+            &b.rows,
+            b.stats_reset_ms,
+            kcache_reset_between(a, b),
+        )
     } else {
         pg_advisor::queries::compare::compare(
             &strip(&a.rows),
@@ -324,6 +352,7 @@ mod tests {
             track_planning: false,
             hidden: false,
             kcache: false,
+            kcache_since_ms: None,
             row_count: 0,
             rows: vec![],
             texts: BTreeMap::new(),

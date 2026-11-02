@@ -463,6 +463,7 @@ mod tests {
             track_planning: false,
             hidden: false,
             kcache: false,
+            kcache_since_ms: None,
             row_count: 0,
             rows: vec![],
             texts: Default::default(),

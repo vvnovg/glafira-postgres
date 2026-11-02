@@ -48,12 +48,32 @@ pub struct Comparison {
 /// счётчиками (и все — после сброса) — счётчики pgss `to` целиком, а колонки `pg_stat_kcache` — дельтой, пока они не
 /// уменьшились (`Counters::rebased_with_kcache_delta`: у kcache свой сброс).
 pub fn deltas(from: &[Cumulative], to: &[Cumulative], reset: bool) -> Vec<(QueryKey, Counters)> {
+    deltas_with(from, to, reset, false)
+}
+
+/// `deltas` с известным сбросом `pg_stat_kcache` между концами (`kcache_reset`: начало накопления его строк в `to`
+/// позже `from`): колонки kcache — значения `to` целиком (M5 ревью волны смоука P3b). Без этого знания уменьшение
+/// значения — единственный признак сброса kcache.
+pub fn deltas_with(
+    from: &[Cumulative],
+    to: &[Cumulative],
+    reset: bool,
+    kcache_reset: bool,
+) -> Vec<(QueryKey, Counters)> {
     let prev: HashMap<QueryKey, &Counters> = from.iter().map(|c| (c.key, &c.counters)).collect();
     to.iter()
-        .map(|c| match prev.get(&c.key) {
-            Some(p) if !reset && !c.counters.decreased_from(p) => (c.key, c.counters.delta(p)),
-            Some(p) => (c.key, c.counters.rebased_with_kcache_delta(p)),
-            None => (c.key, c.counters),
+        .map(|c| {
+            let d = match prev.get(&c.key) {
+                Some(p) if !reset && !c.counters.decreased_from(p) => c.counters.delta(p),
+                Some(p) => c.counters.rebased_with_kcache_delta(p),
+                None => c.counters,
+            };
+            let d = if kcache_reset {
+                d.with_kcache_of(&c.counters)
+            } else {
+                d
+            };
+            (c.key, d)
         })
         .collect()
 }
@@ -84,6 +104,17 @@ pub fn compare(
     to: &[Cumulative],
     to_reset_ms: Option<i64>,
 ) -> Comparison {
+    compare_with(from, from_reset_ms, to, to_reset_ms, false)
+}
+
+/// `compare` с известным сбросом `pg_stat_kcache` между снимками (`deltas_with`).
+pub fn compare_with(
+    from: &[Cumulative],
+    from_reset_ms: Option<i64>,
+    to: &[Cumulative],
+    to_reset_ms: Option<i64>,
+    kcache_reset: bool,
+) -> Comparison {
     let reset = from_reset_ms != to_reset_ms;
     let totals_from = totals(from.iter().map(|c| &c.counters));
     let totals_to = totals(to.iter().map(|c| &c.counters));
@@ -106,7 +137,7 @@ pub fn compare(
         .map(|c| cumulative_stat(c, &totals_from))
         .collect();
     if !reset {
-        let d = deltas(from, to, false);
+        let d = deltas_with(from, to, false, kcache_reset);
         let delta_totals = totals(d.iter().map(|(_, c)| c));
         for (key, d) in d {
             let (Some(f), Some(t)) = (from_by.get(&key), to_by.get(&key)) else {
@@ -298,6 +329,32 @@ mod tests {
         // Вытесненная и вернувшаяся строка pgss без сброса — то же правило.
         let d = deltas(&from[..1], &to[..1], false);
         assert_eq!((d[0].1.calls, d[0].1.cpu_user_ms), (50, Some(60_000.0)));
+    }
+
+    /// M5 ревью: сброшены и pgss, и kcache, а CPU к `to` вырос выше значения `from` — по значениям сброс kcache не
+    /// виден; известный сброс kcache (`kcache_reset`) даёт значение `to` целиком, и без сброса pgss тоже.
+    #[test]
+    fn a_known_kcache_reset_takes_kcache_whole() {
+        let with_cpu = |mut r: Cumulative, cpu: f64| {
+            r.counters.cpu_user_ms = Some(cpu);
+            r
+        };
+        let from = [with_cpu(row(1, 100, 1000.0), 500.0)];
+        let to = [with_cpu(row(1, 50, 800.0), 700.0)];
+        assert_eq!(
+            deltas(&from, &to, true)[0].1.cpu_user_ms,
+            Some(200.0),
+            "без знания — дельта"
+        );
+        let d = deltas_with(&from, &to, true, true);
+        assert_eq!((d[0].1.calls, d[0].1.cpu_user_ms), (50, Some(700.0)));
+        let to = [with_cpu(row(1, 150, 1500.0), 700.0)];
+        let d = deltas_with(&from, &to, false, true);
+        assert_eq!(
+            (d[0].1.calls, d[0].1.cpu_user_ms),
+            (50, Some(700.0)),
+            "сброшен только kcache"
+        );
     }
 
     #[test]
