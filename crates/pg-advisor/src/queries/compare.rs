@@ -44,14 +44,16 @@ pub struct Comparison {
     pub reset: bool,
 }
 
-/// Дельты `to − from` по ключу, в порядке `to`: ключ только в `to` или с уменьшившимися счётчиками (и все — после
-/// сброса) — значение `to` целиком.
+/// Дельты `to − from` по ключу, в порядке `to`: ключ только в `to` — значение `to` целиком; с уменьшившимися
+/// счётчиками (и все — после сброса) — счётчики pgss `to` целиком, а колонки `pg_stat_kcache` — дельтой, пока они не
+/// уменьшились (`Counters::rebased_with_kcache_delta`: у kcache свой сброс).
 pub fn deltas(from: &[Cumulative], to: &[Cumulative], reset: bool) -> Vec<(QueryKey, Counters)> {
     let prev: HashMap<QueryKey, &Counters> = from.iter().map(|c| (c.key, &c.counters)).collect();
     to.iter()
         .map(|c| match prev.get(&c.key) {
             Some(p) if !reset && !c.counters.decreased_from(p) => (c.key, c.counters.delta(p)),
-            _ => (c.key, c.counters),
+            Some(p) => (c.key, c.counters.rebased_with_kcache_delta(p)),
+            None => (c.key, c.counters),
         })
         .collect()
 }
@@ -258,6 +260,44 @@ mod tests {
             c.degraded.is_empty() && c.improved.is_empty(),
             "после сброса дельты не сравниваются"
         );
+    }
+
+    /// Замечание 15 смоука P3b: `pg_stat_statements_reset()` не сбрасывает `pg_stat_kcache`. После сброса pgss счётчики
+    /// pgss — значения `to` целиком, а колонки kcache — дельтой против `from`, пока они не уменьшились (kcache не
+    /// сбрасывался); уменьшились — значение `to` целиком.
+    #[test]
+    fn kcache_deltas_survive_a_pgss_reset() {
+        let with_cpu = |mut r: Cumulative, cpu: f64| {
+            r.counters.cpu_user_ms = Some(cpu);
+            r.counters.disk_read_bytes = Some(cpu as i64 * 10);
+            r
+        };
+        let from = [
+            with_cpu(row(1, 1000, 10_000.0), 4_000_000.0),
+            with_cpu(row(2, 10, 100.0), 500.0),
+        ];
+        let to = [
+            with_cpu(row(1, 50, 80_000.0), 4_060_000.0),
+            with_cpu(row(2, 5, 50.0), 20.0),
+            with_cpu(row(3, 1, 1.0), 7.0),
+        ];
+        let d = deltas(&from, &to, true);
+        let got: Vec<_> = d
+            .iter()
+            .map(|(k, c)| (k.query_id, c.calls, c.cpu_user_ms, c.disk_read_bytes))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (1, 50, Some(60_000.0), Some(600_000)),
+                (2, 5, Some(20.0), Some(200)),
+                (3, 1, Some(7.0), Some(70)),
+            ],
+            "pgss — целиком, kcache — дельта, сброшенный kcache и новый ключ — целиком"
+        );
+        // Вытесненная и вернувшаяся строка pgss без сброса — то же правило.
+        let d = deltas(&from[..1], &to[..1], false);
+        assert_eq!((d[0].1.calls, d[0].1.cpu_user_ms), (50, Some(60_000.0)));
     }
 
     #[test]

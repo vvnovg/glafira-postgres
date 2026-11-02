@@ -133,6 +133,20 @@ impl Counters {
         }
     }
 
+    /// Новая база pgss (сброс `pg_stat_statements_reset()` или вытесненная и вернувшаяся строка): счётчики pgss — `self`
+    /// целиком, а колонки `pg_stat_kcache` — дельтой против `prev` (замечание 15 смоука P3b). Сброс pgss счётчики kcache
+    /// не обнуляет: целиком они дали бы накопленное с прошлого сброса kcache. Уменьшились — сброшен и kcache, значение
+    /// целиком (`sub_kcache`).
+    pub fn rebased_with_kcache_delta(&self, prev: &Counters) -> Counters {
+        Counters {
+            cpu_user_ms: sub_kcache(self.cpu_user_ms, prev.cpu_user_ms),
+            cpu_sys_ms: sub_kcache(self.cpu_sys_ms, prev.cpu_sys_ms),
+            disk_read_bytes: sub_kcache(self.disk_read_bytes, prev.disk_read_bytes),
+            disk_write_bytes: sub_kcache(self.disk_write_bytes, prev.disk_write_bytes),
+            ..*self
+        }
+    }
+
     pub fn add(&mut self, o: &Counters) {
         self.calls += o.calls;
         self.total_exec_ms += o.total_exec_ms;

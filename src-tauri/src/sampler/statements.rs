@@ -153,8 +153,9 @@ impl StatementsBuffer {
     }
 
     /// Тик: дельты изменившихся ключей против прошлых накопительных значений. Первый тик и тик после промежутка —
-    /// только база (дельт нет); смена `pg_stat_kcache` — новая база для его колонок. Ключ с уменьшившимися счётчиками (вытеснен и вернулся) и все ключи после смены
-    /// `stats_reset` получают новую базу: дельта равна накопительному значению.
+    /// только база (дельт нет); смена `pg_stat_kcache` — новая база для его колонок. Ключ с уменьшившимися счётчиками
+    /// (вытеснен и вернулся) и все ключи после смены `stats_reset` получают новую базу pgss: дельта счётчиков pgss равна
+    /// накопительному значению, а колонки kcache — дельта, пока они не уменьшились (свой сброс у kcache).
     pub fn push(&mut self, at_ms: i64, s: StatementsSample) -> Vec<StatementsEvent> {
         let mut out = Vec::with_capacity(2);
         let gap = self
@@ -190,7 +191,11 @@ impl StatementsBuffer {
                             d
                         }
                     }
-                    _ => row.counters,
+                    // Новая база pgss (сброс, вытесненная и вернувшаяся строка): у kcache свой сброс — его колонки
+                    // дельтой против прошлого значения, если расширение то же.
+                    Some(_) if kcache_changed => row.counters.without_kcache(),
+                    Some(prev) => row.counters.rebased_with_kcache_delta(&prev.counters),
+                    None => row.counters,
                 };
                 if delta.calls == 0 && delta.total_exec_ms == 0.0 {
                     continue;
@@ -797,12 +802,33 @@ mod tests {
         b.push(3 * M, kcache(sample(vec![with_cpu(30, 5040.0)], 1, 0)));
         let w = b.window(300).unwrap();
         assert_eq!(w.sums[&key(1)].cpu_user_ms, Some(40.0));
+        // Замечание 15 смоука P3b: сброс pgss (`stats_reset` сменился) kcache не сбрасывает — счётчики pgss целиком,
+        // CPU дельтой; уменьшившийся CPU (сброшен и kcache) — целиком.
+        b.push(4 * M, kcache(sample(vec![with_cpu(3, 5100.0)], 2, 0)));
+        let w = b.window(60).unwrap();
+        assert_eq!(
+            (w.sums[&key(1)].calls, w.sums[&key(1)].cpu_user_ms),
+            (3, Some(60.0))
+        );
+        b.push(5 * M, kcache(sample(vec![with_cpu(4, 7.0)], 3, 0)));
+        let w = b.window(60).unwrap();
+        assert_eq!(
+            (w.sums[&key(1)].calls, w.sums[&key(1)].cpu_user_ms),
+            (4, Some(7.0))
+        );
         // kcache исчез: колонок нет, счётчики pgss идут дальше.
-        b.push(4 * M, sample(vec![row(1, 35, 35.0)], 1, 0));
+        b.push(6 * M, sample(vec![row(1, 9, 9.0)], 3, 0));
         let w = b.window(60).unwrap();
         assert_eq!(
             (w.sums[&key(1)].calls, w.sums[&key(1)].cpu_user_ms),
             (5, None)
+        );
+        // kcache вернулся вместе со сбросом pgss: его прошлые значения — от другого чтения, колонок нет.
+        b.push(7 * M, kcache(sample(vec![with_cpu(2, 9000.0)], 4, 0)));
+        let w = b.window(60).unwrap();
+        assert_eq!(
+            (w.sums[&key(1)].calls, w.sums[&key(1)].cpu_user_ms),
+            (2, None)
         );
     }
 
