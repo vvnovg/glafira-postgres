@@ -427,7 +427,9 @@ export function ConnectionTree() {
                 <span className="tree-caret" aria-hidden="true">
                   {expanded ? "▾" : "▸"}
                 </span>
-                <span className="tree-name">{folder.name}</span>
+                <span className="tree-name" title={folder.name}>
+                  {folder.name}
+                </span>
               </button>
               <span className="tree-menu-anchor">
                 <button

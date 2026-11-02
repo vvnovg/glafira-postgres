@@ -186,7 +186,7 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
         </button>
         <Glyph className={`conn-state conn-state-${view.state}`} symbol="" label={t(`sidebar.state.${view.state}`)} />
         <span className="dot" style={{ background: c.color }} />
-        <button type="button" className="link tree-name" onClick={() => open({ kind: "overview", connectionId: c.id })}>
+        <button type="button" className="link tree-name" title={c.name} onClick={() => open({ kind: "overview", connectionId: c.id })}>
           {c.name}
         </button>
         <EnvBadge environment={c.environment} readOnly={c.readOnly} />

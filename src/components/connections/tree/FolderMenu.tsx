@@ -13,7 +13,18 @@ export interface FolderMenuItem {
  * Фокус — на первом пункте, стрелки переходят между пунктами. Esc и Tab закрывают меню и возвращают
  * фокус триггеру (Esc не уходит дальше меню), клик вне — просто закрывает.
  */
-export function FolderMenu({ label, items, onClose }: { label: string; items: FolderMenuItem[]; onClose: () => void }) {
+export function FolderMenu({
+  label,
+  items,
+  onClose,
+  trigger,
+}: {
+  label: string;
+  items: FolderMenuItem[];
+  onClose: () => void;
+  /** Куда вернуть фокус при закрытии, если в якоре нет кнопки-триггера (контекстное меню строки). */
+  trigger?: () => HTMLElement | null;
+}) {
   const ref = useRef<HTMLDivElement>(null);
   // Свежий onClose без переподписки слушателя при каждом рендере родителя.
   const closeRef = useRef(onClose);
@@ -24,7 +35,7 @@ export function FolderMenu({ label, items, onClose }: { label: string; items: Fo
 
   const close = (returnFocus: boolean) => {
     // Фокус возвращается до закрытия: поле с autoFocus, которое откроет пункт меню, всё равно заберёт его.
-    if (returnFocus) anchor()?.querySelector<HTMLElement>("[aria-haspopup]")?.focus();
+    if (returnFocus) (trigger?.() ?? anchor()?.querySelector<HTMLElement>("[aria-haspopup]"))?.focus();
     closeRef.current();
   };
 

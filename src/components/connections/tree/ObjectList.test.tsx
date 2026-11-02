@@ -152,6 +152,10 @@ describe("ObjectList", () => {
     expect(screen.getByRole("button", { name: "Развернуть или свернуть партиции events" })).not.toBe(screen.getByRole("button", { name: "Открыть events" }));
     expect(screen.getByText("2,0 KB")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^t1/ })).not.toBeInTheDocument();
+    // Список партиций по умолчанию свёрнут и не читается; имя строки — одной линией, полностью — в подсказке.
+    expect(screen.getByRole("button", { name: "Развернуть или свернуть партиции events" })).toHaveAttribute("aria-expanded", "false");
+    expect(api.listPartitions).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Открыть events" })).toHaveAttribute("title", "events");
     await user.click(screen.getByRole("button", { name: "Развернуть или свернуть партиции events" }));
     expect(await screen.findByText("events_2026_10")).toBeInTheDocument();
     expect(api.listPartitions).toHaveBeenCalledWith("c", "orders", "shop", "events", 0, PAGE);

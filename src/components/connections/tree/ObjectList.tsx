@@ -135,10 +135,12 @@ function ObjectRow({
         >
           {label}
         </button>
-        {partitioned && <span className="muted">{t("sidebar.partitions", { count: item.partitions ?? 0 })}</span>}
-        {item.totalBytes !== null && item.totalBytes > 0 && <span className="muted">{formatBytes(item.totalBytes)}</span>}
-        {/* Размер партиционированной таблицы в списке не считается: пришлось бы заблокировать каждую партицию. */}
-        {item.relkind === "p" && item.totalBytes === null && <Glyph className="muted" symbol="—" label={t("sidebar.partitionedSize")} />}
+        <span className="tree-extra">
+          {partitioned && <span className="muted">{t("sidebar.partitions", { count: item.partitions ?? 0 })}</span>}
+          {item.totalBytes !== null && item.totalBytes > 0 && <span className="muted">{formatBytes(item.totalBytes)}</span>}
+          {/* Размер партиционированной таблицы в списке не считается: пришлось бы заблокировать каждую партицию. */}
+          {item.relkind === "p" && item.totalBytes === null && <Glyph className="muted" symbol="—" label={t("sidebar.partitionedSize")} />}
+        </span>
       </div>
       {open && <PartitionList connectionId={connectionId} db={db} schema={item.schema} table={item.name} openState={openState} />}
     </li>
@@ -312,7 +314,7 @@ export function ObjectList({
           </ul>
         </div>
       ) : (
-        <ul>
+        <ul className="tree-objects">
           {items.map((item) => (
             <ObjectRow key={item.oid} item={item} kind={kind} connectionId={connectionId} db={db} schema={schema} openState={openState} />
           ))}
