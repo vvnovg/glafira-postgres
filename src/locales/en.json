@@ -708,6 +708,7 @@
       "ok": "Installed, version {{version}}",
       "warn": "Available but not created",
       "missing": "Not installed on the server",
+      "notLoaded": "Created (version {{version}}), but the library is not loaded: {{members}}",
       "affects": "Advanced checks (indexes, bloat, waits) will be unavailable",
       "hints": {
         "hypopg": "Index hypothesis checks (“Check hypothesis” in a plan)",
@@ -719,7 +720,8 @@
         "packagePreload": "Enable: install the {{package}} package from PGDG on the server ({{rpm}} for RPM), add {{name}} to shared_preload_libraries and restart the server, then CREATE EXTENSION in this database.",
         "preload": "Enable: the package is installed but the library is not loaded: add {{name}} to shared_preload_libraries and restart the server, then CREATE EXTENSION in this database.",
         "preloadUnknown": "Enable: the package is installed; if {{name}} is not in shared_preload_libraries yet (the role cannot see the value), add it and restart the server, then CREATE EXTENSION in this database.",
-        "create": "Enable: CREATE EXTENSION in this database only, no restart needed."
+        "create": "Enable: CREATE EXTENSION in this database only, no restart needed.",
+        "loadCreated": "Enable: CREATE EXTENSION is already done — add {{name}} to shared_preload_libraries on {{members}} and restart the server; until then the extension does not work and the Queries tool does not use it."
       },
       "notes": {
         "pg_stat_kcache": "In shared_preload_libraries pg_stat_kcache goes after pg_stat_statements. If the role lacks EXECUTE on pg_stat_kcache(), grant it.",

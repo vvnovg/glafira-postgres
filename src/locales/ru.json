@@ -726,6 +726,7 @@
       "ok": "Установлено, версия {{version}}",
       "warn": "Доступно, но не создано",
       "missing": "Не установлено на сервере",
+      "notLoaded": "Создано (версия {{version}}), но библиотека не загружена: {{members}}",
       "affects": "Расширенные проверки (индексы, bloat, ожидания) будут недоступны",
       "hints": {
         "hypopg": "Проверка гипотез индексов («Проверить гипотезу» в плане)",
@@ -737,7 +738,8 @@
         "packagePreload": "Включение: установить на сервер пакет {{package}} из PGDG (в RPM — {{rpm}}), добавить {{name}} в shared_preload_libraries и перезапустить сервер, затем CREATE EXTENSION в этой базе.",
         "preload": "Включение: пакет установлен, но библиотека не загружена — добавить {{name}} в shared_preload_libraries и перезапустить сервер, затем CREATE EXTENSION в этой базе.",
         "preloadUnknown": "Включение: пакет установлен; если {{name}} ещё нет в shared_preload_libraries (роли значение не видно) — добавить и перезапустить сервер, затем CREATE EXTENSION в этой базе.",
-        "create": "Включение: только CREATE EXTENSION в этой базе, перезапуск не нужен."
+        "create": "Включение: только CREATE EXTENSION в этой базе, перезапуск не нужен.",
+        "loadCreated": "Включение: CREATE EXTENSION уже выполнен — добавить {{name}} в shared_preload_libraries на узлах {{members}} и перезапустить сервер; до этого расширение не работает, и «Запросы» его не используют."
       },
       "notes": {
         "pg_stat_kcache": "В shared_preload_libraries pg_stat_kcache идёт после pg_stat_statements. Если у роли нет EXECUTE на pg_stat_kcache(), выдать его.",

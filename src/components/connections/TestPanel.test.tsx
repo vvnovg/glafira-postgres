@@ -198,6 +198,28 @@ describe("TestPanel", () => {
     expect(screen.getByText("Проверка гипотез индексов («Проверить гипотезу» в плане)")).toBeInTheDocument();
   });
 
+  it("расширение создано, но библиотека не загружена — предупреждение с шагами preload (M6 ревью)", () => {
+    render(
+      <TestPanel
+        events={[]}
+        report={{
+          ok: true,
+          topology: null,
+          readiness: [
+            {
+              id: "extension",
+              status: "warn",
+              params: { name: "pg_stat_kcache", hint: "pg_stat_kcache", version: "2.3.0", reason: "notLoaded", enable: "loadCreated", members: "pg-2" },
+              fix: null,
+            },
+          ],
+        }}
+      />,
+    );
+    expect(screen.getByText("Создано (версия 2.3.0), но библиотека не загружена: pg-2")).toBeInTheDocument();
+    expect(screen.getByText(/CREATE EXTENSION уже выполнен — добавить pg_stat_kcache в shared_preload_libraries на узлах pg-2/)).toBeInTheDocument();
+  });
+
   it("шаги включения расширения — по состоянию сервера; заметка расширения отдельно", () => {
     const { container } = render(
       <TestPanel

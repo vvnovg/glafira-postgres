@@ -1255,7 +1255,8 @@ Windows — только unit-тесты и сборка. Фикстуры пл�
     (и) *Включение расширений по факту* (§9.6, п. 20м): `readiness.extension.enable.{package,packagePreload,preload,preloadUnknown,create}` —
     не установлено → пакет PGDG `postgresql-<мажор>-<имя>` (RPM `<имя>_<мажор>`) → preload и перезапуск (kcache, wait_sampling) →
     `CREATE EXTENSION`; доступно, библиотеки нет → preload; загружено → только `CREATE EXTENSION`; список preload роли не виден — «проверьте
-    сами». Прежние статические `enable.<имя>` заменены, их доп. сведения — в `readiness.extension.notes.*`. Колонка команды в чек-листе
+    сами»; создано, но библиотеки нет в видимом списке preload хотя бы одного узла (kcache, wait_sampling) — `warn` с `reason=notLoaded`,
+    `enable=loadCreated` и `members` (preload и перезапуск, без `CREATE EXTENSION`). Прежние статические `enable.<имя>` заменены, их доп. сведения — в `readiness.extension.notes.*`. Колонка команды в чек-листе
     шире, перенос только по пробелам, длинное прокручивается.
     (к) *Ожидания в карточке* (§7.3): `QueryDetail.waitsSampler` различает «профиль не открыт» (подсказка открыть), «открыт, запрос не
     встречался» («В сэмплах «Сессий» за … этот запрос не встречался», плюс пометка об остановке сбора) и «сэмплов ещё нет».

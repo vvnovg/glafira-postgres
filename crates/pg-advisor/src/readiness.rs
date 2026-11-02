@@ -127,6 +127,19 @@ fn enable_steps(f: &ReadinessFacts, name: &str, available: bool) -> Vec<(&'stati
     ]
 }
 
+/// Узлы, где список `shared_preload_libraries` виден и библиотеки расширения с предзагрузкой в нём нет; список не
+/// виден нигде или предзагрузка не нужна — пусто (утверждать нечего).
+fn not_loaded_on(f: &ReadinessFacts, name: &str) -> Vec<String> {
+    if !NEEDS_PRELOAD.contains(&name) {
+        return Vec::new();
+    }
+    f.preload_libraries_by_member
+        .iter()
+        .filter(|(_, l)| !l.iter().any(|x| x == name))
+        .map(|(m, _)| m.clone())
+        .collect()
+}
+
 const PRELOAD_FIX: &str = "shared_preload_libraries = 'pg_stat_statements'";
 
 pub fn evaluate(f: &ReadinessFacts) -> Vec<ReadinessItem> {
@@ -309,7 +322,17 @@ pub fn evaluate(f: &ReadinessFacts) -> Vec<ReadinessItem> {
                 installed: Some(v), ..
             }) => {
                 params.push(("version", v.clone()));
-                item("extension", Status::Ok, &params, None)
+                // Создано, но библиотека не загружена (убрана из preload, реплика без preload): расширение не работает,
+                // «Запросы» и карточка его не используют — предупреждение с шагами preload (M6 ревью волны смоука P3b).
+                let unloaded = not_loaded_on(f, name);
+                if HINTED.contains(&name) && !unloaded.is_empty() {
+                    params.push(("reason", "notLoaded".into()));
+                    params.push(("enable", "loadCreated".into()));
+                    params.push(("members", unloaded.join(", ")));
+                    item("extension", Status::Warn, &params, None)
+                } else {
+                    item("extension", Status::Ok, &params, None)
+                }
             }
             Some(ExtensionFact {
                 available: true, ..
@@ -516,6 +539,45 @@ mod tests {
         assert_eq!(k.fix, None);
         // Расширения без подсказки (pgstattuple и др.) шагов включения не получают.
         assert_eq!(enable_of(&items, "pgstattuple"), None);
+    }
+
+    /// M6 ревью: расширение создано в базе, но библиотеки нет в preload (на узле, где список виден) — предупреждение с
+    /// шагами preload и перезапуска, без CREATE EXTENSION; список не виден — не утверждаем.
+    #[test]
+    fn a_created_extension_without_its_library_is_a_warning() {
+        let mut f = facts();
+        f.extensions = vec![
+            ExtensionFact {
+                name: "pg_stat_kcache".into(),
+                installed: Some("2.3.0".into()),
+                available: true,
+            },
+            ExtensionFact {
+                name: "pg_wait_sampling".into(),
+                installed: Some("1.1".into()),
+                available: true,
+            },
+        ];
+        f.preload_libraries_by_member = vec![
+            (
+                "a".into(),
+                vec!["pg_stat_statements".into(), "pg_stat_kcache".into()],
+            ),
+            ("b".into(), vec!["pg_stat_statements".into()]),
+        ];
+        let items = evaluate(&f);
+        let k = ext(&items, "pg_stat_kcache");
+        assert_eq!(k.status, Status::Warn);
+        assert_eq!(k.params["reason"], "notLoaded");
+        assert_eq!(k.params["enable"], "loadCreated");
+        assert_eq!(k.params["members"], "b");
+        assert_eq!(k.params["version"], "2.3.0");
+        assert_eq!(k.fix, None);
+        assert_eq!(ext(&items, "pg_wait_sampling").params["members"], "a, b");
+        f.preload_libraries_by_member.clear();
+        let items = evaluate(&f);
+        assert_eq!(ext(&items, "pg_stat_kcache").status, Status::Ok);
+        assert!(!ext(&items, "pg_stat_kcache").params.contains_key("reason"));
     }
 
     #[test]
