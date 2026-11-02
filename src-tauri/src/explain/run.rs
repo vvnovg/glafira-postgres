@@ -84,6 +84,20 @@ pub(crate) fn explain_prefix(options: &str) -> String {
     format!("EXPLAIN ({options}) ")
 }
 
+/// Обёртка EXPLAIN консоли Глафиры — свой запрос (замечание 13 смоука P3b): текст строки pgss начинается точным
+/// префиксом команды с опциями Глафиры — пробный план (с `GENERIC_PLAN` и без) или выполнение. Метку `/* glafira */` в
+/// начало команды Глафира не ставит: она сдвинула бы позицию ошибки сервера в тексте пользователя.
+pub fn is_own_explain(text: &str) -> bool {
+    let text = text.trim_start();
+    [
+        PROBE_OPTIONS.to_string(),
+        probe_options(&Params::Generic),
+        ANALYZE_OPTIONS.to_string(),
+    ]
+    .iter()
+    .any(|o| text.starts_with(&explain_prefix(o)))
+}
+
 /// Где SQL пользователя в команде EXPLAIN: позиция ошибки сервера пересчитывается в позицию в исходном тексте.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Origin {
@@ -575,6 +589,32 @@ pub async fn run(st: &AppState, id: &str, req: &ExplainRequest) -> AppResult<Exp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explain_wrappers_of_glafira_are_own() {
+        for options in [
+            probe_options(&Params::None),
+            probe_options(&Params::Generic),
+            ANALYZE_OPTIONS.to_string(),
+        ] {
+            let text = format!("{}SELECT * FROM t WHERE id = $1", explain_prefix(&options));
+            assert!(is_own_explain(&text), "{text}");
+            assert!(crate::diag::texts::is_own_text(&text), "{text}");
+        }
+        assert!(is_own_explain(
+            "EXPLAIN (FORMAT JSON, VERBOSE, SETTINGS, GENERIC_PLAN) SELECT $1"
+        ));
+        assert!(is_own_explain(
+            "EXPLAIN (ANALYZE, BUFFERS, WAL, VERBOSE, SETTINGS, FORMAT JSON) SELECT 1"
+        ));
+        // EXPLAIN пользователя с другими опциями — не свой.
+        assert!(!is_own_explain("EXPLAIN (FORMAT JSON) SELECT 1"));
+        assert!(!is_own_explain("EXPLAIN ANALYZE SELECT 1"));
+        assert!(!is_own_explain(
+            "explain (format json, verbose, settings) SELECT 1"
+        ));
+        assert!(!is_own_explain("SELECT 1"));
+    }
 
     #[test]
     fn server_position_maps_to_the_original_text() {

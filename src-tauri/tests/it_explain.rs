@@ -740,6 +740,61 @@ async fn generic_plan_is_refused_before_16_and_writes_are_refused_on_a_replica()
     }
 }
 
+/// Замечание 13 смоука P3b: обёртки EXPLAIN консоли (пробный план и выполнение) в топе «Запросов» — свои строки
+/// Глафиры (по точному префиксу её опций), хотя метки `/* glafira */` у них нет.
+#[tokio::test]
+async fn explain_wrappers_are_own_rows_of_the_top() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st) = common::open_server_in(&perf, "perf").await;
+    let m = member_of(&st).await;
+    let sql = "SELECT count(*) FROM shop.orders WHERE status = $1";
+    for mode in [Mode::Plan, Mode::Analyze] {
+        explain::run::run(
+            &st,
+            "it",
+            &req(&m, "perf", sql, mode, values(&["disputed"])),
+        )
+        .await
+        .unwrap();
+    }
+    for search in [
+        "EXPLAIN (FORMAT JSON, VERBOSE, SETTINGS)",
+        "EXPLAIN (ANALYZE, BUFFERS, WAL, VERBOSE, SETTINGS, FORMAT JSON)",
+    ] {
+        let r = diag::run(
+            &st,
+            "it",
+            DiagRequest {
+                tool: Tool::Queries,
+                member: None,
+                window_s: None,
+                queries: Some(QueriesParams {
+                    mode: QueriesMode::SinceReset,
+                    sort: QuerySort::Calls,
+                    limit: 50,
+                    database: Some("perf".into()),
+                    toplevel_only: true,
+                    search: Some(search.into()),
+                }),
+            },
+        )
+        .await
+        .unwrap();
+        let DiagData::Queries(d) = &r.data else {
+            unreachable!()
+        };
+        let wrappers: Vec<_> = d
+            .rows
+            .iter()
+            .filter(|x| x.text.as_deref().is_some_and(|t| t.starts_with(search)))
+            .collect();
+        assert!(!wrappers.is_empty(), "{search}: {:?}", d.rows);
+        assert!(wrappers.iter().all(|x| x.own), "{search}: {wrappers:?}");
+    }
+}
+
 #[tokio::test]
 async fn llm_bundle_has_text_stats_plan_and_ddl() {
     let Some(perf) = common::perf_addr() else {

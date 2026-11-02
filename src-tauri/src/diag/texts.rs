@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use pg_advisor::queries::QueryKey;
 
 use crate::diag::query_detail::NodeKey;
+use crate::explain::run::is_own_explain;
 use crate::product::is_marked_sql;
 use crate::sync::MutexExt;
 use crate::topology::probe::is_unmarked_poll_sql;
@@ -18,9 +19,10 @@ use crate::topology::runtime::CloseListener;
 /// Текстов на узел (вместе с отметками «текста нет»); при переполнении кеш узла очищается целиком.
 pub const MAX_TEXTS: usize = 2000;
 
-/// Свой запрос Глафиры: текст с меткой или запрос опроса узла без метки (строка записана до метки).
+/// Свой запрос Глафиры: текст с меткой, запрос опроса узла без метки (строка записана до метки) или обёртка EXPLAIN
+/// консоли с опциями Глафиры (`explain::run::is_own_explain`).
 pub fn is_own_text(text: &str) -> bool {
-    is_marked_sql(text) || is_unmarked_poll_sql(text)
+    is_marked_sql(text) || is_unmarked_poll_sql(text) || is_own_explain(text)
 }
 
 /// Тексты одного узла: текст и признак обрезки по ключу; `None` — текст уже читался, и у строки pgss его нет (NULL или
