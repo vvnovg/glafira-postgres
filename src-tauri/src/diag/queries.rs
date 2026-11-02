@@ -41,12 +41,14 @@ pub struct PgssInstalled {
     pub kcache: Option<KcacheCaps>,
 }
 
-/// Установленный `pg_stat_kcache`: 2.2+ — колонки `exec_*` и `top`, старше — `user_time` и без `top`.
+/// Установленный `pg_stat_kcache`: 2.2+ — колонки `exec_*` и `top`, старше — `user_time` и без `top`; `stats_since`
+/// (2.3+, по каталогу: колонка результата `pg_stat_kcache()`) — с какого момента накоплена строка.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KcacheCaps {
     pub schema: String,
     pub exec_prefix: bool,
     pub has_top: bool,
+    pub stats_since: bool,
 }
 
 impl KcacheCaps {
@@ -68,6 +70,7 @@ impl KcacheCaps {
             schema,
             exec_prefix: new,
             has_top: new,
+            stats_since: false,
         })
     }
 }
@@ -86,13 +89,15 @@ const DETECT_SQL: &str = marked_sql!(
 );
 
 /// `pg_stat_kcache`: версия, схема, `shared_preload_libraries` (из `pg_settings`: без `pg_read_all_settings` строки
-/// нет — NULL) и право вызова функции. `to_regprocedure` — повреждённое расширение (функции нет) не роняет запрос,
+/// нет — NULL), право вызова функции и колонка `stats_since` в её результате. `to_regprocedure` — повреждённое расширение (функции нет) не роняет запрос,
 /// а даёт `false`. Расширение без загруженной библиотеки или без права вызова роняло бы чтение всего топа — такое
 /// расширение не используется (`kcache_usable`, затем проба `kcache_probe_sql`).
 const DETECT_KCACHE_SQL: &str = marked_sql!(
     "SELECT e.extversion::text, n.nspname::text, \
     (SELECT setting FROM pg_settings WHERE name = 'shared_preload_libraries'), \
-    COALESCE(has_function_privilege(to_regprocedure(format('%I.pg_stat_kcache()', n.nspname)), 'EXECUTE'), false) \
+    COALESCE(has_function_privilege(to_regprocedure(format('%I.pg_stat_kcache()', n.nspname)), 'EXECUTE'), false), \
+    COALESCE((SELECT 'stats_since' = ANY(p.proargnames) FROM pg_proc p \
+      WHERE p.oid = to_regprocedure(format('%I.pg_stat_kcache()', n.nspname))), false) \
     FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'pg_stat_kcache'"
 );
 
@@ -162,6 +167,10 @@ async fn detect_kcache(c: &Client, k: &KcacheNode) -> AppResult<Option<KcacheCap
         })
         .and_then(|k| {
             KcacheCaps::from_version(&k.get::<_, String>(0), quote_ident(&k.get::<_, String>(1)))
+                .map(|caps| KcacheCaps {
+                    stats_since: k.get::<_, Option<bool>>(4).unwrap_or(false),
+                    ..caps
+                })
         });
     let Some(caps) = candidate else {
         k.probes.remember(&k.node, now, None);
@@ -570,11 +579,45 @@ pub struct PgssMeta {
     pub dealloc: Option<i64>,
     /// Колонки `pg_stat_kcache` (CPU, диск) заполнены: расширение установлено (между снимками — в обоих снимках).
     pub kcache: bool,
+    /// «С момента сброса»: с какого момента накоплены колонки kcache — самая ранняя `stats_since` его строк (2.3+);
+    /// `None` — неизвестно (старый kcache, строк нет, другой режим).
+    pub kcache_since_ms: Option<i64>,
+    /// «С момента сброса»: CPU и диск накоплены за другой период, чем остальные колонки, — `pg_stat_kcache` сбрасывается
+    /// отдельно от pgss (`kcache_period_differs`). В окне и между снимками его колонки — дельты, и признака нет.
+    pub kcache_separate: bool,
+}
+
+/// Расхождение начала накопления kcache и сброса pgss меньше этого — один период (сброшены вместе).
+pub const KCACHE_PERIOD_SLACK_MS: i64 = 60_000;
+
+/// Начало накопления колонок kcache (замечание 15 смоука P3b): `pg_stat_statements_reset()` kcache не сбрасывает, и
+/// «с момента сброса» его CPU и диск могут быть накоплены с прошлого `pg_stat_kcache_reset()`. Только для kcache со
+/// `stats_since`.
+pub fn kcache_since_sql(k: &KcacheCaps) -> Option<String> {
+    k.stats_since.then(|| {
+        format!(
+            "{SQL_MARKER}SELECT (extract(epoch FROM min(stats_since)) * 1000)::bigint FROM {}.pg_stat_kcache()",
+            k.schema
+        )
+    })
+}
+
+/// Периоды kcache и pgss «с момента сброса» различаются: начало накопления kcache (`since`, если `stats_since` есть —
+/// `known`) раньше сброса pgss больше чем на `KCACHE_PERIOD_SLACK_MS`. Начало или сброс неизвестны — считается, что
+/// различаются: kcache сбрасывается отдельно, и подвал об этом скажет. Строк kcache нет — колонок тоже нет.
+pub fn kcache_period_differs(known: bool, since: Option<i64>, pgss_reset: Option<i64>) -> bool {
+    match (known, since, pgss_reset) {
+        (true, None, _) => false,
+        (true, Some(k), Some(r)) => k < r - KCACHE_PERIOD_SLACK_MS,
+        _ => true,
+    }
 }
 
 impl PgssMeta {
     pub fn of(pgss: &PgssInstalled, info: &PgssInfo) -> Self {
         Self {
+            kcache_since_ms: None,
+            kcache_separate: false,
             kcache: pgss.kcache.is_some(),
             version: pgss.version.clone(),
             has_info: pgss.caps.info,
@@ -890,6 +933,15 @@ async fn report_since_reset(
                 Detect::Installed(pgss) => {
                     // Сначала строки: их ключи существовали до скана текстов, и он их проверит.
                     let snap = read_cumulative_on(c, pgss, &kcache).await?;
+                    // Начало накопления kcache — украшение подвала: сбой чтения не роняет отчёт.
+                    let kcache_since = match pgss.kcache.as_ref().and_then(kcache_since_sql) {
+                        Some(sql) => c
+                            .query_one(&sql, &[])
+                            .await
+                            .ok()
+                            .map(|r| r.get::<_, Option<i64>>(0)),
+                        None => None,
+                    };
                     let matched = match &search {
                         Some(s) => {
                             let keys = snap.rows.iter().map(|r| r.key).collect();
@@ -900,7 +952,7 @@ async fn report_since_reset(
                         }
                         None => None,
                     };
-                    Some((snap, matched))
+                    Some((snap, matched, kcache_since))
                 }
                 _ => None,
             };
@@ -910,7 +962,7 @@ async fn report_since_reset(
     .await?;
     let mut unavailable = Vec::new();
     let (data, findings) = match (detected, snapshot) {
-        (Detect::Installed(pgss), Some((snap, matched))) => {
+        (Detect::Installed(pgss), Some((snap, matched, kcache_since))) => {
             if !p.sort.available(&pgss.caps, false, pgss.kcache.is_some()) {
                 return Err(sort_unavailable());
             }
@@ -934,7 +986,16 @@ async fn report_since_reset(
                     mode: p.mode.clone(),
                     coverage_s: None,
                     ticks: None,
-                    pgss: Some(PgssMeta::of(&pgss, &snap.info)),
+                    pgss: Some(PgssMeta {
+                        kcache_since_ms: kcache_since.flatten(),
+                        kcache_separate: pgss.kcache.is_some()
+                            && kcache_period_differs(
+                                kcache_since.is_some(),
+                                kcache_since.flatten(),
+                                snap.info.stats_reset_ms,
+                            ),
+                        ..PgssMeta::of(&pgss, &snap.info)
+                    }),
                     totals: t,
                     rows,
                 },
@@ -1811,12 +1872,51 @@ mod tests {
         );
     }
 
+    /// Замечание 15 смоука P3b: период kcache «с момента сброса» — по самой ранней `stats_since` его строк.
+    #[test]
+    fn kcache_period_is_compared_with_the_pgss_reset() {
+        let reset = Some(10 * 60_000);
+        assert!(
+            kcache_period_differs(true, Some(0), reset),
+            "kcache старше сброса pgss"
+        );
+        assert!(
+            !kcache_period_differs(true, Some(10 * 60_000 - 30_000), reset),
+            "сброшены вместе (в пределах минуты)"
+        );
+        assert!(
+            !kcache_period_differs(true, Some(11 * 60_000), reset),
+            "строки kcache моложе сброса"
+        );
+        assert!(
+            !kcache_period_differs(true, None, reset),
+            "строк kcache нет"
+        );
+        assert!(
+            kcache_period_differs(false, None, reset),
+            "без stats_since — неизвестно"
+        );
+        assert!(
+            kcache_period_differs(true, Some(0), None),
+            "время сброса pgss неизвестно"
+        );
+        let k = KcacheCaps::from_version("2.3.2", "public".into()).unwrap();
+        assert_eq!(kcache_since_sql(&k), None, "без stats_since не читается");
+        let sql = kcache_since_sql(&KcacheCaps {
+            stats_since: true,
+            ..k
+        })
+        .unwrap();
+        assert!(crate::product::is_marked_sql(&sql) && sql.contains("min(stats_since)"));
+    }
+
     #[test]
     fn kcache_join_depends_on_its_version() {
         let new = KcacheCaps {
             schema: "public".into(),
             exec_prefix: true,
             has_top: true,
+            stats_since: false,
         };
         let sql = statements_sql("public", caps("1.11"), Some(&new), "");
         assert!(
@@ -1834,6 +1934,7 @@ mod tests {
             schema: "public".into(),
             exec_prefix: false,
             has_top: false,
+            stats_since: false,
         };
         let sql = statements_sql("public", caps("1.9"), Some(&old), "");
         assert!(

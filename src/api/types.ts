@@ -698,6 +698,10 @@ export interface PgssMeta {
   dealloc: number | null;
   /** Колонки `pg_stat_kcache` (CPU, диск) заполнены: расширение установлено (между снимками — при снятии обоих). */
   kcache: boolean;
+  /** «С момента сброса»: с какого момента накоплены колонки kcache (самая ранняя `stats_since`, kcache 2.3+); `null` — неизвестно. */
+  kcacheSinceMs: number | null;
+  /** «С момента сброса»: CPU и диск — за другой период, чем остальные колонки (pg_stat_kcache сбрасывается отдельно). */
+  kcacheSeparate: boolean;
 }
 export interface QueriesData {
   mode: QueriesMode;

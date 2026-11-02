@@ -150,7 +150,7 @@ describe("DiagTab", () => {
         mode: { kind: "sinceReset" },
         coverageS: null,
         ticks: null,
-        pgss: { version: "1.11", max: 5000, trackPlanning: true, hasInfo: true, statsResetMs: null, dealloc: 0, kcache: false },
+        pgss: { version: "1.11", max: 5000, trackPlanning: true, hasInfo: true, statsResetMs: null, dealloc: 0, kcache: false, kcacheSinceMs: null, kcacheSeparate: false },
         totals: { calls: 0, totalExecMs: 0, rows: 0 },
         rows: [],
       }),
@@ -257,7 +257,7 @@ describe("DiagTab", () => {
       mode,
       coverageS: mode.kind === "between" ? 3600 : null,
       ticks: null,
-      pgss: { version: "1.11", max: 5000, trackPlanning: true, hasInfo: true, statsResetMs: null, dealloc: 0, kcache: false },
+      pgss: { version: "1.11", max: 5000, trackPlanning: true, hasInfo: true, statsResetMs: null, dealloc: 0, kcache: false, kcacheSinceMs: null, kcacheSeparate: false },
       totals: { calls: 1, totalExecMs: 1, rows: 1 },
       rows: [{ ...sinceResetRow, text: mode.kind === "between" ? "select from snapshot" : "select live" }],
     });

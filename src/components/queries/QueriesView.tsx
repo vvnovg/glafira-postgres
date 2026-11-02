@@ -386,6 +386,11 @@ export function QueriesView({
                             {t(c.labelKey)}
                             {current ? (ascending ? " ▴" : " ▾") : ""}
                           </button>
+                          {c.kcache && data.pgss?.kcacheSeparate && (
+                            <span className="muted" title={t("diag.queries.kcacheColumnHint")}>
+                              {" *"}
+                            </span>
+                          )}
                         </th>
                       );
                     })}
@@ -437,6 +442,13 @@ export function QueriesView({
                 ? t("diag.queries.pgss", { version: data.pgss.version, reset: data.pgss.statsResetMs === null ? "—" : formatTimestamp(data.pgss.statsResetMs) })
                 : t("diag.queries.pgssNoInfo", { version: data.pgss.version })}
               {!data.pgss.trackPlanning && ` · ${t("diag.queries.noTrackPlanning")}`}
+            </p>
+          )}
+          {data.pgss?.kcacheSeparate && (
+            <p className="muted diag-note">
+              {"* "}
+              {data.pgss.kcacheSinceMs === null ? t("diag.queries.kcacheSeparate") : t("diag.queries.kcacheSince", { since: formatTimestamp(data.pgss.kcacheSinceMs) })}{" "}
+              {t("diag.queries.kcacheResetBoth")} <code>SELECT pg_stat_statements_reset(); SELECT pg_stat_kcache_reset();</code>
             </p>
           )}
         </div>

@@ -172,6 +172,7 @@ mod tests {
             schema: "\"public\"".into(),
             exec_prefix: true,
             has_top: true,
+            stats_since: false,
         }
     }
 

@@ -30,7 +30,7 @@ function row(id: string, patch: Partial<QueryStat> = {}): QueryStat {
 function data(patch: Partial<QueriesData> = {}): { kind: "queries" } & QueriesData {
   return {
     kind: "queries", mode: { kind: "sinceReset" }, coverageS: null, ticks: null,
-    pgss: { version: "1.11", max: 5000, trackPlanning: true, hasInfo: true, statsResetMs: 1_700_000_000_000, dealloc: 0, kcache: false },
+    pgss: { version: "1.11", max: 5000, trackPlanning: true, hasInfo: true, statsResetMs: 1_700_000_000_000, dealloc: 0, kcache: false, kcacheSinceMs: null, kcacheSeparate: false },
     totals: { calls: 200, totalExecMs: 2000, rows: 200 }, rows: [row("1"), row("2", { totalExecMs: 500, sharePct: 25, text: "select 2" })], ...patch,
   };
 }
@@ -263,7 +263,7 @@ describe("QueriesView", () => {
   });
 
   it("pgss без pg_stat_statements_info: подвал без «сброс статистики —»; track_planning выключен — «Планирование» «—»", async () => {
-    vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport(data({ pgss: { version: "1.8", hasInfo: false, max: 5000, trackPlanning: false, statsResetMs: null, dealloc: null, kcache: false }, rows: [row("1", { totalPlanMs: 7, text: "select 1" })] }), { member: "pg-1" }));
+    vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport(data({ pgss: { version: "1.8", hasInfo: false, max: 5000, trackPlanning: false, statsResetMs: null, dealloc: null, kcache: false, kcacheSinceMs: null, kcacheSeparate: false }, rows: [row("1", { totalPlanMs: 7, text: "select 1" })] }), { member: "pg-1" }));
     renderWithClient(view());
     await screen.findByText("select 1");
     expect(screen.getByText(/время сброса недоступно/)).toBeInTheDocument();
@@ -281,7 +281,7 @@ describe("QueriesView", () => {
     expect(screen.queryByRole("columnheader", { name: /Чтение с диска/ })).toBeNull();
     unmount();
     const kc = data({
-      pgss: { version: "1.11", max: 5000, trackPlanning: true, hasInfo: true, statsResetMs: null, dealloc: 0, kcache: true },
+      pgss: { version: "1.11", max: 5000, trackPlanning: true, hasInfo: true, statsResetMs: null, dealloc: 0, kcache: true, kcacheSinceMs: null, kcacheSeparate: false },
       rows: [row("1", { text: "select 1", cpuUserMs: 1500, cpuSysMs: 500, diskReadBytes: 2048, diskWriteBytes: 0 }), row("2", { text: "select 2" })],
     });
     vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport(kc, { member: "pg-1" }));
@@ -298,6 +298,30 @@ describe("QueriesView", () => {
     expect(within(screen.getByText("select 2").closest("tr")!).getAllByRole("cell")[cpu].textContent).toBe("—");
     await user.click(within(headers[cpu]).getByRole("button"));
     await waitFor(() => expect(vi.mocked(api.runDiagnostic).mock.lastCall![1].queries?.sort).toBe("cpuTime"));
+  });
+
+  it("pg_stat_kcache сброшен отдельно от pgss: колонки CPU и диска помечены, подвал называет период и советует сбрасывать оба", async () => {
+    const pgss = { version: "1.11", max: 5000, trackPlanning: true, hasInfo: true, statsResetMs: 1_700_000_000_000, dealloc: 0, kcache: true };
+    const rows = [row("1", { text: "select 1", cpuUserMs: 1500, cpuSysMs: 500, diskReadBytes: 2048, diskWriteBytes: 0 })];
+    vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport(data({ pgss: { ...pgss, kcacheSinceMs: null, kcacheSeparate: false }, rows }), { member: "pg-1" }));
+    const { unmount } = renderWithClient(view());
+    await screen.findByText("select 1");
+    expect(screen.queryByText(/pg_stat_kcache_reset/)).toBeNull();
+    expect(screen.getByRole("columnheader", { name: /CPU/ }).textContent).not.toContain("*");
+    unmount();
+    vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport(data({ pgss: { ...pgss, kcacheSinceMs: 1_690_000_000_000, kcacheSeparate: true }, rows }), { member: "pg-1" }));
+    const { unmount: unmount2 } = renderWithClient(view());
+    await screen.findByText("select 1");
+    expect(screen.getByRole("columnheader", { name: /CPU/ }).textContent).toContain("*");
+    expect(screen.getByRole("columnheader", { name: /Чтение с диска/ }).textContent).toContain("*");
+    expect(screen.getByText(/CPU и диск \(pg_stat_kcache\) накоплены с .*pg_stat_statements_reset\(\) их не сбрасывает/)).toBeInTheDocument();
+    expect(screen.getByText("SELECT pg_stat_statements_reset(); SELECT pg_stat_kcache_reset();")).toBeInTheDocument();
+    unmount2();
+    // kcache без stats_since: время неизвестно, подвал говорит об отдельном сбросе.
+    vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport(data({ pgss: { ...pgss, kcacheSinceMs: null, kcacheSeparate: true }, rows }), { member: "pg-1" }));
+    renderWithClient(view());
+    await screen.findByText("select 1");
+    expect(screen.getByText(/накоплены с его собственного сброса/)).toBeInTheDocument();
   });
 
   it("«между снимками»: пара из панели снимков; подпись местным временем, покрытие, без stddev и без запроса текстов; удаление снимка пары и выход", async () => {

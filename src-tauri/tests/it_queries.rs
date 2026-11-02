@@ -853,6 +853,16 @@ async fn kcache_columns_on_perf() {
             .any(|x| x.cpu_user_ms.is_some_and(|c| c > 0.0)),
         "CPU заполнен"
     );
+    // kcache 2.3 на pg-perf: начало накопления его колонок известно, признак другого периода — по нему.
+    let meta = d.pgss.as_ref().unwrap();
+    let since = meta
+        .kcache_since_ms
+        .expect("stats_since у pg_stat_kcache 2.3");
+    assert_eq!(
+        meta.kcache_separate,
+        queries::kcache_period_differs(true, Some(since), meta.stats_reset_ms),
+        "{meta:?}"
+    );
     assert!(
         d.rows
             .windows(2)
