@@ -1,4 +1,4 @@
-import { fireEvent, screen } from "@testing-library/react";
+import { act, fireEvent, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { newProfile } from "./connections/profile";
@@ -96,6 +96,38 @@ describe("Sidebar: ширина панели", () => {
     expect(aside(container).style.width).toBe("180px");
     fireEvent.doubleClick(sep);
     expect(aside(container).style.width).toBe("260px");
+  });
+
+  it("значение и база перетаскивания — фактическая ширина панели; хранилище пишется по отпусканию (M10 ревью)", () => {
+    let observed: (() => void) | null = null;
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(cb: () => void) {
+          observed = cb;
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    localStorage.setItem("glafira.sidebar.width", "400");
+    const { container } = renderWithClient(<Sidebar />);
+    // Узкое окно: flex сжал панель до 200 px.
+    vi.spyOn(aside(container), "getBoundingClientRect").mockReturnValue({ width: 200 } as DOMRect);
+    act(() => observed?.());
+    const sep = screen.getByRole("separator", { name: "Ширина панели подключений" });
+    expect(sep).toHaveAttribute("aria-valuenow", "200");
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+    fireEvent.pointerDown(sep, { clientX: 500, pointerId: 1, button: 0 });
+    fireEvent.pointerMove(sep, { clientX: 540, pointerId: 1 });
+    expect(aside(container).style.width).toBe("240px");
+    fireEvent.pointerMove(sep, { clientX: 560, pointerId: 1 });
+    expect(setItem).not.toHaveBeenCalled();
+    fireEvent.pointerUp(sep, { clientX: 560, pointerId: 1 });
+    expect(setItem).toHaveBeenCalledTimes(1);
+    expect(localStorage.getItem("glafira.sidebar.width")).toBe("260");
+    setItem.mockRestore();
+    vi.unstubAllGlobals();
   });
 
   it("сохранённая ширина вне пределов или не число — приводится к пределам или к значению по умолчанию", () => {

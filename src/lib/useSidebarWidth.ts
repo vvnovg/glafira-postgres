@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 /** Ширина левой панели: по умолчанию и пределы, px. */
 export const SIDEBAR_DEFAULT = 260;
@@ -18,15 +18,26 @@ function readWidth(): number {
   }
 }
 
-/** Ширина левой панели, запоминаемая на этом компьютере (как свёрнутые папки дерева — в localStorage). */
-export function useSidebarWidth(): [number, (w: number) => void] {
+function saveWidth(w: number) {
+  try {
+    localStorage.setItem(KEY, String(w));
+  } catch {
+    // Хранилище недоступно — ширина живёт до перезапуска.
+  }
+}
+
+/**
+ * Ширина левой панели, запоминаемая на этом компьютере (как свёрнутые папки дерева — в localStorage). `persist: false` —
+ * промежуточное значение (перетаскивание): запись в хранилище одна, по отпусканию.
+ */
+export function useSidebarWidth(): [number, (w: number, opts?: { persist?: boolean }) => void] {
   const [width, setWidth] = useState(readWidth);
-  useEffect(() => {
-    try {
-      localStorage.setItem(KEY, String(width));
-    } catch {
-      // Хранилище недоступно — ширина живёт до перезапуска.
-    }
-  }, [width]);
-  return [width, (w) => setWidth(clampSidebar(w))];
+  return [
+    width,
+    (w, opts) => {
+      const next = clampSidebar(w);
+      setWidth(next);
+      if (opts?.persist !== false) saveWidth(next);
+    },
+  ];
 }
