@@ -176,6 +176,40 @@ fn group_partitions(root: &PlanNode, recs: Vec<Recommendation>) -> Vec<Recommend
 /// Сколько партиций назвать в доказательстве; остальные — «и ещё N» (полный список — в `tables`).
 const PARTITIONS_SHOWN: usize = 3;
 
+/// Естественный порядок имён: числа внутри имени сравниваются по значению (`events_2` раньше `events_10`; M8 ревью
+/// волны смоука P3b), остальное — посимвольно.
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (mut a, mut b) = (a, b);
+    loop {
+        let (Some(x), Some(y)) = (a.chars().next(), b.chars().next()) else {
+            return a.len().cmp(&b.len());
+        };
+        if x.is_ascii_digit() && y.is_ascii_digit() {
+            let da = a.find(|c: char| !c.is_ascii_digit()).unwrap_or(a.len());
+            let db = b.find(|c: char| !c.is_ascii_digit()).unwrap_or(b.len());
+            let (na, nb) = (
+                a[..da].trim_start_matches('0'),
+                b[..db].trim_start_matches('0'),
+            );
+            let ord = na
+                .len()
+                .cmp(&nb.len())
+                .then_with(|| na.cmp(nb))
+                .then_with(|| da.cmp(&db));
+            if ord != Ordering::Equal {
+                return ord;
+            }
+            (a, b) = (&a[da..], &b[db..]);
+        } else {
+            if x != y {
+                return x.cmp(&y);
+            }
+            (a, b) = (&a[x.len_utf8()..], &b[y.len_utf8()..]);
+        }
+    }
+}
+
 fn merge_partitions(mut parts: Vec<Recommendation>) -> Recommendation {
     // Партиции — по имени: в доказательстве и в командах порядок предсказуем.
     let name = |p: &Recommendation| {
@@ -185,7 +219,7 @@ fn merge_partitions(mut parts: Vec<Recommendation>) -> Recommendation {
             .unwrap_or_default()
             .to_string()
     };
-    parts.sort_by_key(name);
+    parts.sort_by(|a, b| natural_cmp(&name(a), &name(b)));
     let first = &parts[0];
     let severity = parts
         .iter()
@@ -830,7 +864,7 @@ mod tests {
                 "Filter": format!("(events_{i}.kind = 'pay'::text)"), "Rows Removed by Filter": 20_000})
         };
         let v = serde_json::json!({"Plan": {"Node Type": "Append", "Startup Cost": 0.0, "Total Cost": 10.0, "Plan Rows": 30, "Plan Width": 8,
-            "Actual Startup Time": 0.1, "Actual Total Time": 20.0, "Actual Rows": 0, "Actual Loops": 1, "Plans": [scan(0), scan(1), scan(2)]}});
+            "Actual Startup Time": 0.1, "Actual Total Time": 20.0, "Actual Rows": 0, "Actual Loops": 1, "Plans": [scan(10), scan(2), scan(1)]}});
         let r = evaluate(&crate::plan::json::from_json(&v).unwrap());
         let seq: Vec<&Recommendation> = r
             .recommendations
@@ -843,8 +877,8 @@ mod tests {
         assert_eq!(g.params["partitions"], 3);
         assert_eq!(g.params["rowsRead"], 60_000);
         assert_eq!(
-            g.params["tables"],
-            "shop.events_0, shop.events_1, shop.events_2"
+            g.params["tables"], "shop.events_1, shop.events_2, shop.events_10",
+            "естественный порядок: числа по значению (M8 ревью)"
         );
         assert_eq!(g.params["tablesHead"], g.params["tables"]);
         assert_eq!(g.params["tablesMore"], 0);
@@ -855,6 +889,34 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("CREATE INDEX CONCURRENTLY ON \"shop\".\"events_1\" (\"kind\");")
+        );
+    }
+
+    #[test]
+    fn natural_order_compares_numbers_by_value() {
+        let mut v = vec![
+            "events_10",
+            "events_2",
+            "events_02",
+            "events_1a",
+            "events_",
+            "a10b2",
+            "a10b10",
+            "a9",
+        ];
+        v.sort_by(|a, b| natural_cmp(a, b));
+        assert_eq!(
+            v,
+            [
+                "a9",
+                "a10b2",
+                "a10b10",
+                "events_",
+                "events_1a",
+                "events_2",
+                "events_02",
+                "events_10"
+            ]
         );
     }
 
