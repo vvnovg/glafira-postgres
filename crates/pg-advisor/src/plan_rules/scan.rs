@@ -62,11 +62,36 @@ pub fn index_filter(n: &PlanNode) -> Option<Recommendation> {
     let cols = columns_from(&[index_cond, n.filter.as_deref()], alias(n));
     let r = Recommendation::new("plan_index_filter", Severity::Warning, n.id)
         .param("table", table_name(n).unwrap_or_default())
-        .param("index", n.index_name.clone().unwrap_or_default())
+        .param("index", index_label(n))
         .param("rowsRemoved", removed.round() as i64)
         .param("rowsReturned", a.rows.round() as i64)
         .param("loops", a.loops.round() as u64);
     Some(index_recommendation(r, n, &cols))
+}
+
+/// Индекс сканирования для текста: свой (`Index Scan`), у Bitmap Heap Scan — индексы дочерних Bitmap Index Scan (через
+/// BitmapAnd / BitmapOr), иначе тип узла — доказательство не начинается с пустого имени.
+fn index_label(n: &PlanNode) -> String {
+    fn bitmap_indexes<'a>(n: &'a PlanNode, out: &mut Vec<&'a str>) {
+        for c in &n.children {
+            match c.node_type.as_str() {
+                "Bitmap Index Scan" => out.extend(c.index_name.as_deref()),
+                "BitmapAnd" | "BitmapOr" => bitmap_indexes(c, out),
+                _ => {}
+            }
+        }
+    }
+    if let Some(i) = &n.index_name {
+        return i.clone();
+    }
+    let mut names = Vec::new();
+    bitmap_indexes(n, &mut names);
+    names.dedup();
+    if names.is_empty() {
+        n.node_type.clone()
+    } else {
+        names.join(", ")
+    }
 }
 
 /// Nested Loop, внутренний ребёнок — Seq Scan с loops ≥ 1000: индекс по ключу соединения.
@@ -438,6 +463,22 @@ mod tests {
         assert_eq!(
             rec.hypo.as_ref().unwrap().index_ddl,
             "CREATE INDEX ON \"shop\".\"orders\" (\"customer_id\", \"status\")"
+        );
+        assert_eq!(
+            rec.params["index"], "orders_customer_idx",
+            "индекс дочернего Bitmap Index Scan"
+        );
+        let mut v = bitmap(5000, 10.0);
+        v["Plan"]["Plans"][0]["Index Name"] = serde_json::Value::Null;
+        let r = evaluate(&from_json(&v).unwrap());
+        let rec = r
+            .recommendations
+            .iter()
+            .find(|r| r.id == "plan_index_filter")
+            .unwrap();
+        assert_eq!(
+            rec.params["index"], "Bitmap Heap Scan",
+            "без имени индекса — тип узла"
         );
         assert!(
             !ids(&bitmap(900, 10.0)).contains(&"plan_index_filter".to_string()),

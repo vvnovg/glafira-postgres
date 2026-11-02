@@ -348,3 +348,15 @@ fn misestimate_flag_skips_early_stop_and_small_zero_estimates() {
     assert!(zero.len() >= 20, "{}", zero.len());
     assert!(zero.iter().all(|n| !n.misestimated));
 }
+
+/// index_filter у Bitmap Heap Scan: имя индекса — из дочернего Bitmap Index Scan (доказательство не начинается с «: »).
+#[test]
+fn bitmap_index_filter_names_the_child_index() {
+    let recs = pg_advisor::plan_rules::evaluate(&load("bitmap_filter_analyze")).recommendations;
+    let r = recs
+        .iter()
+        .find(|r| r.id == "plan_index_filter")
+        .expect("plan_index_filter");
+    assert_eq!(r.params["index"], "audit_order_idx");
+    assert_eq!(r.params["rowsRemoved"], 198_000);
+}
