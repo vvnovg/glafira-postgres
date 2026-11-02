@@ -378,6 +378,15 @@
     "trustAndCheck": "Trust and check"
   },
   "sidebar": {
+    "focus": {
+      "here": "Focus here",
+      "label": "Tree focus",
+      "back": "Back",
+      "backHint": "Return to the previous tree view",
+      "offline": "The connection is closed — go back and connect",
+      "gone": "This object no longer exists — go back"
+    },
+    "objectMenu": "Menu: {{name}}",
     "resize": "Connections panel width",
     "resizeHint": "Drag to change the width; double-click restores the default",
     "settings": "Settings",

@@ -230,6 +230,7 @@ describe("ConnectionTree", () => {
       "Удалить",
       "Экспортировать папку…",
       "Импортировать сюда…",
+      "Сфокусироваться здесь",
     ]);
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
@@ -580,5 +581,59 @@ describe("ConnectionTree", () => {
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
       expect(api.previewImport).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe("ConnectionTree: фокус на ветке", () => {
+  it("«Сфокусироваться здесь» у папки: видна только её ветка, сверху путь и «Назад»; «Назад» возвращает всё дерево", async () => {
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionTree />);
+    await screen.findByText("kafka-ift");
+    fireEvent.contextMenu(folderRow("ИФТ"));
+    await user.click(screen.getByRole("menuitem", { name: "Сфокусироваться здесь" }));
+    const bar = screen.getByRole("navigation", { name: "Фокус дерева" });
+    expect(within(bar).getByText("Проект А › ИФТ")).toBeInTheDocument();
+    expect(screen.getByText("kafka-ift")).toBeInTheDocument();
+    expect(screen.queryByText("local")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Развернуть или свернуть Проект А" })).not.toBeInTheDocument();
+    // Фокус переходит на «Назад»: с клавиатуры из ветки выходят сразу.
+    const back = within(bar).getByRole("button", { name: /Назад/ });
+    expect(back).toHaveFocus();
+    await user.click(back);
+    expect(screen.queryByRole("navigation", { name: "Фокус дерева" })).not.toBeInTheDocument();
+    expect(screen.getByText("local")).toBeInTheDocument();
+  });
+
+  it("фокус вложенный: «Назад» возвращает к прежней ветке, а не ко всему дереву; свёрнутая папка раскрывается", async () => {
+    localStorage.setItem("glafira.tree.collapsed", JSON.stringify(["b"]));
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionTree />);
+    await screen.findByText("local");
+    fireEvent.contextMenu(folderRow("Проект А"));
+    await user.click(screen.getByRole("menuitem", { name: "Сфокусироваться здесь" }));
+    fireEvent.contextMenu(folderRow("ИФТ"));
+    await user.click(screen.getByRole("menuitem", { name: "Сфокусироваться здесь" }));
+    expect(screen.getByText("kafka-ift")).toBeInTheDocument();
+    expect(screen.getByText("Проект А › ИФТ")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Назад/ }));
+    expect(within(screen.getByRole("navigation", { name: "Фокус дерева" })).getByText("Проект А")).toBeInTheDocument();
+    expect(screen.queryByText("Проект А › ИФТ")).not.toBeInTheDocument();
+    expect(screen.queryByText("local")).not.toBeInTheDocument();
+  });
+
+  it("фокус на подключении: путь с папками, подключение раскрыто; пропавшее подключение снимает фокус", async () => {
+    const user = userEvent.setup();
+    const { client } = renderWithClient(<ConnectionTree />);
+    await screen.findByText("kafka-ift");
+    fireEvent.contextMenu(connRow("kafka-ift"));
+    await user.click(screen.getByRole("menuitem", { name: "Сфокусироваться здесь" }));
+    expect(screen.getByText("Проект А › ИФТ › kafka-ift")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Развернуть или свернуть подключение kafka-ift" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.queryByText("local")).not.toBeInTheDocument();
+    expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
+    vi.mocked(api.listConnections).mockResolvedValue([CONNS[1]]);
+    await client.invalidateQueries({ queryKey: ["connections"] });
+    expect(await screen.findByText("local")).toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "Фокус дерева" })).not.toBeInTheDocument();
   });
 });

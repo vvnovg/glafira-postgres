@@ -31,12 +31,14 @@ vi.mock("../../../api/client", async (importOriginal) => {
       listExtensions: vi.fn(() => Promise.resolve([])),
       listRoles: vi.fn(() => Promise.resolve([])),
       setCatalogMember: vi.fn(),
+      getTopology: vi.fn(async () => (await import("../../../test/fixtures")).topologyView()),
     },
   };
 });
 
 import { api } from "../../../api/client";
-import { CatalogNodes } from "./CatalogNodes";
+import { CatalogNodes, FocusedCatalog } from "./CatalogNodes";
+import { TreeFocusContext } from "./treeFocus";
 
 const conn = { ...newProfile(), id: "c", name: "billing", kind: "patroni" as const };
 
@@ -113,5 +115,52 @@ describe("CatalogNodes", () => {
   it("уведомление о возврате к узлу по умолчанию", () => {
     renderWithClient(<CatalogNodes connection={conn} view={topologyView({ catalogFallback: true })} />);
     expect(screen.getByText(/Выбранный узел недоступен/)).toBeInTheDocument();
+  });
+});
+
+describe("CatalogNodes: фокус на базе и схеме", () => {
+  it("в контекстном меню базы и схемы — «Сфокусироваться здесь» (правая кнопка и Shift+F10)", async () => {
+    const focusOn = vi.fn();
+    const user = userEvent.setup();
+    renderWithClient(
+      <TreeFocusContext.Provider value={focusOn}>
+        <CatalogNodes connection={conn} view={topologyView()} />
+      </TreeFocusContext.Provider>,
+    );
+    await user.click(screen.getByRole("button", { name: /Базы данных \(с узла pg-1\)/ }));
+    const db = await screen.findByRole("button", { name: /^orders/ });
+    fireEvent.contextMenu(db);
+    await user.click(screen.getByRole("menuitem", { name: "Сфокусироваться здесь" }));
+    expect(focusOn).toHaveBeenCalledWith({ kind: "database", connectionId: "c", db: "orders" });
+    expect(db).toHaveFocus();
+    await user.click(db);
+    const schema = await screen.findByRole("button", { name: /^shop/ });
+    schema.focus();
+    await user.keyboard("{Shift>}{F10}{/Shift}");
+    await user.click(screen.getByRole("menuitem", { name: "Сфокусироваться здесь" }));
+    expect(focusOn).toHaveBeenLastCalledWith({ kind: "schema", connectionId: "c", db: "orders", schema: "shop" });
+  });
+
+  it("без фокуса дерева (вне панели) меню у базы нет", async () => {
+    const user = userEvent.setup();
+    renderWithClient(<CatalogNodes connection={conn} view={topologyView()} />);
+    await user.click(screen.getByRole("button", { name: /Базы данных \(с узла pg-1\)/ }));
+    fireEvent.contextMenu(await screen.findByRole("button", { name: /^orders/ }));
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
+  it("ветка схемы в фокусе: схема раскрыта сразу, виды объектов видны; ветка базы — с размером", async () => {
+    const first = renderWithClient(<FocusedCatalog focus={{ kind: "schema", connectionId: "c", db: "orders", schema: "shop" }} />);
+    expect(await screen.findByRole("button", { name: /^Таблицы \(3\)/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^shop/ })).toHaveAttribute("aria-expanded", "true");
+    first.unmount();
+    renderWithClient(<FocusedCatalog focus={{ kind: "database", connectionId: "c", db: "orders" }} />);
+    expect(await screen.findByRole("button", { name: /^shop/ })).toBeInTheDocument();
+    expect(screen.getByText("5,0 MB")).toBeInTheDocument();
+  });
+
+  it("базы больше нет — сообщение вместо ветки", async () => {
+    renderWithClient(<FocusedCatalog focus={{ kind: "database", connectionId: "c", db: "gone" }} />);
+    expect(await screen.findByText("Этого объекта больше нет — вернитесь назад")).toBeInTheDocument();
   });
 });

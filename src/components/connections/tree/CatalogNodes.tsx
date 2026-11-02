@@ -1,15 +1,17 @@
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { api } from "../../../api/client";
-import type { ConnectionProfile, ObjectKind, SchemaInfo, TopologyView } from "../../../api/types";
+import type { ConnectionProfile, DatabaseInfo, ObjectKind, SchemaInfo, TopologyView } from "../../../api/types";
 import { formatBytes } from "../../../lib/format";
 import { roleLabel } from "../../../lib/topology";
+import { disconnectedView, useTopology } from "../../../lib/useConnectionEvents";
 import { useWorkspace } from "../../../state/workspace";
 import { ErrorBanner } from "../../common/ErrorBanner";
 import { Glyph } from "../../common/Glyph";
 import { DiagnosticsNodes } from "./DiagnosticsNodes";
 import { ObjectList } from "./ObjectList";
 import { TreeGroup } from "./TreeGroup";
+import { type TreeFocus, useFocusMenuItem } from "./treeFocus";
 
 /** Лаг реплики, начиная с которого узел помечается предупреждением. */
 const LAG_WARN_BYTES = 16 * 1024 * 1024;
@@ -53,10 +55,11 @@ const KINDS: { kind: ObjectKind; count: (s: SchemaInfo) => number }[] = [
   { kind: "sequences", count: (s) => s.counts.sequences },
 ];
 
-function SchemaNode({ connectionId, db, schema }: { connectionId: string; db: string; schema: SchemaInfo }) {
+function SchemaNode({ connectionId, db, schema, defaultOpen }: { connectionId: string; db: string; schema: SchemaInfo; defaultOpen?: boolean }) {
   const { t } = useTranslation();
+  const menu = useFocusMenuItem({ kind: "schema", connectionId, db, schema: schema.name });
   return (
-    <TreeGroup label={schema.name}>
+    <TreeGroup label={schema.name} menu={menu} menuLabel={t("sidebar.objectMenu", { name: schema.name })} defaultOpen={defaultOpen}>
       {() =>
         KINDS.filter((k) => k.count(schema) > 0).map((k) => {
           const label = t(`sidebar.kinds.${k.kind}`);
@@ -75,13 +78,17 @@ function SchemaNode({ connectionId, db, schema }: { connectionId: string; db: st
   );
 }
 
-function SchemaList({ connectionId, db }: { connectionId: string; db: string }) {
+function useSchemas(connectionId: string, db: string) {
   const { showSystem, ready } = useShowSystem();
-  const q = useQuery({
+  return useQuery({
     queryKey: ["catalog", connectionId, "schemas", db, showSystem],
     queryFn: () => api.listSchemas(connectionId, db, showSystem),
     enabled: ready,
   });
+}
+
+function SchemaList({ connectionId, db }: { connectionId: string; db: string }) {
+  const q = useSchemas(connectionId, db);
   return (
     <>
       <Loading q={q} />
@@ -111,34 +118,77 @@ function ExtensionList({ connectionId, db }: { connectionId: string; db: string 
   );
 }
 
-function DatabaseList({ connectionId }: { connectionId: string }) {
+function DatabaseNode({ connectionId, db: d, defaultOpen }: { connectionId: string; db: DatabaseInfo; defaultOpen?: boolean }) {
   const { t } = useTranslation();
-  const q = useQuery({ queryKey: ["catalog", connectionId, "databases"], queryFn: () => api.listDatabases(connectionId) });
+  const menu = useFocusMenuItem({ kind: "database", connectionId, db: d.name });
+  return (
+    <TreeGroup
+      label={d.name}
+      menu={menu}
+      menuLabel={t("sidebar.objectMenu", { name: d.name })}
+      defaultOpen={defaultOpen}
+      extra={
+        d.sizeBytes === null ? (
+          <Glyph className="muted" symbol="—" label={t("sidebar.sizeUnavailable")} />
+        ) : (
+          <span className="muted">{formatBytes(d.sizeBytes)}</span>
+        )
+      }
+    >
+      {() => (
+        <>
+          <SchemaList connectionId={connectionId} db={d.name} />
+          <TreeGroup label={t("sidebar.extensions")}>{() => <ExtensionList connectionId={connectionId} db={d.name} />}</TreeGroup>
+        </>
+      )}
+    </TreeGroup>
+  );
+}
+
+function useDatabases(connectionId: string) {
+  return useQuery({ queryKey: ["catalog", connectionId, "databases"], queryFn: () => api.listDatabases(connectionId) });
+}
+
+function DatabaseList({ connectionId }: { connectionId: string }) {
+  const q = useDatabases(connectionId);
   return (
     <>
       <Loading q={q} />
-      {q.data?.map((d) => (
-        <TreeGroup
-          key={d.name}
-          label={d.name}
-          extra={
-            d.sizeBytes === null ? (
-              <Glyph className="muted" symbol="—" label={t("sidebar.sizeUnavailable")} />
-            ) : (
-              <span className="muted">{formatBytes(d.sizeBytes)}</span>
-            )
-          }
-        >
-          {() => (
-            <>
-              <SchemaList connectionId={connectionId} db={d.name} />
-              <TreeGroup label={t("sidebar.extensions")}>{() => <ExtensionList connectionId={connectionId} db={d.name} />}</TreeGroup>
-            </>
-          )}
-        </TreeGroup>
-      ))}
+      {q.data?.map((d) => <DatabaseNode key={d.name} connectionId={connectionId} db={d} />)}
     </>
   );
+}
+
+function FocusedDatabase({ connectionId, db }: { connectionId: string; db: string }) {
+  const { t } = useTranslation();
+  const q = useDatabases(connectionId);
+  const found = q.data?.find((d) => d.name === db);
+  if (!q.data) return <Loading q={q} />;
+  return found ? <DatabaseNode connectionId={connectionId} db={found} defaultOpen /> : <li className="tree-notice">{t("sidebar.focus.gone")}</li>;
+}
+
+function FocusedSchema({ connectionId, db, schema }: { connectionId: string; db: string; schema: string }) {
+  const { t } = useTranslation();
+  const q = useSchemas(connectionId, db);
+  const found = q.data?.find((s) => s.name === schema);
+  if (!q.data) return <Loading q={q} />;
+  return found ? <SchemaNode connectionId={connectionId} db={db} schema={found} defaultOpen /> : <li className="tree-notice">{t("sidebar.focus.gone")}</li>;
+}
+
+/**
+ * Ветка базы или схемы в режиме фокуса дерева: корень раскрыт сразу. Каталог читается с узла каталога подключения;
+ * подключение закрыто или узла каталога нет — сообщение вместо ветки (вернуться — кнопкой «Назад» над деревом).
+ */
+export function FocusedCatalog({ focus }: { focus: Extract<TreeFocus, { kind: "database" | "schema" }> }) {
+  const { t } = useTranslation();
+  const { data: view = disconnectedView } = useTopology(focus.connectionId);
+  const live = view.state === "connected" || view.state === "degraded";
+  let body;
+  if (!live) body = <li className="tree-notice">{t("sidebar.focus.offline")}</li>;
+  else if (!view.catalogMember) body = <li className="tree-notice">{t("sidebar.noCatalogNode")}</li>;
+  else if (focus.kind === "database") body = <FocusedDatabase connectionId={focus.connectionId} db={focus.db} />;
+  else body = <FocusedSchema connectionId={focus.connectionId} db={focus.db} schema={focus.schema} />;
+  return <ul className="tree">{body}</ul>;
 }
 
 function RoleList({ connectionId }: { connectionId: string }) {

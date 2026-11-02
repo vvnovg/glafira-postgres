@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { type HTMLAttributes, useEffect, useState } from "react";
+import { type HTMLAttributes, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../../api/client";
 import type { AppError, ConnectionProfile, TopologyView } from "../../../api/types";
@@ -13,24 +13,36 @@ import { hostKeyUnknown } from "../profile";
 import { TrustHostKeyDialog } from "../TrustHostKeyDialog";
 import { CatalogNodes } from "./CatalogNodes";
 import { FolderMenu, type FolderMenuItem } from "./FolderMenu";
+import { useFocusMenuItem } from "./treeFocus";
 
 /**
  * Узел подключения: раскрытие открывает подключение (Rust поднимает наблюдение), дочерние узлы —
- * участники, базы, роли. rowProps — атрибуты строки (перетаскивание), как в Glafira.
+ * участники, базы, роли. rowProps — атрибуты строки (перетаскивание), как в Glafira. `defaultExpanded` — узел раскрыт
+ * сразу (корень ветки в режиме фокуса): закрытое подключение при этом открывается, как при раскрытии щелчком.
  */
-export function ConnectionNode({ connection: c, rowProps }: { connection: ConnectionProfile; rowProps?: HTMLAttributes<HTMLDivElement> }) {
+export function ConnectionNode({
+  connection: c,
+  rowProps,
+  defaultExpanded = false,
+}: {
+  connection: ConnectionProfile;
+  rowProps?: HTMLAttributes<HTMLDivElement>;
+  defaultExpanded?: boolean;
+}) {
   const { t } = useTranslation();
   const open = useWorkspace((s) => s.open);
   const qc = useQueryClient();
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(defaultExpanded);
   const [menuOpen, setMenuOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [reopening, setReopening] = useState(false);
   const [error, setError] = useState<AppError | null>(null);
   // Ошибка ключа хоста, от диалога доверия по которой пользователь отказался: текст ошибки остаётся, диалог — нет.
   const [trustDismissed, setTrustDismissed] = useState<AppError | null>(null);
-  const { data: view = disconnectedView } = useTopology(c.id);
+  const topologyQ = useTopology(c.id);
+  const { data: view = disconnectedView } = topologyQ;
   const live = view.state === "connected" || view.state === "degraded";
+  const focusItem = useFocusMenuItem({ kind: "connection", connectionId: c.id });
 
   // Локальная ошибка — про прошлую попытку или действие. Когда подключение снова здорово («connected»),
   // она устарела и не должна висеть под живым узлом.
@@ -39,6 +51,15 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
   }, [view.state]);
 
   const setView = (v: TopologyView) => qc.setQueryData(["topology", c.id], v);
+
+  // Раскрыт сразу (фокус на подключении): как и раскрытие щелчком, открывает закрытое подключение — один раз, когда
+  // состояние известно (до ответа топологии вид «закрыто» — заглушка, а не факт).
+  const autoConnect = useRef(defaultExpanded);
+  useEffect(() => {
+    if (!autoConnect.current || !topologyQ.isSuccess) return;
+    autoConnect.current = false;
+    if (view.state === "disconnected") void connect();
+  }, [topologyQ.isSuccess]);
 
   const connect = async () => {
     if (busy) return;
@@ -113,6 +134,7 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
   const members = view.topology?.members ?? [];
   const menu: FolderMenuItem[] = [
     { label: t("sidebar.overview"), onSelect: () => open({ kind: "overview", connectionId: c.id }) },
+    ...focusItem,
     { label: t("sidebar.pulse"), onSelect: () => open({ kind: "diag", connectionId: c.id, tool: "pulse" }) },
     { label: t("sidebar.editConnection"), onSelect: () => open({ kind: "connection-form", connectionId: c.id }) },
     {
@@ -178,7 +200,16 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
 
   return (
     <li>
-      <div {...rowProps} className={rowProps?.className ? `tree-conn ${rowProps.className}` : "tree-conn"}>
+      <div
+        {...rowProps}
+        className={rowProps?.className ? `tree-conn ${rowProps.className}` : "tree-conn"}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setMenuOpen(true);
+        }}
+        // Пока открыто меню, строку не перетаскивают (выделение текста пунктов не начинает перенос).
+        draggable={rowProps?.draggable && !menuOpen}
+      >
         <button type="button" className="tree-folder-toggle conn-toggle" aria-expanded={expanded} aria-label={t("sidebar.connectionToggle", { name: c.name })} onClick={toggle}>
           <span className="tree-caret" aria-hidden="true">
             {expanded ? "▾" : "▸"}

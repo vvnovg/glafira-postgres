@@ -7,10 +7,12 @@ import type { AppError, ConnectionFolder, ImportPreview, TreeItemRef } from "../
 import { tr } from "../../../i18n/text";
 import { useWorkspace } from "../../../state/workspace";
 import { ErrorBanner } from "../../common/ErrorBanner";
+import { FocusedCatalog } from "./CatalogNodes";
 import { ConnectionNode } from "./ConnectionNode";
 import { FolderMenu, type FolderMenuItem } from "./FolderMenu";
 import { ImportDialog } from "./ImportDialog";
 import { buildTree, canMoveFolder, filterTree, type TreeNode } from "./folderTree";
+import { type TreeFocus, TreeFocusContext } from "./treeFocus";
 
 const COLLAPSED_KEY = "glafira.tree.collapsed";
 /** Тип данных перетаскивания: сам элемент берётся из ref (в dragover браузер данные не отдаёт). */
@@ -136,6 +138,31 @@ function DeleteFolderConfirm({ folder, onConfirm, onCancel }: { folder: Connecti
   );
 }
 
+/** Узел папки в дереве по id (с потомками). */
+function findFolder(nodes: TreeNode[], id: string): Extract<TreeNode, { kind: "folder" }> | null {
+  for (const n of nodes) {
+    if (n.kind !== "folder") continue;
+    if (n.folder.id === id) return n;
+    const inner = findFolder(n.children, id);
+    if (inner) return inner;
+  }
+  return null;
+}
+
+/** Имена папок от корня до папки id (включительно); неизвестная папка — пустой путь. */
+function folderPath(folders: ConnectionFolder[], id: string | null | undefined): string[] {
+  const byId = new Map(folders.map((f) => [f.id, f]));
+  const path: string[] = [];
+  const seen = new Set<string>();
+  let cur = id ? byId.get(id) : undefined;
+  while (cur && !seen.has(cur.id)) {
+    seen.add(cur.id);
+    path.unshift(cur.name);
+    cur = cur.parentId ? byId.get(cur.parentId) : undefined;
+  }
+  return path;
+}
+
 type Editing = { mode: "create"; parentId: string | null } | { mode: "rename"; folderId: string };
 /** Куда бросают: внутрь папки, перед подключением или в корень. */
 type DropTarget = { key: string; parentId: string | null; before: TreeItemRef | null };
@@ -161,6 +188,15 @@ export function ConnectionTree() {
   /** Открытый диалог импорта: выбранный файл и начальная цель. */
   const [importing, setImporting] = useState<{ path: string; targetId: string | null } | null>(null);
   const dragged = useRef<TreeItemRef | null>(null);
+  /**
+   * Фокус дерева: стек веток («Сфокусироваться здесь» внутри ветки кладёт новую, «Назад» снимает верхнюю). Пустой —
+   * всё дерево. Живёт до перезапуска.
+   */
+  const [focusStack, setFocusStack] = useState<TreeFocus[]>([]);
+  const focus = focusStack.length > 0 ? focusStack[focusStack.length - 1] : null;
+  const backRef = useRef<HTMLButtonElement>(null);
+  /** После входа в ветку фокус клавиатуры — на «Назад»: строка, из меню которой пришли, перерисована заново. */
+  const focusBack = useRef(false);
 
   const connections = connectionsQ.data;
   const folders = foldersQ.data;
@@ -191,7 +227,46 @@ export function ConnectionTree() {
 
   const toggleMenu = (id: string) => setMenu((m) => (m === id ? null : id));
 
+  const focusOn = (target: TreeFocus) => {
+    // Папка-корень ветки раскрыта: иначе ветка из одной свёрнутой строки.
+    if (target.kind === "folder" && collapsed.has(target.folderId)) setCollapsedAndSave((next) => next.delete(target.folderId));
+    setMenu(null);
+    setEditing(null);
+    setDeleting(null);
+    focusBack.current = true;
+    setFocusStack((stack) => [...stack, target]);
+  };
+
+  useEffect(() => {
+    if (!focusBack.current || focus === null) return;
+    focusBack.current = false;
+    backRef.current?.focus();
+  }, [focus]);
+
+  // Папка или подключение ветки исчезли (удалены, перенесены импортом) — фокус снимается целиком.
+  const focusLost =
+    focus !== null &&
+    connectionsQ.isSuccess &&
+    foldersQ.isSuccess &&
+    (focus.kind === "folder" ? findFolder(tree, focus.folderId) === null : !(connections ?? []).some((c) => c.id === focus.connectionId));
+  useEffect(() => {
+    if (focusLost) setFocusStack([]);
+  }, [focusLost]);
+
+  /** Путь ветки фокуса: папки, подключение, база, схема. */
+  const focusPath = (() => {
+    if (!focus) return [];
+    if (focus.kind === "folder") return folderPath(folders ?? [], focus.folderId);
+    const conn = (connections ?? []).find((c) => c.id === focus.connectionId);
+    const path = [...folderPath(folders ?? [], conn?.folderId), conn?.name ?? focus.connectionId];
+    if (focus.kind === "database" || focus.kind === "schema") path.push(focus.db);
+    if (focus.kind === "schema") path.push(focus.schema);
+    return path;
+  })();
+
   const startCreate = (parentId: string | null) => {
+    // Новая папка корня в ветке фокуса не видна: дерево возвращается целиком.
+    if (parentId === null) setFocusStack([]);
     setDeleting(null);
     setEditing({ mode: "create", parentId });
     // Новая строка появляется внутри родителя — он должен быть развёрнут.
@@ -272,6 +347,7 @@ export function ConnectionTree() {
     },
     { label: t("sidebar.folder.export"), onSelect: () => void exportTree(folder) },
     { label: t("sidebar.folder.importHere"), onSelect: () => void startImport(folder.id) },
+    { label: t("sidebar.focus.here"), onSelect: () => focusOn({ kind: "folder", folderId: folder.id }) },
   ];
 
   // --- Перетаскивание ---
@@ -459,6 +535,27 @@ export function ConnectionTree() {
     });
   };
 
+  /** Список дерева: всё дерево или ветка фокуса. */
+  const treeBody = () => {
+    if (focus === null || focusLost) {
+      return (
+        <ul className="tree">
+          {nameInput(null)}
+          {renderNodes(visible, null)}
+        </ul>
+      );
+    }
+    if (focus.kind === "folder") {
+      const node = findFolder(tree, focus.folderId);
+      return <ul className="tree">{node && renderNodes(filterTree([node], query), node.folder.parentId ?? null)}</ul>;
+    }
+    if (focus.kind === "connection") {
+      const conn = (connections ?? []).find((c) => c.id === focus.connectionId);
+      return <ul className="tree">{conn && <ConnectionNode key={conn.id} connection={conn} defaultExpanded />}</ul>;
+    }
+    return <FocusedCatalog key={JSON.stringify(focus)} focus={focus} />;
+  };
+
   const error = connectionsQ.error ?? foldersQ.error;
   const rootHighlight = dropKey === "root" || (dropKey === foldersEndKey(null) && lastFolderId(visible) === null);
   // Пока не загружены и подключения, и папки, подсказку о пустом списке не показываем.
@@ -505,7 +602,17 @@ export function ConnectionTree() {
           <Trans i18nKey="sidebar.emptyHint" components={{ code: <code /> }} />
         </p>
       )}
-      {tree.length > 0 && (
+      {focus && (
+        <nav className="tree-focus" aria-label={t("sidebar.focus.label")}>
+          <button type="button" ref={backRef} title={t("sidebar.focus.backHint")} onClick={() => setFocusStack((stack) => stack.slice(0, -1))}>
+            ← {t("sidebar.focus.back")}
+          </button>
+          <span className="tree-focus-path" title={focusPath.join(" › ")}>
+            {focusPath.join(" › ")}
+          </span>
+        </nav>
+      )}
+      {tree.length > 0 && (focus === null || focus.kind === "folder") && (
         <input
           type="search"
           className="tree-filter"
@@ -516,10 +623,7 @@ export function ConnectionTree() {
         />
       )}
       {filtering && visible.length === 0 && <p className="empty">{t("sidebar.noMatches")}</p>}
-      <ul className="tree">
-        {nameInput(null)}
-        {renderNodes(visible, null)}
-      </ul>
+      <TreeFocusContext.Provider value={focusOn}>{treeBody()}</TreeFocusContext.Provider>
       <div className={rootHighlight ? "tree-root-drop drop-into" : "tree-root-drop"} aria-hidden="true" {...rootTarget} />
       {importing && (
         <ImportDialog path={importing.path} initialTargetId={importing.targetId} onClose={() => setImporting(null)} onImported={onImported} />
