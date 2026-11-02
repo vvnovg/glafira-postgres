@@ -84,6 +84,25 @@ pub struct QueryWaits {
     pub items: Vec<WaitItem>,
 }
 
+/// Сэмплер активности узла для ожиданий карточки: буфер есть — карточка различает «сэмплера нет» (подсказка открыть
+/// «Профиль ожиданий») и «сэмплы есть, но запроса в них нет».
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaitsSampler {
+    /// Сбор идёт (вкладка «Профиль ожиданий» или «Сессии» узла открыта); иначе буфер остался от прошлого сбора.
+    pub running: bool,
+    /// Сколько секунд охватывают сэмплы (не больше часа); `None` — тиков ещё не было.
+    pub coverage_s: Option<i64>,
+}
+
+/// Состояние сэмплера для карточки по первому тику буфера.
+pub fn waits_sampler(running: bool, oldest_tick: Option<i64>, now_ms: i64) -> WaitsSampler {
+    WaitsSampler {
+        running,
+        coverage_s: oldest_tick.map(|t| (now_ms - sampler_since(now_ms, Some(t))) / 1000),
+    }
+}
+
 /// Строка pgss запроса по роли и `toplevel`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -125,6 +144,8 @@ pub struct QueryDetail {
     /// Профиль `pg_wait_sampling` (если расширение читается и в нём есть запрос), иначе сэмплы активности; `None` —
     /// ни того, ни другого (буфера сэмплера на узле нет: вкладка «Профиль ожиданий» не открывалась).
     pub waits: Option<QueryWaits>,
+    /// Буфер сэмплера активности узла; `None` — его нет (ни «Профиль ожиданий», ни «Сессии» узла не открывались).
+    pub waits_sampler: Option<WaitsSampler>,
     pub findings: Vec<Finding>,
     pub unavailable: Vec<Unavailable>,
     pub server_version_num: i32,
@@ -155,6 +176,7 @@ impl QueryDetail {
             gaps: Vec::new(),
             running: Vec::new(),
             waits: None,
+            waits_sampler: None,
             findings: Vec::new(),
             unavailable: Vec::new(),
             server_version_num: h.version_num,
@@ -878,8 +900,16 @@ pub async fn detail(
             .map(|(from_ms, to_ms)| Gap { from_ms, to_ms })
             .collect();
     }
+    let activity = st.samplers.buffer(id, member);
+    d.waits_sampler = activity.as_ref().map(|b| {
+        waits_sampler(
+            st.samplers.is_running(id, member),
+            b.lock_safe().oldest_tick(),
+            now_ms,
+        )
+    });
     d.waits = pick_waits(f.waits_profile, || {
-        let b = st.samplers.buffer(id, member)?;
+        let b = activity?;
         let b = b.lock_safe();
         let since = sampler_since(now_ms, b.oldest_tick());
         waits_of(&b.samples(since), query_id, since).map(|w| QueryWaits {
@@ -1190,6 +1220,30 @@ mod tests {
             Some(WaitsSource::Sampler)
         );
         assert_eq!(pick_waits(None, || None), None);
+    }
+
+    #[test]
+    fn waits_sampler_reports_coverage_and_whether_it_runs() {
+        let now = 10 * LOOKBACK_MS;
+        assert_eq!(
+            waits_sampler(true, Some(now - 600_000), now),
+            WaitsSampler {
+                running: true,
+                coverage_s: Some(600)
+            }
+        );
+        assert_eq!(
+            waits_sampler(false, Some(0), now).coverage_s,
+            Some(LOOKBACK_MS / 1000),
+            "не больше часа"
+        );
+        assert_eq!(
+            waits_sampler(true, None, now).coverage_s,
+            None,
+            "тиков ещё нет"
+        );
+        let v = serde_json::to_value(waits_sampler(true, None, now)).unwrap();
+        assert_eq!(v, serde_json::json!({"running": true, "coverageS": null}));
     }
 
     #[test]

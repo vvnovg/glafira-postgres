@@ -25,6 +25,7 @@ const detail = (patch: Partial<QueryDetail> = {}): QueryDetail => ({
   history: [{ atMs: 1, calls: 10, totalExecMs: 5, meanExecMs: 0.5 }, { atMs: 60_001, calls: 20, totalExecMs: 10, meanExecMs: 0.5 }], gaps: [],
   running: [{ pid: 42, backendStartUs: 1, state: "active", startedMs: 1, durationS: 3.5, waitEventType: "IO", waitEvent: "DataFileRead", usename: "app", applicationName: "api", clientAddr: "10.0.0.5", query: "SELECT * FROM shop.customers WHERE id = 15", truncated: false }],
   waits: { source: "sampler", sinceMs: 0, coverageS: 3600, total: 10, items: [{ eventType: "IO", event: "DataFileRead", count: 7, sharePct: 70 }, { eventType: "CPU", event: null, count: 3, sharePct: 30 }] },
+  waitsSampler: { running: true, coverageS: 3600 },
   findings: [], unavailable: [], serverVersionNum: 170_000, inRecovery: false, pgssVersion: "1.11", trackPlanning: true, kcache: false, ...patch,
 });
 
@@ -300,6 +301,30 @@ describe("QueryTab", () => {
     );
     renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
     expect(await screen.findByText("По сэмплам «Сессий» за 10 мин")).toBeInTheDocument();
+  });
+
+  it("ожиданий нет: сэмплера нет — подсказка открыть профиль; сэмплер идёт — «запрос не встречался за …»", async () => {
+    vi.mocked(api.queryDetail).mockResolvedValue(detail({ waits: null, waitsSampler: null }));
+    const first = renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
+    expect(await screen.findByText("Откройте «Профиль ожиданий», чтобы собирать ожидания этого запроса")).toBeInTheDocument();
+    first.unmount();
+
+    vi.mocked(api.queryDetail).mockResolvedValue(detail({ waits: null, waitsSampler: { running: true, coverageS: 600 } }));
+    const second = renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
+    expect(await screen.findByText("В сэмплах «Сессий» за 10 мин этот запрос не встречался")).toBeInTheDocument();
+    expect(screen.queryByText(/Откройте «Профиль ожиданий»/)).toBeNull();
+    second.unmount();
+
+    // Сбор остановлен (вкладка закрыта) — буфер остался: то же и подсказка, что сбор не идёт.
+    vi.mocked(api.queryDetail).mockResolvedValue(detail({ waits: null, waitsSampler: { running: false, coverageS: 3600 } }));
+    const third = renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
+    expect(await screen.findByText(/В сэмплах «Сессий» за 1 ч этот запрос не встречался/)).toBeInTheDocument();
+    expect(screen.getByText(/Сбор остановлен: откройте «Профиль ожиданий», чтобы продолжить/)).toBeInTheDocument();
+    third.unmount();
+
+    vi.mocked(api.queryDetail).mockResolvedValue(detail({ waits: null, waitsSampler: { running: true, coverageS: null } }));
+    renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
+    expect(await screen.findByText("Сэмплер «Сессий» запущен, сэмплов ещё нет")).toBeInTheDocument();
   });
 
   it("охват в подписи ожиданий — отформатированная длительность, параметр без суффикса единиц", () => {

@@ -647,6 +647,8 @@ async fn query_detail_on_perf_and_on_pg13() {
             "PG 17: экземпляры читаются"
         );
         assert!(detail.server_version_num >= 170_000 && !detail.in_recovery);
+        // Сэмплер активности на узле не запускался — карточка подскажет открыть «Профиль ожиданий».
+        assert_eq!(detail.waits_sampler, None);
         assert_eq!(
             detail.pgss_version.as_deref().map(|v| v.starts_with("1.")),
             Some(true)

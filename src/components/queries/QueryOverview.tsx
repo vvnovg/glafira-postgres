@@ -39,6 +39,17 @@ const METRICS: { id: string; labelKey: string; of: (s: QueryStat, trackPlanning:
  * «Открыть в консоли», «Копировать запрос», «Скопировать для LLM» (`llmPlan` — последний план вкладки на её узле). Без выполняющихся
  * экземпляров на сервере < 14 блок «Выполняющиеся экземпляры» скрыт целиком, пометка о причине остаётся вверху.
  */
+/**
+ * Почему у запроса нет ожиданий: сэмплера активности на узле нет — подсказка открыть «Профиль ожиданий»; буфер есть, но
+ * запроса в сэмплах нет — «не встречался за …» (с пометкой, если сбор остановлен); тиков ещё не было — «сэмплов ещё нет».
+ */
+function noWaitsText(sampler: QueryDetail["waitsSampler"], t: (k: string, o?: Record<string, unknown>) => string): string {
+  if (sampler === null) return t("diag.query.noWaitsBuffer");
+  if (sampler.coverageS === null) return t("diag.query.noWaitsYet");
+  const notSeen = t("diag.query.noWaitsInSamples", { coverage: formatDuration(sampler.coverageS) });
+  return sampler.running ? notSeen : `${notSeen}. ${t("diag.query.noWaitsStopped")}`;
+}
+
 export function QueryOverview({
   connectionId,
   member,
@@ -212,7 +223,7 @@ export function QueryOverview({
       <section>
         <h3>{t("diag.query.waits")}</h3>
         {detail.waits === null ? (
-          <p className="muted">{t("diag.query.noWaitsBuffer")}</p>
+          <p className="muted">{noWaitsText(detail.waitsSampler, t)}</p>
         ) : (
           <>
             <p className="muted">

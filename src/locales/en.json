@@ -1378,6 +1378,9 @@
       "openSessions": "Open “{{tool}}”",
       "waits": "Waits",
       "noWaitsBuffer": "Open the Wait profile tab to collect waits for this query",
+      "noWaitsInSamples": "This query did not appear in the Sessions samples over the last {{coverage}}",
+      "noWaitsStopped": "Collection is stopped: open the Wait profile tab to resume",
+      "noWaitsYet": "The Sessions sampler has started, no samples yet",
       "waitsSource": {
         "sampler": "From the Sessions sampler over the last {{coverage}}",
         "pgWaitSampling": "pg_wait_sampling profile since its reset"

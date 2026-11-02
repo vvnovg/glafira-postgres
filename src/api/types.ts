@@ -808,8 +808,10 @@ export interface QueryDetail {
   history: HistoryPoint[];
   gaps: { fromMs: number; toMs: number }[];
   running: RunningInstance[];
-  /** `null` — буфера сэмплера активности на узле нет. */
+  /** `null` — ожиданий нет: ни профиля pg_wait_sampling с запросом, ни сэмплов запроса в буфере активности. */
   waits: QueryWaits | null;
+  /** Буфер сэмплера активности узла; `null` — его нет («Профиль ожиданий» не открывался). `coverageS: null` — тиков ещё не было. */
+  waitsSampler: { running: boolean; coverageS: number | null } | null;
   findings: Finding[];
   unavailable: Unavailable[];
   serverVersionNum: number;
