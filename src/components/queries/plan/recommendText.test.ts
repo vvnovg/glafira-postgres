@@ -48,6 +48,8 @@ describe("recommendText", () => {
     expect(recommendEvidence(sort)).toBe("На диске 20,0 MB; work_mem для сессии или роли: 40,0 MB");
     expect(recommendEffect(sort)).toMatch(/индекс по o\.created_at/);
     expect(recommendEffect(hash)).toBe("Достаточный work_mem держит операцию в памяти");
+    // Ключ сортировки — выражение: бэкенд не отдаёт `keys`, эффект без индекса.
+    expect(recommendEffect(rec("plan_spill", { kind: "sort", spaceKb: 4520, workMemKb: 6780 }))).toBe("Достаточный work_mem держит операцию в памяти");
     expect(recommendTitle(bitmap)).toBe("Битовая карта стала неточной: мало work_mem");
     expect(recommendEvidence(bitmap)).toMatch(/неточных 1\s200, точных 300/);
     expect(recommendEvidence(pruned)).toBe("Просканировано партиций 24, из них ничего не вернули 23");

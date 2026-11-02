@@ -383,3 +383,15 @@ fn misestimate_takes_columns_from_recheck_cond_and_filter() {
         "{cmd}"
     );
 }
+
+/// spill сортировки по `(sum(orders.total)) DESC`: ключ — выражение, совета про индекс (`keys`) нет.
+#[test]
+fn spill_by_aggregate_key_has_no_index_keys() {
+    let recs = pg_advisor::plan_rules::evaluate(&load("sort_spill_analyze")).recommendations;
+    let r = recs
+        .iter()
+        .find(|r| r.id == "plan_spill")
+        .expect("plan_spill");
+    assert_eq!(r.params["kind"], "sort");
+    assert!(r.params.get("keys").is_none(), "{:?}", r.params);
+}

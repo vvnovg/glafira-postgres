@@ -4,7 +4,7 @@
 use crate::findings::{Severity, thresholds as th};
 use crate::plan::{PlanNode, PlanTree};
 use crate::plan_rules::{
-    Recommendation, column_ref, index_recommendation, qualified, scan::alias, table_name,
+    Recommendation, column_ref, ident, index_recommendation, qualified, scan::alias, table_name,
 };
 
 /// Sort на диске, Hash с батчами: `work_mem` ×1,5 от объёма (не меньше 1 МБ и не больше 1 ГБ). Lossy bitmap: объём
@@ -30,14 +30,31 @@ pub fn spill(n: &PlanNode) -> Option<Recommendation> {
     };
     let work_mem_kb =
         ((space_kb as f64 * th::PLAN_WORK_MEM_FACTOR) as i64).clamp(1024, th::PLAN_WORK_MEM_MAX_KB);
-    Some(
-        Recommendation::new("plan_spill", Severity::Warning, n.id)
-            .param("kind", kind)
-            .param("spaceKb", space_kb)
-            .param("workMemKb", work_mem_kb)
-            .param("keys", n.sort_key.join(", "))
-            .command(format!("SET work_mem = '{work_mem_kb}kB';")),
-    )
+    let mut r = Recommendation::new("plan_spill", Severity::Warning, n.id)
+        .param("kind", kind)
+        .param("spaceKb", space_kb)
+        .param("workMemKb", work_mem_kb)
+        .command(format!("SET work_mem = '{work_mem_kb}kB';"));
+    // Совет про индекс под сортировку (`keys`) — только когда все ключи — простые колонки: по выражению
+    // (`sum(orders.total)`) индекс не построить.
+    if !n.sort_key.is_empty() && n.sort_key.iter().all(|k| plain_column_key(k)) {
+        r = r.param("keys", n.sort_key.join(", "));
+    }
+    Some(r)
+}
+
+/// Ключ сортировки — простая колонка таблицы: `[alias.]col [ASC|DESC]`.
+fn plain_column_key(key: &str) -> bool {
+    let Some((_, mut rest)) = ident(key.trim()) else {
+        return false;
+    };
+    if let Some(r) = rest.strip_prefix('.') {
+        let Some((_, r)) = ident(r) else {
+            return false;
+        };
+        rest = r;
+    }
+    matches!(rest.trim(), "" | "ASC" | "DESC")
 }
 
 /// Ключ сортировки `[alias.]col [ASC|DESC]` своего псевдонима: колонка и признак DESC. Выражения, `NULLS …`,
@@ -287,6 +304,31 @@ mod tests {
         );
         assert!(r.params.get("workMemKb").is_none() && r.params.get("spaceKb").is_none());
         assert_eq!(r.command.as_deref(), Some("SET work_mem = '<work_mem>';"));
+        assert_eq!(
+            rec(&json!({"Plan": sort.clone()}), "plan_spill")
+                .unwrap()
+                .params["keys"],
+            "o.total DESC"
+        );
+        // Ключ — выражение: индекс под сортировку не построить, `keys` нет (эффект — только про память).
+        let mut agg = sort.clone();
+        agg["Sort Key"] = json!(["(sum(orders.total)) DESC"]);
+        assert!(
+            rec(&json!({"Plan": agg}), "plan_spill")
+                .unwrap()
+                .params
+                .get("keys")
+                .is_none()
+        );
+        let mut mixed = sort.clone();
+        mixed["Sort Key"] = json!(["o.customer_id", "(sum(o.total)) DESC"]);
+        assert!(
+            rec(&json!({"Plan": mixed}), "plan_spill")
+                .unwrap()
+                .params
+                .get("keys")
+                .is_none()
+        );
         // Предел work_mem — 1 ГБ.
         let mut huge = with_actual(base("Sort"), 1.0, 1);
         huge["Sort Space Type"] = json!("Disk");
