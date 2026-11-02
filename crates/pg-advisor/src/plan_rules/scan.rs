@@ -123,8 +123,8 @@ pub fn nested_loop_seq(n: &PlanNode) -> Option<Recommendation> {
     Some(index_recommendation(r, inner, &cols))
 }
 
-/// Ошибка оценки ≥ ×10 при объёме ≥ 1000 строк у узла с отношением: ANALYZE, SET STATISTICS по колонкам условий, при
-/// двух и более колонках — CREATE STATISTICS. Узел под `Limit` без блокирующего узла между ними читает меньше оценки
+/// Ошибка оценки ≥ ×10 при объёме ≥ 1000 строк у узла с отношением: ANALYZE, SET STATISTICS по колонкам условий
+/// (Index Cond, Recheck Cond, Filter), при двух и более колонках — CREATE STATISTICS. Узел под `Limit` без блокирующего узла между ними читает меньше оценки
 /// не из-за статистики (поправка 8 плана P3b): такую «переоценку» флаг `misestimated` уже не размечает.
 pub fn misestimate(n: &PlanNode) -> Option<Recommendation> {
     // Порог отношения — флаг P3a `misestimated` (×`plan::MISESTIMATE_RATIO`, равен `PLAN_MISESTIMATE_RATIO`; тест
@@ -142,7 +142,16 @@ pub fn misestimate(n: &PlanNode) -> Option<Recommendation> {
     // Конечное отношение (оценка 0 даёт бесконечность, а она в JSON — `null`).
     let ratio = a.rows.max(1.0) / n.plan_rows.max(1.0);
     let ratio = if ratio >= 1.0 { ratio } else { 1.0 / ratio };
-    let cols = columns_from(&[n.filter.as_deref(), n.index_cond.as_deref()], alias(n));
+    // Условия индекса и фильтр вместе: оценка ошибается на связанных колонках (условие индекса и фильтр по
+    // коррелирующим колонкам) — по двум и более колонкам нужна расширенная статистика.
+    let cols = columns_from(
+        &[
+            n.index_cond.as_deref(),
+            n.recheck_cond.as_deref(),
+            n.filter.as_deref(),
+        ],
+        alias(n),
+    );
     let target = qualified(rel.schema.as_deref(), &rel.name);
     let mut cmd = format!("ANALYZE {target};");
     for c in &cols {

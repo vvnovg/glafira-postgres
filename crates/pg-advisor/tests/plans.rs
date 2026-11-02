@@ -360,3 +360,26 @@ fn bitmap_index_filter_names_the_child_index() {
     assert_eq!(r.params["index"], "audit_order_idx");
     assert_eq!(r.params["rowsRemoved"], 198_000);
 }
+
+/// misestimate у Bitmap Heap Scan: колонки из Recheck Cond (order_id) и Filter (actor) вместе — расширенная статистика.
+#[test]
+fn misestimate_takes_columns_from_recheck_cond_and_filter() {
+    let recs =
+        pg_advisor::plan_rules::evaluate(&load("bitmap_misestimate_analyze")).recommendations;
+    let r = recs
+        .iter()
+        .find(|r| r.id == "plan_misestimate" && r.params["table"] == "shop.audit")
+        .expect("plan_misestimate по shop.audit");
+    let cmd = r.command.as_deref().unwrap();
+    assert!(
+        cmd.contains("ALTER COLUMN \"order_id\" SET STATISTICS 1000;")
+            && cmd.contains("ALTER COLUMN \"actor\" SET STATISTICS 1000;"),
+        "{cmd}"
+    );
+    assert!(
+        cmd.contains(
+            "CREATE STATISTICS \"shop\".\"audit_order_id_actor_stat\" ON \"order_id\", \"actor\" FROM \"shop\".\"audit\";"
+        ),
+        "{cmd}"
+    );
+}
