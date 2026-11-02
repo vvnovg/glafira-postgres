@@ -1,4 +1,6 @@
+import type { TFunction } from "i18next";
 import type { PgssMeta, QueryKey, QuerySort, QueryStat } from "../../api/types";
+import { currentLocale } from "../../i18n";
 
 /** Размер блока PostgreSQL, байты: счётчики блоков pgss переводятся в байты по нему. */
 export const BLOCK_BYTES = 8192;
@@ -50,4 +52,17 @@ export function snapshotFileParts(file: string): { member: string; stamp: string
     // Не код — имя каталога как есть.
   }
   return { member, stamp };
+}
+
+/**
+ * Изменение средней между снимками (`ratio` = после / до) словами с направлением: замедление — «в 3 раза медленнее»,
+ * ускорение — обратным коэффициентом «в 2,5 раза быстрее» (а не «×0,4»). Коэффициент — до одного знака; склонение
+ * («раза»/«раз») — по нему же. Нулевое, бесконечное и нечисловое отношение — прочерк.
+ */
+export function changeRatioText(ratio: number, t: TFunction): string {
+  if (!Number.isFinite(ratio) || ratio <= 0) return "—";
+  const slower = ratio >= 1;
+  const factor = Math.round((slower ? ratio : 1 / ratio) * 10) / 10;
+  const x = factor.toLocaleString(currentLocale(), { maximumFractionDigits: 1 });
+  return t(slower ? "diag.snapshots.slower" : "diag.snapshots.faster", { count: factor, x });
 }

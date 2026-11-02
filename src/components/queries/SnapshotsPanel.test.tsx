@@ -27,7 +27,7 @@ const comparison: Comparison = {
   newMore: 0,
   goneMore: 0,
   degraded: [{ key: stat("1", 1).key, datname: "perf", rolname: "app", before: stat("1", 10), after: stat("1", 30), ratio: 3 }],
-  improved: [],
+  improved: [{ key: stat("2", 1).key, datname: "perf", rolname: "app", before: stat("2", 25), after: stat("2", 10), ratio: 0.4 }],
   totalsFrom: { calls: 1, totalExecMs: 1, rows: 0 },
   totalsTo: { calls: 2, totalExecMs: 2, rows: 0 },
   reset: false,
@@ -90,7 +90,10 @@ describe("SnapshotsPanel", () => {
     await user.click(screen.getByRole("button", { name: "Сравнить" }));
     await waitFor(() => expect(api.snapshotCompare).toHaveBeenCalledWith("c", a.file, b.file));
     expect(await screen.findByRole("heading", { name: /Деградировали \(1\)/ })).toBeInTheDocument();
-    expect(screen.getByText(/×3/)).toBeInTheDocument();
+    // Направление словами: замедление — «в 3 раза медленнее», ускорение — обратным коэффициентом, а не «×0,4».
+    expect(within(screen.getByRole("table", { name: "Деградировали" })).getByText("в 3 раза медленнее")).toBeInTheDocument();
+    expect(within(screen.getByRole("table", { name: "Ускорились" })).getByText("в 2,5 раза быстрее")).toBeInTheDocument();
+    expect(screen.queryByText(/×/)).toBeNull();
     expect(screen.getByRole("heading", { name: /Новые \(2\)/ })).toBeInTheDocument();
     // Запрос самой Глафиры помечен.
     const fresh = screen.getByRole("table", { name: "Новые" });

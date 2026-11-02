@@ -35,6 +35,8 @@ export interface DiagControls {
   onSelect: (member: string | null) => void;
   intervalS: number | null;
   onInterval: (seconds: number | null) => void;
+  /** Обновлять нечего (у «Запросов» — режим «между снимками»: отчёт читается из файлов): выбор интервала скрыт. */
+  noInterval?: boolean;
   /** Окно профиля ожиданий, секунды; `null` — у инструмента окна нет (выбор не показывается). */
   windowS: number | null;
   onWindow: (seconds: number) => void;
@@ -73,21 +75,23 @@ export function DiagHeader({ tool, controls }: { tool: DiagTool; controls?: Diag
       )}
       {c && (
         <>
-          <label className="inline">
-            <span>{t("diag.header.interval")}</span>
-            <select
-              aria-label={t("diag.header.interval")}
-              value={c.intervalS === null ? PAUSE : String(c.intervalS)}
-              onChange={(e) => c.onInterval(e.target.value === PAUSE ? null : Number(e.target.value))}
-            >
-              {DIAG_INTERVALS_S.map((s) => (
-                <option key={s} value={String(s)}>
-                  {t("diag.header.seconds", { n: s })}
-                </option>
-              ))}
-              <option value={PAUSE}>{t("diag.header.pause")}</option>
-            </select>
-          </label>
+          {!c.noInterval && (
+            <label className="inline">
+              <span>{t("diag.header.interval")}</span>
+              <select
+                aria-label={t("diag.header.interval")}
+                value={c.intervalS === null ? PAUSE : String(c.intervalS)}
+                onChange={(e) => c.onInterval(e.target.value === PAUSE ? null : Number(e.target.value))}
+              >
+                {DIAG_INTERVALS_S.map((s) => (
+                  <option key={s} value={String(s)}>
+                    {t("diag.header.seconds", { n: s })}
+                  </option>
+                ))}
+                <option value={PAUSE}>{t("diag.header.pause")}</option>
+              </select>
+            </label>
+          )}
           {c.windowS !== null && (
             <label className="inline">
               <span>{t("diag.waits.window")}</span>

@@ -356,6 +356,9 @@ describe("QueriesView", () => {
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("1 ч между снимками"));
     expect(screen.getByRole("combobox", { name: "Режим" })).toHaveValue("between");
     expect(screen.getByText("Сравнение: статистика сбрасывалась между снимками")).toBeInTheDocument();
+    // Между снимками обновлять нечего: выбора интервала нет. Без pg_stat_kcache пометки о периоде CPU нет.
+    expect(screen.queryByRole("combobox", { name: "Интервал" })).toBeNull();
+    expect(screen.queryByText(/CPU и диск/)).toBeNull();
     expect(screen.getByText("Глафира")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Stddev" })).toBeDisabled();
     expect(api.queryTexts).not.toHaveBeenCalled();
@@ -363,6 +366,7 @@ describe("QueriesView", () => {
     await user.click(screen.getByRole("button", { name: "Выйти из режима снимков" }));
     expect(screen.getByRole("combobox", { name: "Режим" })).toHaveValue("sinceReset");
     expect(screen.queryByText(/Между снимками узла/)).not.toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Интервал" })).toBeInTheDocument();
     // Удаление снимка активной пары выводит из режима «между снимками».
     await user.click(screen.getByRole("button", { name: "Снимки" }));
     const fresh = await within(screen.getByRole("region", { name: "Снимки" })).findAllByRole("row");
@@ -378,6 +382,14 @@ describe("QueriesView", () => {
     await waitFor(() => expect(api.snapshotDelete).toHaveBeenCalledWith("c", b.file));
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Режим" })).toHaveValue("sinceReset"));
     expect(screen.queryByText(/Между снимками узла/)).not.toBeInTheDocument();
+  });
+
+  it("«между снимками» со сбросом pgss и pg_stat_kcache: пометка, что CPU и диск — за весь промежуток между снимками", async () => {
+    const pgss = { version: "1.11", max: 5000, trackPlanning: true, hasInfo: true, statsResetMs: null, dealloc: 0, kcache: true, kcacheSinceMs: null, kcacheSeparate: false };
+    const reset = [{ part: "between", reason: { key: "diag.unavailable.betweenReset", params: { part: "between" }, text: "x" } }];
+    vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport(data({ mode: { kind: "between", from: "pg-1/x.json", to: "pg-1/y.json" }, coverageS: 60, pgss }), { member: "pg-1", unavailable: reset }));
+    renderWithClient(view());
+    expect(await screen.findByText(/CPU и диск \(pg_stat_kcache\) — за весь промежуток между снимками/)).toBeInTheDocument();
   });
 
   it("покрытие «между снимками» короче минуты — в секундах", async () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { snapshotFileParts } from "./queriesText";
+import { i18n } from "../../i18n";
+import { changeRatioText, snapshotFileParts } from "./queriesText";
 
 describe("snapshotFileParts", () => {
   it("раскодирует каталог узла и отделяет время", () => {
@@ -12,5 +13,33 @@ describe("snapshotFileParts", () => {
     expect(snapshotFileParts("db1:5432/x.json")).toEqual({ member: "db1:5432", stamp: "x" });
     expect(snapshotFileParts("50%zz/x.json")).toEqual({ member: "50%zz", stamp: "x" });
     expect(snapshotFileParts("x.json")).toEqual({ member: "", stamp: "x" });
+  });
+});
+
+describe("changeRatioText", () => {
+  const t = i18n.t.bind(i18n);
+
+  it("замедление — «в N раза медленнее», ускорение — обратным коэффициентом «быстрее»", () => {
+    expect(changeRatioText(3, t)).toBe("в 3 раза медленнее");
+    expect(changeRatioText(0.4, t)).toBe("в 2,5 раза быстрее");
+    expect(changeRatioText(0.2, t)).toBe("в 5 раз быстрее");
+    expect(changeRatioText(21, t)).toBe("в 21 раз медленнее");
+    expect(changeRatioText(1.5, t)).toBe("в 1,5 раза медленнее");
+  });
+
+  it("неопределённое отношение — прочерк", () => {
+    expect(changeRatioText(0, t)).toBe("—");
+    expect(changeRatioText(Number.POSITIVE_INFINITY, t)).toBe("—");
+    expect(changeRatioText(Number.NaN, t)).toBe("—");
+  });
+
+  it("по-английски — «2.5× faster»", async () => {
+    await i18n.changeLanguage("en");
+    try {
+      expect(changeRatioText(0.4, t)).toBe("2.5× faster");
+      expect(changeRatioText(3, t)).toBe("3× slower");
+    } finally {
+      await i18n.changeLanguage("ru");
+    }
   });
 });

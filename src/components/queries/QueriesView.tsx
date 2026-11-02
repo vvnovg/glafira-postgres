@@ -265,6 +265,7 @@ export function QueriesView({
           onSelect: onSelectMember,
           intervalS,
           onInterval: setIntervalS,
+          noInterval: between,
           windowS: null,
           onWindow: () => {},
           onRefresh: () => void q.refetch(),
@@ -365,6 +366,8 @@ export function QueriesView({
               {report.unavailable.map((u, i) => (
                 <p key={`${u.part}:${i}`} className="muted">
                   {unavailableText(u)}
+                  {/* После сброса pgss счётчики pgss — с момента сброса, а pg_stat_kcache не сбрасывался: его дельта — за весь промежуток. */}
+                  {u.reason.key === "diag.unavailable.betweenReset" && data.pgss?.kcache && ` ${t("diag.queries.betweenResetKcache")}`}
                 </p>
               ))}
             </div>

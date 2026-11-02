@@ -1,7 +1,7 @@
 import { useTranslation } from "react-i18next";
 import type { Change, Comparison, QueryStat } from "../../api/types";
 import { formatCount, formatMs } from "../../lib/format";
-import { QUERY_KEY_ID, cpuMs, queryTitle } from "./queriesText";
+import { QUERY_KEY_ID, changeRatioText, cpuMs, queryTitle } from "./queriesText";
 
 /** Ячейка запроса: начало текста (или queryId) и пометка запроса самой Глафиры — такие строки приглушены. */
 function QueryCell({ stat }: { stat: QueryStat }) {
@@ -102,7 +102,7 @@ function Changes({ title, rows }: { title: string; rows: Change[] }) {
                   <td className="num">{formatMs(c.before.meanExecMs)}</td>
                   <td className="num">{formatMs(c.after.meanExecMs)}</td>
                   <td className="num">{formatCount(c.after.calls)}</td>
-                  <td className="num">×{formatCount(c.ratio, 1)}</td>
+                  <td className="num">{changeRatioText(c.ratio, t)}</td>
                 </tr>
               );
             })}
