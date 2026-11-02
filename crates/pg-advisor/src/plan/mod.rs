@@ -151,7 +151,8 @@ pub struct PlanNode {
     /// `actual.rows / plan_rows`; `None` без ANALYZE, у не выполнявшегося узла (сервер отдаёт для него 0 строк) и при
     /// `plan_rows = 0` и `actual.rows = 0`.
     pub estimate_ratio: Option<f64>,
-    /// Три узла с наибольшим собственным временем (без ANALYZE и при `TIMING OFF` — по стоимости без детей).
+    /// Не больше трёх узлов с наибольшим собственным временем, у которых оно не меньше `HOT_MIN_SHARE_PCT` % общего (без
+    /// ANALYZE и при `TIMING OFF` — по стоимости без детей от суммы таких стоимостей).
     pub hot: bool,
     /// Ошибка оценки ×10 и больше при `max(план, факт) ≥ 100` строк; у не выполнявшегося узла всегда `false`.
     pub misestimated: bool,
@@ -173,6 +174,9 @@ pub struct PlanTree {
 }
 
 pub const HOT_NODES: usize = 3;
+/// Порог доли «горячего» узла, проценты: узел с долей меньше — не горячий, даже если он в первой тройке (поправка по
+/// смоуку P3b: в быстром плане доли в сотые доли миллисекунды не подсвечиваются).
+pub const HOT_MIN_SHARE_PCT: f64 = 10.0;
 pub const MISESTIMATE_RATIO: f64 = 10.0;
 pub const MISESTIMATE_MIN_ROWS: f64 = 100.0;
 
@@ -191,10 +195,16 @@ impl PlanTree {
         let mut weights: Vec<(f64, u32)> = Vec::new();
         collect_weights(&self.root, with_time, &mut weights);
         weights.sort_by(|a, b| b.0.total_cmp(&a.0));
+        // Знаменатель доли: время выполнения (как у `share_pct`), без времён — сумма стоимостей без детей.
+        let total = if with_time {
+            self.total_ms.unwrap_or(0.0)
+        } else {
+            weights.iter().map(|(w, _)| w).sum()
+        };
         let hot: Vec<u32> = weights
             .iter()
             .take(HOT_NODES)
-            .filter(|(w, _)| *w > 0.0)
+            .filter(|(w, _)| *w > 0.0 && *w / total * 100.0 >= HOT_MIN_SHARE_PCT)
             .map(|(_, id)| *id)
             .collect();
         mark_hot(&mut self.root, &hot);
@@ -365,8 +375,8 @@ mod tests {
         assert!((scan.share_pct.unwrap() - 90.0 / 106.0 * 100.0).abs() < 1e-9);
         let sum = share_sum(&t.root);
         assert!(sum <= 100.0, "сумма долей {sum}");
-        // Горячие — по скорректированному собственному времени: Scan (90), Gather (10), Limit (5).
-        assert!(scan.hot && gather.hot && t.root.hot);
+        // Горячие — по скорректированному собственному времени: Scan (90 из 106); Gather (10, 9,4 %) и Limit (5) — ниже 10 %.
+        assert!(scan.hot && !gather.hot && !t.root.hot);
     }
 
     #[test]
@@ -436,6 +446,42 @@ mod tests {
             gather.exclusive_ms
         );
         assert!(share_sum(&t.root) <= 100.0);
+    }
+
+    #[test]
+    fn hot_nodes_need_ten_percent_share() {
+        // Aggregate (0,02 мс) над Bitmap Heap Scan (51 мс) и Bitmap Index Scan (2,3 мс) из 62 мс: горячий только Bitmap Heap Scan.
+        let v = json!({"Plan": {
+            "Node Type": "Aggregate", "Strategy": "Plain", "Startup Cost": 1387.34, "Total Cost": 1387.35, "Plan Rows": 1, "Plan Width": 8,
+            "Actual Startup Time": 53.806, "Actual Total Time": 53.807, "Actual Rows": 1, "Actual Loops": 1,
+            "Plans": [{
+                "Node Type": "Bitmap Heap Scan", "Parent Relationship": "Outer", "Relation Name": "audit",
+                "Startup Cost": 9.55, "Total Cost": 1387.33, "Plan Rows": 4, "Plan Width": 0,
+                "Actual Startup Time": 53.785, "Actual Total Time": 53.785, "Actual Rows": 0, "Actual Loops": 1,
+                "Plans": [{
+                    "Node Type": "Bitmap Index Scan", "Parent Relationship": "Outer", "Index Name": "audit_order_idx",
+                    "Startup Cost": 0.0, "Total Cost": 9.55, "Plan Rows": 701, "Plan Width": 0,
+                    "Actual Startup Time": 2.324, "Actual Total Time": 2.324, "Actual Rows": 198000, "Actual Loops": 1
+                }]
+            }]
+        }, "Execution Time": 62.432});
+        let t = from_json(&v).unwrap();
+        let heap = &t.root.children[0];
+        assert!(!t.root.hot && heap.hot && !heap.children[0].hot);
+        // Без факта — по стоимости без детей: Bitmap Heap Scan 1377,8 из 1387,35; Aggregate (0,02) и индекс (9,55) — меньше 10 %.
+        let mut plain = v.clone();
+        fn strip(n: &mut serde_json::Value) {
+            let o = n.as_object_mut().unwrap();
+            o.retain(|k, _| !k.starts_with("Actual"));
+            if let Some(ps) = o.get_mut("Plans").and_then(|p| p.as_array_mut()) {
+                ps.iter_mut().for_each(strip);
+            }
+        }
+        strip(&mut plain["Plan"]);
+        plain.as_object_mut().unwrap().remove("Execution Time");
+        let t = from_json(&plain).unwrap();
+        let heap = &t.root.children[0];
+        assert!(!t.root.hot && heap.hot && !heap.children[0].hot);
     }
 
     #[test]

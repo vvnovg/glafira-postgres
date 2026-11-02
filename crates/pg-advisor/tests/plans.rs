@@ -318,3 +318,15 @@ fn partition_grouping_and_parallel_jit_on_fixtures() {
     assert!(!par.iter().any(|r| r.id == "plan_jit_heavy"), "{par:?}");
     assert!(par.iter().any(|r| r.id == "plan_workers_short"));
 }
+
+/// Поправки по смоуку P3b (замечания 4–10) на планах pg-perf:
+/// - `bitmap_filter_analyze` — `SELECT count(*) FROM shop.audit WHERE order_id = 1 AND actor = 'ops'`;
+/// - `bitmap_misestimate_analyze` — `SELECT o.id, a.note FROM shop.audit a JOIN shop.orders o ON o.id = a.order_id
+///   WHERE a.actor = 'app' AND a.order_id = 1`.
+#[test]
+fn hot_nodes_skip_tiny_shares_on_fixtures() {
+    // Aggregate над Bitmap Heap Scan: собственное время 0,02 мс — не горячий; горячий только Bitmap Heap Scan.
+    let t = load("bitmap_filter_analyze");
+    let heap = &t.root.children[0];
+    assert!(!t.root.hot && heap.hot && !heap.children[0].hot);
+}

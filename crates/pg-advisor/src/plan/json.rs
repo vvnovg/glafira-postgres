@@ -447,12 +447,13 @@ mod tests {
         // Оценка строк: 500 против факта 5 — ошибка ×100.
         assert_eq!(seq.estimate_ratio, Some(0.01));
         assert!(seq.misestimated && !root.children[1].children[0].misestimated);
-        // Горячие — три узла с наибольшим собственным временем: Seq Scan (30), корень (19,5), Index Scan (0,4).
+        // Горячие — до трёх узлов с наибольшим собственным временем и долей ≥ 10 %: Seq Scan (30 из 55), корень (19,5);
+        // Index Scan (0,4) — третий по времени, но меньше 10 %.
         let hot: Vec<i32> = [root, seq, &root.children[1], &root.children[1].children[0]]
             .iter()
             .map(|n| n.hot as i32)
             .collect();
-        assert_eq!(hot, [1, 1, 0, 1]);
+        assert_eq!(hot, [1, 1, 0, 0]);
         assert!(!seq.never_executed);
     }
 
@@ -480,10 +481,10 @@ mod tests {
             t.root.actual.is_none() && t.root.inclusive_ms.is_none() && t.root.share_pct.is_none()
         );
         assert_eq!(t.execution_ms, None);
-        // Без факта «горячие» — по стоимости без детей: Seq Scan (60), корень (100 − 60 − 5 = 35), Index Scan (4 − 0 = 4);
-        // Hash (5 − 4 = 1) — четвёртый и не горячий.
-        assert!(t.root.children[0].hot && t.root.hot && t.root.children[1].children[0].hot);
-        assert!(!t.root.children[1].hot);
+        // Без факта «горячие» — по стоимости без детей: Seq Scan (60), корень (100 − 60 − 5 = 35); Index Scan (4 − 0 = 4)
+        // и Hash (5 − 4 = 1) — меньше 10 % суммы и не горячие.
+        assert!(t.root.children[0].hot && t.root.hot);
+        assert!(!t.root.children[1].hot && !t.root.children[1].children[0].hot);
         assert_eq!(t.root.estimate_ratio, None);
     }
 
@@ -619,8 +620,9 @@ mod tests {
         // Оценка строк считается и без времён: 500 → 5, ошибка ×100.
         assert_eq!(seq.estimate_ratio, Some(0.01));
         assert!(seq.misestimated);
-        // Горячие — по стоимости без детей, как у обычного EXPLAIN: Seq Scan (60), корень (100 − 64 = 36), Index Scan (4).
-        assert!(seq.hot && t.root.hot && t.root.children[1].hot);
+        // Горячие — по стоимости без детей, как у обычного EXPLAIN: Seq Scan (60), корень (100 − 64 = 36); Index Scan (4) —
+        // меньше 10 %.
+        assert!(seq.hot && t.root.hot && !t.root.children[1].hot);
     }
 
     #[test]
