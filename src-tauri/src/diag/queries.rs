@@ -15,17 +15,17 @@ use tokio_postgres::{Client, Row};
 use crate::catalog::ddl::quote_ident;
 use crate::conn::errors::from_pg;
 use crate::diag::kcache::{KcacheNode, ProbeOutcome, classify_probe_error};
+use crate::diag::query_detail::NodeKey;
 use crate::diag::sessions::QUERY_LIMIT;
+use crate::diag::texts::is_own_text;
 use crate::diag::{
     DiagData, DiagReport, Head, Tool, Unavailable, WINDOWS_S, head, make_report, on_member,
 };
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::product::SQL_MARKER;
-use crate::product::is_marked_sql;
 use crate::sampler::statements::StatementsBuffer;
 use crate::state::AppState;
 use crate::sync::MutexExt;
-use crate::topology::probe::is_unmarked_poll_sql;
 use crate::topology::runtime::DiagTarget;
 
 /// Пределы строк отчёта (спец. §4.2).
@@ -713,59 +713,71 @@ pub fn own_keys(
 ) -> HashSet<QueryKey> {
     entries
         .iter()
-        .filter(|e| text(&e.key).is_some_and(|t| is_marked_sql(&t) || is_unmarked_poll_sql(&t)))
+        .filter(|e| text(&e.key).is_some_and(|t| is_own_text(&t)))
         .map(|e| e.key)
         .collect()
 }
 
-/// Тексты, прочитанные отчётом: `None` — строки нет или текста у неё нет.
-type Fetched = HashMap<QueryKey, Option<(Arc<str>, bool)>>;
+/// Ключи, тексты которых отчёт дочитывает (замечание 12 смоука P3b): строки топа (`build` с теми же параметрами), про
+/// которые кеш узла ничего не знает (`known`), затем кандидаты N+1 (`own_candidates`: исключение своих из итогов
+/// поднимает доли остальных) — не больше `p.limit` ключей. Так строки `/* glafira */` получают `own` уже на первом
+/// обновлении и не дают находок.
+pub fn texts_to_read(
+    entries: &[Entry],
+    matched: Option<&HashSet<QueryKey>>,
+    p: &QueriesParams,
+    text: impl Fn(&QueryKey) -> Option<Arc<str>>,
+    known: impl Fn(&QueryKey) -> bool,
+) -> Vec<QueryKey> {
+    let own = own_keys(entries, &text);
+    let (rows, _) = build(entries, &own, matched, p);
+    let mut out: Vec<QueryKey> = rows.iter().map(|r| r.key).filter(|k| !known(k)).collect();
+    for k in own_candidates(entries, &own, |k| !known(k)) {
+        if !out.contains(&k) {
+            out.push(k);
+        }
+    }
+    out.truncate(p.limit);
+    out
+}
 
-/// Свои запросы Глафиры в наборе (спец. P3 §4). Текст — из кеша узла; кандидатам N+1 без известного текста он
-/// читается с сервера (как `texts`), пока кандидаты не кончатся: исключение своих из итогов поднимает доли остальных.
-/// Сбой чтения не роняет отчёт — строки остаются не своими.
+/// Узел отчёта для кеша текстов.
+fn node_of(id: &str, target: &DiagTarget) -> AppResult<NodeKey> {
+    Ok(NodeKey {
+        id: id.to_string(),
+        generation: target.generation,
+        member: member_name(target)?,
+    })
+}
+
+/// Свои запросы Глафиры в наборе (спец. P3 §4): тексты — из кеша узла (`AppState::query_texts`), недостающие
+/// (`texts_to_read`) читаются с сервера одним запросом на обновление и остаются в кеше (не найденные — с отметкой «текста
+/// нет»). Сбой чтения не роняет отчёт — строки без текста остаются не своими.
 async fn resolve_own(
     st: &AppState,
     id: &str,
     target: &DiagTarget,
-    member: &str,
+    node: &NodeKey,
     entries: &[Entry],
-) -> (HashSet<QueryKey>, Fetched) {
-    let buffer = st.statements.buffer(id, member);
-    let mut fetched: Fetched = HashMap::new();
-    loop {
-        let (own, candidates) = {
-            let b = buffer.as_ref().map(|b| b.lock_safe());
-            let text = |k: &QueryKey| match fetched.get(k) {
-                Some(t) => t.as_ref().map(|(t, _)| Arc::clone(t)),
-                None => b.as_ref().and_then(|b| b.text(k)).map(|(t, _)| t),
-            };
-            let own = own_keys(entries, text);
-            let candidates = own_candidates(entries, &own, |k| {
-                !fetched.contains_key(k)
-                    && b.as_ref()
-                        .is_none_or(|b| b.text(k).is_none() && !b.text_missing(k))
-            });
-            (own, candidates)
-        };
-        if candidates.is_empty() {
-            return (own, fetched);
-        }
-        match fetch_texts(st, id, target, candidates.clone()).await {
-            Ok(texts) => {
-                for k in candidates {
-                    fetched.insert(k, None);
-                }
-                for t in texts {
-                    fetched.insert(t.key, t.text.map(|x| (Arc::from(x), t.truncated)));
-                }
-            }
-            Err(e) => {
-                tracing::warn!(connection = %id, member, "query texts for own-query detection not read: {}", e.message);
-                return (own, fetched);
-            }
-        }
+    matched: Option<&HashSet<QueryKey>>,
+    p: &QueriesParams,
+) -> HashSet<QueryKey> {
+    let read = st.query_texts.with(node, |t| {
+        texts_to_read(
+            entries,
+            matched,
+            p,
+            |k| t.text(k).map(|(x, _)| x),
+            |k| t.known(k),
+        )
+    });
+    if !read.is_empty()
+        && let Err(e) = fetch_texts(st, id, target, read, true).await
+    {
+        tracing::warn!(connection = %id, member = %node.member, "query texts for own-query detection not read: {}", e.message);
     }
+    st.query_texts
+        .with(node, |t| own_keys(entries, |k| t.text(k).map(|(x, _)| x)))
 }
 
 /// Подставляет тексты из кеша: `lookup` отдаёт текст и признак обрезки.
@@ -903,9 +915,10 @@ async fn report_since_reset(
                 return Err(sort_unavailable());
             }
             let entries = entries_since_reset(&snap.rows, p);
-            let (own, fetched) = resolve_own(st, id, target, &member, &entries).await;
+            let node = node_of(id, target)?;
+            let own = resolve_own(st, id, target, &node, &entries, matched.as_ref(), p).await;
             let (mut rows, t) = build(&entries, &own, matched.as_ref(), p);
-            attach_texts(&mut rows, |k| report_text(st, id, &member, &fetched, k));
+            attach_texts(&mut rows, |k| st.query_texts.text(&node, k));
             if snap.hidden {
                 unavailable.push(hidden_rows());
             }
@@ -1050,21 +1063,19 @@ async fn report_window(
         })
         .filter(|e| keep(&e.key, e.datname.as_deref(), p))
         .collect();
-    let (own, fetched) = resolve_own(st, id, target, &member, &entries).await;
+    let node = node_of(id, target)?;
     // Ключи окна, ушедшие из pgss, скан не находит — их ищем по текстам, которые помнит кеш узла.
     let matched = matched.map(|mut m| {
         if let Some(s) = p.search() {
-            let buffer = st.statements.buffer(id, &member);
-            let b = buffer.as_ref().map(|b| b.lock_safe());
-            m.extend(cached_matches(&entries, s, |k| match fetched.get(k) {
-                Some(Some((t, _))) => Some(Arc::clone(t)),
-                _ => b.as_ref().and_then(|b| b.text(k)).map(|(t, _)| t),
-            }));
+            st.query_texts.with(&node, |t| {
+                m.extend(cached_matches(&entries, s, |k| t.text(k).map(|(x, _)| x)));
+            });
         }
         m
     });
+    let own = resolve_own(st, id, target, &node, &entries, matched.as_ref(), p).await;
     let (mut rows, t) = build(&entries, &own, matched.as_ref(), p);
-    attach_texts(&mut rows, |k| report_text(st, id, &member, &fetched, k));
+    attach_texts(&mut rows, |k| st.query_texts.text(&node, k));
     let mut unavailable = Vec::new();
     if hidden {
         unavailable.push(hidden_rows());
@@ -1248,32 +1259,6 @@ pub async fn report_between(
     })
 }
 
-/// Текст из кеша узла (буфер сэмплера pgss, спец. §4.6).
-pub fn cached_text(
-    st: &AppState,
-    id: &str,
-    member: &str,
-    key: &QueryKey,
-) -> Option<(Arc<str>, bool)> {
-    st.statements
-        .buffer(id, member)
-        .and_then(|b| b.lock_safe().text(key))
-}
-
-/// Текст строки отчёта: прочитанный этим отчётом или из кеша узла.
-fn report_text(
-    st: &AppState,
-    id: &str,
-    member: &str,
-    fetched: &Fetched,
-    key: &QueryKey,
-) -> Option<(Arc<str>, bool)> {
-    match fetched.get(key) {
-        Some(Some(t)) => Some(t.clone()),
-        _ => cached_text(st, id, member, key),
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryText {
@@ -1293,18 +1278,21 @@ pub async fn texts(
         return Ok(Vec::new());
     }
     let target = st.runtimes.diag_target(id, member, false)?;
-    fetch_texts(st, id, &target, keys).await
+    fetch_texts(st, id, &target, keys, false).await
 }
 
-/// Тексты по ключам на узле `target` одним запросом; прочитанное — в кеш узла (строка без текста — отметкой «текста
-/// нет»).
+/// Тексты по ключам на узле `target` одним запросом; прочитанное — в кеш узла (`AppState::query_texts`): строка без
+/// текста — отметкой «текста нет», как и ключ, которого в pgss не нашлось, если `mark_absent` (отчёт не перечитывает
+/// ключи окна, ушедшие из pgss, на каждом обновлении).
 async fn fetch_texts(
     st: &AppState,
     id: &str,
     target: &DiagTarget,
     keys: Vec<QueryKey>,
+    mark_absent: bool,
 ) -> AppResult<Vec<QueryText>> {
     let ids: Vec<i64> = keys.iter().map(|k| k.query_id).collect();
+    let asked = keys.clone();
     let rows = on_member(st, id, target, |c| {
         Box::pin(async move {
             // Текстам kcache не нужен: без поиска и пробы.
@@ -1330,27 +1318,28 @@ async fn fetch_texts(
                         truncated: r.get::<_, Option<bool>>(5).unwrap_or(false),
                     })
                 })
-                .filter(|t| keys.contains(&t.key))
+                .filter(|t| asked.contains(&t.key))
                 .collect())
         })
     })
     .await?;
     // Прочитанные тексты — в кеш узла: следующие отчёты подставят их без обращения к серверу.
-    if let Some(m) = target.member.as_ref().map(|m| m.name.clone())
-        && let Some(b) = st.statements.buffer(id, &m)
-    {
-        let mut b = b.lock_safe();
-        b.remember_texts(
+    let node = node_of(id, target)?;
+    st.query_texts.update(&node, |cache| {
+        cache.remember_texts(
             rows.iter()
                 .filter_map(|t| t.text.clone().map(|text| (t.key, text, t.truncated))),
         );
-        let no_text: Vec<QueryKey> = rows
+        let mut no_text: Vec<QueryKey> = rows
             .iter()
             .filter(|t| t.text.is_none())
             .map(|t| t.key)
             .collect();
-        b.remember_no_text(&no_text);
-    }
+        if mark_absent {
+            no_text.extend(keys.iter().filter(|k| !rows.iter().any(|t| t.key == **k)));
+        }
+        cache.remember_no_text(&no_text);
+    });
     Ok(rows)
 }
 
@@ -1563,6 +1552,50 @@ mod tests {
             (rows[1].key, Arc::<str>::from("SELECT 1 /* glafira */")),
         ]);
         assert_eq!(own_keys(&entries, |k| texts.get(k).cloned()), own);
+    }
+
+    /// Замечание 12 смоука P3b: отчёт дочитывает тексты всех строк топа без известного текста (не только кандидатов
+    /// N+1) и кандидатов N+1 вне топа — не больше `limit` ключей; известные (текст или «текста нет») не перечитываются.
+    #[test]
+    fn report_reads_unknown_texts_of_the_top_and_n_plus_one_candidates() {
+        let p = QueriesParams {
+            limit: 50,
+            ..params(QueriesMode::SinceReset)
+        };
+        // 60 долгих строк заполняют топ по времени; строка 100 — частая и быстрая (кандидат N+1) вне топа.
+        let mut rows: Vec<Cumulative> = (1..=60)
+            .map(|i| cumulative(i, true, "perf", 1, 10_000.0 + i as f64))
+            .collect();
+        rows.push(cumulative(100, true, "perf", 100_000, 50.0));
+        let entries = entries_since_reset(&rows, &p);
+        let read = texts_to_read(&entries, None, &p, |_| None, |_| false);
+        assert_eq!(read.len(), 50, "не больше limit");
+        assert!(read.contains(&rows[59].key) && !read.contains(&rows[0].key));
+        assert!(!read.contains(&rows[60].key), "предел занят строками топа");
+        // Тексты топа известны (у части — «текста нет»): читается только кандидат N+1.
+        let top: HashSet<QueryKey> = read.iter().copied().collect();
+        let read = texts_to_read(&entries, None, &p, |_| None, |k| top.contains(k));
+        assert_eq!(read, [rows[60].key]);
+        // Свой кандидат N+1 больше не кандидат, и при известном топе читать нечего.
+        let own_text: Arc<str> = Arc::from("/* glafira */ SELECT 1");
+        let read = texts_to_read(
+            &entries,
+            None,
+            &p,
+            |k| (*k == rows[60].key).then(|| own_text.clone()),
+            |k| top.contains(k) || *k == rows[60].key,
+        );
+        assert!(read.is_empty());
+        // Поиск: топ — только найденные строки.
+        let matched = HashSet::from([rows[0].key]);
+        let read = texts_to_read(
+            &entries,
+            Some(&matched),
+            &p,
+            |_| None,
+            |k| *k != rows[0].key,
+        );
+        assert_eq!(read, [rows[0].key]);
     }
 
     /// Поиск ограничивает строки, но не итоги: доли — от всей нагрузки.

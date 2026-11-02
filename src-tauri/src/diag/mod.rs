@@ -14,6 +14,7 @@ pub mod replication;
 pub mod sessions;
 pub mod slots;
 pub mod sql;
+pub mod texts;
 pub mod waits;
 
 use futures_util::future::BoxFuture;

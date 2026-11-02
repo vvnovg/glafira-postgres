@@ -29,8 +29,6 @@ pub const MAX_ENTRIES: usize = 200_000;
 pub const MAX_AGE_MS: i64 = 3_600_000;
 /// Пауза между тиками дольше — промежуток: сэмплер стоял (вкладка была закрыта), и следующий тик — новая база.
 pub const GAP_AFTER_MS: i64 = 150_000;
-/// Кеш текстов узла (вместе с отметками «текста нет»); при переполнении очищается целиком.
-pub const MAX_TEXTS: usize = 2000;
 
 /// Сэмпл: шапка узла, установленное расширение и строки pgss.
 pub struct StatementsSample {
@@ -120,8 +118,6 @@ pub struct StatementsBuffer {
     info: Option<PgssInfo>,
     pgss: Option<PgssInstalled>,
     hidden: bool,
-    /// Текст и признак обрезки по ключу; `None` — текст уже читался, и у строки pgss его нет (NULL).
-    texts: HashMap<QueryKey, Option<(Arc<str>, bool)>>,
     /// Имена базы и роли ключей, на которые ссылаются тики, и число таких тиков: ключ может уйти из pgss (сброс,
     /// вытеснение), а его дельты — остаться в окне.
     tick_names: HashMap<QueryKey, TickNames>,
@@ -149,7 +145,6 @@ impl StatementsBuffer {
             info: None,
             pgss: None,
             hidden: false,
-            texts: HashMap::new(),
             tick_names: HashMap::new(),
             search: None,
             max_entries,
@@ -400,31 +395,6 @@ impl StatementsBuffer {
         self.hidden
     }
 
-    pub fn text(&self, key: &QueryKey) -> Option<(Arc<str>, bool)> {
-        self.texts.get(key).cloned().flatten()
-    }
-
-    /// Текст ключа уже читался, и его нет (NULL в pgss): карточка не перечитывает файл текстов на каждом опросе.
-    pub fn text_missing(&self, key: &QueryKey) -> bool {
-        matches!(self.texts.get(key), Some(None))
-    }
-
-    /// Переполнение очищает кеш целиком: и тексты, и отметки «текста нет».
-    fn make_room(&mut self, adding: usize) {
-        if self.texts.len() + adding > MAX_TEXTS {
-            self.texts.clear();
-        }
-    }
-
-    pub fn remember_texts(&mut self, items: impl IntoIterator<Item = (QueryKey, String, bool)>) {
-        let items: Vec<(QueryKey, String, bool)> = items.into_iter().collect();
-        self.make_room(items.len());
-        for (k, t, truncated) in items {
-            self.texts
-                .insert(k, Some((Arc::from(t.as_str()), truncated)));
-        }
-    }
-
     /// Ключи pgss последнего тика.
     pub fn latest_keys(&self) -> HashSet<QueryKey> {
         self.latest.keys().copied().collect()
@@ -460,14 +430,6 @@ impl StatementsBuffer {
             checked,
             matched,
         });
-    }
-
-    /// Отметка «текста нет» для ключей; известный текст она не затирает.
-    pub fn remember_no_text(&mut self, keys: &[QueryKey]) {
-        self.make_room(keys.len());
-        for k in keys {
-            self.texts.entry(*k).or_insert(None);
-        }
     }
 }
 
@@ -1040,51 +1002,6 @@ mod tests {
             None,
             "после промежутка новая база, старый тик вытеснен возрастом"
         );
-    }
-
-    #[test]
-    fn texts_cache_is_bounded() {
-        let mut b = StatementsBuffer::default();
-        b.remember_texts([(key(1), "SELECT 1".to_string(), false)]);
-        assert_eq!(
-            b.text(&key(1)).map(|(t, tr)| (t.to_string(), tr)),
-            Some(("SELECT 1".into(), false))
-        );
-        assert!(b.text(&key(2)).is_none());
-        b.remember_texts((2..=(MAX_TEXTS as i64 + 1)).map(|i| (key(i), format!("q{i}"), false)));
-        assert!(
-            b.text(&key(1)).is_none(),
-            "переполнение очищает кеш целиком"
-        );
-        assert!(
-            b.text(&key(MAX_TEXTS as i64 + 1)).is_some(),
-            "новые тексты записаны"
-        );
-    }
-
-    #[test]
-    fn missing_text_is_remembered_and_a_text_replaces_it() {
-        let mut b = StatementsBuffer::default();
-        assert!(
-            !b.text_missing(&key(1)),
-            "ничего не известно — не «нет текста»"
-        );
-        b.remember_no_text(&[key(1), key(2)]);
-        assert!(b.text_missing(&key(1)) && b.text_missing(&key(2)));
-        assert!(b.text(&key(1)).is_none());
-        b.remember_texts([(key(1), "SELECT 1".to_string(), false)]);
-        assert!(
-            !b.text_missing(&key(1)),
-            "прочитанный текст заменяет отметку"
-        );
-        assert!(b.text(&key(1)).is_some());
-        // Отметка не затирает уже известный текст.
-        b.remember_no_text(&[key(1)]);
-        assert!(b.text(&key(1)).is_some() && !b.text_missing(&key(1)));
-        // Отметки входят в предел кеша: переполнение очищает и их.
-        b.remember_no_text(&(3..=(MAX_TEXTS as i64 + 2)).map(key).collect::<Vec<_>>());
-        assert!(!b.text_missing(&key(2)) && b.text(&key(1)).is_none());
-        assert!(b.text_missing(&key(MAX_TEXTS as i64 + 2)));
     }
 
     #[test]

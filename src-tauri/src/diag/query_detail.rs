@@ -23,10 +23,11 @@ use crate::diag::queries::{
 };
 use crate::diag::sessions::QUERY_LIMIT;
 use crate::diag::sql::BACKEND_START_US;
+use crate::diag::texts::QueryTexts;
 use crate::diag::{Head, Unavailable, WINDOWS_S, head, on_member};
 use crate::error::{AppResult, ErrorCode};
 use crate::product::SQL_MARKER;
-use crate::sampler::statements::{HistoryPoint, KeysWindow, StatementsBuffer};
+use crate::sampler::statements::{HistoryPoint, KeysWindow};
 use crate::state::AppState;
 use crate::sync::MutexExt;
 use crate::topology::runtime::CloseListener;
@@ -595,7 +596,7 @@ pub fn text_source(
     TextSource::Read
 }
 
-/// Текст карточки из кеша текстов узла (буфер сэмплера pgss, спец. §4.6): первый ключ запроса, чей текст там уже есть.
+/// Текст карточки из кеша текстов узла (`AppState::query_texts`, спец. §4.6): первый ключ запроса, чей текст там уже есть.
 /// `None` — промах.
 pub fn text_from_cache(
     keys: &[QueryKey],
@@ -626,13 +627,13 @@ struct Fetched {
     unavailable: Vec<Unavailable>,
 }
 
-/// `cache` — буфер сэмплера pgss узла (если сэмплер на узле запускался): из него берётся текст, в него же кладётся
-/// прочитанный с сервера. Блокировка короткая и никогда не держится через `await`.
+/// `cache` — кеш текстов узлов (`AppState::query_texts`): из него берётся текст, в него же кладётся прочитанный с
+/// сервера. Блокировка короткая и никогда не держится через `await`.
 async fn fetch(
     c: &Client,
     database: &str,
     query_id: i64,
-    cache: Option<&Mutex<StatementsBuffer>>,
+    cache: &QueryTexts,
     node: &NodeKey,
     profiles: &WaitProfiles,
     kcache: &KcacheNode,
@@ -663,13 +664,9 @@ async fn fetch(
                 .map_err(pg)?;
             let rows: Vec<Cumulative> = raw.iter().filter_map(row_from).collect();
             let keys: Vec<QueryKey> = rows.iter().map(|r| r.key).collect();
-            let source = match cache {
-                Some(b) => {
-                    let b = b.lock_safe();
-                    text_source(&keys, |k| b.text(k), |k| b.text_missing(k))
-                }
-                None => text_source(&keys, |_| None, |_| false),
-            };
+            let source = cache.with(node, |t| {
+                text_source(&keys, |k| t.text(k), |k| t.text_missing(k))
+            });
             let text = match source {
                 TextSource::Cached(text, truncated) => Some((text, truncated)),
                 TextSource::Skip => None,
@@ -691,15 +688,12 @@ async fn fetch(
                     // Прочитанное — в кеш узла: следующий опрос карточки и отчёты возьмут текст оттуда. Строка без текста
                     // (NULL у всех строк запроса) — отметка «текста нет» для ключей, иначе каждый опрос читал бы файл
                     // текстов. Строки не нашлось (вытеснена между запросами) — не запоминается ничего.
-                    if let Some(b) = cache {
-                        match &read {
-                            Some((key, Some(text), truncated)) => {
-                                b.lock_safe()
-                                    .remember_texts([(*key, text.clone(), *truncated)])
-                            }
-                            Some((_, None, _)) => b.lock_safe().remember_no_text(&keys),
-                            None => {}
-                        }
+                    match &read {
+                        Some((key, Some(text), truncated)) => cache.update(node, |t| {
+                            t.remember_texts([(*key, text.clone(), *truncated)])
+                        }),
+                        Some((_, None, _)) => cache.update(node, |t| t.remember_no_text(&keys)),
+                        None => {}
                     }
                     read.and_then(|(_, text, truncated)| text.map(|t| (t, truncated)))
                 }
@@ -794,7 +788,7 @@ pub async fn detail(
     let target = st.runtimes.diag_target(id, Some(member), false)?;
     // Замыкание отдаёт будущее на любое время жизни соединения, поэтому база и буфер уходят в него владеемыми.
     let database = database.to_string();
-    let cache = st.statements.buffer(id, member);
+    let cache = st.query_texts.clone();
     let node = NodeKey {
         id: id.to_string(),
         generation: target.generation,
@@ -803,18 +797,9 @@ pub async fn detail(
     let profiles = st.wait_profiles.clone();
     let kcache = KcacheNode::new(&st.kcache_probes, id, target.generation, member);
     let f = on_member(st, id, &target, |c| {
-        Box::pin(async move {
-            fetch(
-                c,
-                &database,
-                query_id,
-                cache.as_deref(),
-                &node,
-                &profiles,
-                &kcache,
-            )
-            .await
-        })
+        Box::pin(
+            async move { fetch(c, &database, query_id, &cache, &node, &profiles, &kcache).await },
+        )
     })
     .await?;
     let mut d = QueryDetail::empty(&f.head);

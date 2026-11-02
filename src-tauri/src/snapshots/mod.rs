@@ -15,10 +15,8 @@ use crate::diag::kcache::KcacheNode;
 use crate::diag::queries::{Detect, detect, read_cumulative_on, texts_sql};
 use crate::diag::{head, on_member};
 use crate::error::{AppError, AppResult, ErrorCode};
-use crate::product::is_marked_sql;
 use crate::sampler::statements::{pgss_missing, pgss_too_old};
 use crate::state::AppState;
-use crate::topology::probe::is_unmarked_poll_sql;
 pub use store::{SnapshotInfo, SnapshotStore, Unreadable, file_name, member_dir, valid_file};
 
 /// Текстов в снимке — у верхних запросов по общему времени и, отдельно, по числу вызовов (по ним узнаются частые
@@ -206,10 +204,7 @@ pub fn text_of<'a>(a: &'a Snapshot, b: &'a Snapshot, key: &QueryKey) -> Option<(
     b.text(key).or_else(|| a.text(key))
 }
 
-/// Свой запрос Глафиры: текст с меткой или запрос опроса узла без метки (как `diag::queries::own_keys`).
-pub fn is_own_text(text: &str) -> bool {
-    is_marked_sql(text) || is_unmarked_poll_sql(text)
-}
+pub use crate::diag::texts::is_own_text;
 
 /// Текст и признак `own` строке сравнения или отчёта — по текстам снимков.
 pub fn annotate(a: &Snapshot, b: &Snapshot, s: &mut QueryStat) {

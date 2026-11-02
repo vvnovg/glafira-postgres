@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use glafira_pg_lib::diag::queries::{self, Detect, QueriesMode, QueriesParams};
 use glafira_pg_lib::diag::query_detail;
+use glafira_pg_lib::diag::texts::is_own_text;
 use glafira_pg_lib::diag::{self, DiagData, DiagRequest, Tool};
 use glafira_pg_lib::sampler::registry::SamplerSink;
 use glafira_pg_lib::sampler::statements::{self, StatementsEvent};
@@ -62,11 +63,13 @@ async fn top_since_reset_on_perf() {
             .all(|w| w[0].total_exec_ms >= w[1].total_exec_ms),
         "по убыванию времени"
     );
-    // Сэмплер pgss не запущен: кеша текстов у узла нет, строки без текстов (они подгружаются по ключам). Текст есть
-    // только у кандидатов N+1: его отчёт читает сам, чтобы отличить запросы Глафиры.
-    assert!(d.rows.iter().all(|x| x.key.toplevel
-        && x.datname.is_some()
-        && (x.text.is_none() || (x.calls >= 1000 && x.mean_exec_ms <= 1.0))));
+    // Сэмплер pgss не запущен: тексты строк топа отчёт читает сам (кеш текстов узла не зависит от сэмплера), чтобы
+    // отличить запросы Глафиры.
+    assert!(
+        d.rows
+            .iter()
+            .all(|x| x.key.toplevel && x.datname.is_some() && x.text.is_some())
+    );
     assert!(
         r.unavailable
             .iter()
@@ -222,6 +225,85 @@ async fn own_queries_are_flagged_and_left_out_of_totals() {
         )),
         "{:?}",
         r.findings
+    );
+}
+
+/// Замечание 12 смоука P3b: свои запросы распознаются без сэмплера pgss. Свежее состояние приложения, подписки на
+/// сэмплер нет: уже первый отчёт «с момента сброса» читает тексты строк топа, строки с меткой Глафиры помечены `own` и
+/// находок не дают; после `texts` по строкам топа повторный отчёт — то же (раньше `own` терялся: тексты клались только
+/// в буфер сэмплера, а без него — никуда).
+#[tokio::test]
+async fn own_queries_are_flagged_without_the_sampler() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st) = common::open_server_in(&perf, "perf").await;
+    let member = st.runtimes.view("it").topology.unwrap().members[0]
+        .name
+        .clone();
+    let pg = common::superuser(&perf, "postgres").await;
+    // Имена колонок в `queryid` не входят: форма запроса своя, чтобы строка не совпала с меткой другого теста.
+    let marked = pg
+        .prepare(
+            "/* glafira */ SELECT pg_backend_pid(), pg_postmaster_start_time(), txid_current_if_assigned()",
+        )
+        .await
+        .unwrap();
+    for _ in 0..3000 {
+        pg.query_one(&marked, &[]).await.unwrap();
+    }
+    // База postgres стенда: там опрос узла и запросы Глафиры, но и чужие строки (тесты, суперпользователь стенда).
+    let p = QueriesParams {
+        sort: QuerySort::Calls,
+        limit: 50,
+        database: Some("postgres".into()),
+        ..since_reset(QuerySort::Calls)
+    };
+    let check = |r: &glafira_pg_lib::diag::DiagReport, step: &str| {
+        let DiagData::Queries(d) = &r.data else {
+            unreachable!()
+        };
+        let mut own = 0;
+        for x in &d.rows {
+            let text = x
+                .text
+                .as_deref()
+                .unwrap_or_else(|| panic!("{step}: строка топа без текста: {x:?}"));
+            assert_eq!(x.own, is_own_text(text), "{step}: {text}");
+            if x.own {
+                own += 1;
+                let qid = x.key.query_id.to_string();
+                assert!(
+                    r.findings.iter().all(|f| !matches!(
+                        &f.target,
+                        Some(pg_advisor::findings::FindingTarget::Query { query_id, .. }) if *query_id == qid
+                    )),
+                    "{step}: находка по своей строке {text}: {:?}",
+                    r.findings
+                );
+            }
+        }
+        assert!(
+            d.rows.iter().any(|x| x.own
+                && x.text
+                    .as_deref()
+                    .is_some_and(|t| t.contains("txid_current_if_assigned"))),
+            "{step}: строка метки помечена"
+        );
+        own
+    };
+    let first = diag::run(&st, "it", request(p.clone())).await.unwrap();
+    assert!(check(&first, "первый отчёт") > 0);
+    let DiagData::Queries(d) = &first.data else {
+        unreachable!()
+    };
+    let keys: Vec<_> = d.rows.iter().take(30).map(|x| x.key).collect();
+    queries::texts(&st, "it", None, keys).await.unwrap();
+    let second = diag::run(&st, "it", request(p)).await.unwrap();
+    assert!(check(&second, "после texts") > 0);
+    assert!(
+        st.statements.buffer("it", &member).is_none(),
+        "сэмплер pgss не запускался"
     );
 }
 
@@ -457,10 +539,11 @@ async fn statements_sampler_fills_the_window_and_caches_texts() {
     );
 }
 
-/// Текст карточки — из кеша текстов узла (буфер сэмплера pgss): первый вызов читает его с сервера и кладёт в кеш,
-/// следующий берёт из кеша и `pg_stat_statements(true)` не читает (подложенный в кеш текст возвращается как есть).
+/// Текст карточки — из кеша текстов узла (`AppState::query_texts`, с сэмплером pgss и без него): первый вызов читает его
+/// с сервера и кладёт в кеш, следующий берёт из кеша и `pg_stat_statements(true)` не читает (подложенный в кеш текст
+/// возвращается как есть).
 #[tokio::test]
-async fn query_detail_text_goes_through_the_sampler_cache() {
+async fn query_detail_text_goes_through_the_node_cache() {
     let Some(perf) = common::perf_addr() else {
         return;
     };
@@ -485,7 +568,11 @@ async fn query_detail_text_goes_through_the_sampler_cache() {
         .expect("строка базы perf")
         .key
         .query_id;
-    let buffer = st.statements.buffer("it", &member).expect("буфер узла");
+    let node = query_detail::NodeKey {
+        id: "it".into(),
+        generation: st.runtimes.generation("it").unwrap(),
+        member: member.clone(),
+    };
     let first = query_detail::detail(&st, "it", &member, "perf", query_id)
         .await
         .unwrap();
@@ -493,17 +580,15 @@ async fn query_detail_text_goes_through_the_sampler_cache() {
     let keys: Vec<_> = first.by_user.iter().map(|u| u.stat.key).collect();
     assert!(!keys.is_empty());
     assert!(
-        keys.iter().any(|k| buffer
-            .lock()
-            .unwrap()
-            .text(k)
+        keys.iter().any(|k| st
+            .query_texts
+            .text(&node, k)
             .is_some_and(|(t, _)| *t == *text)),
         "прочитанный текст — в кеше узла"
     );
-    buffer
-        .lock()
-        .unwrap()
-        .remember_texts(keys.iter().map(|k| (*k, "-- из кеша".to_string(), false)));
+    st.query_texts.update(&node, |t| {
+        t.remember_texts(keys.iter().map(|k| (*k, "-- из кеша".to_string(), false)))
+    });
     let second = query_detail::detail(&st, "it", &member, "perf", query_id)
         .await
         .unwrap();
@@ -692,7 +777,8 @@ async fn query_detail_lists_running_instances() {
 
 /// Карточка запроса, которого нет в pgss, файл текстов (`pg_stat_statements(true)`) не читает ни при первом, ни при
 /// повторном опросе: строк нет — и текста нет (спец. §7.3). Чтения текста считаются по строке самого запроса текста в
-/// pgss; что счётчик живой, показывает карточка существующего запроса без кеша (сэмплер не запущен — каждый вызов читает).
+/// pgss; что счётчик живой, показывает карточка существующего запроса без кеша (отдельное состояние приложения: тексты,
+/// прочитанные отчётом, в его кеш не попали).
 #[tokio::test]
 async fn query_detail_of_a_missing_query_does_not_read_texts() {
     let Some(perf) = common::perf_addr() else {
@@ -726,7 +812,8 @@ async fn query_detail_of_a_missing_query_does_not_read_texts() {
         .find(|x| x.datname.as_deref() == Some("perf"))
         .expect("строка pgss в perf");
     let before = text_reads().await;
-    let present = query_detail::detail(&st, "it", &member, "perf", top.key.query_id)
+    let (_dir2, cold) = common::open_server_in(&perf, "perf").await;
+    let present = query_detail::detail(&cold, "it", &member, "perf", top.key.query_id)
         .await
         .unwrap();
     assert!(present.text.is_some());
@@ -736,7 +823,7 @@ async fn query_detail_of_a_missing_query_does_not_read_texts() {
         "карточка существующего запроса без кеша читает текст: {before} → {after_present}"
     );
     for _ in 0..2 {
-        let gone = query_detail::detail(&st, "it", &member, "perf", 1)
+        let gone = query_detail::detail(&cold, "it", &member, "perf", 1)
             .await
             .unwrap();
         assert!(gone.text.is_none() && gone.since_reset.is_none());

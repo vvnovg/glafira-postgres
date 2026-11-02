@@ -50,6 +50,8 @@ pub struct AppState {
     pub wait_profiles: Arc<crate::diag::query_detail::WaitProfiles>,
     /// Итоги поиска и пробы `pg_stat_kcache` по узлам (P3b): проба не повторяется на каждом обновлении.
     pub kcache_probes: Arc<crate::diag::kcache::KcacheProbes>,
+    /// Тексты запросов pgss по узлам (замечание 12 смоука P3b): свои запросы Глафиры распознаются без сэмплера pgss.
+    pub query_texts: Arc<crate::diag::texts::QueryTexts>,
 }
 
 impl AppState {
@@ -84,6 +86,8 @@ impl AppState {
         runtimes.add_close_listener(wait_profiles.clone());
         let kcache_probes = Arc::new(crate::diag::kcache::KcacheProbes::default());
         runtimes.add_close_listener(kcache_probes.clone());
+        let query_texts = Arc::new(crate::diag::texts::QueryTexts::default());
+        runtimes.add_close_listener(query_texts.clone());
         let sessions = Arc::new(SessionRegistry::default());
         let samplers = SamplerRegistry::new(
             Activity {
@@ -115,6 +119,7 @@ impl AppState {
             snapshots: Arc::new(crate::snapshots::SnapshotStore::new(data_dir)),
             wait_profiles,
             kcache_probes,
+            query_texts,
         })
     }
 
