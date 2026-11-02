@@ -12,7 +12,10 @@ vi.mock("../../api/client", async (importOriginal) => {
 });
 
 import { api } from "../../api/client";
+import type { ParsedPlan, PlanTree, Recommendation } from "../../api/types";
 import { ExplainTab } from "./ExplainTab";
+
+const pasted = (plan: PlanTree, recommendations: Recommendation[] = []): ParsedPlan => ({ plan, recommendations, recommendationsSkipped: [] });
 
 describe("ExplainTab", () => {
   beforeEach(() => {
@@ -36,7 +39,7 @@ describe("ExplainTab", () => {
   });
 
   it("без узла в спеке берётся лидер; «Вставить план» разбирает JSON без сервера", async () => {
-    vi.mocked(api.parsePlan).mockResolvedValue(planTree());
+    vi.mocked(api.parsePlan).mockResolvedValue(pasted(planTree()));
     const user = userEvent.setup();
     renderWithClient(<ExplainTab connectionId="c" member={null} database={undefined} sql={undefined} active />);
     expect(await screen.findByRole("combobox", { name: "Узел" })).toHaveValue("pg-1");
@@ -49,6 +52,28 @@ describe("ExplainTab", () => {
     await waitFor(() => expect(api.parsePlan).toHaveBeenCalledWith("[{]"));
     expect(await screen.findByRole("treegrid", { name: "Дерево плана" })).toBeInTheDocument();
     expect(api.explain).not.toHaveBeenCalled();
+  });
+
+  it("вставленный план получает рекомендации; «Проверить гипотезу» (нужен сервер) скрыта", async () => {
+    const rec: Recommendation = {
+      id: "plan_seq_scan_filter",
+      severity: "warning",
+      nodeIds: [0],
+      params: { table: "shop.orders", rowsRead: 500_000, rowsReturned: 500, loops: 1, columns: "status" },
+      command: 'CREATE INDEX CONCURRENTLY ON "shop"."orders" ("status");',
+      hypo: { indexDdl: 'CREATE INDEX ON "shop"."orders" ("status")' },
+    };
+    vi.mocked(api.parsePlan).mockResolvedValue(pasted(planTree(), [rec]));
+    const user = userEvent.setup();
+    renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql={undefined} active />);
+    await screen.findByRole("combobox", { name: "Узел" });
+    await user.click(screen.getByRole("tab", { name: "Вставить план" }));
+    await user.type(screen.getByRole("textbox", { name: "План (текст или JSON)" }), "x");
+    await user.click(screen.getByRole("button", { name: "Разобрать" }));
+    const block = await screen.findByRole("region", { name: "Рекомендации" });
+    expect(within(block).getByRole("heading", { name: "Индекс по колонкам фильтра: shop.orders" })).toBeInTheDocument();
+    expect(within(block).getByText(rec.command!)).toBeInTheDocument();
+    expect(within(block).queryByRole("button", { name: "Проверить гипотезу" })).toBeNull();
   });
 
   it("ошибка разбора показывается баннером", async () => {
@@ -64,7 +89,7 @@ describe("ExplainTab", () => {
 
   it("«Разобрать» недоступна, пока вставлено только пустое; ошибка прошлого разбора снимается удачным", async () => {
     vi.mocked(api.parsePlan).mockRejectedValueOnce({ code: "INVALID_INPUT", key: "errors.plan.unparsed", params: { line: "1", message: "x" }, message: "m", retryable: false });
-    vi.mocked(api.parsePlan).mockResolvedValueOnce(planTree());
+    vi.mocked(api.parsePlan).mockResolvedValueOnce(pasted(planTree()));
     const user = userEvent.setup();
     renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql={undefined} active />);
     await screen.findByRole("combobox", { name: "Узел" });
@@ -89,7 +114,7 @@ describe("ExplainTab", () => {
 
   it("вставленный план без времени (TIMING OFF) показывается; выбор узла открывает панель узла", async () => {
     const root = planNode({ id: 0, nodeType: "Seq Scan", actual: { startupMs: null, totalMs: null, rows: 5, loops: 1 }, inclusiveMs: null, exclusiveMs: null, sharePct: null, hot: false, misestimated: false, children: [] });
-    vi.mocked(api.parsePlan).mockResolvedValue(planTree({ root, executionMs: null, totalMs: null }));
+    vi.mocked(api.parsePlan).mockResolvedValue(pasted(planTree({ root, executionMs: null, totalMs: null })));
     const user = userEvent.setup();
     renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql={undefined} active />);
     await screen.findByRole("combobox", { name: "Узел" });
@@ -174,7 +199,7 @@ describe("ExplainTab", () => {
 
   it("«Вставить план» работает, пока список баз не прочитан: полноэкранной загрузки нет", async () => {
     vi.mocked(api.listDatabases).mockReturnValue(new Promise(() => {}));
-    vi.mocked(api.parsePlan).mockResolvedValue(planTree());
+    vi.mocked(api.parsePlan).mockResolvedValue(pasted(planTree()));
     const user = userEvent.setup();
     renderWithClient(<ExplainTab connectionId="c" member={null} database={undefined} sql={undefined} active />);
     await user.click(await screen.findByRole("tab", { name: "Вставить план" }));

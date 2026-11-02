@@ -5,6 +5,16 @@ import { CopyButton } from "../../common/CopyButton";
 import { HypoCheck } from "./HypoCheck";
 import { isKnownRecommendation, isTemplate, recommendEffect, recommendEvidence, recommendRisks, recommendTitle } from "./recommendText";
 
+/** Где получен план: на этом же проверяется гипотеза hypopg. */
+export interface HypoTarget {
+  connectionId: string;
+  member: string;
+  database: string;
+  sql: string;
+  params: ExplainParams;
+  searchPath: string | null;
+}
+
 const SEVERITY_ORDER = { critical: 0, warning: 1, info: 2 } as const;
 
 /** Ключи подписей важности — литералами (правило словарей); те же, что у находок. */
@@ -19,33 +29,29 @@ const SEVERITY_KEYS = { critical: "diag.severity.critical", warning: "diag.sever
  * ANALYZE правила, которым нужен факт, пропущены — блок говорит, сколько их. У сгруппированной по партициям рекомендации
  * доказательство называет первые партиции, полный список — в разворачиваемом блоке; условие-диапазон (`rewrite`) вместо
  * выражения над колонкой — отдельным блоком с копированием.
- * `member`, `database`, `sql`, `params` и `searchPath` — те, с которыми получен план: гипотеза проверяется на них же.
+ * `target` — подключение, узел, база, SQL, параметры и `search_path`, с которыми получен план: гипотеза проверяется на них же.
+ * У вставленного плана («Вставить план») его нет: советы те же, а «Проверить гипотезу» (нужен сервер) скрыта, и подсказка о
+ * пропущенных правилах просит вставить план с ANALYZE, а не выполнить его.
  */
 export function Recommendations({
-  connectionId,
-  member,
-  database,
-  sql,
-  params,
-  searchPath,
+  target,
   result,
   onShowNode,
 }: {
-  connectionId: string;
-  member: string;
-  database: string;
-  sql: string;
-  params: ExplainParams;
-  searchPath: string | null;
-  result: ExplainResult;
+  target: HypoTarget | null;
+  result: Pick<ExplainResult, "recommendations" | "recommendationsSkipped">;
   onShowNode: (ids: number[]) => void;
 }) {
   const { t } = useTranslation();
   const [hypo, setHypo] = useState<HypoRequest | null>(null);
   const recs = [...result.recommendations].sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
   const check = (r: Recommendation) => {
-    if (r.hypo) setHypo({ member, database, sql, params, searchPath, indexDdl: r.hypo.indexDdl });
+    if (r.hypo && target) {
+      const { member, database, sql, params, searchPath } = target;
+      setHypo({ member, database, sql, params, searchPath, indexDdl: r.hypo.indexDdl });
+    }
   };
+  const skipped = result.recommendationsSkipped.length;
   return (
     <section className="recommendations" aria-label={t("recommend.title")}>
       <h3>
@@ -53,7 +59,7 @@ export function Recommendations({
         {recs.length > 0 && <span className="muted"> ({recs.length})</span>}
       </h3>
       {recs.length === 0 && <p className="muted">{t("recommend.none")}</p>}
-      {result.recommendationsSkipped.length > 0 && <p className="diag-note">{t("recommend.skipped", { count: result.recommendationsSkipped.length })}</p>}
+      {skipped > 0 && <p className="diag-note">{target ? t("recommend.skipped", { count: skipped }) : t("recommend.skippedPasted", { count: skipped })}</p>}
       {recs.length > 0 && (
         <ul className="recommend-list">
           {recs.map((r, i) => {
@@ -104,7 +110,7 @@ export function Recommendations({
                   </>
                 )}
                 <div className="finding-actions">
-                  {r.hypo && (
+                  {r.hypo && target && (
                     <button type="button" onClick={() => check(r)}>
                       {t("recommend.hypo.check")}
                     </button>
@@ -120,7 +126,7 @@ export function Recommendations({
           })}
         </ul>
       )}
-      {hypo && <HypoCheck connectionId={connectionId} request={hypo} onClose={() => setHypo(null)} />}
+      {hypo && target && <HypoCheck connectionId={target.connectionId} request={hypo} onClose={() => setHypo(null)} />}
     </section>
   );
 }

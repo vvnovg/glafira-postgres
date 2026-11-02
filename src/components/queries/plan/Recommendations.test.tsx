@@ -11,7 +11,9 @@ vi.mock("../../../api/client", async (importOriginal) => {
 });
 
 import { api } from "../../../api/client";
-import { Recommendations } from "./Recommendations";
+import { Recommendations, type HypoTarget } from "./Recommendations";
+
+const target: HypoTarget = { connectionId: "c", member: "pg-1", database: "perf", sql: "SELECT 1", params: { kind: "none" }, searchPath: null };
 
 const rec: Recommendation = {
   id: "plan_seq_scan_filter", severity: "warning", nodeIds: [1],
@@ -26,7 +28,7 @@ describe("Recommendations", () => {
   it("карточка рекомендации: заголовок с цифрами, доказательство, команда, эффект и риски, «Показать узел»", async () => {
     const onShowNode = vi.fn();
     const user = userEvent.setup();
-    renderWithClient(<Recommendations connectionId="c" member="pg-1" database="perf" sql="SELECT 1" params={{ kind: "none" }} searchPath={null} result={result()} onShowNode={onShowNode} />);
+    renderWithClient(<Recommendations target={target} result={result()} onShowNode={onShowNode} />);
     expect(screen.getByRole("heading", { name: "Индекс по колонкам фильтра: shop.orders" })).toBeInTheDocument();
     expect(screen.getByText(/Seq Scan прочитал 500 000 строк, вернул 500/)).toBeInTheDocument();
     expect(screen.getByText(rec.command!)).toBeInTheDocument();
@@ -39,7 +41,7 @@ describe("Recommendations", () => {
   it("«Проверить гипотезу»: запрос с DDL, стоимость была/стала и использование индекса", async () => {
     vi.mocked(api.hypoCheck).mockResolvedValue({ indexName: "<1>btree_orders_status", estimatedBytes: 11_000_000, costBefore: 12_000, costAfter: 120.5, used: true, planAfter: planTree() });
     const user = userEvent.setup();
-    renderWithClient(<Recommendations connectionId="c" member="pg-1" database="perf" sql="SELECT 1" params={{ kind: "none" }} searchPath={null} result={result()} onShowNode={() => {}} />);
+    renderWithClient(<Recommendations target={target} result={result()} onShowNode={() => {}} />);
     await user.click(screen.getByRole("button", { name: "Проверить гипотезу" }));
     await waitFor(() => expect(api.hypoCheck).toHaveBeenCalledWith("c", { member: "pg-1", database: "perf", sql: "SELECT 1", params: { kind: "none" }, searchPath: null, indexDdl: rec.hypo!.indexDdl }));
     const dialog = await screen.findByRole("dialog", { name: "Проверка гипотезы" });
@@ -50,12 +52,21 @@ describe("Recommendations", () => {
   });
 
   it("без ANALYZE — подсказка о пропущенных правилах; без рекомендаций — «Советов нет»", () => {
-    renderWithClient(<Recommendations connectionId="c" member="pg-1" database="perf" sql="SELECT 1" params={{ kind: "none" }} searchPath={null} result={result({ recommendations: [], recommendationsSkipped: ["plan_spill", "plan_jit_heavy"] })} onShowNode={() => {}} />);
+    renderWithClient(<Recommendations target={target} result={result({ recommendations: [], recommendationsSkipped: ["plan_spill", "plan_jit_heavy"] })} onShowNode={() => {}} />);
     expect(screen.getByText("Советов нет")).toBeInTheDocument();
     expect(screen.getByText("Выполните план с выполнением, чтобы проверить ещё 2 правила")).toBeInTheDocument();
   });
 
-  const props = { connectionId: "c", member: "pg-1", database: "perf", sql: "SELECT 1", params: { kind: "none" } as const, searchPath: null, onShowNode: () => {} };
+  const props = { target, onShowNode: () => {} };
+
+  it("вставленный план (без подключения): советы есть, «Проверить гипотезу» скрыта, подсказка — про вставку плана с ANALYZE", () => {
+    renderWithClient(<Recommendations target={null} result={result({ recommendationsSkipped: ["plan_spill", "plan_jit_heavy"] })} onShowNode={() => {}} />);
+    expect(screen.getByRole("heading", { name: "Индекс по колонкам фильтра: shop.orders" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Копировать команду" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Проверить гипотезу" })).toBeNull();
+    expect(screen.getByText("План без выполнения (ANALYZE): ещё 2 правила не проверено — вставьте план EXPLAIN ANALYZE")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Показать узел" })).toBeInTheDocument();
+  });
 
   it("шаблон (<columns>), без hypo: пометка о шаблоне, нет «Проверить гипотезу»; без шаблона пометки нет", () => {
     const template: Recommendation = { ...rec, params: { table: "shop.orders", rowsRead: 500_000, rowsReturned: 500, loops: 1 }, command: "CREATE INDEX CONCURRENTLY ON \"shop\".\"orders\" (<columns>);", hypo: null };

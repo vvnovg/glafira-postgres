@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../api/client";
-import type { AppError, PlanTree } from "../../api/types";
+import type { AppError, ParsedPlan, PlanTree } from "../../api/types";
 import { useTopology } from "../../lib/useConnectionEvents";
 import { tabId, useWorkspace } from "../../state/workspace";
 import { SubTabs } from "../catalog/SubTabs";
@@ -10,6 +10,7 @@ import { ErrorBanner } from "../common/ErrorBanner";
 import { CopyLlmButton } from "./CopyLlmButton";
 import { PlanRunner } from "./plan/PlanRunner";
 import { PlanView } from "./plan/PlanView";
+import { Recommendations } from "./plan/Recommendations";
 
 type Source = "sql" | "paste";
 
@@ -35,7 +36,7 @@ function versionNum(text: string | null | undefined): number {
 
 /**
  * Консоль EXPLAIN (спец. P3 §8.7): узел, база, SQL и запуск планов через `PlanRunner`; режим «Вставить план» разбирает
- * текстовый план или JSON (в том числе с обрамлением psql) на месте, без обращения к серверу БД. Одна на подключение: «Открыть в консоли»
+ * текстовый план или JSON (в том числе с обрамлением psql) на месте, без обращения к серверу БД, и показывает рекомендации по нему. Одна на подключение: «Открыть в консоли»
  * подставляет узел, базу и текст сюда же, а открытие из дерева (без подстановки) оставляет набранное.
  * active — вкладка сейчас видна: скрытая список баз не читает, а при возвращении читает заново. Список нужен только режиму
  * «Запрос» и только пока база не известна (спека или выбор): «Вставить план» от него не зависит.
@@ -65,7 +66,7 @@ export function ExplainTab({
   const [source, setSource] = useState<Source>("sql");
   const [pasted, setPasted] = useState("");
   // Разобранный план хранится одним объектом: дерево плана сбрасывает развёртку при смене объекта.
-  const [parsed, setParsed] = useState<PlanTree | null>(null);
+  const [parsed, setParsed] = useState<ParsedPlan | null>(null);
   const [last, setLast] = useState<LastRun | null>(null);
   const [parsing, setParsing] = useState(false);
   const [parseError, setParseError] = useState<AppError | null>(null);
@@ -186,7 +187,8 @@ export function ExplainTab({
                 </button>
               </div>
               {parseError && <ErrorBanner error={parseError} />}
-              {parsed && <PlanView tree={parsed} />}
+              {/* Советы по вставленному плану — те же чистые правила; «Проверить гипотезу» нужен сервер — её нет. */}
+              {parsed && <PlanView tree={parsed.plan} afterSummary={(showNode) => <Recommendations target={null} result={parsed} onShowNode={showNode} />} />}
             </div>
           </>
         )}

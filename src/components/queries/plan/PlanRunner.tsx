@@ -455,12 +455,14 @@ export function PlanRunner({
           extraActions={extraActions}
           afterSummary={(showNode) => (
             <Recommendations
-              connectionId={connectionId}
-              member={current.request.member}
-              database={current.request.database}
-              sql={current.request.sql}
-              params={current.request.params}
-              searchPath={current.request.searchPath}
+              target={{
+                connectionId,
+                member: current.request.member,
+                database: current.request.database,
+                sql: current.request.sql,
+                params: current.request.params,
+                searchPath: current.request.searchPath,
+              }}
               result={current.result}
               onShowNode={showNode}
             />

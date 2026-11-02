@@ -29,6 +29,7 @@ import type {
   PatroniAction,
   PatroniActionPreview,
   PatroniActionResult,
+  ParsedPlan,
   PlanTree,
   PolicyStatus,
   QueryDetail,
@@ -161,7 +162,7 @@ export const api = {
   explain: (id: string, request: ExplainRequest) => call<ExplainResult>("explain", { id, request }),
   /** Проверка гипотезы hypopg: виртуальный индекс в READ ONLY-транзакции, без следа на сервере. */
   hypoCheck: (id: string, request: HypoRequest) => call<HypoResult>("hypo_check", { id, request }),
-  parsePlan: (text: string) => call<PlanTree>("parse_plan", { text }),
+  parsePlan: (text: string) => call<ParsedPlan>("parse_plan", { text }),
   queryLlmBundle: (id: string, member: string, database: string, source: LlmSource, plan: PlanTree | null) =>
     call<LlmBundle>("query_llm_bundle", { id, member, database, source, plan }),
 

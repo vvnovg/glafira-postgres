@@ -960,6 +960,14 @@ export interface ExplainResult {
   recommendationsSkipped: string[];
 }
 
+/** Вставленный план («Вставить план»): дерево и рекомендации по нему — правила чистые, сервер не нужен. */
+export interface ParsedPlan {
+  plan: PlanTree;
+  recommendations: Recommendation[];
+  /** Правила, которым нужен факт (ANALYZE): у плана без него пропущены. */
+  recommendationsSkipped: string[];
+}
+
 /** Виртуальный индекс для hypopg: `CREATE INDEX` без `CONCURRENTLY`. */
 export interface HypoIndex {
   indexDdl: string;

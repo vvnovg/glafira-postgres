@@ -2,6 +2,8 @@
 
 use pg_advisor::plan::json::from_any;
 use pg_advisor::plan::{PlanError, PlanTree};
+use pg_advisor::plan_rules::{Recommendation, evaluate};
+use serde::Serialize;
 use tauri::State;
 
 use crate::error::{AppResult, ErrorCode};
@@ -28,11 +30,31 @@ pub async fn hypo_check(
     hypopg::check(&state, &id, &request).await
 }
 
+/// Разобранный вставленный план и рекомендации по нему: правила чистые (дерево → советы), сервер не нужен.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParsedPlan {
+    pub plan: PlanTree,
+    pub recommendations: Vec<Recommendation>,
+    /// Правила «факт», пропущенные у плана без ANALYZE.
+    pub recommendations_skipped: Vec<String>,
+}
+
 /// Вставленный план: JSON или текстовый EXPLAIN (psql, auto_explain), формат определяется сам (`from_any`). Без сервера;
 /// разбор — вне главного потока (вставка может быть в мегабайты).
 #[tauri::command]
-pub async fn parse_plan(text: String) -> AppResult<PlanTree> {
-    super::blocking(move || parse_plan_text(&text)).await
+pub async fn parse_plan(text: String) -> AppResult<ParsedPlan> {
+    super::blocking(move || parse_pasted(&text)).await
+}
+
+fn parse_pasted(text: &str) -> AppResult<ParsedPlan> {
+    let plan = parse_plan_text(text)?;
+    let report = evaluate(&plan);
+    Ok(ParsedPlan {
+        plan,
+        recommendations: report.recommendations,
+        recommendations_skipped: report.skipped,
+    })
 }
 
 fn parse_plan_text(text: &str) -> AppResult<PlanTree> {
@@ -76,5 +98,25 @@ mod tests {
         );
         let e = parse_plan_text("nothing to see").unwrap_err();
         assert_eq!(e.params.get("line").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn pasted_plan_gets_recommendations() {
+        // С ANALYZE: Seq Scan отбросил почти всё — совет про индекс по колонкам фильтра.
+        let analyzed = "Seq Scan on orders  (cost=0.00..10000.00 rows=500 width=4) (actual time=0.010..50.000 rows=500 loops=1)\n  Filter: (status = 'new'::text)\n  Rows Removed by Filter: 499500\nPlanning Time: 0.100 ms\nExecution Time: 50.100 ms\n";
+        let p = parse_pasted(analyzed).unwrap();
+        assert!(
+            p.recommendations
+                .iter()
+                .any(|r| r.id == "plan_seq_scan_filter"),
+            "{:?}",
+            p.recommendations
+        );
+        assert!(p.recommendations_skipped.is_empty());
+        // Без ANALYZE правила «факт» пропущены — интерфейс скажет, сколько.
+        let p = parse_pasted("Seq Scan on orders  (cost=0.00..10000.00 rows=500 width=4)\n  Filter: (status = 'new'::text)\n").unwrap();
+        assert!(!p.recommendations_skipped.is_empty());
+        let v = serde_json::to_value(&p).unwrap();
+        assert!(v.get("recommendationsSkipped").is_some() && v.get("plan").is_some());
     }
 }

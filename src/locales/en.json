@@ -1985,6 +1985,8 @@
     "none": "No advice",
     "skipped_one": "Run the plan with execution to check {{count}} more rule",
     "skipped_other": "Run the plan with execution to check {{count}} more rules",
+    "skippedPasted_one": "The plan has no execution data (ANALYZE): {{count}} more rule is not checked; paste an EXPLAIN ANALYZE plan",
+    "skippedPasted_other": "The plan has no execution data (ANALYZE): {{count}} more rules are not checked; paste an EXPLAIN ANALYZE plan",
     "copyCommand": "Copy command",
     "partitionsAll": "All partitions ({{count}})",
     "rewrite": "Condition to use instead of {{condition}}",
