@@ -9,7 +9,7 @@ pub const POLICY_PRODUCT: &str = "PostgreSQL";
 /// `application_name` соединений приложения: так их видно в `pg_stat_activity`.
 pub const PG_APPLICATION_NAME: &str = "glafira-pg";
 
-/// Литерал SQL с ведущей меткой периодических запросов Глафиры: `marked_sql!("SELECT …")`. Метка — комментарий:
+/// Литерал SQL с ведущей меткой запросов Глафиры: `marked_sql!("SELECT …")`. Метка — комментарий:
 /// `pg_stat_statements` хранит его в тексте строки, а `queryid` его не учитывает (спец. P3 §4).
 #[macro_export]
 macro_rules! marked_sql {
@@ -18,8 +18,8 @@ macro_rules! marked_sql {
     };
 }
 
-/// Метка периодических запросов Глафиры (опрос топологии, сэмплеры, диагностика по таймеру); в строках `format!` —
-/// `{SQL_MARKER}` в начале.
+/// Метка запросов Глафиры — периодических (опрос топологии, сэмплеры, диагностика по таймеру) и разовых (каталог,
+/// чек-лист, действия; замечание 17 смоука P3b), кроме текста пользователя; в строках `format!` — `{SQL_MARKER}` в начале.
 pub const SQL_MARKER: &str = marked_sql!("");
 
 /// Текст запроса начинается с метки Глафиры (ведущие пробелы и переводы строк не мешают).
@@ -42,6 +42,64 @@ mod tests {
         assert!(!super::is_marked_sql("SELECT 1 /* glafira */"));
         assert!(!super::is_marked_sql("/* glafira-like */ SELECT 1"));
         assert!(!super::is_marked_sql(""));
+    }
+
+    /// Замечание 17 смоука P3b: метка у всех запросов приложения, не только периодических. Проверка по исходникам (до
+    /// модуля тестов файла): строковый литерал, начинающийся с инструкции SQL, — в `marked_sql!` или с `{SQL_MARKER}`
+    /// в той же или двух предыдущих строках. Текст пользователя (консоль EXPLAIN) литералом не бывает.
+    #[test]
+    fn every_sql_literal_is_marked() {
+        const STARTS: [&str; 11] = [
+            "\"SELECT ",
+            "\"WITH ",
+            "\"BEGIN",
+            "\"SET ",
+            "\"ROLLBACK",
+            "\"SAVEPOINT ",
+            "\"SHOW ",
+            "\"ANALYZE ",
+            "\"VACUUM ",
+            "\"DISCARD ",
+            "\"RESET ",
+        ];
+        // Куски уже помеченного `format!` и опции EXPLAIN.
+        const ALLOWED: [&str; 2] = ["\"SELECT 't', ", "\"ANALYZE, BUFFERS"];
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        let mut unmarked = Vec::new();
+        for f in files {
+            let src = std::fs::read_to_string(&f).unwrap();
+            let lines: Vec<&str> = src
+                .lines()
+                .take_while(|l| !l.contains("#[cfg(test)]"))
+                .collect();
+            for (i, l) in lines.iter().enumerate() {
+                if l.trim_start().starts_with("//")
+                    || !STARTS.iter().any(|s| l.contains(s))
+                    || ALLOWED.iter().any(|s| l.contains(s))
+                {
+                    continue;
+                }
+                let near = lines[i.saturating_sub(2)..=i].join(" ");
+                if !near.contains("marked_sql!") && !near.contains("SQL_MARKER") {
+                    unmarked.push(format!("{}:{}: {}", f.display(), i + 1, l.trim()));
+                }
+            }
+        }
+        assert!(unmarked.is_empty(), "{unmarked:#?}");
     }
 
     #[test]

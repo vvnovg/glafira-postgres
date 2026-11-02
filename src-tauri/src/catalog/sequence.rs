@@ -46,7 +46,8 @@ pub struct SequenceDetails {
 /// `pg_sequences`: без права на последовательность там NULL, а не ошибка, как у `pg_sequence_last_value`.
 /// `readable` — тот же предикат, что у `pg_sequences` (`COALESCE`: для исчезнувшей последовательности
 /// `has_sequence_privilege` вернул бы NULL).
-const SQL: &str = "SELECT n.nspname::text, c.relname::text, COALESCE(format_type(s.seqtypid, NULL), ''), \
+const SQL: &str = marked_sql!(
+    "SELECT n.nspname::text, c.relname::text, COALESCE(format_type(s.seqtypid, NULL), ''), \
     s.seqstart, s.seqincrement, s.seqmin, s.seqmax, s.seqcycle, s.seqcache, \
     (SELECT ps.last_value FROM pg_sequences ps WHERE ps.schemaname = n.nspname AND ps.sequencename = c.relname), \
     (SELECT quote_ident(tn.nspname) || '.' || quote_ident(t.relname) || '.' || quote_ident(a.attname) \
@@ -56,7 +57,8 @@ const SQL: &str = "SELECT n.nspname::text, c.relname::text, COALESCE(format_type
          AND d.deptype IN ('a', 'i') LIMIT 1), \
     COALESCE(has_sequence_privilege(c.oid, 'SELECT,USAGE'), false) \
   FROM pg_sequence s JOIN pg_class c ON c.oid = s.seqrelid JOIN pg_namespace n ON n.oid = c.relnamespace \
-  WHERE s.seqrelid = $1";
+  WHERE s.seqrelid = $1"
+);
 
 /// Доля использованного диапазона: для растущей — от min, для убывающей — от max; пустой диапазон — None.
 pub fn percent_used(last: Option<i64>, min: i64, max: i64, increment: i64) -> Option<f64> {

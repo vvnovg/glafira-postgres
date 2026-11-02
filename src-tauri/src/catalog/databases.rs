@@ -17,10 +17,10 @@ pub struct DatabaseInfo {
 pub async fn list(c: &Client, filter: Option<&[String]>) -> AppResult<Vec<DatabaseInfo>> {
     let rows = c
         .query(
-            "SELECT datname::text, \
+            marked_sql!("SELECT datname::text, \
                CASE WHEN has_database_privilege(oid, 'CONNECT') OR pg_has_role('pg_read_all_stats', 'USAGE') \
                     THEN pg_database_size(oid) END \
-             FROM pg_database WHERE NOT datistemplate AND datallowconn ORDER BY datname",
+             FROM pg_database WHERE NOT datistemplate AND datallowconn ORDER BY datname"),
             &[],
         )
         .await

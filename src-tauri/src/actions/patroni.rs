@@ -16,7 +16,7 @@ use crate::conn::errors::from_pg;
 use crate::conn::profile::{ConnectionKind, Environment, strip_url_credentials};
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::guard::{ensure_mutation_allowed, ensure_name_confirmed};
-use crate::product::PG_APPLICATION_NAME;
+use crate::product::{PG_APPLICATION_NAME, SQL_MARKER};
 use crate::state::AppState;
 use crate::sync::MutexExt;
 use crate::topology::BoxFuture;
@@ -539,7 +539,7 @@ fn patroni_only(kind: ConnectionKind) -> AppResult<()> {
 /// продукта) и своей: столько чужих клиентов оборвётся при переключении.
 fn leader_sessions_sql() -> String {
     format!(
-        "SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'client backend' AND pid <> pg_backend_pid() \
+        "{SQL_MARKER}SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'client backend' AND pid <> pg_backend_pid() \
          AND application_name IS DISTINCT FROM {}",
         quote_literal(PG_APPLICATION_NAME)
     )

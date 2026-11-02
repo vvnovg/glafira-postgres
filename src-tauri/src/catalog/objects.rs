@@ -5,6 +5,7 @@ use tokio_postgres::{Client, Row};
 use crate::catalog::{check_page, like_pattern};
 use crate::conn::errors::from_pg;
 use crate::error::AppResult;
+use crate::product::SQL_MARKER;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -145,7 +146,7 @@ async fn paged(
 ) -> AppResult<ObjectPage> {
     let n = params.len();
     let sql = format!(
-        "SELECT {columns} {from_where} ORDER BY {order_by} LIMIT ${} OFFSET ${}",
+        "{SQL_MARKER}SELECT {columns} {from_where} ORDER BY {order_by} LIMIT ${} OFFSET ${}",
         n + 1,
         n + 2
     );
@@ -157,7 +158,7 @@ async fn paged(
     let total = match rows.first() {
         Some(r) => r.get::<_, i64>(r.len() - 1),
         None if offset > 0 => c
-            .query_one(&format!("SELECT count(*) {from_where}"), params)
+            .query_one(&format!("{SQL_MARKER}SELECT count(*) {from_where}"), params)
             .await
             .map_err(|e| from_pg(&e))?
             .get(0),

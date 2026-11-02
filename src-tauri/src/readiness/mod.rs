@@ -33,7 +33,7 @@ pub fn preloads_pg_stat_statements(value: &str) -> bool {
 pub async fn preload_of(c: &Client) -> AppResult<Option<bool>> {
     let rows = c
         .query(
-            "SELECT setting FROM pg_settings WHERE name = 'shared_preload_libraries'",
+            marked_sql!("SELECT setting FROM pg_settings WHERE name = 'shared_preload_libraries'"),
             &[],
         )
         .await
@@ -52,8 +52,8 @@ pub async fn collect_facts(
     let pg = |e: tokio_postgres::Error| from_pg(&e);
     let r = c
         .query_one(
-            "SELECT current_setting('server_version_num')::int, current_user::text, r.rolsuper, r.rolreplication \
-             FROM pg_roles r WHERE r.rolname = current_user",
+            marked_sql!("SELECT current_setting('server_version_num')::int, current_user::text, r.rolsuper, r.rolreplication \
+             FROM pg_roles r WHERE r.rolname = current_user"),
             &[],
         )
         .await
@@ -62,9 +62,9 @@ pub async fn collect_facts(
         (r.get(0), r.get(1), r.get(2), r.get(3));
     let member_of: Vec<String> = c
         .query(
-            "SELECT b.rolname::text FROM pg_roles b \
+            marked_sql!("SELECT b.rolname::text FROM pg_roles b \
              WHERE b.rolname IN ('pg_monitor', 'pg_signal_backend', 'pg_maintain', 'pg_read_all_stats', 'pg_read_all_data') \
-             AND pg_has_role(current_user, b.oid, 'USAGE')",
+             AND pg_has_role(current_user, b.oid, 'USAGE')"),
             &[],
         )
         .await
@@ -77,7 +77,9 @@ pub async fn collect_facts(
     // Версия расширения (не сервера) определяет колонки топа запросов (P3); `None` — расширения нет.
     let pgss_version: Option<String> = c
         .query_opt(
-            "SELECT extversion::text FROM pg_extension WHERE extname = 'pg_stat_statements'",
+            marked_sql!(
+                "SELECT extversion::text FROM pg_extension WHERE extname = 'pg_stat_statements'"
+            ),
             &[],
         )
         .await
@@ -90,9 +92,11 @@ pub async fn collect_facts(
     let mut track_activity_query_size = 1024;
     for r in c
         .query(
-            "SELECT name::text, setting FROM pg_settings \
+            marked_sql!(
+                "SELECT name::text, setting FROM pg_settings \
              WHERE name IN ('compute_query_id', 'track_io_timing', 'track_activity_query_size', \
-             'pg_stat_statements.track_planning')",
+             'pg_stat_statements.track_planning')"
+            ),
             &[],
         )
         .await
@@ -113,8 +117,10 @@ pub async fn collect_facts(
     let names: Vec<&str> = OPTIONAL_EXTENSIONS.to_vec();
     let extensions = c
         .query(
-            "SELECT a.name::text, e.extversion::text FROM pg_available_extensions a \
-             LEFT JOIN pg_extension e ON e.extname = a.name WHERE a.name = ANY($1)",
+            marked_sql!(
+                "SELECT a.name::text, e.extversion::text FROM pg_available_extensions a \
+             LEFT JOIN pg_extension e ON e.extname = a.name WHERE a.name = ANY($1)"
+            ),
             &[&names],
         )
         .await

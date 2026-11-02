@@ -27,7 +27,7 @@ pub struct SchemaInfo {
 pub async fn list(c: &Client, include_system: bool) -> AppResult<Vec<SchemaInfo>> {
     let rows = c
         .query(
-            "SELECT n.nspname::text, n.nspname IN ('pg_catalog', 'information_schema'), \
+            marked_sql!("SELECT n.nspname::text, n.nspname IN ('pg_catalog', 'information_schema'), \
                count(cl.oid) FILTER (WHERE cl.relkind IN ('r', 'p', 'f') AND NOT cl.relispartition), \
                count(cl.oid) FILTER (WHERE cl.relkind = 'v'), \
                count(cl.oid) FILTER (WHERE cl.relkind = 'm'), \
@@ -36,7 +36,7 @@ pub async fn list(c: &Client, include_system: bool) -> AppResult<Vec<SchemaInfo>
              FROM pg_namespace n LEFT JOIN pg_class cl ON cl.relnamespace = n.oid \
              WHERE n.nspname NOT LIKE 'pg\\_toast%' AND n.nspname NOT LIKE 'pg\\_temp\\_%' \
                AND ($1 OR n.nspname NOT IN ('pg_catalog', 'information_schema')) \
-             GROUP BY n.oid, n.nspname ORDER BY 2, 1",
+             GROUP BY n.oid, n.nspname ORDER BY 2, 1"),
             &[&include_system],
         )
         .await

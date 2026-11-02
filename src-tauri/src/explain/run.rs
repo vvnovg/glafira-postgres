@@ -22,6 +22,7 @@ use crate::explain::{
     ExplainRequest, ExplainResult, Mode, PROBE_TIMEOUT_S, Params, ensure_write_confirmed, validate,
 };
 use crate::guard::ensure_mutation_allowed;
+use crate::product::SQL_MARKER;
 use crate::state::AppState;
 
 pub(crate) const PROBE_OPTIONS: &str = "FORMAT JSON, VERBOSE, SETTINGS";
@@ -279,8 +280,25 @@ pub(crate) async fn explain_in_tx(
         Ok(()) => explain_in_open_tx(c, options, sql, params).await,
     };
     // Откат — страховка: при ошибке транзакция уже прервана сервером, при обрыве соединение закроется.
-    let _ = c.batch_execute("ROLLBACK").await;
+    let _ = c.batch_execute(ROLLBACK_SQL).await;
     result
+}
+
+/// Откат транзакции EXPLAIN и гипотезы hypopg.
+pub(crate) const ROLLBACK_SQL: &str = marked_sql!("ROLLBACK");
+
+/// Служебные инструкции транзакции EXPLAIN — каждая со своей меткой (замечание 17 смоука P3b): pgss хранит текст каждой
+/// инструкции пакета отдельно.
+fn begin_sql(read_only: bool, timeout_s: u32, search_path: Option<&str>) -> String {
+    let mut begin = format!(
+        "{SQL_MARKER}BEGIN{}; {SQL_MARKER}SET LOCAL statement_timeout = '{timeout_s}s'; \
+         {SQL_MARKER}SET LOCAL lock_timeout = '1s'",
+        if read_only { " READ ONLY" } else { "" }
+    );
+    if let Some(sp) = search_path {
+        begin.push_str(&format!("; {SQL_MARKER}SET LOCAL search_path = {sp}"));
+    }
+    begin
 }
 
 /// Начало транзакции EXPLAIN: `BEGIN [READ ONLY]` (по `ctx.read_only`), `SET LOCAL` сроков и `search_path`. Ошибка
@@ -291,13 +309,7 @@ pub(crate) async fn begin_tx(
     timeout_s: u32,
     search_path: Option<&str>,
 ) -> Result<(), Step> {
-    let mut begin = format!(
-        "BEGIN{}; SET LOCAL statement_timeout = '{timeout_s}s'; SET LOCAL lock_timeout = '1s'",
-        if ctx.read_only { " READ ONLY" } else { "" }
-    );
-    if let Some(sp) = search_path {
-        begin.push_str(&format!("; SET LOCAL search_path = {sp}"));
-    }
+    let begin = begin_sql(ctx.read_only, timeout_s, search_path);
     c.batch_execute(&begin).await.map_err(|e| {
         Step::App(classify(
             &e,
@@ -339,11 +351,12 @@ async fn explain_query(c: &Client, text: &str, params: &Params) -> Result<serde_
             // 42P18 (тип параметра не выведен, как у `$1 IS NULL`) поднимается уже при анализе, после проверки
             // числа инструкций, — значит, инструкция одна; обобщённый план сервер такой строит. Ошибка разбора
             // прерывает транзакцию, поэтому проверка — под точкой сохранения, к которой тогда и откатываемся.
-            c.batch_execute("SAVEPOINT one_statement").await?;
+            c.batch_execute(marked_sql!("SAVEPOINT one_statement"))
+                .await?;
             match c.prepare(text).await {
                 Ok(_) => {}
                 Err(e) if e.code() == Some(&SqlState::INDETERMINATE_DATATYPE) => {
-                    c.batch_execute("ROLLBACK TO SAVEPOINT one_statement")
+                    c.batch_execute(marked_sql!("ROLLBACK TO SAVEPOINT one_statement"))
                         .await?;
                 }
                 Err(e) => return Err(e.into()),
@@ -589,6 +602,23 @@ pub async fn run(st: &AppState, id: &str, req: &ExplainRequest) -> AppResult<Exp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transaction_statements_are_marked() {
+        let begin = begin_sql(true, 30, Some("\"app\", public"));
+        let parts: Vec<&str> = begin.split("; ").collect();
+        assert_eq!(parts.len(), 4, "{begin}");
+        assert!(
+            parts.iter().all(|p| crate::product::is_marked_sql(p)),
+            "{begin}"
+        );
+        assert!(
+            parts[0].ends_with("BEGIN READ ONLY")
+                && parts[3].ends_with("search_path = \"app\", public")
+        );
+        assert!(begin_sql(false, 5, None).starts_with("/* glafira */ BEGIN; "));
+        assert!(crate::product::is_marked_sql(ROLLBACK_SQL));
+    }
 
     #[test]
     fn explain_wrappers_of_glafira_are_own() {

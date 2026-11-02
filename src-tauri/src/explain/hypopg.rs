@@ -16,8 +16,8 @@ use crate::diag::head;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::explain::params::normalize;
 use crate::explain::run::{
-    Context, Origin, Step, begin_tx, classify, explain_in_open_tx, explain_in_tx, probe_options,
-    within,
+    Context, Origin, ROLLBACK_SQL, Step, begin_tx, classify, explain_in_open_tx, explain_in_tx,
+    probe_options, within,
 };
 use crate::explain::{ExplainRequest, Mode, PROBE_TIMEOUT_S, Params, validate};
 use crate::product::SQL_MARKER;
@@ -325,7 +325,7 @@ async fn cleanup(c: &Client, reset_sql: &str) -> AppResult<()> {
         Err(e) if client_deadline(&e) => return Err(app(e, ctx)),
         r => r,
     };
-    run("ROLLBACK").await.map_err(|e| app(e, ctx))?;
+    run(ROLLBACK_SQL).await.map_err(|e| app(e, ctx))?;
     if reset.is_err() {
         run(reset_sql).await.map_err(|e| app(e, ctx))?;
     }

@@ -15,7 +15,9 @@ use crate::guard::{ensure_mutation_allowed, ensure_name_confirmed};
 use crate::state::AppState;
 
 /// Только неактивный слот: активный за время между предпросмотром и удалением сюда не попадёт.
-pub const DROP_SQL: &str = "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1 AND NOT active";
+pub const DROP_SQL: &str = marked_sql!(
+    "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1 AND NOT active"
+);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

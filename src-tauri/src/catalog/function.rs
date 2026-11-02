@@ -28,13 +28,15 @@ pub struct FunctionDetails {
     pub definition: Option<String>,
 }
 
-const SQL: &str = "SELECT n.nspname::text, p.proname::text, p.prokind::text, \
+const SQL: &str = marked_sql!(
+    "SELECT n.nspname::text, p.proname::text, p.prokind::text, \
     COALESCE(pg_get_function_identity_arguments(p.oid), ''), \
     CASE WHEN p.prokind IN ('f', 'w') THEN pg_get_function_result(p.oid) END, l.lanname::text, \
     p.provolatile::text, p.prosecdef, pg_get_userbyid(p.proowner)::text, obj_description(p.oid, 'pg_proc'), \
     CASE WHEN p.prokind = 'a' THEN NULL ELSE pg_get_functiondef(p.oid) END \
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang \
-  WHERE p.oid = $1";
+  WHERE p.oid = $1"
+);
 
 /// Функции с таким OID нет (удалена после того, как её показало дерево, или число не OID). Своё сообщение: схемы
 /// у запроса нет, и `object_not_found("", oid)` дало бы «Объект .16401 не найден». Код тот же, что у `objectNotFound`.

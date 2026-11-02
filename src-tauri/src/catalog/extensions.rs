@@ -17,9 +17,9 @@ pub struct ExtensionInfo {
 pub async fn list(c: &Client) -> AppResult<Vec<ExtensionInfo>> {
     let rows = c
         .query(
-            "SELECT e.extname::text, e.extversion::text, n.nspname::text, a.default_version::text \
+            marked_sql!("SELECT e.extname::text, e.extversion::text, n.nspname::text, a.default_version::text \
              FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace \
-             LEFT JOIN pg_available_extensions a ON a.name = e.extname ORDER BY 1",
+             LEFT JOIN pg_available_extensions a ON a.name = e.extname ORDER BY 1"),
             &[],
         )
         .await

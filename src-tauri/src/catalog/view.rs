@@ -30,13 +30,15 @@ pub struct ViewDetails {
 }
 
 /// Заголовок (`$1` — OID). Не представление (`v`) и не материализованное (`m`) — строки нет.
-const HEAD_SQL: &str = "SELECT n.nspname::text, c.relname::text, c.relkind::text, \
+const HEAD_SQL: &str = marked_sql!(
+    "SELECT n.nspname::text, c.relname::text, c.relkind::text, \
     pg_get_userbyid(c.relowner)::text, obj_description(c.oid, 'pg_class'), \
     COALESCE(pg_get_viewdef(c.oid, true), ''), \
     CASE WHEN c.relkind = 'm' THEN c.relispopulated END, \
     CASE WHEN c.relkind = 'm' THEN pg_total_relation_size(c.oid) END \
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
-  WHERE c.oid = $1 AND c.relkind IN ('v', 'm')";
+  WHERE c.oid = $1 AND c.relkind IN ('v', 'm')"
+);
 
 pub async fn get(c: &Client, schema: &str, name: &str) -> AppResult<ViewDetails> {
     // OID из каталога всегда помещается в `u32`.

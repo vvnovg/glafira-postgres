@@ -42,7 +42,10 @@ pub fn like_pattern(filter: Option<&str>) -> Option<String> {
 /// Версия сервера для выбора текста запроса (`last_idx_scan` — 16+ и т. п.).
 pub async fn server_version_num(c: &Client) -> AppResult<i32> {
     let r = c
-        .query_one("SELECT current_setting('server_version_num')::int", &[])
+        .query_one(
+            marked_sql!("SELECT current_setting('server_version_num')::int"),
+            &[],
+        )
         .await
         .map_err(|e| from_pg(&e))?;
     Ok(r.get(0))
@@ -64,8 +67,8 @@ pub(crate) fn object_not_found(schema: &str, name: &str) -> AppError {
 pub async fn relation_oid(c: &Client, schema: &str, name: &str) -> AppResult<i64> {
     let row = c
         .query_opt(
-            "SELECT c.oid::bigint FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
-             WHERE n.nspname = $1 AND c.relname = $2",
+            marked_sql!("SELECT c.oid::bigint FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relname = $2"),
             &[&schema, &name],
         )
         .await

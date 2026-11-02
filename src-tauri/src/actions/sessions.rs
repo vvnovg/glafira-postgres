@@ -14,6 +14,7 @@ use crate::diag::caps::{Caps, V14};
 use crate::diag::sql::BACKEND_START_US;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::guard::{ensure_mutation_allowed, ensure_name_confirmed};
+use crate::product::SQL_MARKER;
 use crate::state::AppState;
 
 /// Больше сессий за одно действие не принимается.
@@ -176,7 +177,7 @@ fn target_filter(target: &SessionTarget) -> &'static str {
 
 pub fn preview_sql(target: &SessionTarget) -> String {
     format!(
-        "SELECT a.pid, {BACKEND_START_US}, a.usename::text, a.datname::text, a.application_name, host(a.client_addr), \
+        "{SQL_MARKER}SELECT a.pid, {BACKEND_START_US}, a.usename::text, a.datname::text, a.application_name, host(a.client_addr), \
                 a.state, a.backend_type, extract(epoch FROM now() - a.xact_start)::float8, \
                 extract(epoch FROM now() - a.state_change)::float8, left(a.query, 500), \
                 a.backend_type = 'client backend', a.pid = pg_backend_pid(), COALESCE(r.rolsuper, false), \
@@ -350,7 +351,7 @@ pub fn signal_sql(kind: SignalKind, target: &SessionTarget, caps: Caps) -> Strin
     };
     let query_id = caps.col(V14, "a.query_id::text", "text");
     format!(
-        "SELECT a.usename::text, a.datname::text, a.application_name, host(a.client_addr), a.state, {query_id}, \
+        "{SQL_MARKER}SELECT a.usename::text, a.datname::text, a.application_name, host(a.client_addr), a.state, {query_id}, \
                 left(a.query, 500), extract(epoch FROM now() - a.xact_start)::float8, {func}(a.pid) \
          FROM pg_stat_activity a \
          WHERE a.pid = $1 AND {BACKEND_START_US} = $2 AND a.backend_type = 'client backend' \
@@ -360,7 +361,9 @@ pub fn signal_sql(kind: SignalKind, target: &SessionTarget, caps: Caps) -> Strin
 }
 
 fn exists_sql() -> String {
-    format!("SELECT 1 FROM pg_stat_activity a WHERE a.pid = $1 AND {BACKEND_START_US} = $2")
+    format!(
+        "{SQL_MARKER}SELECT 1 FROM pg_stat_activity a WHERE a.pid = $1 AND {BACKEND_START_US} = $2"
+    )
 }
 
 /// Итог пакета для журнала: отказ в правах и сбой считаются неудачей сессии; `gone` и `noLongerMatches` — нет.

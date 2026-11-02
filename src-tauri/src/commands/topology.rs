@@ -157,10 +157,12 @@ where
 async fn query_facts(c: &Client) -> AppResult<MemberFacts> {
     let r = c
         .query_one(
-            "SELECT (extract(epoch FROM pg_postmaster_start_time()) * 1000)::bigint, \
+            marked_sql!(
+                "SELECT (extract(epoch FROM pg_postmaster_start_time()) * 1000)::bigint, \
              (SELECT count(*) FROM pg_stat_activity)::bigint, \
              current_setting('max_connections')::bigint, \
-             (SELECT count(*) FROM pg_database WHERE NOT datistemplate)::bigint",
+             (SELECT count(*) FROM pg_database WHERE NOT datistemplate)::bigint"
+            ),
             &[],
         )
         .await

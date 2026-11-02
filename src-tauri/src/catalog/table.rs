@@ -6,6 +6,7 @@ use tokio_postgres::{Client, Row};
 use crate::catalog::{ddl, object_not_found, relation_oid, server_version_num};
 use crate::conn::errors::from_pg;
 use crate::error::AppResult;
+use crate::product::SQL_MARKER;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -149,7 +150,8 @@ pub struct TableDetails {
 }
 
 /// Колонки отношения (`$1` — OID); общий запрос для таблиц и представлений.
-pub(crate) const COLUMNS_SQL: &str = "SELECT a.attname::text, format_type(a.atttypid, a.atttypmod), \
+pub(crate) const COLUMNS_SQL: &str = marked_sql!(
+    "SELECT a.attname::text, format_type(a.atttypid, a.atttypmod), \
     a.attnotnull, pg_get_expr(d.adbin, d.adrelid), NULLIF(a.attidentity::text, ''), \
     NULLIF(a.attgenerated::text, ''), \
     CASE WHEN a.attcollation <> 0 AND a.attcollation <> t.typcollation \
@@ -159,7 +161,8 @@ pub(crate) const COLUMNS_SQL: &str = "SELECT a.attname::text, format_type(a.attt
   LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
   LEFT JOIN pg_collation co ON co.oid = a.attcollation \
   LEFT JOIN pg_namespace cn ON cn.oid = co.collnamespace \
-  WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum";
+  WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum"
+);
 
 /// Индексы отношения (`$1` — OID). Статистика использования — `pg_stat_all_indexes`; `last_idx_scan`
 /// появился в 16: на старых версиях — NULL, иначе запрос не разберётся. У партиционированного индекса
@@ -177,7 +180,7 @@ pub fn index_sql(version_num: i32) -> String {
         "NULL::bigint"
     };
     format!(
-        "SELECT ic.relname::text, COALESCE(pg_get_indexdef(i.indexrelid), ''), i.indisprimary, \
+        "{SQL_MARKER}SELECT ic.relname::text, COALESCE(pg_get_indexdef(i.indexrelid), ''), i.indisprimary, \
            i.indisunique, i.indisvalid, \
            (SELECT COALESCE(sum(pg_relation_size(r)), 0) FROM unnest(t.rels) r)::bigint, \
            x.scans, x.tup_read, x.last_ms \
@@ -196,17 +199,21 @@ pub fn index_sql(version_num: i32) -> String {
     )
 }
 
-const CONSTRAINTS_SQL: &str = "SELECT conname::text, contype::text, \
+const CONSTRAINTS_SQL: &str = marked_sql!(
+    "SELECT conname::text, contype::text, \
     COALESCE(pg_get_constraintdef(oid, true), ''), convalidated \
-  FROM pg_constraint WHERE conrelid = $1 ORDER BY contype, conname";
+  FROM pg_constraint WHERE conrelid = $1 ORDER BY contype, conname"
+);
 
 /// Внешние ключи, ссылающиеся на таблицу. Копии ключа партиционированной таблицы на её партициях
 /// (`conparentid <> 0`) не повторяются: показывается ключ, который объявил пользователь.
-const INCOMING_FK_SQL: &str = "SELECT c.conname::text, n.nspname::text, r.relname::text, \
+const INCOMING_FK_SQL: &str = marked_sql!(
+    "SELECT c.conname::text, n.nspname::text, r.relname::text, \
     COALESCE(pg_get_constraintdef(c.oid, true), '') \
   FROM pg_constraint c JOIN pg_class r ON r.oid = c.conrelid JOIN pg_namespace n ON n.oid = r.relnamespace \
   WHERE c.contype = 'f' AND c.confrelid = $1 AND c.conparentid = 0 \
-  ORDER BY n.nspname, r.relname, c.conname";
+  ORDER BY n.nspname, r.relname, c.conname"
+);
 
 /// Заголовок, размеры и статистика (`$1` — OID). `t.rels` — отношения, по которым считаются размеры и
 /// статистика: у партиционированной таблицы — всё дерево партиций вместе с самим родителем, у остальных —
@@ -224,7 +231,8 @@ const INCOMING_FK_SQL: &str = "SELECT c.conname::text, n.nspname::text, r.relnam
 /// `ANALYZE` одной партиции двигает `last_analyze_ms` родителя, а `analyze_count` и прочие счётчики
 /// родителя — сумма по всему дереву, а не его собственные.
 /// Вкладка открывает обычную (`r`), партиционированную (`p`) и внешнюю (`f`) таблицу.
-const HEAD_SQL: &str = "SELECT n.nspname::text, c.relname::text, c.relkind::text, pg_get_userbyid(c.relowner)::text, \
+const HEAD_SQL: &str = marked_sql!(
+    "SELECT n.nspname::text, c.relname::text, c.relkind::text, pg_get_userbyid(c.relowner)::text, \
     ts.spcname::text, obj_description(c.oid, 'pg_class'), COALESCE(c.reloptions, '{}'::text[]), \
     (CASE WHEN c.relkind = 'p' THEN COALESCE((SELECT sum(x.reltuples::float8) FROM pg_class x \
           WHERE x.oid = ANY (t.rels) AND x.relkind <> 'p' AND x.reltuples >= 0), -1) \
@@ -265,15 +273,20 @@ const HEAD_SQL: &str = "SELECT n.nspname::text, c.relname::text, c.relkind::text
   LEFT JOIN LATERAL (SELECT pn.nspname::text AS schema_name, p.relname::text AS rel_name FROM pg_inherits i \
       JOIN pg_class p ON p.oid = i.inhparent JOIN pg_namespace pn ON pn.oid = p.relnamespace \
       WHERE c.relispartition AND i.inhrelid = c.oid LIMIT 1) par ON true \
-  WHERE c.oid = $1 AND c.relkind IN ('r', 'p', 'f')";
+  WHERE c.oid = $1 AND c.relkind IN ('r', 'p', 'f')"
+);
 
-const PARTITIONS_SQL: &str = "SELECT n.nspname::text, c.relname::text FROM pg_inherits i \
+const PARTITIONS_SQL: &str = marked_sql!(
+    "SELECT n.nspname::text, c.relname::text FROM pg_inherits i \
   JOIN pg_class c ON c.oid = i.inhrelid JOIN pg_namespace n ON n.oid = c.relnamespace \
-  WHERE i.inhparent = $1 ORDER BY n.nspname, c.relname";
+  WHERE i.inhparent = $1 ORDER BY n.nspname, c.relname"
+);
 
-const TRIGGERS_SQL: &str = "SELECT t.tgname::text, t.tgenabled::text, \
+const TRIGGERS_SQL: &str = marked_sql!(
+    "SELECT t.tgname::text, t.tgenabled::text, \
     COALESCE(pg_get_triggerdef(t.oid, true), '') \
-  FROM pg_trigger t WHERE t.tgrelid = $1 AND NOT t.tgisinternal ORDER BY t.tgname";
+  FROM pg_trigger t WHERE t.tgrelid = $1 AND NOT t.tgisinternal ORDER BY t.tgname"
+);
 
 /// Имена объектов партиции, которые PostgreSQL создал копиями объектов родителя (`PARTITION OF` создаёт их
 /// сам, повторять их в DDL нельзя: два первичных ключа, одноимённый индекс, дубль внешнего ключа). Только
@@ -290,7 +303,7 @@ pub fn inherited_sql(version_num: i32) -> String {
         "SELECT 't', NULL::text WHERE false"
     };
     format!(
-        "SELECT 'c', conname::text FROM pg_constraint \
+        "{SQL_MARKER}SELECT 'c', conname::text FROM pg_constraint \
            WHERE conrelid = $1 AND (conparentid <> 0 OR NOT conislocal) \
          UNION ALL \
          SELECT 'i', ic.relname::text FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid \
