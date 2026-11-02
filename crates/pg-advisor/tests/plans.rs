@@ -330,3 +330,21 @@ fn hot_nodes_skip_tiny_shares_on_fixtures() {
     let heap = &t.root.children[0];
     assert!(!t.root.hot && heap.hot && !heap.children[0].hot);
 }
+
+/// Подсветка ошибки оценки в дереве: под Limit (ранняя остановка) «переоценки» нет; партиции без отсечения с оценкой
+/// ~125 строк и фактом 0 — не «×∞».
+#[test]
+fn misestimate_flag_skips_early_stop_and_small_zero_estimates() {
+    let t = load("sort_limit_analyze");
+    let gm = &t.root.children[0];
+    assert!(!gm.misestimated && !gm.children[0].misestimated);
+    let t = load("append_partitions_analyze");
+    let mut nodes = Vec::new();
+    walk(&t.root, &mut nodes);
+    let zero: Vec<_> = nodes
+        .iter()
+        .filter(|n| n.relation.is_some() && n.actual.is_some_and(|a| a.rows == 0.0))
+        .collect();
+    assert!(zero.len() >= 20, "{}", zero.len());
+    assert!(zero.iter().all(|n| !n.misestimated));
+}

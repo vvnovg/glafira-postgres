@@ -5,6 +5,8 @@ pub mod json;
 pub mod text_in;
 pub mod text_out;
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -154,7 +156,9 @@ pub struct PlanNode {
     /// Не больше трёх узлов с наибольшим собственным временем, у которых оно не меньше `HOT_MIN_SHARE_PCT` % общего (без
     /// ANALYZE и при `TIMING OFF` — по стоимости без детей от суммы таких стоимостей).
     pub hot: bool,
-    /// Ошибка оценки ×10 и больше при `max(план, факт) ≥ 100` строк; у не выполнявшегося узла всегда `false`.
+    /// Ошибка оценки ×10 и больше при `max(план, факт) ≥ 100` строк; у не выполнявшегося узла всегда `false`. Не ошибка:
+    /// факт 0 при оценке меньше `MISESTIMATE_ZERO_MIN_ROWS` и факт меньше оценки у узла, который `Limit` остановил раньше
+    /// конца (`early_stop_nodes`).
     pub misestimated: bool,
     pub children: Vec<PlanNode>,
 }
@@ -179,6 +183,8 @@ pub const HOT_NODES: usize = 3;
 pub const HOT_MIN_SHARE_PCT: f64 = 10.0;
 pub const MISESTIMATE_RATIO: f64 = 10.0;
 pub const MISESTIMATE_MIN_ROWS: f64 = 100.0;
+/// Наименьшая оценка, при которой факт 0 строк — ошибка оценки (порог объёма правила `plan_misestimate`).
+pub const MISESTIMATE_ZERO_MIN_ROWS: f64 = crate::findings::thresholds::PLAN_MISESTIMATE_MIN_ROWS;
 
 impl PlanTree {
     /// Вычисляемые поля после разбора: id, времена, доли, ошибки оценки, горячие узлы.
@@ -186,6 +192,8 @@ impl PlanTree {
         let mut next = 0u32;
         number(&mut self.root, &mut next);
         compute_times(&mut self.root, 1.0);
+        let early = early_stop_nodes(&self.root);
+        clear_early_stop_overestimates(&mut self.root, &early);
         self.total_ms = self.execution_ms.or(self.root.inclusive_ms);
         if let Some(total) = self.total_ms.filter(|t| *t > 0.0) {
             shares(&mut self.root, total);
@@ -208,6 +216,44 @@ impl PlanTree {
             .map(|(_, id)| *id)
             .collect();
         mark_hot(&mut self.root, &hot);
+    }
+}
+
+/// Узлы, которые `Limit` может остановить раньше конца (поправка 8 плана P3b): они читают меньше оценки планировщика,
+/// и «переоценка» у них не ошибка статистики. Блокирующий узел (Sort, Hash, агрегат не по сортировке) читает вход
+/// целиком — ниже него остановки нет; InitPlan / SubPlan выполняются отдельно.
+pub fn early_stop_nodes(root: &PlanNode) -> HashSet<u32> {
+    fn go(n: &PlanNode, under: bool, out: &mut HashSet<u32>) {
+        let under = under
+            && !matches!(
+                n.parent_relationship.as_deref(),
+                Some("InitPlan" | "SubPlan")
+            );
+        if under {
+            out.insert(n.id);
+        }
+        // HashSetOp разбирается как `SetOp` со стратегией `Hashed`.
+        let blocking = matches!(n.node_type.as_str(), "Sort" | "Hash")
+            || (n.node_type == "SetOp" && n.strategy.as_deref() == Some("Hashed"))
+            || (n.node_type == "Aggregate" && n.strategy.as_deref() != Some("Sorted"));
+        let next = (under || n.node_type == "Limit") && !blocking;
+        for c in &n.children {
+            go(c, next, out);
+        }
+    }
+    let mut out = HashSet::new();
+    go(root, false, &mut out);
+    out
+}
+
+/// Снимает флаг `misestimated` с «переоценки» узлов, которые `Limit` остановил раньше конца: они читают меньше оценки
+/// не из-за статистики.
+fn clear_early_stop_overestimates(n: &mut PlanNode, early: &HashSet<u32>) {
+    if early.contains(&n.id) && n.actual.is_some_and(|a| a.rows < n.plan_rows) {
+        n.misestimated = false;
+    }
+    for c in &mut n.children {
+        clear_early_stop_overestimates(c, early);
     }
 }
 
@@ -266,9 +312,12 @@ fn compute_times(n: &mut PlanNode, procs: f64) {
         } else {
             None
         };
+        // Факт 0 при малой оценке (партиции без отсечения, оценка ~100 строк) — бесконечное отношение, но не ошибка
+        // статистики: такой ноль флагом не размечается, порог оценки — как у правила `plan_misestimate`.
         n.misestimated = n.estimate_ratio.is_some_and(|r| {
             (r >= MISESTIMATE_RATIO || r <= 1.0 / MISESTIMATE_RATIO)
                 && n.plan_rows.max(a.rows) >= MISESTIMATE_MIN_ROWS
+                && (a.rows > 0.0 || n.plan_rows >= MISESTIMATE_ZERO_MIN_ROWS)
         });
     }
 }
@@ -449,6 +498,36 @@ mod tests {
     }
 
     #[test]
+    fn limit_early_stop_is_not_an_overestimate() {
+        // Limit → Gather Merge → Sort → Seq Scan: Gather Merge (416 666 → 10) и Sort (208 333 → 8) остановлены Limit;
+        // Seq Scan под Sort читает вход целиком — его ошибка (×10 в любую сторону) осталась бы.
+        let v = json!({"Plan": {"Node Type": "Limit", "Startup Cost": 0.0, "Total Cost": 1.0, "Plan Rows": 10, "Plan Width": 8,
+            "Actual Startup Time": 0.0, "Actual Total Time": 58.0, "Actual Rows": 10, "Actual Loops": 1, "Plans": [
+            {"Node Type": "Gather Merge", "Parent Relationship": "Outer", "Startup Cost": 0.0, "Total Cost": 1.0, "Plan Rows": 416666, "Plan Width": 8,
+             "Actual Startup Time": 0.0, "Actual Total Time": 26.0, "Actual Rows": 10, "Actual Loops": 1, "Plans": [
+                {"Node Type": "Sort", "Parent Relationship": "Outer", "Startup Cost": 0.0, "Total Cost": 1.0, "Plan Rows": 208333, "Plan Width": 8,
+                 "Actual Startup Time": 0.0, "Actual Total Time": 17.0, "Actual Rows": 8, "Actual Loops": 3, "Plans": [
+                    {"Node Type": "Seq Scan", "Parent Relationship": "Outer", "Relation Name": "orders", "Startup Cost": 0.0, "Total Cost": 1.0,
+                     "Plan Rows": 2083, "Plan Width": 8, "Actual Startup Time": 0.0, "Actual Total Time": 6.0, "Actual Rows": 166667, "Actual Loops": 3}
+                ]}
+            ]}
+        ]}});
+        let t = from_json(&v).unwrap();
+        let gm = &t.root.children[0];
+        let sort = &gm.children[0];
+        assert!(!gm.misestimated && !sort.misestimated);
+        assert!(
+            sort.children[0].misestimated,
+            "ниже блокирующего Sort остановки нет"
+        );
+        // Недооценка под Limit — ошибка и там.
+        let mut under = v.clone();
+        under["Plan"]["Plans"][0]["Plan Rows"] = json!(1);
+        under["Plan"]["Plans"][0]["Actual Rows"] = json!(500);
+        assert!(from_json(&under).unwrap().root.children[0].misestimated);
+    }
+
+    #[test]
     fn hot_nodes_need_ten_percent_share() {
         // Aggregate (0,02 мс) над Bitmap Heap Scan (51 мс) и Bitmap Index Scan (2,3 мс) из 62 мс: горячий только Bitmap Heap Scan.
         let v = json!({"Plan": {
@@ -496,9 +575,12 @@ mod tests {
         assert!(skipped.never_executed);
         assert_eq!(skipped.estimate_ratio, None);
         assert!(!skipped.misestimated);
-        // Выполнившийся узел с теми же цифрами — настоящая ошибка оценки: план 500, факт 0.
+        // Выполнившийся узел: план 500, факт 0 — малая оценка, не ошибка (×∞ в дереве не показывается); план 5000 — ошибка.
         let ran = from_json(&node(1)).unwrap().root;
         assert_eq!(ran.estimate_ratio, Some(0.0));
-        assert!(ran.misestimated);
+        assert!(!ran.misestimated);
+        let mut big = node(1);
+        big["Plan"]["Plan Rows"] = json!(5000);
+        assert!(from_json(&big).unwrap().root.misestimated);
     }
 }

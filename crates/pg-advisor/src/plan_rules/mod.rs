@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::findings::Severity;
+pub use crate::plan::early_stop_nodes;
 use crate::plan::{PlanNode, PlanTree};
 use crate::rules::sessions::quote_ident;
 
@@ -92,14 +93,13 @@ pub const FACT_RULES: [&str; 9] = [
 
 pub fn evaluate(t: &PlanTree) -> Report {
     let with_actual = t.root.actual.is_some();
-    let early = early_stop_nodes(&t.root);
     let mut out = Vec::new();
     walk(&t.root, &mut |n| {
         if with_actual {
             out.extend(scan::seq_scan_filter(n));
             out.extend(scan::index_filter(n));
             out.extend(scan::nested_loop_seq(n));
-            out.extend(scan::misestimate(n, early.contains(&n.id)));
+            out.extend(scan::misestimate(n));
             out.extend(exec::spill(n));
             out.extend(exec::heap_fetches(n));
             out.extend(exec::workers_short(n));
@@ -227,33 +227,6 @@ pub fn walk<'a>(n: &'a PlanNode, f: &mut impl FnMut(&'a PlanNode)) {
     for c in &n.children {
         walk(c, f);
     }
-}
-
-/// Узлы, которые `Limit` может остановить раньше конца (поправка 8 плана P3b): они читают меньше оценки планировщика,
-/// и «переоценка» у них не ошибка статистики. Блокирующий узел (Sort, Hash, агрегат не по сортировке) читает вход
-/// целиком — ниже него остановки нет; InitPlan / SubPlan выполняются отдельно.
-pub fn early_stop_nodes(root: &PlanNode) -> HashSet<u32> {
-    fn go(n: &PlanNode, under: bool, out: &mut HashSet<u32>) {
-        let under = under
-            && !matches!(
-                n.parent_relationship.as_deref(),
-                Some("InitPlan" | "SubPlan")
-            );
-        if under {
-            out.insert(n.id);
-        }
-        // HashSetOp разбирается как `SetOp` со стратегией `Hashed`.
-        let blocking = matches!(n.node_type.as_str(), "Sort" | "Hash")
-            || (n.node_type == "SetOp" && n.strategy.as_deref() == Some("Hashed"))
-            || (n.node_type == "Aggregate" && n.strategy.as_deref() != Some("Sorted"));
-        let next = (under || n.node_type == "Limit") && !blocking;
-        for c in &n.children {
-            go(c, next, out);
-        }
-    }
-    let mut out = HashSet::new();
-    go(root, false, &mut out);
-    out
 }
 
 /// Полное имя отношения для текста и команд.

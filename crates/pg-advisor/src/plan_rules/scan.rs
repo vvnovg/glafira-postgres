@@ -99,9 +99,9 @@ pub fn nested_loop_seq(n: &PlanNode) -> Option<Recommendation> {
 }
 
 /// Ошибка оценки ≥ ×10 при объёме ≥ 1000 строк у узла с отношением: ANALYZE, SET STATISTICS по колонкам условий, при
-/// двух и более колонках — CREATE STATISTICS. `early_stop` — узел под `Limit` без блокирующего узла между ними: там
-/// факт меньше оценки — не ошибка статистики (поправка 8 плана P3b), такую «переоценку» правило пропускает.
-pub fn misestimate(n: &PlanNode, early_stop: bool) -> Option<Recommendation> {
+/// двух и более колонках — CREATE STATISTICS. Узел под `Limit` без блокирующего узла между ними читает меньше оценки
+/// не из-за статистики (поправка 8 плана P3b): такую «переоценку» флаг `misestimated` уже не размечает.
+pub fn misestimate(n: &PlanNode) -> Option<Recommendation> {
     // Порог отношения — флаг P3a `misestimated` (×`plan::MISESTIMATE_RATIO`, равен `PLAN_MISESTIMATE_RATIO`; тест
     // `misestimate_threshold_matches_p3a_flag`): он же исключает не выполнявшийся узел и нулевые оценку и факт
     // (поправка 4). При объёме ≥ `PLAN_MISESTIMATE_MIN_ROWS` (≥ 1000 > 10) конечное `ratio` ниже не меньше отношения флага.
@@ -114,9 +114,6 @@ pub fn misestimate(n: &PlanNode, early_stop: bool) -> Option<Recommendation> {
         return None;
     }
     let under = a.rows >= n.plan_rows;
-    if early_stop && !under {
-        return None;
-    }
     // Конечное отношение (оценка 0 даёт бесконечность, а она в JSON — `null`).
     let ratio = a.rows.max(1.0) / n.plan_rows.max(1.0);
     let ratio = if ratio >= 1.0 { ratio } else { 1.0 / ratio };
