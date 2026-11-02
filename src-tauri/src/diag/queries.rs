@@ -761,10 +761,12 @@ pub fn own_keys(
         .collect()
 }
 
-/// Ключи, тексты которых отчёт дочитывает (замечание 12 смоука P3b): строки топа (`build` с теми же параметрами), про
-/// которые кеш узла ничего не знает (`known`), затем кандидаты N+1 (`own_candidates`: исключение своих из итогов
-/// поднимает доли остальных) — не больше `p.limit` ключей. Так строки `/* glafira */` получают `own` уже на первом
-/// обновлении и не дают находок.
+/// Ключи, тексты которых отчёт дочитывает (замечание 12 смоука P3b): сначала кандидаты N+1 (`own_candidates`:
+/// исключение своих из итогов поднимает доли остальных; их мало, и от них зависят итоги правил), затем строки топа
+/// (`build` с теми же параметрами), про которые кеш узла ничего не знает (`known`) — не больше `p.limit` ключей. Так
+/// строки `/* glafira */` получают `own` уже на первом обновлении и не дают находок, а свой частый запрос вне топа не
+/// занижает доли N+1 настоящих запросов. Кандидаты второго порядка (появляются, когда своими оказались кандидаты
+/// первого) дочитываются на следующем обновлении.
 pub fn texts_to_read(
     entries: &[Entry],
     matched: Option<&HashSet<QueryKey>>,
@@ -774,8 +776,8 @@ pub fn texts_to_read(
 ) -> Vec<QueryKey> {
     let own = own_keys(entries, &text);
     let (rows, _) = build(entries, &own, matched, p);
-    let mut out: Vec<QueryKey> = rows.iter().map(|r| r.key).filter(|k| !known(k)).collect();
-    for k in own_candidates(entries, &own, |k| !known(k)) {
+    let mut out = own_candidates(entries, &own, |k| !known(k));
+    for k in rows.iter().map(|r| r.key).filter(|k| !known(k)) {
         if !out.contains(&k) {
             out.push(k);
         }
@@ -1632,12 +1634,14 @@ mod tests {
         let entries = entries_since_reset(&rows, &p);
         let read = texts_to_read(&entries, None, &p, |_| None, |_| false);
         assert_eq!(read.len(), 50, "не больше limit");
+        assert_eq!(read[0], rows[60].key, "кандидат N+1 вне топа — первым (M1 ревью)");
         assert!(read.contains(&rows[59].key) && !read.contains(&rows[0].key));
-        assert!(!read.contains(&rows[60].key), "предел занят строками топа");
-        // Тексты топа известны (у части — «текста нет»): читается только кандидат N+1.
+        assert!(!read.contains(&rows[10].key), "остаток предела — строки топа");
+        // Тексты топа и кандидата известны (у части — «текста нет»): читать нечего, кроме строки топа, вытесненной
+        // кандидатом.
         let top: HashSet<QueryKey> = read.iter().copied().collect();
         let read = texts_to_read(&entries, None, &p, |_| None, |k| top.contains(k));
-        assert_eq!(read, [rows[60].key]);
+        assert_eq!(read, [rows[10].key]);
         // Свой кандидат N+1 больше не кандидат, и при известном топе читать нечего.
         let own_text: Arc<str> = Arc::from("/* glafira */ SELECT 1");
         let read = texts_to_read(
@@ -1645,7 +1649,7 @@ mod tests {
             None,
             &p,
             |k| (*k == rows[60].key).then(|| own_text.clone()),
-            |k| top.contains(k) || *k == rows[60].key,
+            |k| top.contains(k) || *k == rows[10].key,
         );
         assert!(read.is_empty());
         // Поиск: топ — только найденные строки.
