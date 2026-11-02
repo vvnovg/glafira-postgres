@@ -135,7 +135,11 @@ tr.clickable:hover, .row.clickable:hover { background: var(--bg-alt); }
 .tab.active { background: var(--bg-alt); font-weight: 600; }
 .tab-content { flex: 1; overflow: auto; min-height: 0; }
 .tab-content[hidden] { display: none; }
-.page { padding: 12px 16px; display: flex; flex-direction: column; gap: 12px; min-height: 100%; }
+.page { padding: 12px 16px; display: flex; flex-direction: column; gap: 12px; min-height: 100%; min-width: 0; max-width: 100%; }
+/* Шапки инструментов переносятся: элемент не шире строки, длинные подписи (узел, база, queryid) не распирают её. */
+.toolbar > * { max-width: 100%; }
+.toolbar > .mono { min-width: 0; overflow-wrap: anywhere; }
+.toolbar label.inline select { min-width: 0; max-width: 100%; text-overflow: ellipsis; }
 .toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .toolbar h2 { margin: 0 auto 0 0; font-size: 16px; }
 .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; margin: 0; }
@@ -409,6 +413,10 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .hypo-used { color: color-mix(in srgb, var(--ok) 55%, var(--fg)); font-weight: 600; }
 /* Карточка запроса и запуск плана (P3a). */
 .query-text { margin: 0; max-height: 200px; overflow: auto; white-space: pre-wrap; }
+/* Шапка карточки запроса: в узком окне «база · queryid» сжимается с «…» (полностью — в подсказке), строка переносится,
+   а «Обновить» не сжимается и не уезжает за край. */
+.query-head .query-head-id { flex: 1 1 12ch; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.query-head > button { flex: none; }
 .query-overview, .plan-runner, .query-plan { display: flex; flex-direction: column; gap: 12px; }
 /* Подпись флажка GENERIC_PLAN — обычным цветом: от него зависит, что делает «План». */
 .params-form label.generic { color: var(--fg); font-weight: 600; }

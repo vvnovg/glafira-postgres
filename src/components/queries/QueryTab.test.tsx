@@ -45,6 +45,10 @@ describe("QueryTab", () => {
     renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
     expect(await screen.findByText("SELECT * FROM shop.customers WHERE id = $1")).toBeInTheDocument();
     expect(api.queryDetail).toHaveBeenCalledWith("c", "pg-1", "perf", "7");
+    // «база · queryid» в узком окне сжимается с «…»: полностью — в подсказке; «Обновить» в той же шапке.
+    const id = screen.getByText("perf · 7");
+    expect(id).toHaveAttribute("title", "perf · 7");
+    expect(id.parentElement).toContainElement(screen.getByRole("button", { name: "Обновить" }));
     expect(screen.getByRole("table", { name: "Метрики" })).toHaveTextContent("1 200");
     expect(screen.getByRole("table", { name: "Метрики" })).toHaveTextContent("60");
     expect(screen.getByRole("table", { name: "Выполняющиеся экземпляры" })).toHaveTextContent("42");

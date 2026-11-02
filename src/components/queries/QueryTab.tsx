@@ -76,9 +76,9 @@ export function QueryTab({ connectionId, member, database, queryId, active }: { 
   if (gone) {
     return (
       <div className="page query-tab">
-        <div className="toolbar">
+        <div className="toolbar query-head">
           <h2>{t("diag.query.heading")}</h2>
-          <span className="muted mono">
+          <span className="muted mono query-head-id" title={`${database} · ${queryId}`}>
             {database} · {queryId}
           </span>
         </div>
@@ -105,9 +105,9 @@ export function QueryTab({ connectionId, member, database, queryId, active }: { 
   }
   return (
     <div className="page query-tab">
-      <div className="toolbar">
+      <div className="toolbar query-head">
         <h2>{t("diag.query.heading")}</h2>
-        <span className="muted mono">
+        <span className="muted mono query-head-id" title={`${database} · ${queryId}`}>
           {database} · {queryId}
         </span>
         {members && (
