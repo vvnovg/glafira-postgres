@@ -44,8 +44,48 @@ mod tests {
         assert!(!super::is_marked_sql(""));
     }
 
-    /// Замечание 17 смоука P3b: метка у всех запросов приложения, не только периодических. Проверка по исходникам (до
-    /// модуля тестов файла): строковый литерал, начинающийся с инструкции SQL, — в `marked_sql!` или с `{SQL_MARKER}`
+    /// Строки исходника без элементов под `#[cfg(test)]` (модуль тестов, вспомогательная функция посреди файла):
+    /// номер строки (с 1) и строка. Элемент — от атрибута до `;` в строке без `{` либо до закрытия первой `{` (подсчёт
+    /// скобок по строкам; литералы с непарными скобками в тестовых элементах не встречаются). Код после элемента
+    /// проверяется (M4 ревью волны смоука P3b).
+    fn production_lines(src: &str) -> Vec<(usize, &str)> {
+        let mut out = Vec::new();
+        let mut skipping = false;
+        let mut depth = 0i64;
+        let mut opened = false;
+        for (i, l) in src.lines().enumerate() {
+            if !skipping {
+                if l.trim_start().starts_with("#[cfg(test)]") {
+                    (skipping, depth, opened) = (true, 0, false);
+                } else {
+                    out.push((i + 1, l));
+                }
+                continue;
+            }
+            let t = l.trim_start();
+            if !opened && (t.starts_with("#[") || t.is_empty() || t.starts_with("//")) {
+                continue;
+            }
+            depth += l.matches('{').count() as i64 - l.matches('}').count() as i64;
+            opened |= l.contains('{');
+            if (opened && depth <= 0) || (!opened && t.trim_end().ends_with(';')) {
+                skipping = false;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn production_lines_skip_only_test_items() {
+        let src = "fn a() {}\n#[cfg(test)]\nfn helper() {\n    x();\n}\nconst Q: &str = \"SELECT 1\";\n\
+                   #[cfg(test)]\nuse foo::bar;\nfn b() {}\n#[cfg(test)]\n#[allow(dead_code)]\nmod tests {\n    \
+                   fn t() {\n    }\n}\nfn c() {}";
+        let lines: Vec<usize> = production_lines(src).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(lines, [1, 6, 9, 16]);
+    }
+
+    /// Замечание 17 смоука P3b: метка у всех запросов приложения, не только периодических. Проверка по исходникам (весь
+    /// файл без элементов под `#[cfg(test)]`, `production_lines`): строковый литерал, начинающийся с инструкции SQL, — в `marked_sql!` или с `{SQL_MARKER}`
     /// в той же или двух предыдущих строках. Текст пользователя (консоль EXPLAIN) литералом не бывает.
     #[test]
     fn every_sql_literal_is_marked() {
@@ -82,20 +122,21 @@ mod tests {
         let mut unmarked = Vec::new();
         for f in files {
             let src = std::fs::read_to_string(&f).unwrap();
-            let lines: Vec<&str> = src
-                .lines()
-                .take_while(|l| !l.contains("#[cfg(test)]"))
-                .collect();
-            for (i, l) in lines.iter().enumerate() {
+            let lines = production_lines(&src);
+            for (i, (n, l)) in lines.iter().enumerate() {
                 if l.trim_start().starts_with("//")
                     || !STARTS.iter().any(|s| l.contains(s))
                     || ALLOWED.iter().any(|s| l.contains(s))
                 {
                     continue;
                 }
-                let near = lines[i.saturating_sub(2)..=i].join(" ");
+                let near = lines[i.saturating_sub(2)..=i]
+                    .iter()
+                    .map(|(_, l)| *l)
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 if !near.contains("marked_sql!") && !near.contains("SQL_MARKER") {
-                    unmarked.push(format!("{}:{}: {}", f.display(), i + 1, l.trim()));
+                    unmarked.push(format!("{}:{}: {}", f.display(), n, l.trim()));
                 }
             }
         }
