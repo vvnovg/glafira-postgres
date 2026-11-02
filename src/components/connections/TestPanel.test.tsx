@@ -198,6 +198,47 @@ describe("TestPanel", () => {
     expect(screen.getByText("Проверка гипотез индексов («Проверить гипотезу» в плане)")).toBeInTheDocument();
   });
 
+  it("шаги включения расширения — по состоянию сервера; заметка расширения отдельно", () => {
+    const { container } = render(
+      <TestPanel
+        events={[]}
+        report={{
+          ok: true,
+          topology: null,
+          readiness: [
+            {
+              id: "extension",
+              status: "missing",
+              params: { name: "hypopg", hint: "hypopg", enable: "package", package: "postgresql-16-hypopg", rpm: "hypopg_16" },
+              fix: null,
+            },
+            {
+              id: "extension",
+              status: "warn",
+              params: { name: "pg_stat_kcache", hint: "pg_stat_kcache", enable: "create", package: "postgresql-17-pg-stat-kcache", rpm: "pg_stat_kcache_17" },
+              fix: "CREATE EXTENSION IF NOT EXISTS pg_stat_kcache;",
+            },
+            {
+              id: "extension",
+              status: "warn",
+              params: { name: "pg_wait_sampling", hint: "pg_wait_sampling", enable: "preload", package: "postgresql-17-pg-wait-sampling", rpm: "pg_wait_sampling_17" },
+              fix: "CREATE EXTENSION IF NOT EXISTS pg_wait_sampling;",
+            },
+          ],
+        }}
+      />,
+    );
+    expect(screen.getByText(/установить на сервер пакет postgresql-16-hypopg из PGDG \(в RPM — hypopg_16\)/)).toBeInTheDocument();
+    expect(screen.queryByText(/только CREATE EXTENSION.*hypopg/)).toBeNull();
+    expect(screen.getByText("Включение: только CREATE EXTENSION в этой базе, перезапуск не нужен.")).toBeInTheDocument();
+    expect(screen.getByText(/добавить pg_wait_sampling в shared_preload_libraries и перезапустить сервер/)).toBeInTheDocument();
+    expect(screen.getByText(/EXECUTE на pg_stat_kcache\(\)/)).toBeInTheDocument();
+    // Ячейка команды — со своим классом: перенос только по пробелам, без разрыва слов.
+    const fix = screen.getByText("CREATE EXTENSION IF NOT EXISTS pg_stat_kcache;");
+    expect(fix.closest("td")).toHaveClass("readiness-fix");
+    expect(container.querySelectorAll("td.readiness-fix")).toHaveLength(3);
+  });
+
   it("значки статусов читаются как текст", () => {
     render(
       <TestPanel

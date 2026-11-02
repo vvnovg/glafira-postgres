@@ -718,9 +718,15 @@
         "pg_wait_sampling": "Точный профиль ожиданий запроса в карточке"
       },
       "enable": {
-        "hypopg": "Включение: только CREATE EXTENSION, без preload и перезапуска.",
-        "pg_stat_kcache": "Включение: добавить pg_stat_kcache (после pg_stat_statements) в shared_preload_libraries и перезапустить сервер, затем CREATE EXTENSION в этой базе. Если у роли нет EXECUTE на pg_stat_kcache(), выдать его.",
-        "pg_wait_sampling": "Включение: добавить pg_wait_sampling в shared_preload_libraries и перезапустить сервер, затем CREATE EXTENSION в этой базе. Для профиля по запросу задать pg_wait_sampling.profile_queries = top (on на старых версиях); нужна версия 1.1+. Если у роли нет EXECUTE на функции профиля, выдать его."
+        "package": "Включение: установить на сервер пакет {{package}} из PGDG (в RPM — {{rpm}}), затем CREATE EXTENSION в этой базе; перезапуск не нужен.",
+        "packagePreload": "Включение: установить на сервер пакет {{package}} из PGDG (в RPM — {{rpm}}), добавить {{name}} в shared_preload_libraries и перезапустить сервер, затем CREATE EXTENSION в этой базе.",
+        "preload": "Включение: пакет установлен, но библиотека не загружена — добавить {{name}} в shared_preload_libraries и перезапустить сервер, затем CREATE EXTENSION в этой базе.",
+        "preloadUnknown": "Включение: пакет установлен; если {{name}} ещё нет в shared_preload_libraries (роли значение не видно) — добавить и перезапустить сервер, затем CREATE EXTENSION в этой базе.",
+        "create": "Включение: только CREATE EXTENSION в этой базе, перезапуск не нужен."
+      },
+      "notes": {
+        "pg_stat_kcache": "В shared_preload_libraries pg_stat_kcache идёт после pg_stat_statements. Если у роли нет EXECUTE на pg_stat_kcache(), выдать его.",
+        "pg_wait_sampling": "Для профиля по запросу задать pg_wait_sampling.profile_queries = top (on на старых версиях); нужна версия 1.1+. Если у роли нет EXECUTE на функции профиля, выдать его."
       }
     }
   },

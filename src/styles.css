@@ -167,6 +167,10 @@ tr.selected { background: color-mix(in srgb, var(--accent) 15%, transparent); }
 
 .path-field { display: flex; gap: 6px; align-items: center; }
 .path-field > input:not([type="checkbox"]) { flex: 1; min-width: 0; }
+/* Команда чек-листа готовности: колонка не уже 18em, перенос только по пробелам (слова и идентификаторы
+   не рвутся), слишком длинное слово — прокрутка внутри ячейки. */
+.readiness-fix { min-width: 18em; width: 38%; }
+.readiness-fix pre { white-space: pre-wrap; word-break: normal; overflow-wrap: normal; overflow-x: auto; flex: 1; }
 label.inline { display: inline-flex; gap: 4px; align-items: center; white-space: nowrap; color: var(--muted); }
 .headers-editor { border: 1px solid var(--border); border-radius: 4px; padding: 6px; display: flex; flex-direction: column; gap: 4px; }
 /* Группа полей (TLS): рамка с заголовком; внутренняя сетка совпадает с внешней по колонкам (180px + 12px зазор = 168px + рамка и поля). */

@@ -36,6 +36,10 @@ pub struct ReadinessFacts {
     pub member_of: Vec<String>,
     /// Участник → есть ли `pg_stat_statements` в `shared_preload_libraries` (только доступные).
     pub preload_by_member: Vec<(String, bool)>,
+    /// Участник → библиотеки из `shared_preload_libraries` (только узлы, где значение видно роли): шаги
+    /// включения расширений, которым нужна предзагрузка.
+    #[serde(default)]
+    pub preload_libraries_by_member: Vec<(String, Vec<String>)>,
     pub pgss_installed: bool,
     /// `pg_extension.extversion` расширения (P3): колонки топа запросов зависят от неё.
     #[serde(default)]
@@ -91,6 +95,36 @@ fn item(
 /// или ошибка синтаксиса, а кавычки безопасны для любого имени.
 fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// Расширения, которым нужна библиотека в `shared_preload_libraries` (и перезапуск сервера).
+const NEEDS_PRELOAD: [&str; 2] = ["pg_stat_kcache", "pg_wait_sampling"];
+
+/// Шаги включения расширения по факту состояния сервера (`params.enable` — вариант текста): нет на сервере →
+/// пакет PGDG (`package` для apt, `rpm` для yum/dnf) → предзагрузка с перезапуском, если нужна и библиотеки
+/// ещё нет → `CREATE EXTENSION`. Предзагрузка считается сделанной, только если библиотека есть на всех узлах,
+/// где список виден; не виден нигде — вариант «проверьте сами».
+fn enable_steps(f: &ReadinessFacts, name: &str, available: bool) -> Vec<(&'static str, String)> {
+    let libs = &f.preload_libraries_by_member;
+    let loaded = !libs.is_empty() && libs.iter().all(|(_, l)| l.iter().any(|x| x == name));
+    let preload = NEEDS_PRELOAD.contains(&name);
+    let variant = match (available, preload) {
+        (false, true) if !loaded => "packagePreload",
+        (false, _) => "package",
+        (true, false) => "create",
+        (true, true) if loaded => "create",
+        (true, true) if libs.is_empty() => "preloadUnknown",
+        (true, true) => "preload",
+    };
+    let major = f.server_version_num / 10_000;
+    vec![
+        ("enable", variant.into()),
+        (
+            "package",
+            format!("postgresql-{major}-{}", name.replace('_', "-")),
+        ),
+        ("rpm", format!("{name}_{major}")),
+    ]
 }
 
 const PRELOAD_FIX: &str = "shared_preload_libraries = 'pg_stat_statements'";
@@ -260,6 +294,15 @@ pub fn evaluate(f: &ReadinessFacts) -> Vec<ReadinessItem> {
         let mut params: Vec<(&str, String)> = vec![("name", name.into())];
         if HINTED.contains(&name) {
             params.push(("hint", name.into()));
+            if !matches!(
+                fact,
+                Some(ExtensionFact {
+                    installed: Some(_),
+                    ..
+                })
+            ) {
+                params.extend(enable_steps(f, name, fact.is_some_and(|e| e.available)));
+            }
         }
         out.push(match fact {
             Some(ExtensionFact {
@@ -300,6 +343,7 @@ mod tests {
                 "pg_read_all_data".into(),
             ],
             preload_by_member: vec![("a".into(), true), ("b".into(), true)],
+            preload_libraries_by_member: vec![],
             pgss_installed: true,
             pgss_version: Some("1.11".into()),
             pgss_track_planning: Some("on".into()),
@@ -378,6 +422,100 @@ mod tests {
             Some("hypopg")
         );
         assert_eq!(ext(&items, "pgstattuple").params.get("hint"), None);
+    }
+
+    fn enable_of(items: &[ReadinessItem], name: &str) -> Option<String> {
+        ext(items, name).params.get("enable").cloned()
+    }
+
+    #[test]
+    fn enable_steps_follow_the_server_state() {
+        let mut f = facts();
+        f.extensions = vec![
+            ExtensionFact {
+                name: "hypopg".into(),
+                installed: Some("1.4.1".into()),
+                available: true,
+            },
+            ExtensionFact {
+                name: "pg_stat_kcache".into(),
+                installed: None,
+                available: true,
+            },
+            ExtensionFact {
+                name: "pg_wait_sampling".into(),
+                installed: None,
+                available: true,
+            },
+        ];
+        // Библиотеки загружены на всех узлах (pg-perf, база без расширений): только CREATE EXTENSION.
+        f.preload_libraries_by_member = vec![
+            (
+                "a".into(),
+                vec![
+                    "pg_stat_statements".into(),
+                    "pg_stat_kcache".into(),
+                    "pg_wait_sampling".into(),
+                ],
+            ),
+            (
+                "b".into(),
+                vec![
+                    "pg_stat_statements".into(),
+                    "pg_stat_kcache".into(),
+                    "pg_wait_sampling".into(),
+                ],
+            ),
+        ];
+        let items = evaluate(&f);
+        assert_eq!(
+            enable_of(&items, "pg_stat_kcache").as_deref(),
+            Some("create")
+        );
+        assert_eq!(
+            enable_of(&items, "pg_wait_sampling").as_deref(),
+            Some("create")
+        );
+        assert_eq!(
+            ext(&items, "pg_stat_kcache").fix.as_deref(),
+            Some("CREATE EXTENSION IF NOT EXISTS pg_stat_kcache;")
+        );
+        // Установлено — шагов нет; hypopg не на сервере — пакет PGDG под мажорную версию, без preload.
+        assert_eq!(enable_of(&items, "hypopg"), None);
+        f.extensions.retain(|e| e.name != "hypopg");
+        let items = evaluate(&f);
+        let h = ext(&items, "hypopg");
+        assert_eq!(h.params.get("enable").map(String::as_str), Some("package"));
+        assert_eq!(h.params["package"], "postgresql-17-hypopg");
+        assert_eq!(h.params["rpm"], "hypopg_17");
+        // На одном из узлов библиотеки нет: preload и перезапуск, затем CREATE EXTENSION.
+        f.preload_libraries_by_member[1].1 = vec!["pg_stat_statements".into()];
+        let items = evaluate(&f);
+        assert_eq!(
+            enable_of(&items, "pg_stat_kcache").as_deref(),
+            Some("preload")
+        );
+        // Список не виден роли — не утверждаем ни того, ни другого.
+        f.preload_libraries_by_member.clear();
+        let items = evaluate(&f);
+        assert_eq!(
+            enable_of(&items, "pg_wait_sampling").as_deref(),
+            Some("preloadUnknown")
+        );
+        // Не установлено на сервере (pg-single): пакет, preload и перезапуск, CREATE EXTENSION.
+        f.extensions.clear();
+        f.preload_libraries_by_member = vec![("a".into(), vec!["pg_stat_statements".into()])];
+        let items = evaluate(&f);
+        let k = ext(&items, "pg_stat_kcache");
+        assert_eq!(
+            (k.status, k.params.get("enable").map(String::as_str)),
+            (Status::Missing, Some("packagePreload"))
+        );
+        assert_eq!(k.params["package"], "postgresql-17-pg-stat-kcache");
+        assert_eq!(k.params["rpm"], "pg_stat_kcache_17");
+        assert_eq!(k.fix, None);
+        // Расширения без подсказки (pgstattuple и др.) шагов включения не получают.
+        assert_eq!(enable_of(&items, "pgstattuple"), None);
     }
 
     #[test]

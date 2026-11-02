@@ -702,9 +702,15 @@
         "pg_wait_sampling": "Exact wait profile of a query in its card"
       },
       "enable": {
-        "hypopg": "Enable: CREATE EXTENSION only, no preload or restart.",
-        "pg_stat_kcache": "Enable: add pg_stat_kcache (after pg_stat_statements) to shared_preload_libraries and restart the server, then CREATE EXTENSION in this database. If the role lacks EXECUTE on pg_stat_kcache(), grant it.",
-        "pg_wait_sampling": "Enable: add pg_wait_sampling to shared_preload_libraries and restart the server, then CREATE EXTENSION in this database. For the per-query profile set pg_wait_sampling.profile_queries = top (on for old versions); needs version 1.1+. If the role lacks EXECUTE on the profile functions, grant it."
+        "package": "Enable: install the {{package}} package from PGDG on the server ({{rpm}} for RPM), then CREATE EXTENSION in this database; no restart needed.",
+        "packagePreload": "Enable: install the {{package}} package from PGDG on the server ({{rpm}} for RPM), add {{name}} to shared_preload_libraries and restart the server, then CREATE EXTENSION in this database.",
+        "preload": "Enable: the package is installed but the library is not loaded: add {{name}} to shared_preload_libraries and restart the server, then CREATE EXTENSION in this database.",
+        "preloadUnknown": "Enable: the package is installed; if {{name}} is not in shared_preload_libraries yet (the role cannot see the value), add it and restart the server, then CREATE EXTENSION in this database.",
+        "create": "Enable: CREATE EXTENSION in this database only, no restart needed."
+      },
+      "notes": {
+        "pg_stat_kcache": "In shared_preload_libraries pg_stat_kcache goes after pg_stat_statements. If the role lacks EXECUTE on pg_stat_kcache(), grant it.",
+        "pg_wait_sampling": "For the per-query profile set pg_wait_sampling.profile_queries = top (on for old versions); needs version 1.1+. If the role lacks EXECUTE on the profile functions, grant it."
       }
     }
   },

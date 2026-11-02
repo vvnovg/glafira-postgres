@@ -19,18 +19,28 @@ fn library_name(item: &str) -> &str {
         .unwrap_or(name)
 }
 
-/// Есть ли `pg_stat_statements` в значении `shared_preload_libraries`.
-pub fn preloads_pg_stat_statements(value: &str) -> bool {
+/// Имена библиотек из значения `shared_preload_libraries` (пустые элементы отброшены).
+pub fn preload_libraries(value: &str) -> Vec<String> {
     value
         .split(',')
-        .any(|lib| library_name(lib) == "pg_stat_statements")
+        .map(library_name)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect()
 }
 
-/// Загружен ли `pg_stat_statements` на узле. `None` — значение не видно роли: `shared_preload_libraries`
+/// Есть ли `pg_stat_statements` в значении `shared_preload_libraries`.
+pub fn preloads_pg_stat_statements(value: &str) -> bool {
+    preload_libraries(value)
+        .iter()
+        .any(|lib| lib == "pg_stat_statements")
+}
+
+/// Библиотеки `shared_preload_libraries` узла. `None` — значение не видно роли: `shared_preload_libraries`
 /// доступна суперпользователю и членам `pg_read_all_settings` (входит в `pg_monitor`); остальным
 /// `current_setting` отвечает 42501, а `pg_settings` строку не отдаёт (проверено на PostgreSQL 15). Это не
 /// ошибка проверки: именно такую роль чек-лист и должен разобрать, поэтому читаем через `pg_settings`.
-pub async fn preload_of(c: &Client) -> AppResult<Option<bool>> {
+pub async fn preload_of(c: &Client) -> AppResult<Option<Vec<String>>> {
     let rows = c
         .query(
             marked_sql!("SELECT setting FROM pg_settings WHERE name = 'shared_preload_libraries'"),
@@ -41,14 +51,18 @@ pub async fn preload_of(c: &Client) -> AppResult<Option<bool>> {
     Ok(rows
         .first()
         .and_then(|r| r.get::<_, Option<String>>(0))
-        .map(|v| preloads_pg_stat_statements(&v)))
+        .map(|v| preload_libraries(&v)))
 }
 
 pub async fn collect_facts(
     c: &Client,
-    preload_by_member: Vec<(String, bool)>,
+    preload_libraries_by_member: Vec<(String, Vec<String>)>,
     database: &str,
 ) -> AppResult<ReadinessFacts> {
+    let preload_by_member = preload_libraries_by_member
+        .iter()
+        .map(|(m, libs)| (m.clone(), libs.iter().any(|l| l == "pg_stat_statements")))
+        .collect();
     let pg = |e: tokio_postgres::Error| from_pg(&e);
     let r = c
         .query_one(
@@ -140,6 +154,7 @@ pub async fn collect_facts(
         has_replication,
         member_of,
         preload_by_member,
+        preload_libraries_by_member,
         pgss_installed,
         pgss_version,
         pgss_track_planning,
@@ -185,5 +200,16 @@ mod tests {
         ] {
             assert!(!preloads_pg_stat_statements(v), "{v}");
         }
+    }
+
+    #[test]
+    fn splits_preload_list_into_library_names() {
+        assert_eq!(
+            preload_libraries(
+                "pg_stat_statements, \"$libdir/pg_stat_kcache.so\" ,pg_wait_sampling,"
+            ),
+            ["pg_stat_statements", "pg_stat_kcache", "pg_wait_sampling"]
+        );
+        assert!(preload_libraries("").is_empty());
     }
 }

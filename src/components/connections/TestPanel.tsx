@@ -49,7 +49,9 @@ function itemText(item: ReadinessItem, t: Translate) {
         : item.params.hint
           ? t(`readiness.${item.id}.hints.${item.params.hint}`)
           : t(`readiness.${item.id}.affects`, item.params),
-    enable: item.status === "ok" || !item.params.hint ? null : t(`readiness.${item.id}.enable.${item.params.hint}`),
+    // Шаги включения — по факту состояния сервера (`params.enable`: пакет → предзагрузка → CREATE EXTENSION).
+    enable: item.status === "ok" || !item.params.enable ? null : t(`readiness.${item.id}.enable.${item.params.enable}`, item.params),
+    note: item.status === "ok" || !item.params.hint ? null : t(`readiness.${item.id}.notes.${item.params.hint}`, { defaultValue: "" }) || null,
   };
 }
 
@@ -115,8 +117,9 @@ export function TestPanel({ events, report }: { events: TestEvent[]; report: Tes
                       <div className="muted">{text.state}</div>
                       {text.affects && <div className="muted">{text.affects}</div>}
                       {text.enable && <div className="muted">{text.enable}</div>}
+                      {text.note && <div className="muted">{text.note}</div>}
                     </td>
-                    <td>
+                    <td className="readiness-fix">
                       {item.fix && (
                         <span className="path-field">
                           <pre>{item.fix}</pre>

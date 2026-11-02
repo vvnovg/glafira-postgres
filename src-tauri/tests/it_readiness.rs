@@ -96,6 +96,75 @@ async fn single_server_without_pg_stat_statements() {
     );
 }
 
+fn enable_of(report: &glafira_pg_lib::readiness::check::TestReport, name: &str) -> Option<String> {
+    report
+        .readiness
+        .iter()
+        .find(|i| i.id == "extension" && i.params["name"] == name)
+        .unwrap()
+        .params
+        .get("enable")
+        .cloned()
+}
+
+/// Шаги включения по факту (смоук P3b, замечание 2). pg-perf, база `postgres`: библиотеки kcache и
+/// wait_sampling уже в `shared_preload_libraries`, расширения там не созданы — только CREATE EXTENSION.
+#[tokio::test]
+async fn enable_steps_on_perf_skip_preload_when_library_is_loaded() {
+    let Some(addr) = common::env("GPG_IT_PERF") else {
+        return;
+    };
+    let report = run(
+        common::server_profile("perf", &addr),
+        common::secrets_with_password("perf"),
+        no_tunnels(),
+        &|_| {},
+    )
+    .await
+    .unwrap();
+    assert!(report.ok);
+    for name in ["pg_stat_kcache", "pg_wait_sampling"] {
+        let item = report
+            .readiness
+            .iter()
+            .find(|i| i.id == "extension" && i.params["name"] == name)
+            .unwrap();
+        // Если на стенде расширение уже создано в `postgres` — шагов нет; иначе только CREATE EXTENSION.
+        match item.status {
+            Status::Ok => assert_eq!(enable_of(&report, name), None),
+            _ => assert_eq!(
+                enable_of(&report, name).as_deref(),
+                Some("create"),
+                "{name}"
+            ),
+        }
+    }
+}
+
+/// pg-single: пакетов hypopg, kcache и wait_sampling на сервере нет — сначала пакет PGDG.
+#[tokio::test]
+async fn enable_steps_on_single_start_with_the_package() {
+    let Some(addr) = common::env("GPG_IT_SINGLE") else {
+        return;
+    };
+    let report = run(
+        common::server_profile("t", &addr),
+        common::secrets_with_password("t"),
+        no_tunnels(),
+        &|_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(enable_of(&report, "hypopg").as_deref(), Some("package"));
+    for name in ["pg_stat_kcache", "pg_wait_sampling"] {
+        assert_eq!(
+            enable_of(&report, name).as_deref(),
+            Some("packagePreload"),
+            "{name}"
+        );
+    }
+}
+
 /// Спек P1 §10: роль без `pg_monitor` — это тот случай, ради которого чек-лист и нужен. Проверка не
 /// падает целиком (ни `shared_preload_libraries`, ни другие факты не должны требовать привилегий), а
 /// показывает «Роль мониторинга — missing» с готовым `GRANT`.
