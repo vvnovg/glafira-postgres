@@ -602,13 +602,34 @@ pub fn kcache_since_sql(k: &KcacheCaps) -> Option<String> {
     })
 }
 
-/// Периоды kcache и pgss «с момента сброса» различаются: начало накопления kcache (`since`, если `stats_since` есть —
-/// `known`) раньше сброса pgss больше чем на `KCACHE_PERIOD_SLACK_MS`. Начало или сброс неизвестны — считается, что
-/// различаются: kcache сбрасывается отдельно, и подвал об этом скажет. Строк kcache нет — колонок тоже нет.
-pub fn kcache_period_differs(known: bool, since: Option<i64>, pgss_reset: Option<i64>) -> bool {
-    match (known, since, pgss_reset) {
-        (true, None, _) => false,
-        (true, Some(k), Some(r)) => k < r - KCACHE_PERIOD_SLACK_MS,
+/// Начало накопления kcache для подвала «с момента сброса».
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KcacheSince {
+    /// Расширение не даёт `stats_since` (старше 2.3): начало неизвестно по устройству.
+    Unsupported,
+    /// Чтение не удалось: о периоде ничего не известно, пометки нет (M11 ревью волны смоука P3b).
+    Unread,
+    /// Самая ранняя `stats_since` строк; `None` — строк kcache нет.
+    Read(Option<i64>),
+}
+
+impl KcacheSince {
+    pub fn ms(self) -> Option<i64> {
+        match self {
+            KcacheSince::Read(ms) => ms,
+            _ => None,
+        }
+    }
+}
+
+/// Периоды kcache и pgss «с момента сброса» различаются: начало накопления kcache раньше сброса pgss больше чем на
+/// `KCACHE_PERIOD_SLACK_MS`. Расширение без `stats_since` или неизвестный сброс pgss — считается, что различаются:
+/// kcache сбрасывается отдельно, и подвал об этом скажет. Строк kcache нет — колонок тоже нет; чтение не удалось —
+/// без пометки (основания утверждать нет).
+pub fn kcache_period_differs(since: KcacheSince, pgss_reset: Option<i64>) -> bool {
+    match (since, pgss_reset) {
+        (KcacheSince::Unread | KcacheSince::Read(None), _) => false,
+        (KcacheSince::Read(Some(k)), Some(r)) => k < r - KCACHE_PERIOD_SLACK_MS,
         _ => true,
     }
 }
@@ -937,12 +958,11 @@ async fn report_since_reset(
                     let snap = read_cumulative_on(c, pgss, &kcache).await?;
                     // Начало накопления kcache — украшение подвала: сбой чтения не роняет отчёт.
                     let kcache_since = match pgss.kcache.as_ref().and_then(kcache_since_sql) {
-                        Some(sql) => c
-                            .query_one(&sql, &[])
-                            .await
-                            .ok()
-                            .map(|r| r.get::<_, Option<i64>>(0)),
-                        None => None,
+                        Some(sql) => match c.query_one(&sql, &[]).await {
+                            Ok(r) => KcacheSince::Read(r.get::<_, Option<i64>>(0)),
+                            Err(_) => KcacheSince::Unread,
+                        },
+                        None => KcacheSince::Unsupported,
                     };
                     let matched = match &search {
                         Some(s) => {
@@ -989,13 +1009,9 @@ async fn report_since_reset(
                     coverage_s: None,
                     ticks: None,
                     pgss: Some(PgssMeta {
-                        kcache_since_ms: kcache_since.flatten(),
+                        kcache_since_ms: kcache_since.ms(),
                         kcache_separate: pgss.kcache.is_some()
-                            && kcache_period_differs(
-                                kcache_since.is_some(),
-                                kcache_since.flatten(),
-                                snap.info.stats_reset_ms,
-                            ),
+                            && kcache_period_differs(kcache_since, snap.info.stats_reset_ms),
                         ..PgssMeta::of(&pgss, &snap.info)
                     }),
                     totals: t,
@@ -1888,28 +1904,33 @@ mod tests {
     #[test]
     fn kcache_period_is_compared_with_the_pgss_reset() {
         let reset = Some(10 * 60_000);
+        let read = |ms| KcacheSince::Read(Some(ms));
         assert!(
-            kcache_period_differs(true, Some(0), reset),
+            kcache_period_differs(read(0), reset),
             "kcache старше сброса pgss"
         );
         assert!(
-            !kcache_period_differs(true, Some(10 * 60_000 - 30_000), reset),
+            !kcache_period_differs(read(10 * 60_000 - 30_000), reset),
             "сброшены вместе (в пределах минуты)"
         );
         assert!(
-            !kcache_period_differs(true, Some(11 * 60_000), reset),
+            !kcache_period_differs(read(11 * 60_000), reset),
             "строки kcache моложе сброса"
         );
         assert!(
-            !kcache_period_differs(true, None, reset),
+            !kcache_period_differs(KcacheSince::Read(None), reset),
             "строк kcache нет"
         );
         assert!(
-            kcache_period_differs(false, None, reset),
+            kcache_period_differs(KcacheSince::Unsupported, reset),
             "без stats_since — неизвестно"
         );
         assert!(
-            kcache_period_differs(true, Some(0), None),
+            !kcache_period_differs(KcacheSince::Unread, reset),
+            "чтение не удалось — без пометки (M11 ревью)"
+        );
+        assert!(
+            kcache_period_differs(read(0), None),
             "время сброса pgss неизвестно"
         );
         let k = KcacheCaps::from_version("2.3.2", "public".into()).unwrap();

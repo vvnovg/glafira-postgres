@@ -862,7 +862,10 @@ async fn kcache_columns_on_perf() {
         .expect("stats_since у pg_stat_kcache 2.3");
     assert_eq!(
         meta.kcache_separate,
-        queries::kcache_period_differs(true, Some(since), meta.stats_reset_ms),
+        queries::kcache_period_differs(
+            queries::KcacheSince::Read(Some(since)),
+            meta.stats_reset_ms
+        ),
         "{meta:?}"
     );
     assert!(
