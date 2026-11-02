@@ -1390,10 +1390,6 @@ async fn fetch_texts(
     // Прочитанные тексты — в кеш узла: следующие отчёты подставят их без обращения к серверу.
     let node = node_of(id, target)?;
     st.query_texts.update(&node, |cache| {
-        cache.remember_texts(
-            rows.iter()
-                .filter_map(|t| t.text.clone().map(|text| (t.key, text, t.truncated))),
-        );
         let mut no_text: Vec<QueryKey> = rows
             .iter()
             .filter(|t| t.text.is_none())
@@ -1402,7 +1398,11 @@ async fn fetch_texts(
         if mark_absent {
             no_text.extend(keys.iter().filter(|k| !rows.iter().any(|t| t.key == **k)));
         }
-        cache.remember_no_text(&no_text);
+        cache.remember(
+            rows.iter()
+                .filter_map(|t| t.text.clone().map(|text| (t.key, text, t.truncated))),
+            &no_text,
+        );
     });
     Ok(rows)
 }
@@ -1634,9 +1634,15 @@ mod tests {
         let entries = entries_since_reset(&rows, &p);
         let read = texts_to_read(&entries, None, &p, |_| None, |_| false);
         assert_eq!(read.len(), 50, "не больше limit");
-        assert_eq!(read[0], rows[60].key, "кандидат N+1 вне топа — первым (M1 ревью)");
+        assert_eq!(
+            read[0], rows[60].key,
+            "кандидат N+1 вне топа — первым (M1 ревью)"
+        );
         assert!(read.contains(&rows[59].key) && !read.contains(&rows[0].key));
-        assert!(!read.contains(&rows[10].key), "остаток предела — строки топа");
+        assert!(
+            !read.contains(&rows[10].key),
+            "остаток предела — строки топа"
+        );
         // Тексты топа и кандидата известны (у части — «текста нет»): читать нечего, кроме строки топа, вытесненной
         // кандидатом.
         let top: HashSet<QueryKey> = read.iter().copied().collect();

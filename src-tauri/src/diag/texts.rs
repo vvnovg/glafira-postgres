@@ -19,6 +19,10 @@ use crate::topology::runtime::CloseListener;
 /// Текстов на узел (вместе с отметками «текста нет»); при переполнении кеш узла очищается целиком.
 pub const MAX_TEXTS: usize = 2000;
 
+/// Байт текстов на узел: тексты pgss бывают длинными, а кеш живёт до закрытия подключения у каждого узла, где
+/// открывались «Запросы»; при переполнении кеш узла очищается целиком.
+pub const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
+
 /// Свой запрос Глафиры: текст с меткой, запрос опроса узла без метки (строка записана до метки) или обёртка EXPLAIN
 /// консоли с опциями Глафиры (`explain::run::is_own_explain`).
 pub fn is_own_text(text: &str) -> bool {
@@ -30,6 +34,8 @@ pub fn is_own_text(text: &str) -> bool {
 #[derive(Debug, Default)]
 pub struct NodeTexts {
     texts: HashMap<QueryKey, Option<(Arc<str>, bool)>>,
+    /// Сумма длин текстов в байтах (для `MAX_TEXT_BYTES`).
+    bytes: usize,
 }
 
 impl NodeTexts {
@@ -55,28 +61,62 @@ impl NodeTexts {
         self.texts.is_empty()
     }
 
-    /// Переполнение очищает кеш целиком: и тексты, и отметки «текста нет».
-    fn make_room(&mut self, adding: usize) {
-        if self.texts.len() + adding > MAX_TEXTS {
+    /// Суммарная длина текстов в байтах.
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// Переполнение (по числу ключей или байтам) очищает кеш целиком: и тексты, и отметки «текста нет». Вызывается
+    /// один раз на запись, до вставки: только что прочитанное не теряется.
+    fn make_room(&mut self, adding: usize, adding_bytes: usize) {
+        if self.texts.len() + adding > MAX_TEXTS || self.bytes + adding_bytes > MAX_TEXT_BYTES {
             self.texts.clear();
+            self.bytes = 0;
+        }
+    }
+
+    /// Одна запись чтения: тексты и отметки «текста нет» (отметка известный текст не затирает) — с одной проверкой
+    /// предела на всю запись (M3 ревью волны смоука P3b).
+    pub fn remember(
+        &mut self,
+        items: impl IntoIterator<Item = (QueryKey, String, bool)>,
+        no_text: &[QueryKey],
+    ) {
+        let items: Vec<(QueryKey, String, bool)> = items.into_iter().collect();
+        // Прирост с учётом заменяемых записей: замена текста того же ключа не раздувает кеш.
+        let replaced: usize = items
+            .iter()
+            .filter_map(|(k, _, _)| self.text(k).map(|(t, _)| t.len()))
+            .sum();
+        let added = items.iter().map(|(_, t, _)| t.len()).sum::<usize>();
+        let new_keys = items
+            .iter()
+            .map(|(k, _, _)| k)
+            .chain(no_text)
+            .filter(|k| !self.known(k))
+            .count();
+        self.make_room(new_keys, added.saturating_sub(replaced));
+        for (k, t, truncated) in items {
+            self.bytes += t.len();
+            if let Some(Some((old, _))) = self
+                .texts
+                .insert(k, Some((Arc::from(t.as_str()), truncated)))
+            {
+                self.bytes -= old.len();
+            }
+        }
+        for k in no_text {
+            self.texts.entry(*k).or_insert(None);
         }
     }
 
     pub fn remember_texts(&mut self, items: impl IntoIterator<Item = (QueryKey, String, bool)>) {
-        let items: Vec<(QueryKey, String, bool)> = items.into_iter().collect();
-        self.make_room(items.len());
-        for (k, t, truncated) in items {
-            self.texts
-                .insert(k, Some((Arc::from(t.as_str()), truncated)));
-        }
+        self.remember(items, &[]);
     }
 
     /// Отметка «текста нет» для ключей; известный текст она не затирает.
     pub fn remember_no_text(&mut self, keys: &[QueryKey]) {
-        self.make_room(keys.len());
-        for k in keys {
-            self.texts.entry(*k).or_insert(None);
-        }
+        self.remember([], keys);
     }
 }
 
@@ -97,8 +137,16 @@ impl QueryTexts {
     }
 
     /// Запись в кеш узла. Кеш прежнего открытия того же узла удаляется: его тексты относятся к закрытому подключению.
+    /// Запись устаревшего открытия (чтение началось до переподключения и закончилось после него) отбрасывается и кеш
+    /// нового открытия не трогает.
     pub fn update<R>(&self, node: &NodeKey, f: impl FnOnce(&mut NodeTexts) -> R) -> R {
         let mut nodes = self.nodes.lock_safe();
+        let stale = nodes
+            .keys()
+            .any(|k| k.id == node.id && k.member == node.member && k.generation > node.generation);
+        if stale {
+            return f(&mut NodeTexts::default());
+        }
         nodes.retain(|k, _| {
             k.id != node.id || k.member != node.member || k.generation == node.generation
         });
@@ -154,6 +202,56 @@ mod tests {
         t.remember_texts((2..=(MAX_TEXTS as i64 + 1)).map(|i| (key(i), format!("q{i}"), false)));
         assert!(t.text(&key(1)).is_none(), "переполнение очищает кеш");
         assert_eq!(t.len(), MAX_TEXTS);
+    }
+
+    /// M3 ревью: у границы предела одна запись (тексты + отметки) очищает кеш один раз и сохраняет всё прочитанное.
+    #[test]
+    fn one_write_clears_once_and_keeps_what_it_read() {
+        let mut t = NodeTexts::default();
+        t.remember_no_text(&(1..=(MAX_TEXTS as i64 - 1)).map(key).collect::<Vec<_>>());
+        t.remember(
+            [(key(5000), "SELECT 1".to_string(), false)],
+            &[key(5001), key(5002)],
+        );
+        assert!(t.text(&key(5000)).is_some(), "прочитанный текст не потерян");
+        assert!(t.text_missing(&key(5001)) && t.text_missing(&key(5002)));
+        assert!(!t.known(&key(1)), "старое вытеснено");
+        assert_eq!(t.len(), 3);
+    }
+
+    /// Предел по байтам: длинные тексты не держат десятки мегабайт на узел.
+    #[test]
+    fn texts_cache_is_bounded_by_bytes() {
+        let mut t = NodeTexts::default();
+        let long = "x".repeat(MAX_TEXT_BYTES / 4);
+        for i in 1..=4 {
+            t.remember_texts([(key(i), long.clone(), true)]);
+        }
+        assert_eq!(t.bytes(), MAX_TEXT_BYTES);
+        t.remember_texts([(key(1), "SELECT 1".to_string(), false)]);
+        assert_eq!(
+            t.bytes(),
+            MAX_TEXT_BYTES - long.len() + 8,
+            "замена текста учитывается"
+        );
+        t.remember_texts([(key(9), long.clone(), true)]);
+        assert!(!t.known(&key(2)), "переполнение по байтам очищает кеш");
+        assert_eq!((t.len(), t.bytes()), (1, long.len()));
+    }
+
+    /// M2 ревью: запись устаревшего открытия не стирает кеш нового и сама не сохраняется.
+    #[test]
+    fn a_stale_generation_write_is_dropped() {
+        let texts = QueryTexts::default();
+        texts.update(&node("c1", 2, "pg-1"), |t| {
+            t.remember_texts([(key(1), "SELECT 1".into(), false)])
+        });
+        texts.update(&node("c1", 1, "pg-1"), |t| t.remember_no_text(&[key(2)]));
+        assert!(
+            texts.text(&node("c1", 2, "pg-1"), &key(1)).is_some(),
+            "кеш нового открытия цел"
+        );
+        assert!(!texts.with(&node("c1", 1, "pg-1"), |t| t.known(&key(2))));
     }
 
     #[test]
