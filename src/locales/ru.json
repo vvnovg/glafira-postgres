@@ -490,6 +490,10 @@
   },
   "layout": {
     "closeTab": "Закрыть вкладку",
+    "hiddenTabs_one": "Скрытые вкладки: {{count}}",
+    "hiddenTabs_few": "Скрытые вкладки: {{count}}",
+    "hiddenTabs_many": "Скрытые вкладки: {{count}}",
+    "hiddenTabs_other": "Скрытые вкладки: {{count}}",
     "empty": "Выберите подключение слева или добавьте новое."
   },
   "about": {

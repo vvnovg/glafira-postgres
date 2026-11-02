@@ -3,6 +3,8 @@ import { type KeyboardEvent, useEffect, useRef } from "react";
 export interface FolderMenuItem {
   label: string;
   onSelect: () => void;
+  /** Ключ пункта, если подписи могут совпасть (вкладки с одинаковым заголовком); по умолчанию — подпись. */
+  key?: string;
 }
 
 /**
@@ -71,7 +73,7 @@ export function FolderMenu({ label, items, onClose }: { label: string; items: Fo
     >
       {items.map((item) => (
         <button
-          key={item.label}
+          key={item.key ?? item.label}
           type="button"
           role="menuitem"
           onClick={() => {

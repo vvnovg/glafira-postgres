@@ -486,6 +486,8 @@
   },
   "layout": {
     "closeTab": "Close tab",
+    "hiddenTabs_one": "Hidden tabs: {{count}}",
+    "hiddenTabs_other": "Hidden tabs: {{count}}",
     "empty": "Select a connection on the left or add a new one."
   },
   "about": {

@@ -1,5 +1,6 @@
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import userEvent from "@testing-library/user-event";
 import { listen } from "@tauri-apps/api/event";
 import { ENV_COLORS } from "../lib/env";
 import type { ConnectionProfile } from "../api/types";
@@ -234,5 +235,68 @@ describe("Layout tabs", () => {
     renderWithClient(<Layout />);
     fireEvent.click(screen.getByRole("button", { name: "Справка" }));
     expect(useWorkspace.getState().activeId).toBe("help");
+  });
+});
+
+describe("Layout: переполнение строки вкладок", () => {
+  /** Строка 0…250 px, вкладки по 100 px подряд: третья и дальше не видны целиком. */
+  let rects: { mockRestore: () => void } | null = null;
+  const layoutRects = () =>
+    (rects = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const rect = (left: number, width: number) => ({ left, right: left + width, width, top: 0, bottom: 20, height: 20, x: left, y: 0, toJSON: () => ({}) }) as DOMRect;
+      if (this.getAttribute("role") === "tablist") return rect(0, 250);
+      const id = this.dataset.tabId;
+      if (id) return rect(useWorkspace.getState().tabs.findIndex((t) => t.id === id) * 100, 100);
+      return rect(0, 0);
+    }));
+
+  beforeEach(() => {
+    useHelpContext.setState({ byTab: {} });
+    useWorkspace.setState({
+      tabs: [
+        { kind: "settings", id: "settings" },
+        { kind: "about", id: "about" },
+        { kind: "help", id: "help", chapter: "getting-started" },
+      ],
+      activeId: "settings",
+    });
+  });
+
+  afterEach(() => {
+    rects?.mockRestore();
+    rects = null;
+    delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+  });
+
+  it("активная вкладка прокручивается в видимую часть строки", () => {
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
+    renderWithClient(<Layout />);
+    act(() => useWorkspace.getState().activate("help"));
+    expect(scroll).toHaveBeenCalled();
+    const target = scroll.mock.contexts[scroll.mock.contexts.length - 1] as HTMLElement;
+    expect(within(target).getByRole("tab", { name: "Справка" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("скрытые вкладки — в меню за кнопкой у строки; выбор пункта делает вкладку активной, Esc закрывает меню", async () => {
+    layoutRects();
+    const user = userEvent.setup();
+    renderWithClient(<Layout />);
+    const more = await screen.findByRole("button", { name: "Скрытые вкладки: 1" });
+    expect(more).toHaveAttribute("aria-haspopup", "menu");
+    await user.click(more);
+    const menu = screen.getByRole("menu", { name: "Скрытые вкладки: 1" });
+    expect(within(menu).getAllByRole("menuitem").map((m) => m.textContent)).toEqual(["Справка"]);
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(more).toHaveFocus();
+    await user.keyboard("{Enter}");
+    await user.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "Справка" }));
+    expect(useWorkspace.getState().activeId).toBe("help");
+  });
+
+  it("все вкладки видны — кнопки меню нет", () => {
+    renderWithClient(<Layout />);
+    expect(screen.queryByRole("button", { name: /Скрытые вкладки/ })).toBeNull();
   });
 });
