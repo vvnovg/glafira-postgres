@@ -378,6 +378,8 @@
     "trustAndCheck": "Trust and check"
   },
   "sidebar": {
+    "resize": "Connections panel width",
+    "resizeHint": "Drag to change the width; double-click restores the default",
     "settings": "Settings",
     "connections": "Connections",
     "newConnection": "New connection",

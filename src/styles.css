@@ -85,7 +85,11 @@ tr.clickable:hover, .row.clickable:hover { background: var(--bg-alt); }
 .warn { color: var(--warn); font-weight: 600; }
 .empty { color: var(--muted); padding: 16px; }
 .layout { display: flex; height: 100vh; }
-.sidebar { width: 260px; flex-shrink: 0; border-right: 1px solid var(--border); background: var(--bg-alt); overflow: auto; }
+/* Ширина панели — inline-стилем (перетаскиваемая граница, запоминается); узкое окно может её сжать, но не до нуля. */
+.sidebar { width: 260px; flex-shrink: 1; min-width: 140px; border-right: 1px solid var(--border); background: var(--bg-alt); overflow: auto; }
+/* Граница панели: узкая полоса поверх правого края; при наведении и фокусе — линия акцента. */
+.sidebar-resizer { flex: none; width: 6px; margin-left: -4px; margin-right: -2px; position: relative; z-index: 2; cursor: col-resize; touch-action: none; }
+.sidebar-resizer:hover, .sidebar-resizer:focus-visible { background: linear-gradient(to right, transparent 2px, var(--accent) 2px, var(--accent) 4px, transparent 4px); outline: none; }
 .sidebar-header { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; font-weight: 600; }
 .tree, .tree ul { list-style: none; margin: 0; padding: 0; }
 .tree > li { padding: 4px 12px; }

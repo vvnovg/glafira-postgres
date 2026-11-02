@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { fireEvent, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { newProfile } from "./connections/profile";
@@ -47,5 +47,64 @@ describe("Sidebar", () => {
     await user.click(await screen.findByRole("button", { name: "Поддержать проект" }));
     expect(openUrl).toHaveBeenCalledWith(SUPPORT_URL);
     expect(useWorkspace.getState().tabs).toEqual([]);
+  });
+});
+
+describe("Sidebar: ширина панели", () => {
+  const aside = (c: HTMLElement) => c.querySelector<HTMLElement>("aside.sidebar")!;
+
+  it("по умолчанию 260 px; граница — разделитель с текущим значением и пределами", () => {
+    const { container } = renderWithClient(<Sidebar />);
+    expect(aside(container).style.width).toBe("260px");
+    const sep = screen.getByRole("separator", { name: "Ширина панели подключений" });
+    expect(sep).toHaveAttribute("aria-orientation", "vertical");
+    expect(sep).toHaveAttribute("aria-valuenow", "260");
+    expect(sep).toHaveAttribute("aria-valuemin", "180");
+    expect(sep).toHaveAttribute("aria-valuemax", "640");
+  });
+
+  it("стрелки меняют ширину с шагом 16 px (Shift — 64), Home и End — до пределов; ширина запоминается", async () => {
+    const user = userEvent.setup();
+    const { container, unmount } = renderWithClient(<Sidebar />);
+    const sep = screen.getByRole("separator", { name: "Ширина панели подключений" });
+    sep.focus();
+    await user.keyboard("{ArrowRight}{ArrowRight}");
+    expect(aside(container).style.width).toBe("292px");
+    await user.keyboard("{Shift>}{ArrowLeft}{/Shift}");
+    expect(aside(container).style.width).toBe("228px");
+    await user.keyboard("{Home}");
+    expect(sep).toHaveAttribute("aria-valuenow", "180");
+    await user.keyboard("{End}");
+    expect(sep).toHaveAttribute("aria-valuenow", "640");
+    await user.keyboard("{ArrowLeft}");
+    unmount();
+    expect(localStorage.getItem("glafira.sidebar.width")).toBe("624");
+    const again = renderWithClient(<Sidebar />);
+    expect(aside(again.container).style.width).toBe("624px");
+  });
+
+  it("перетаскивание границы меняет ширину в пределах; двойной щелчок возвращает ширину по умолчанию", () => {
+    const { container } = renderWithClient(<Sidebar />);
+    const sep = screen.getByRole("separator", { name: "Ширина панели подключений" });
+    fireEvent.pointerDown(sep, { clientX: 260, pointerId: 1, button: 0 });
+    fireEvent.pointerMove(sep, { clientX: 340, pointerId: 1 });
+    expect(aside(container).style.width).toBe("340px");
+    fireEvent.pointerMove(sep, { clientX: 10, pointerId: 1 });
+    expect(aside(container).style.width).toBe("180px");
+    fireEvent.pointerUp(sep, { clientX: 10, pointerId: 1 });
+    fireEvent.pointerMove(sep, { clientX: 400, pointerId: 1 });
+    expect(aside(container).style.width).toBe("180px");
+    fireEvent.doubleClick(sep);
+    expect(aside(container).style.width).toBe("260px");
+  });
+
+  it("сохранённая ширина вне пределов или не число — приводится к пределам или к значению по умолчанию", () => {
+    localStorage.setItem("glafira.sidebar.width", "5000");
+    const first = renderWithClient(<Sidebar />);
+    expect(aside(first.container).style.width).toBe("640px");
+    first.unmount();
+    localStorage.setItem("glafira.sidebar.width", "abc");
+    const second = renderWithClient(<Sidebar />);
+    expect(aside(second.container).style.width).toBe("260px");
   });
 });
