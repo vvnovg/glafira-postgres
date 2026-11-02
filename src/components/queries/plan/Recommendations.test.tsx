@@ -144,5 +144,15 @@ describe("Recommendations", () => {
     expect(screen.getByRole("heading", { name: "Отсечение партиций не сработало: условие — выражение над happened_at" })).toBeInTheDocument();
     expect(screen.getByText(pruning.params.rewrite as string)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Копировать условие" })).toBeInTheDocument();
+    expect(screen.queryByText(/начало периода/)).toBeNull();
+  });
+  it("date_trunc с параметром: оговорка «значение — начало периода» (M7 ревью)", () => {
+    const pruning: Recommendation = {
+      id: "plan_no_pruning", severity: "info", nodeIds: [2],
+      params: { children: 12, emptyChildren: 0, column: "at", condition: "date_trunc('month', \"at\") = $1", rewrite: "\"at\" >= $1 AND \"at\" < $1 + interval '1 month'", periodStart: "$1" },
+      command: null, hypo: null,
+    };
+    renderWithClient(<Recommendations {...props} result={result({ recommendations: [pruning] })} />);
+    expect(screen.getByText("Равносильно исходному условию, только если $1 — начало периода")).toBeInTheDocument();
   });
 });

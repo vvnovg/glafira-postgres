@@ -2014,6 +2014,7 @@
     "partitionsAll": "All partitions ({{count}})",
     "rewrite": "Condition to use instead of {{condition}}",
     "copyCondition": "Copy condition",
+    "rewritePeriodStart": "Equivalent to the original condition only when {{value}} is the start of the period",
     "notRun": "The app does not run this command: copy it and run it yourself",
     "template": "Replace <…> with your values before running",
     "effect": "Effect",

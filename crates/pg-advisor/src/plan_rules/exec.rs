@@ -193,6 +193,9 @@ pub fn no_pruning(n: &PlanNode, with_actual: bool) -> Option<Recommendation> {
             .param("column", first.column.clone())
             .param("condition", first.condition.clone())
             .param("rewrite", first.rewrite.clone());
+        if let Some(v) = &first.period_start {
+            r = r.param("periodStart", v.clone());
+        }
     }
     Some(r)
 }

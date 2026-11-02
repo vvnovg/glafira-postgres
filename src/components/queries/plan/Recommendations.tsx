@@ -80,6 +80,7 @@ export function Recommendations({
                 {known && typeof r.params.rewrite === "string" && (
                   <>
                     <p className="muted">{t("recommend.rewrite", { condition: String(r.params.condition ?? "") })}</p>
+                    {typeof r.params.periodStart === "string" && <p className="muted">{t("recommend.rewritePeriodStart", { value: r.params.periodStart })}</p>}
                     <div className="diag-command">
                       <pre className="query-text">
                         <code>{r.params.rewrite}</code>

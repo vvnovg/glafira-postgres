@@ -495,6 +495,9 @@ pub struct RangeRewrite {
     pub column: String,
     pub condition: String,
     pub rewrite: String,
+    /// `date_trunc(…) = V` с неконстантным `V` (параметр, выражение): диапазон равносилен условию, только если `V` —
+    /// начало периода; значение — `V`, для оговорки в тексте (M7 ревью волны смоука P3b).
+    pub period_start: Option<String>,
 }
 
 /// Единицы `date_trunc`, для которых диапазон пишется как `+ interval '1 <unit>'`.
@@ -546,17 +549,90 @@ fn range_rewrite_conjunct(s: &str, alias: Option<&str>) -> Option<RangeRewrite> 
         return None;
     }
     let q = quote_ident(&col);
+    let mut period_start = None;
     let (condition, upper) = match &unit {
-        None => (format!("{q}::date = {value}"), format!("{value} + 1")),
-        Some(u) => (
-            format!("date_trunc('{u}', {q}) = {value}"),
-            format!("{value} + interval '1 {u}'"),
+        // `$1 + 1` без типа в обобщённом плане неоднозначен: верхняя граница — с явным `::date`.
+        None if value.ends_with("::date") => {
+            (format!("{q}::date = {value}"), format!("{value} + 1"))
+        }
+        None if value.contains(char::is_whitespace) => (
+            format!("{q}::date = {value}"),
+            format!("({value})::date + 1"),
         ),
+        None => (format!("{q}::date = {value}"), format!("{value}::date + 1")),
+        Some(u) => {
+            // `date_trunc('month', at) = '2026-03-15'` не находит ничего, а диапазон от той же даты — находит: совет
+            // только для значения на границе единицы; неконстантное значение — с оговоркой «V — начало периода».
+            match on_unit_boundary(value, u) {
+                Some(false) => return None,
+                Some(true) => {}
+                None => period_start = Some(value.to_string()),
+            }
+            (
+                format!("date_trunc('{u}', {q}) = {value}"),
+                format!("{value} + interval '1 {u}'"),
+            )
+        }
     };
     Some(RangeRewrite {
         column: col,
         condition,
         rewrite: format!("{q} >= {value} AND {q} < {upper}"),
+        period_start,
+    })
+}
+
+/// Константа `'YYYY-MM-DD[ HH:MM[:SS[.ffff]]][±TZ]'[::тип]` лежит на границе единицы `date_trunc`: `Some(true|false)`;
+/// не константа или формат не разобран — `None`. Пояс не учитывается: `date_trunc` считает в поясе сеанса.
+fn on_unit_boundary(value: &str, unit: &str) -> Option<bool> {
+    let lit = value.strip_prefix('\'')?;
+    let lit = &lit[..lit.find('\'')?];
+    let (date, time) = match lit.split_once([' ', 'T']) {
+        Some((d, t)) => (d, t),
+        None => (lit, ""),
+    };
+    let mut d = date.splitn(3, '-').map(|x| x.parse::<i64>().ok());
+    let (y, m, day) = (d.next()??, d.next()??, d.next()??);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&day) {
+        return None;
+    }
+    // Время без пояса: до `+`, `-` или буквы после начала.
+    let time = time
+        .find(|c: char| c == '+' || c == '-' || c.is_ascii_alphabetic())
+        .map_or(time, |i| &time[..i])
+        .trim();
+    let (hms, frac) = time.split_once('.').unwrap_or((time, ""));
+    let mut t = hms
+        .split(':')
+        .filter(|x| !x.is_empty())
+        .map(|x| x.parse::<i64>().ok());
+    let (h, mi, sec) = (
+        t.next().unwrap_or(Some(0))?,
+        t.next().unwrap_or(Some(0))?,
+        t.next().unwrap_or(Some(0))?,
+    );
+    if !frac.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let second = frac.chars().all(|c| c == '0');
+    let minute = second && sec == 0;
+    let hour = minute && mi == 0;
+    let day_start = hour && h == 0;
+    // День недели (0 — воскресенье), алгоритм Сакамото; неделя `date_trunc` начинается с понедельника.
+    let weekday = {
+        const T: [i64; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+        let y = if m < 3 { y - 1 } else { y };
+        (y + y / 4 - y / 100 + y / 400 + T[(m - 1) as usize] + day) % 7
+    };
+    Some(match unit {
+        "second" => second,
+        "minute" => minute,
+        "hour" => hour,
+        "day" => day_start,
+        "week" => day_start && weekday == 1,
+        "month" => day_start && day == 1,
+        "year" => day_start && day == 1 && m == 1,
+        _ => return None,
     })
 }
 
@@ -857,6 +933,43 @@ mod tests {
             range_rewrite("((e.code)::text = 'x'::text)", Some("e")).is_none(),
             "не date"
         );
+        // M7 ревью: значение не на границе единицы — условие не равносильно диапазону, совета нет; параметр — с
+        // оговоркой «начало периода»; у `::date = $1` верхняя граница с явным типом.
+        assert!(
+            range_rewrite(
+                "(date_trunc('month'::text, e.at) = '2026-03-15 00:00:00'::timestamp without time zone)",
+                Some("e")
+            )
+            .is_none()
+        );
+        let r = range_rewrite(
+            "(date_trunc('month'::text, e.at) = '2026-03-01 00:00:00'::timestamp without time zone)",
+            Some("e"),
+        )
+        .unwrap();
+        assert_eq!(r.period_start, None);
+        let r = range_rewrite("(date_trunc('month'::text, e.at) = $1)", Some("e")).unwrap();
+        assert_eq!(r.period_start.as_deref(), Some("$1"));
+        assert_eq!(
+            range_rewrite("((e.at)::date = $1)", Some("e"))
+                .unwrap()
+                .rewrite,
+            "\"at\" >= $1 AND \"at\" < $1::date + 1"
+        );
+        for (v, unit, on) in [
+            ("'2026-03-05 10:00:00'", "hour", true),
+            ("'2026-03-05 10:30:00'", "hour", false),
+            ("'2026-03-05 10:30:00.000'", "minute", true),
+            ("'2026-03-05 10:30:01.5'", "second", false),
+            ("'2026-03-02'::date", "week", true),
+            ("'2026-03-05'::date", "week", false),
+            ("'2026-01-01 00:00:00+03'", "year", true),
+            ("'2026-02-01T00:00:00Z'", "month", true),
+        ] {
+            assert_eq!(on_unit_boundary(v, unit), Some(on), "{v} {unit}");
+        }
+        assert_eq!(on_unit_boundary("$1", "day"), None);
+        assert_eq!(on_unit_boundary("'now'::timestamp", "day"), None);
         assert!(
             range_rewrite("(date_trunc('quarter'::text, e.t) = $1)", Some("e")).is_none(),
             "квартала нет в interval"
