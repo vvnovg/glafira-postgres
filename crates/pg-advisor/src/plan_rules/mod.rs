@@ -132,7 +132,8 @@ pub fn evaluate(t: &PlanTree) -> Report {
 const PARTITION_GROUPED: [&str; 1] = ["plan_seq_scan_filter"];
 
 /// Одинаковые рекомендации по партициям одного Append / Merge Append — одна рекомендация: узлы — все сканирования,
-/// `partitions` — их число, строки суммируются, команды индексов — по строке на партицию (без повторов). Гипотеза
+/// `partitions` — их число, `tables` — все партиции по имени, `tablesHead` — первые три, `tablesMore` — сколько ещё;
+/// строки суммируются, команды индексов — по строке на партицию в порядке имён (без повторов). Гипотеза
 /// hypopg — одна DDL, поэтому у группы её нет. `plan_no_pruning` остаётся отдельной рекомендацией.
 fn group_partitions(root: &PlanNode, recs: Vec<Recommendation>) -> Vec<Recommendation> {
     let mut groups: Vec<HashSet<u32>> = Vec::new();
@@ -172,7 +173,19 @@ fn group_partitions(root: &PlanNode, recs: Vec<Recommendation>) -> Vec<Recommend
     out
 }
 
-fn merge_partitions(parts: Vec<Recommendation>) -> Recommendation {
+/// Сколько партиций назвать в доказательстве; остальные — «и ещё N» (полный список — в `tables`).
+const PARTITIONS_SHOWN: usize = 3;
+
+fn merge_partitions(mut parts: Vec<Recommendation>) -> Recommendation {
+    // Партиции — по имени: в доказательстве и в командах порядок предсказуем.
+    let name = |p: &Recommendation| {
+        p.params
+            .get("table")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    parts.sort_by_key(name);
     let first = &parts[0];
     let severity = parts
         .iter()
@@ -192,10 +205,13 @@ fn merge_partitions(parts: Vec<Recommendation>) -> Recommendation {
         .iter()
         .filter_map(|p| p.params.get("table")?.as_str())
         .collect();
+    let shown = tables.len().min(PARTITIONS_SHOWN);
     r = r
         .param("partitions", parts.len() as i64)
         .param("table", tables.first().copied().unwrap_or_default())
         .param("tables", tables.join(", "))
+        .param("tablesHead", tables[..shown].join(", "))
+        .param("tablesMore", (tables.len() - shown) as i64)
         .param("rowsRead", sum("rowsRead"))
         .param("rowsReturned", sum("rowsReturned"))
         .param(
@@ -471,6 +487,99 @@ pub fn columns_of(cond: &str, alias: Option<&str>) -> Vec<String> {
     out
 }
 
+/// Условие-выражение над колонкой, из-за которого не работают отсечение партиций и индекс по колонке:
+/// `(col)::date = V` или `date_trunc('unit', col) = V`. `condition` — условие без псевдонима, `rewrite` — тот же отбор
+/// диапазоном по самой колонке.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RangeRewrite {
+    pub column: String,
+    pub condition: String,
+    pub rewrite: String,
+}
+
+/// Единицы `date_trunc`, для которых диапазон пишется как `+ interval '1 <unit>'`.
+const TRUNC_UNITS: [&str; 7] = ["second", "minute", "hour", "day", "week", "month", "year"];
+
+/// Первый конъюнкт условия вида `(col)::date = V` / `date_trunc('unit', col) = V` своего псевдонима.
+pub fn range_rewrite(cond: &str, alias: Option<&str>) -> Option<RangeRewrite> {
+    conjuncts(cond)
+        .into_iter()
+        .find_map(|c| range_rewrite_conjunct(strip_parens(c), alias))
+}
+
+fn range_rewrite_conjunct(s: &str, alias: Option<&str>) -> Option<RangeRewrite> {
+    const TRUNC: &str = "date_trunc";
+    // `unit` — `Some` у `date_trunc`, `None` у приведения к date.
+    let (col, unit, rest) = if s.starts_with("date_trunc(") {
+        let j = TRUNC.len() + closing(&s[TRUNC.len()..])?;
+        let (unit, arg) = split_comma(&s[TRUNC.len() + 1..j])?;
+        let unit = unit.trim().strip_suffix("::text").unwrap_or(unit.trim());
+        let unit = unit.strip_prefix('\'')?.strip_suffix('\'')?.to_lowercase();
+        if !TRUNC_UNITS.contains(&unit.as_str()) {
+            return None;
+        }
+        let (col, tail) = column_ref(arg.trim(), alias)?;
+        if !tail.trim().is_empty() {
+            return None;
+        }
+        (col, Some(unit), &s[j + 1..])
+    } else {
+        let (col, after) = if s.starts_with('(') {
+            let j = closing(s)?;
+            let (col, tail) = column_ref(strip_parens(&s[1..j]), alias)?;
+            if !tail.trim().is_empty() {
+                return None;
+            }
+            (col, &s[j + 1..])
+        } else {
+            column_ref(s, alias)?
+        };
+        let (ty, rest) = after.strip_prefix("::")?.split_once(' ')?;
+        if ty != "date" {
+            return None;
+        }
+        (col, None, rest)
+    };
+    let (op, value) = rest.trim_start().split_once(' ')?;
+    let value = value.trim();
+    if op != "=" || value.is_empty() {
+        return None;
+    }
+    let q = quote_ident(&col);
+    let (condition, upper) = match &unit {
+        None => (format!("{q}::date = {value}"), format!("{value} + 1")),
+        Some(u) => (
+            format!("date_trunc('{u}', {q}) = {value}"),
+            format!("{value} + interval '1 {u}'"),
+        ),
+    };
+    Some(RangeRewrite {
+        column: col,
+        condition,
+        rewrite: format!("{q} >= {value} AND {q} < {upper}"),
+    })
+}
+
+/// Делит аргументы вызова на первый и остальные по запятой вне скобок и кавычек.
+fn split_comma(s: &str) -> Option<(&str, &str)> {
+    let b = s.as_bytes();
+    let (mut depth, mut i) = (0i32, 0usize);
+    while i < b.len() {
+        match b[i] {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            q @ (b'\'' | b'"') => {
+                i = skip_quoted(b, i + 1, q);
+                continue;
+            }
+            b',' if depth == 0 => return Some((&s[..i], &s[i + 1..])),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 /// `CREATE INDEX [CONCURRENTLY] ON "s"."t" ("a", "b")`; с `CONCURRENTLY` — команда для копирования с `;`.
 pub fn index_ddl(schema: Option<&str>, table: &str, cols: &[String], concurrently: bool) -> String {
     let cols: Vec<String> = cols.iter().map(|c| quote_ident(c)).collect();
@@ -661,6 +770,8 @@ mod tests {
             g.params["tables"],
             "shop.events_0, shop.events_1, shop.events_2"
         );
+        assert_eq!(g.params["tablesHead"], g.params["tables"]);
+        assert_eq!(g.params["tablesMore"], 0);
         assert!(g.hypo.is_none());
         assert_eq!(g.command.as_deref().unwrap().lines().count(), 3);
         assert!(
@@ -704,6 +815,59 @@ mod tests {
         assert!(columns_of("((o.total)::numeric > 5)", Some("o")).is_empty());
         assert!(columns_of("((o.id)::integer = 5)", Some("o")).is_empty());
         assert!(columns_of("((o.tags)::text[] = '{}'::text[])", Some("o")).is_empty());
+    }
+
+    #[test]
+    fn cast_and_date_trunc_conditions_are_rewritten_as_ranges() {
+        let r = range_rewrite(
+            "((events_8.happened_at)::date = '2026-03-05'::date)",
+            Some("events_8"),
+        )
+        .unwrap();
+        assert_eq!(r.column, "happened_at");
+        assert_eq!(r.condition, "\"happened_at\"::date = '2026-03-05'::date");
+        assert_eq!(
+            r.rewrite,
+            "\"happened_at\" >= '2026-03-05'::date AND \"happened_at\" < '2026-03-05'::date + 1"
+        );
+        let r = range_rewrite(
+            "((e.kind = 'x'::text) AND (date_trunc('day'::text, e.happened_at) = '2026-03-05 00:00:00+00'::timestamp with time zone))",
+            Some("e"),
+        )
+        .unwrap();
+        assert_eq!(
+            r.rewrite,
+            "\"happened_at\" >= '2026-03-05 00:00:00+00'::timestamp with time zone AND \"happened_at\" < '2026-03-05 00:00:00+00'::timestamp with time zone + interval '1 day'"
+        );
+        assert_eq!(
+            r.condition,
+            "date_trunc('day', \"happened_at\") = '2026-03-05 00:00:00+00'::timestamp with time zone"
+        );
+        assert_eq!(
+            range_rewrite("((happened_at)::date = '2026-03-05'::date)", None)
+                .unwrap()
+                .column,
+            "happened_at"
+        );
+        assert!(
+            range_rewrite("((e.happened_at)::date > '2026-03-05'::date)", Some("e")).is_none(),
+            "только равенство"
+        );
+        assert!(
+            range_rewrite("((e.code)::text = 'x'::text)", Some("e")).is_none(),
+            "не date"
+        );
+        assert!(
+            range_rewrite("(date_trunc('quarter'::text, e.t) = $1)", Some("e")).is_none(),
+            "квартала нет в interval"
+        );
+        assert!(
+            range_rewrite("((x.happened_at)::date = '2026-03-05'::date)", Some("e")).is_none(),
+            "чужой псевдоним"
+        );
+        assert!(
+            range_rewrite("((e.a)::date = '2026-03-05'::date) OR (e.b = 1)", Some("e")).is_none()
+        );
     }
 
     #[test]

@@ -23,6 +23,8 @@ const ALL: Recommendation[] = [
   rec("plan_subplan_per_row", { loops: 3000, name: "SubPlan 1" }),
   rec("plan_jit_heavy", { jitMs: 121.8, execMs: 60.2, processes: 1, functions: 14 }, { severity: "info" }),
   rec("plan_jit_heavy", { jitMs: 121.8, execMs: 50.1, processes: 2, functions: 14 }, { severity: "info" }),
+  rec("plan_seq_scan_filter", { partitions: 24, table: "shop.events_p01", tables: "shop.events_p01, shop.events_p02, shop.events_p03, shop.events_p04", tablesHead: "shop.events_p01, shop.events_p02, shop.events_p03", tablesMore: 21, rowsRead: 900_000, rowsReturned: 10, loops: 1 }, { nodeIds: [3, 4] }),
+  rec("plan_no_pruning", { children: 24, emptyChildren: 23, column: "happened_at", condition: "\"happened_at\"::date = '2026-03-05'::date", rewrite: "\"happened_at\" >= '2026-03-05'::date AND \"happened_at\" < '2026-03-05'::date + 1" }),
 ];
 
 describe("recommendText", () => {
@@ -56,6 +58,11 @@ describe("recommendText", () => {
     expect(recommendEvidence(rec("plan_heap_fetches", { table: "shop.balances", heapFetches: 3368, rows: 2000 }))).toBe("Index Only Scan вернул строк 2\u00a0000, обращений к heap 3\u00a0368");
     expect(recommendEvidence(pruned)).toBe("Просканировано партиций 24, из них ничего не вернули 23");
     expect(recommendEvidence(pruneNoActual)).toBe("План читает все партиции: 24");
+    const [groupedMore, pruneCast] = ALL.filter((r) => typeof r.params.tablesMore === "number" || typeof r.params.rewrite === "string");
+    expect(recommendEvidence(groupedMore)).toMatch(/^Seq Scan по shop\.events_p01, shop\.events_p02, shop\.events_p03 и ещё 21: /);
+    expect(recommendTitle(pruneCast)).toBe("Отсечение партиций не сработало: условие — выражение над happened_at");
+    expect(recommendEffect(pruneCast)).toMatch(/^Перепишите условие "happened_at"::date = '2026-03-05'::date диапазоном/);
+    expect(recommendEvidence(pruneCast)).toBe("Просканировано партиций 24, из них ничего не вернули 23");
     expect(recommendEvidence(jitPar)).toMatch(/в процессах \(2; функций: 14\)/);
   });
 

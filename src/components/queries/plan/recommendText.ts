@@ -4,7 +4,7 @@ import { formatBytes, formatCount, formatMs, formatPercent } from "../../../lib/
 
 /**
  * Параметры текста рекомендации: числа по суффиксам (как у находок: `…Bytes`, `…Pct`, `…Ms`), `…Kb` — килобайты как байты,
- * `ratio` — с одним знаком до 10, остальные числа — с разделителями; строки (`table`, `tables`, `columns`, `keys`, `index`,
+ * `ratio` — с одним знаком до 10, остальные числа — с разделителями; строки (`table`, `tables`, `tablesHead`, `columns`, `keys`, `index`, `condition`, `rewrite`,
  * `name`) — как есть. Добавляются подписи `directionLabel` (ошибка оценки) и `kindLabel` (что уходит на диск).
  */
 export function recommendParams(r: Recommendation): Record<string, string> {
@@ -28,16 +28,16 @@ type Field = "title" | "evidence" | "effect" | "risks";
 
 /**
  * Вариант текста по параметрам правила: у сгруппированного по партициям `plan_seq_scan_filter` (`partitions`) — свои
- * заголовок и доказательство; у `plan_spill` по bitmap (`kind: bitmap`, без размеров) — свои заголовок и доказательство, а
+ * заголовок и доказательство (при `tablesMore` > 0 — первые партиции и «и ещё N»); у `plan_spill` по bitmap (`kind: bitmap`, без размеров) — свои заголовок и доказательство, а
  * эффект с индексом — только у сортировки с ключами; `plan_no_pruning` без ANALYZE (важность `info`) — доказательство без
- * пустых партиций; `plan_jit_heavy` в параллельном плане (`processes` > 1) — доказательство с числом процессов.
+ * пустых партиций, с условием-выражением по колонке (`rewrite`) — заголовок и эффект про диапазон; `plan_jit_heavy` в параллельном плане (`processes` > 1) — доказательство с числом процессов.
  */
 function variant(r: Recommendation, field: Field): string {
   const p = r.params;
   switch (r.id) {
     case "plan_seq_scan_filter":
       if (typeof p.partitions === "number" && field === "title") return "titlePartitions";
-      if (typeof p.partitions === "number" && field === "evidence") return "evidencePartitions";
+      if (typeof p.partitions === "number" && field === "evidence") return typeof p.tablesMore === "number" && p.tablesMore > 0 ? "evidencePartitionsMore" : "evidencePartitions";
       break;
     case "plan_spill":
       if (p.kind === "bitmap" && field === "title") return "titleBitmap";
@@ -46,6 +46,8 @@ function variant(r: Recommendation, field: Field): string {
       break;
     case "plan_no_pruning":
       if (r.severity === "info" && field === "evidence") return "evidencePlan";
+      if (typeof p.rewrite === "string" && field === "title") return "titleCast";
+      if (typeof p.rewrite === "string" && field === "effect") return "effectCast";
       break;
     case "plan_jit_heavy":
       if (typeof p.processes === "number" && p.processes > 1 && field === "evidence") return "evidenceParallel";

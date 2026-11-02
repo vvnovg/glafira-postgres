@@ -397,6 +397,8 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .recommend h4 { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
 .recommend p { margin: 0; overflow-wrap: anywhere; }
 .recommend .diag-command pre { flex: 1 1 320px; min-width: 0; }
+.recommend-partitions summary { color: var(--muted); }
+.recommend-partitions p { margin-top: 4px; }
 .hypo-check { width: min(900px, 100%); }
 .hypo-check h4 { margin: 0; font-size: 13px; }
 /* «Индекс использован»: цвет с подмешанным текстом (контраст) и жирное слово — смысл не держится на одном цвете. */

@@ -1980,6 +1980,9 @@
     "skipped_one": "Run the plan with execution to check {{count}} more rule",
     "skipped_other": "Run the plan with execution to check {{count}} more rules",
     "copyCommand": "Copy command",
+    "partitionsAll": "All partitions ({{count}})",
+    "rewrite": "Condition to use instead of {{condition}}",
+    "copyCondition": "Copy condition",
     "notRun": "The app does not run this command: copy it and run it yourself",
     "template": "Replace <…> with your values before running",
     "effect": "Effect",
@@ -2014,6 +2017,7 @@
       "titlePartitions": "Index on filter columns in {{partitions}} partitions: {{table}} and others",
       "evidence": "Seq Scan read {{rowsRead}} rows and returned {{rowsReturned}} ({{loops}} loops)",
       "evidencePartitions": "Seq Scans of {{tables}} read {{rowsRead}} rows and returned {{rowsReturned}}",
+      "evidencePartitionsMore": "Seq Scans of {{tablesHead}} and {{tablesMore}} more read {{rowsRead}} rows and returned {{rowsReturned}}",
       "effect": "An index turns the full scan into an index scan of the matching rows",
       "risks": "The index costs disk space and slows writes; CONCURRENTLY avoids blocking but takes longer"
     },
@@ -2058,9 +2062,11 @@
     },
     "plan_no_pruning": {
       "title": "Partition pruning did not work",
+      "titleCast": "Partition pruning did not work: the condition is an expression over {{column}}",
       "evidence": "{{children}} partitions scanned, {{emptyChildren}} returned nothing",
       "evidencePlan": "The plan scans all {{children}} partitions",
       "effect": "A condition on the partition key lets the planner skip partitions",
+      "effectCast": "Rewrite {{condition}} as a range on the column itself: the planner prunes the other partitions and an index on {{column}} can be used",
       "risks": "Pruning needs a constant or a parameter on the key, not an expression; check enable_partition_pruning"
     },
     "plan_workers_short": {

@@ -16,7 +16,9 @@ const SEVERITY_KEYS = { critical: "diag.severity.critical", warning: "diag.sever
  * виртуального индекса) и «Показать узел» (`onShowNode` получает все `nodeIds`: первый — узел совета, он выбирается, остальные
  * помечаются). Команды приложение не выполняет: только показывает и копирует; `<columns>` / `<work_mem>` в команде — шаблон,
  * его заполняет пользователь. Правило без текстов в словаре (бэкенд новее приложения) — карточка с id и командой. Без
- * ANALYZE правила, которым нужен факт, пропущены — блок говорит, сколько их.
+ * ANALYZE правила, которым нужен факт, пропущены — блок говорит, сколько их. У сгруппированной по партициям рекомендации
+ * доказательство называет первые партиции, полный список — в разворачиваемом блоке; условие-диапазон (`rewrite`) вместо
+ * выражения над колонкой — отдельным блоком с копированием.
  * `member`, `database`, `sql`, `params` и `searchPath` — те, с которыми получен план: гипотеза проверяется на них же.
  */
 export function Recommendations({
@@ -63,6 +65,23 @@ export function Recommendations({
                   <h4>{known ? recommendTitle(r) : t("recommend.unknown.title", { id: r.id })}</h4>
                 </div>
                 <p>{known ? recommendEvidence(r) : t("recommend.unknown.evidence")}</p>
+                {known && typeof r.params.tablesMore === "number" && r.params.tablesMore > 0 && typeof r.params.tables === "string" && (
+                  <details className="recommend-partitions">
+                    <summary>{t("recommend.partitionsAll", { count: Number(r.params.partitions ?? 0) })}</summary>
+                    <p className="muted">{r.params.tables}</p>
+                  </details>
+                )}
+                {known && typeof r.params.rewrite === "string" && (
+                  <>
+                    <p className="muted">{t("recommend.rewrite", { condition: String(r.params.condition ?? "") })}</p>
+                    <div className="diag-command">
+                      <pre className="query-text">
+                        <code>{r.params.rewrite}</code>
+                      </pre>
+                      <CopyButton text={r.params.rewrite} label={t("recommend.copyCondition")} />
+                    </div>
+                  </>
+                )}
                 {r.command && (
                   <>
                     <div className="diag-command">

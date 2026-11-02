@@ -114,4 +114,24 @@ describe("Recommendations", () => {
     expect(await within(dialog).findByRole("alert")).toHaveTextContent("hypopg не установлен в этой базе");
     expect(within(dialog).queryByRole("treegrid")).toBeNull();
   });
+  it("партиции: в доказательстве первые три и «и ещё N», полный список — в развороте; условие-диапазон с копированием", () => {
+    const tables = Array.from({ length: 24 }, (_, i) => `shop.events_${String(i + 1).padStart(2, "0")}`);
+    const grouped: Recommendation = {
+      id: "plan_seq_scan_filter", severity: "warning", nodeIds: [3, 4],
+      params: { partitions: 24, table: tables[0], tables: tables.join(", "), tablesHead: tables.slice(0, 3).join(", "), tablesMore: 21, rowsRead: 900_000, rowsReturned: 0, loops: 1 },
+      command: null, hypo: null,
+    };
+    const pruning: Recommendation = {
+      id: "plan_no_pruning", severity: "warning", nodeIds: [2],
+      params: { children: 24, emptyChildren: 23, column: "happened_at", condition: "\"happened_at\"::date = '2026-03-05'::date", rewrite: "\"happened_at\" >= '2026-03-05'::date AND \"happened_at\" < '2026-03-05'::date + 1" },
+      command: null, hypo: null,
+    };
+    renderWithClient(<Recommendations {...props} result={result({ recommendations: [grouped, pruning] })} />);
+    expect(screen.getByText("Seq Scan по shop.events_01, shop.events_02, shop.events_03 и ещё 21: прочитано строк 900 000, возвращено 0")).toBeInTheDocument();
+    expect(screen.getByText("Все партиции (24)")).toBeInTheDocument();
+    expect(screen.getByText(tables.join(", "))).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Отсечение партиций не сработало: условие — выражение над happened_at" })).toBeInTheDocument();
+    expect(screen.getByText(pruning.params.rewrite as string)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Копировать условие" })).toBeInTheDocument();
+  });
 });

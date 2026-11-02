@@ -4,7 +4,8 @@
 use crate::findings::{Severity, thresholds as th};
 use crate::plan::{PlanNode, PlanTree};
 use crate::plan_rules::{
-    Recommendation, column_ref, ident, index_recommendation, qualified, scan::alias, table_name,
+    RangeRewrite, Recommendation, column_ref, ident, index_recommendation, qualified,
+    range_rewrite, scan::alias, table_name,
 };
 
 /// Sort на диске, Hash с батчами: `work_mem` ×1,5 от объёма (не меньше 1 МБ и не больше 1 ГБ). Lossy bitmap: объём
@@ -166,19 +167,34 @@ pub fn no_pruning(n: &PlanNode, with_actual: bool) -> Option<Recommendation> {
     if with_actual && (empty as f64) < th::PLAN_APPEND_EMPTY_SHARE * scans.len() as f64 {
         return None;
     }
-    Some(
-        Recommendation::new(
-            "plan_no_pruning",
-            if with_actual {
-                Severity::Warning
-            } else {
-                Severity::Info
-            },
-            n.id,
-        )
-        .param("children", scans.len() as i64)
-        .param("emptyChildren", empty as i64),
+    let mut r = Recommendation::new(
+        "plan_no_pruning",
+        if with_actual {
+            Severity::Warning
+        } else {
+            Severity::Info
+        },
+        n.id,
     )
+    .param("children", scans.len() as i64)
+    .param("emptyChildren", empty as i64);
+    // Во всех партициях фильтр — выражение над одной колонкой (`col::date = …`, `date_trunc(…) = …`): так пишут условие
+    // по ключу партиционирования, а отсечению и индексу нужна сама колонка — совет переписать диапазоном.
+    let rewrites: Vec<Option<RangeRewrite>> = scans
+        .iter()
+        .map(|c| range_rewrite(c.filter.as_deref()?, alias(c)))
+        .collect();
+    if let Some(Some(first)) = rewrites.first()
+        && rewrites
+            .iter()
+            .all(|w| w.as_ref().is_some_and(|w| w.column == first.column))
+    {
+        r = r
+            .param("column", first.column.clone())
+            .param("condition", first.condition.clone())
+            .param("rewrite", first.rewrite.clone());
+    }
+    Some(r)
 }
 
 /// Воркеров запущено меньше, чем запланировано. «Факт».
@@ -513,6 +529,36 @@ mod tests {
         );
         // Пустых детей меньше половины — чтение всех партиций оправдано.
         assert!(rec(&json!({"Plan": append_of(7)}), "plan_no_pruning").is_none());
+    }
+
+    #[test]
+    fn append_with_cast_condition_suggests_a_range() {
+        let with_filter = |f: &dyn Fn(usize) -> String| {
+            let mut append = append_of(2);
+            for (i, c) in append["Plans"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .enumerate()
+            {
+                c["Filter"] = json!(f(i));
+            }
+            rec(&json!({ "Plan": append }), "plan_no_pruning").unwrap()
+        };
+        let r = with_filter(&|i| format!("(date_trunc('month'::text, events_{i}.at) = $1)"));
+        assert_eq!(r.params["column"], "at");
+        assert_eq!(
+            r.params["rewrite"],
+            "\"at\" >= $1 AND \"at\" < $1 + interval '1 month'"
+        );
+        // Фильтр не через приведение или у части партиций другая колонка — без совета.
+        let r = with_filter(&|i| format!("(events_{i}.kind = 'x'::text)"));
+        assert!(r.params.get("rewrite").is_none());
+        let r = with_filter(&|i| {
+            let col = if i == 0 { "a" } else { "b" };
+            format!("((events_{i}.{col})::date = '2026-01-01'::date)")
+        });
+        assert!(r.params.get("rewrite").is_none());
     }
 
     #[test]

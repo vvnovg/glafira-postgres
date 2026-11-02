@@ -395,3 +395,36 @@ fn spill_by_aggregate_key_has_no_index_keys() {
     assert_eq!(r.params["kind"], "sort");
     assert!(r.params.get("keys").is_none(), "{:?}", r.params);
 }
+
+/// `happened_at::date = date '2026-03-05'` по 24 партициям: в группе — первые три по имени и «ещё 21», команды по
+/// имени; отсечение не сработало из-за приведения — совет переписать диапазоном.
+#[test]
+fn partitions_sorted_by_name_and_cast_condition_rewritten_as_range() {
+    let recs = pg_advisor::plan_rules::evaluate(&load("append_partitions_analyze")).recommendations;
+    let g = recs
+        .iter()
+        .find(|r| r.id == "plan_seq_scan_filter")
+        .expect("группа");
+    assert_eq!(
+        g.params["tablesHead"],
+        "shop.events_2025_01, shop.events_2025_02, shop.events_2025_03"
+    );
+    assert_eq!(g.params["tablesMore"], 21);
+    assert_eq!(g.params["table"], "shop.events_2025_01");
+    let tables: Vec<&str> = g.params["tables"].as_str().unwrap().split(", ").collect();
+    let mut sorted = tables.clone();
+    sorted.sort();
+    assert_eq!(tables, sorted);
+    let cmds: Vec<&str> = g.command.as_deref().unwrap().lines().collect();
+    assert_eq!(cmds.len(), 24);
+    assert!(cmds[0].contains("\"events_2025_01\"") && cmds[23].contains("\"events_2026_12\""));
+    let p = recs
+        .iter()
+        .find(|r| r.id == "plan_no_pruning")
+        .expect("plan_no_pruning");
+    assert_eq!(p.params["column"], "happened_at");
+    assert_eq!(
+        p.params["rewrite"],
+        "\"happened_at\" >= '2026-03-05'::date AND \"happened_at\" < '2026-03-05'::date + 1"
+    );
+}
