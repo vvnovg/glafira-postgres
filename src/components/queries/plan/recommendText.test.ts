@@ -52,6 +52,8 @@ describe("recommendText", () => {
     expect(recommendEffect(rec("plan_spill", { kind: "sort", spaceKb: 4520, workMemKb: 6780 }))).toBe("Достаточный work_mem держит операцию в памяти");
     expect(recommendTitle(bitmap)).toBe("Битовая карта стала неточной: мало work_mem");
     expect(recommendEvidence(bitmap)).toMatch(/неточных 1\s200, точных 300/);
+    // Heap fetches могут превышать число строк (повторные обращения): не «за N из M строк», а два числа.
+    expect(recommendEvidence(rec("plan_heap_fetches", { table: "shop.balances", heapFetches: 3368, rows: 2000 }))).toBe("Index Only Scan вернул строк 2\u00a0000, обращений к heap 3\u00a0368");
     expect(recommendEvidence(pruned)).toBe("Просканировано партиций 24, из них ничего не вернули 23");
     expect(recommendEvidence(pruneNoActual)).toBe("План читает все партиции: 24");
     expect(recommendEvidence(jitPar)).toMatch(/в процессах \(2; функций: 14\)/);

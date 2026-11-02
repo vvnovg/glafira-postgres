@@ -2052,7 +2052,7 @@
     },
     "plan_heap_fetches": {
       "title": "VACUUM {{table}}: visibility map is stale",
-      "evidence": "Index Only Scan fetched {{heapFetches}} of {{rows}} rows from the heap",
+      "evidence": "Index Only Scan returned {{rows}} rows with {{heapFetches}} heap fetches",
       "effect": "VACUUM marks pages all-visible and the scan stops touching the heap",
       "risks": "Check autovacuum settings for the table"
     },

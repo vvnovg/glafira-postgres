@@ -2086,7 +2086,7 @@
     },
     "plan_heap_fetches": {
       "title": "VACUUM {{table}}: карта видимости устарела",
-      "evidence": "Index Only Scan сходил в heap за {{heapFetches}} из {{rows}} строк",
+      "evidence": "Index Only Scan вернул строк {{rows}}, обращений к heap {{heapFetches}}",
       "effect": "VACUUM пометит страницы видимыми, и скан перестанет читать heap",
       "risks": "Проверьте настройки автовакуума таблицы"
     },
