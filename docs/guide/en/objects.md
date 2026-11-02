@@ -18,11 +18,17 @@ System objects are hidden: the `pg_catalog` and `information_schema` schemas and
 
 A partitioned table has its own arrow next to the name: it expands the partitions, and the number of partitions is shown. Partitions are not repeated in the list of the schema. The size of a partitioned table is not computed in the tree (it shows a dash), because that would mean opening every partition for every such row of the list; the table tab shows it.
 
+A tree node is a single line: a long name is cut with “…”, the full name is in the tooltip, and words are not broken. The size and the number of partitions stand on the right and give way to the name, and in a narrow panel they are hidden altogether. Nested levels are indented by 11 px and joined by thin vertical guides, so a deep tree with folders stays readable. The width of the left panel changes by dragging its right edge (from 180 to 640 px) and is remembered; from the keyboard the edge moves with ←/→ (16 px, 64 with Shift), Home and End set the limits, and a double click restores the default width.
+
+To work with one branch of a large tree, choose [[ui:sidebar.focus.here]] in the menu of a folder, connection, database or schema (the menu opens with the right button or Shift+F10; a connection row has a context menu too). The tree then shows only that branch, with a path above it (“Folder › connection › database › schema”) and a [[ui:sidebar.focus.back]] button. Focus can be nested deeper, and [[ui:sidebar.focus.back]] removes the top level. If the object disappears, the focus is dropped or the tree asks you to go back; a closed connection offers to connect again. The focus is not remembered between launches.
+
 The catalog is read from one node of the connection. By default it is the leader or the primary; the connection menu can switch it to another node (see the chapter [Connections](connections.md#kinds)).
 
 ## Object tabs {#tabs}
 
 Click the name of a table, view, function or sequence in the tree (not the arrow of a partitioned table) to open its tab. Opening the same object again switches to its tab. The tab title shows the schema and the name, and next to it the kind of the object: table, partitioned table, partition, foreign table, view, materialized view, function, procedure, aggregate function, window function or sequence.
+
+The active tab is highlighted with the content background and an accent-colored bar on top; the others are muted. When there are more tabs than fit in the row, the row scrolls (with the mouse wheel too), and the active tab scrolls into view by itself on switching. To the right of the row there is a “» N” button with the number of tabs that are not fully visible: it opens a menu of those tabs (arrows and Enter to choose, Esc closes the menu). A tab title longer than 32 characters is cut with “…”, the full one is in the tooltip.
 
 Everything on the tabs is read-only. Data is read when the tab opens; [[ui:object.refresh]] reads it again. If the connection is lost and comes back, open tabs reload by themselves. If the object was dropped or renamed in the meantime, the tab says that it was not found.
 
