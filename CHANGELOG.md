@@ -2,6 +2,12 @@
 
 The Russian version is in [docs/changelog](docs/changelog/). The section of a version is shown in About as the update notes, in the interface language.
 
+## 0.5.1
+Release date: 2026-11-03.
+- EXPLAIN console: without a chosen database it now uses the connection's “Default database” instead of the first database of the server (usually `postgres`), so a query to a table of another database no longer fails with “relation … does not exist”.
+- When the server answers that a table or schema does not exist, the plan view names the database the query ran in.
+- Development: the `pg_wait_sampling` integration test picks a query that is present in the profile, so the scheduled `perf` workflow no longer fails on a fresh server.
+
 ## 0.5.0
 Release date: 2026-11-03.
 - Plan recommendations: under the plan summary, advice with evidence from the plan's numbers, the expected effect, the risks and a ready command to copy (the app never runs it): an index for a filtered Seq Scan or an Index Scan with a heavy filter (one grouped advice for the partitions of a table), a composite index, an index under ORDER BY … LIMIT, a misestimate with ANALYZE, a statistics target and extended statistics for correlated columns, sort or hash spilling to disk with a work_mem value, a stale visibility map (VACUUM), partition pruning that does not work (with a ready range condition when the filter casts the partition key), fewer parallel workers than planned, a subquery executed per row and JIT costing more than the query. «Show node» marks the related plan nodes; rules that need an executed plan are listed when the plan has none. Plans pasted into the EXPLAIN console get recommendations too.
