@@ -218,6 +218,7 @@
       "genericUnsupported": "GENERIC_PLAN needs PostgreSQL 16 or newer: enter parameter values",
       "oneStatement": "Enter exactly one statement",
       "server": "The server rejected the query: {{message}}",
+      "serverMissing": "The server rejected the query: {{message}}",
       "timeout": "The plan was not produced in time; execution was cancelled, nothing changed",
       "notAuthorized": "Not enough privileges on the query's tables: grant pg_read_all_data (14+) or SELECT",
       "notAuthorizedWrite": "Not enough privileges: EXPLAIN of a write statement needs INSERT/UPDATE/DELETE privileges on its tables even without executing it",
@@ -1520,6 +1521,7 @@
         "writeOnReplica": "A write cannot run on a replica: choose the primary",
         "writeReadOnly": "Writes are unavailable: the connection is read-only",
         "errorAt": "Error at line {{line}}, column {{column}}",
+        "missingInDatabase": "The query ran in database “{{database}}”: check that the object is in this database",
         "planGeneric": "Plan (generic)"
       },
       "confirm": {

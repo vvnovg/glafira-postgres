@@ -43,7 +43,7 @@ describe("ExplainTab", () => {
     const user = userEvent.setup();
     renderWithClient(<ExplainTab connectionId="c" member={null} database={undefined} sql={undefined} active />);
     expect(await screen.findByRole("combobox", { name: "Узел" })).toHaveValue("pg-1");
-    // База по умолчанию — первая из списка: известна, когда список прочитан.
+    // База по умолчанию — «БД по умолчанию» подключения (у фикстуры postgres).
     await waitFor(() => expect(screen.getByRole("combobox", { name: "База" })).toHaveValue("postgres"));
     await user.click(screen.getByRole("tab", { name: "Вставить план" }));
     await user.type(screen.getByRole("textbox", { name: "План (текст или JSON)" }), "[[{{]");
@@ -52,6 +52,24 @@ describe("ExplainTab", () => {
     await waitFor(() => expect(api.parsePlan).toHaveBeenCalledWith("[{]"));
     expect(await screen.findByRole("treegrid", { name: "Дерево плана" })).toBeInTheDocument();
     expect(api.explain).not.toHaveBeenCalled();
+  });
+
+  it("без базы в спеке — «БД по умолчанию» подключения, а не первая в списке сервера; ошибка «нет отношения» называет базу", async () => {
+    const base = connection({ id: "c" });
+    vi.mocked(api.listConnections).mockResolvedValue([{ ...base, pg: { ...base.pg, database: "perf" } }]);
+    vi.mocked(api.explain).mockRejectedValue({
+      code: "INVALID_INPUT",
+      key: "errors.explain.serverMissing",
+      params: { message: 'relation "st_boarding.boarding_file" does not exist' },
+      message: "The server rejected the query",
+      retryable: false,
+    });
+    const user = userEvent.setup();
+    renderWithClient(<ExplainTab connectionId="c" member={null} database={undefined} sql="SELECT 1 FROM st_boarding.boarding_file" active />);
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "База" })).toHaveValue("perf"));
+    await user.click(screen.getByRole("button", { name: "План" }));
+    await waitFor(() => expect(api.explain).toHaveBeenCalledWith("c", expect.objectContaining({ database: "perf" })));
+    expect(await screen.findByText("Запрос выполнялся в базе «perf»: проверьте, что объект в этой базе")).toBeInTheDocument();
   });
 
   it("вставленный план получает рекомендации; «Проверить гипотезу» (нужен сервер) скрыта", async () => {
@@ -197,22 +215,21 @@ describe("ExplainTab", () => {
     expect(screen.getByRole("combobox", { name: "База" })).toHaveValue("perf");
   });
 
-  it("«Вставить план» работает, пока список баз не прочитан: полноэкранной загрузки нет", async () => {
+  it("«Вставить план» и запрос работают, пока список баз не прочитан: база — из подключения", async () => {
     vi.mocked(api.listDatabases).mockReturnValue(new Promise(() => {}));
     vi.mocked(api.parsePlan).mockResolvedValue(pasted(planTree()));
     const user = userEvent.setup();
     renderWithClient(<ExplainTab connectionId="c" member={null} database={undefined} sql={undefined} active />);
     await user.click(await screen.findByRole("tab", { name: "Вставить план" }));
-    // Консоль на месте, загрузка (ждёт база) — только в скрытой панели запроса.
+    // Консоль на месте, полноэкранной загрузки нет.
     expect(screen.getByRole("heading", { level: 2, name: "Консоль EXPLAIN" })).toBeInTheDocument();
-    expect(screen.getByText("Загрузка…")).not.toBeVisible();
     await user.type(screen.getByRole("textbox", { name: "План (текст или JSON)" }), "x");
     await user.click(screen.getByRole("button", { name: "Разобрать" }));
     expect(await screen.findByRole("treegrid", { name: "Дерево плана" })).toBeInTheDocument();
-    // Режим запроса ждёт базу: вместо запуска — загрузка, поле SQL доступно.
+    // База известна из подключения («БД по умолчанию»), поэтому режим запроса не ждёт список баз сервера.
     await user.click(screen.getByRole("tab", { name: "Запрос" }));
-    expect(screen.getByText("Загрузка…")).toBeVisible();
-    expect(screen.queryByRole("button", { name: "План" })).toBeNull();
+    expect(screen.getByRole("combobox", { name: "База" })).toHaveValue("postgres");
+    expect(screen.getByRole("button", { name: "План" })).toBeInTheDocument();
   });
 
   it("повтор чтения списка баз не размонтирует запуск: показанный план остаётся", async () => {

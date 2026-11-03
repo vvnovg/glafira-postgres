@@ -172,7 +172,7 @@ async fn plan_and_analyze_read_tier_on_perf() {
         (e.code, e.key.as_str(), e.details.as_deref()),
         (
             ErrorCode::InvalidInput,
-            "errors.explain.server",
+            "errors.explain.serverMissing",
             Some("position 15")
         ),
         "{e:?}"

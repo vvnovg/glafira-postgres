@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../api/client";
 import type { AppError, ParsedPlan, PlanTree } from "../../api/types";
+import { useConnectionProfile } from "../../lib/useConnectionProfile";
 import { useTopology } from "../../lib/useConnectionEvents";
 import { tabId, useWorkspace } from "../../state/workspace";
 import { SubTabs } from "../catalog/SubTabs";
@@ -62,6 +63,7 @@ export function ExplainTab({
   const dbs = useQuery({ queryKey: ["catalog", connectionId, "databases"], queryFn: () => api.listDatabases(connectionId), enabled: live && active });
   const [node, setNode] = useState<string | null>(member ?? null);
   const [db, setDb] = useState<string | null>(database ?? null);
+  const profileDb = useConnectionProfile(connectionId)?.pg.database;
   const [sql, setSql] = useState(initialSql ?? "");
   const [source, setSource] = useState<Source>("sql");
   const [pasted, setPasted] = useState("");
@@ -93,7 +95,8 @@ export function ExplainTab({
   const leader = members.find((m) => m.role === "primary")?.name ?? members[0]?.name ?? null;
   const nodeName = node !== null && members.some((m) => m.name === node) ? node : leader;
   const dbNames = (dbs.data ?? []).map((d) => d.name);
-  const dbName = db ?? dbNames[0] ?? null;
+  // Без выбранной базы — «БД по умолчанию» подключения, а не первая в списке сервера (обычно postgres).
+  const dbName = db ?? (profileDb || null) ?? dbNames[0] ?? null;
   // База из спеки может отсутствовать в списке (удалена, список ещё не прочитан): выбор показывает её, а не пустое место.
   if (dbName !== null && !dbNames.includes(dbName)) dbNames.unshift(dbName);
   const memberInfo = members.find((m) => m.name === nodeName);

@@ -220,6 +220,7 @@
       "genericUnsupported": "GENERIC_PLAN требует PostgreSQL 16 и новее: введите значения параметров",
       "oneStatement": "Введите ровно одну инструкцию",
       "server": "Сервер отверг запрос: {{message}}",
+      "serverMissing": "Сервер отверг запрос: {{message}}",
       "timeout": "План не получен за отведённое время; выполнение прервано, изменений нет",
       "notAuthorized": "Не хватает прав на таблицы запроса: выдайте pg_read_all_data (14+) или SELECT",
       "notAuthorizedWrite": "Не хватает прав: EXPLAIN пишущей инструкции требует прав INSERT/UPDATE/DELETE на её таблицы даже без выполнения",
@@ -1544,6 +1545,7 @@
         "writeOnReplica": "Запись на реплике невозможна: выберите primary",
         "writeReadOnly": "Запись недоступна: подключение только для чтения",
         "errorAt": "Ошибка в строке {{line}}, позиция {{column}}",
+        "missingInDatabase": "Запрос выполнялся в базе «{{database}}»: проверьте, что объект в этой базе",
         "planGeneric": "План (общий)"
       },
       "confirm": {

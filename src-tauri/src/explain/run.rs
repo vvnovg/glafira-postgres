@@ -211,12 +211,22 @@ fn classify_server(e: ServerError, ctx: Context) -> Option<AppError> {
             (Some(ErrorPosition::Original(n)), Some(o)) => o.position(*n),
             _ => None,
         };
-        let err = app_err!(
-            ErrorCode::InvalidInput,
-            "errors.explain.server",
-            "The server rejected the query: {{message}}",
-            message = e.message
-        );
+        // «Нет такого отношения или схемы» — свой ключ: фронтенд называет базу, куда ушёл запрос.
+        let err = if *code == SqlState::UNDEFINED_TABLE || *code == SqlState::INVALID_SCHEMA_NAME {
+            app_err!(
+                ErrorCode::InvalidInput,
+                "errors.explain.serverMissing",
+                "The server rejected the query: {{message}}",
+                message = e.message
+            )
+        } else {
+            app_err!(
+                ErrorCode::InvalidInput,
+                "errors.explain.server",
+                "The server rejected the query: {{message}}",
+                message = e.message
+            )
+        };
         return Some(match position {
             Some(p) => err.with_details(format!("position {p}")),
             None => err,
@@ -809,6 +819,7 @@ mod tests {
             ctx(true, false),
         )
         .unwrap();
+        // «Нет такого отношения» — свой ключ: фронтенд подсказывает проверить выбранную базу.
         assert_eq!(
             (
                 e.key.as_str(),
@@ -816,7 +827,7 @@ mod tests {
                 e.details.as_deref()
             ),
             (
-                "errors.explain.server",
+                "errors.explain.serverMissing",
                 "relation \"shop.nope\" does not exist",
                 Some("position 17")
             )

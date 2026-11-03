@@ -409,6 +409,12 @@ export function PlanRunner({
         </details>
       </div>
       {error && <ErrorBanner error={error} />}
+      {/* «Нет такой таблицы или схемы» чаще всего значит, что запрос ушёл не в ту базу: называем её. */}
+      {error && error.key === "errors.explain.serverMissing" && (
+        <p className="diag-warn" role="status">
+          {t("diag.plan.run.missingInDatabase", { database })}
+        </p>
+      )}
       {place && (
         <div className="sql-error">
           <p className="muted">{t("diag.plan.run.errorAt", { line: place.line, column: place.column })}</p>

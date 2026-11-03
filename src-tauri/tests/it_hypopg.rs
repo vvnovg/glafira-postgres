@@ -70,7 +70,7 @@ async fn hypothetical_index_changes_the_plan_and_leaves_no_trace() {
         .unwrap_err();
     assert_eq!(
         (e.code, e.key.as_str()),
-        (ErrorCode::InvalidInput, "errors.explain.server"),
+        (ErrorCode::InvalidInput, "errors.explain.serverMissing"),
         "{e:?}"
     );
     assert_eq!(hypo_count(c).await, 0, "после ошибки пробы «после»");
@@ -146,5 +146,5 @@ async fn hypothesis_uses_the_search_path_of_the_query() {
         ..req
     };
     let e = hypopg::check(&st, "it", &plain).await.unwrap_err();
-    assert_eq!(e.key, "errors.explain.server", "{e:?}");
+    assert_eq!(e.key, "errors.explain.serverMissing", "{e:?}");
 }
