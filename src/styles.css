@@ -136,13 +136,13 @@ tr.clickable:hover, .row.clickable:hover { background: var(--bg-alt); }
 .env-stripe { height: 3px; flex-shrink: 0; }
 /* Строка вкладок и кнопка меню скрытых вкладок справа (вне прокрутки: иначе меню обрезалось бы). */
 .tabbar-wrap { display: flex; align-items: stretch; flex-shrink: 0; border-bottom: 1px solid var(--border); background: var(--bg-alt); }
-.tabbar { display: flex; flex: 1; min-width: 0; overflow-x: auto; }
+/* Строка вкладок прокручивается без видимой полосы (в WebKit она ложилась поверх вкладок): колесом, меню «» N» и сама —
+   к активной вкладке. Отступ слева отделяет первую вкладку от границы панели. */
+.tabbar { display: flex; flex: 1; min-width: 0; overflow-x: auto; padding-left: 8px; scrollbar-width: none; }
+.tabbar > .tab:first-child { border-left: 1px solid var(--border); }
 .tabbar-more { flex: none; align-items: center; border-left: 1px solid var(--border); }
 .tabbar-more > button { padding: 0 8px; color: var(--muted); white-space: nowrap; }
-/* Тонкая полоса прокрутки строки вкладок: при «Показывать полосы прокрутки: всегда» стандартная толстая выглядит чужеродно. */
-.tabbar::-webkit-scrollbar { height: 4px; }
-.tabbar::-webkit-scrollbar-track { background: transparent; }
-.tabbar::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--muted) 45%, transparent); border-radius: 2px; }
+.tabbar::-webkit-scrollbar { display: none; }
 .tab { display: flex; flex: none; align-items: center; gap: 4px; padding: 6px 10px; border-right: 1px solid var(--border); cursor: pointer; white-space: nowrap; color: var(--muted); }
 /* Длинный заголовок вкладки (начало текста запроса) обрезается с «…», полностью — в подсказке вкладки. */
 .tab > button[role="tab"] { border: none; background: none; padding: 0; font: inherit; color: inherit; cursor: pointer; max-width: 32ch; overflow: hidden; text-overflow: ellipsis; }

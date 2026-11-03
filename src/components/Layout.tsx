@@ -13,7 +13,7 @@ import { i18n } from "../i18n";
 import { TabContent } from "./TabContent";
 import { useConnectionEvents } from "../lib/useConnectionEvents";
 import { useHelpShortcut } from "../lib/useHelpShortcut";
-import { hiddenTabIds } from "../lib/tabOverflow";
+import { hiddenTabIds, revealScrollLeft } from "../lib/tabOverflow";
 
 function tabTitle(tab: Tab, byId: Map<string, ConnectionProfile>): string {
   const connId = "connectionId" in tab ? tab.connectionId : null;
@@ -54,6 +54,8 @@ function tabTitle(tab: Tab, byId: Map<string, ConnectionProfile>): string {
 function useTabOverflow(tabIds: string[], activeId: string | null) {
   const stripRef = useRef<HTMLElement>(null);
   const [hidden, setHidden] = useState<string[]>([]);
+  const activeRef = useRef(activeId);
+  activeRef.current = activeId;
   const measure = useCallback(() => {
     const strip = stripRef.current;
     if (!strip) return;
@@ -64,26 +66,42 @@ function useTabOverflow(tabIds: string[], activeId: string | null) {
     const next = hiddenTabIds(strip.getBoundingClientRect(), tabs);
     setHidden((prev) => (prev.length === next.length && prev.every((id, i) => id === next[i]) ? prev : next));
   }, []);
+  /** Активная вкладка — в видимую часть строки (смещение считается вручную, см. revealScrollLeft), затем пересчёт скрытых. */
+  const reveal = useCallback(() => {
+    const strip = stripRef.current;
+    const id = activeRef.current;
+    if (strip && id !== null) {
+      const el = strip.querySelector<HTMLElement>(`[data-tab-id="${CSS.escape(id)}"]`);
+      if (el) {
+        const next = revealScrollLeft(strip.getBoundingClientRect(), el.getBoundingClientRect(), strip.scrollLeft);
+        if (next !== strip.scrollLeft) strip.scrollLeft = next;
+      }
+    }
+    measure();
+  }, [measure]);
   const key = tabIds.join("\n");
-  useLayoutEffect(measure, [measure, key]);
+  // При выборе вкладки, открытии новой и закрытии: сразу после раскладки и ещё раз в следующем кадре (шрифт и ширина
+  // вкладок в WebKit могут досчитаться позже).
+  useLayoutEffect(() => {
+    reveal();
+    if (typeof requestAnimationFrame === "undefined") return;
+    const frame = requestAnimationFrame(reveal);
+    return () => cancelAnimationFrame(frame);
+  }, [reveal, activeId, key]);
   useEffect(() => {
     const strip = stripRef.current;
     if (!strip) return;
+    // Прокрутка пользователем только пересчитывает скрытые; изменение размера окна или строки — ещё и возвращает активную.
     strip.addEventListener("scroll", measure, { passive: true });
-    window.addEventListener("resize", measure);
-    const ro = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    window.addEventListener("resize", reveal);
+    const ro = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(reveal);
     ro?.observe(strip);
     return () => {
       strip.removeEventListener("scroll", measure);
-      window.removeEventListener("resize", measure);
+      window.removeEventListener("resize", reveal);
       ro?.disconnect();
     };
-  }, [measure]);
-  useEffect(() => {
-    if (activeId === null) return;
-    const el = stripRef.current?.querySelector<HTMLElement>(`[data-tab-id="${CSS.escape(activeId)}"]`);
-    el?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
-  }, [activeId, key]);
+  }, [measure, reveal]);
   return { stripRef, hidden };
 }
 

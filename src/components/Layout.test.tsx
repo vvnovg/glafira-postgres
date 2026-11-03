@@ -268,14 +268,52 @@ describe("Layout: переполнение строки вкладок", () => {
     delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
   });
 
-  it("активная вкладка прокручивается в видимую часть строки", () => {
-    const scroll = vi.fn();
-    Element.prototype.scrollIntoView = scroll;
+  /** Прокрутка строки вкладок: смещение учитывается в положении вкладок, записи scrollLeft копятся. */
+  const scrollableStrip = () => {
+    const writes: number[] = [];
+    let scrollLeft = 0;
+    rects = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const rect = (left: number, width: number) => ({ left, right: left + width, width, top: 0, bottom: 20, height: 20, x: left, y: 0, toJSON: () => ({}) }) as DOMRect;
+      if (this.getAttribute("role") === "tablist") {
+        if (!Object.getOwnPropertyDescriptor(this, "scrollLeft")) {
+          Object.defineProperty(this, "scrollLeft", {
+            configurable: true,
+            get: () => scrollLeft,
+            set: (v: number) => {
+              scrollLeft = v;
+              writes.push(v);
+            },
+          });
+        }
+        return rect(0, 250);
+      }
+      const id = this.dataset.tabId;
+      if (id) return rect(useWorkspace.getState().tabs.findIndex((t) => t.id === id) * 100 - scrollLeft, 100);
+      return rect(0, 0);
+    });
+    return { writes, get scrollLeft() { return scrollLeft; } };
+  };
+
+  it("активная вкладка прокручивается в видимую часть: при выборе, при открытии новой и при изменении размера окна", () => {
+    const strip = scrollableStrip();
     renderWithClient(<Layout />);
     act(() => useWorkspace.getState().activate("help"));
-    expect(scroll).toHaveBeenCalled();
-    const target = scroll.mock.contexts[scroll.mock.contexts.length - 1] as HTMLElement;
-    expect(within(target).getByRole("tab", { name: "Справка" })).toHaveAttribute("aria-selected", "true");
+    // Третья вкладка (200…300) в строке 0…250: прокрутка на 50 + отступ 8.
+    expect(strip.scrollLeft).toBe(58);
+    act(() => useWorkspace.getState().activate("settings"));
+    expect(strip.scrollLeft).toBe(0);
+    act(() => useWorkspace.getState().open({ kind: "about" }));
+    expect(strip.scrollLeft).toBe(0 + 0);
+    act(() => useWorkspace.setState({ tabs: [...useWorkspace.getState().tabs, { kind: "settings", id: "s2" } as never], activeId: "s2" }));
+    expect(strip.scrollLeft).toBe(300 + 100 - 250 + 8);
+    // Пользователь прокрутил строку к началу; окно сузили — активная снова в видимой части.
+    strip.writes.length = 0;
+    const nav = screen.getByRole("tablist");
+    nav.scrollLeft = 0;
+    act(() => {
+      window.dispatchEvent(new Event("resize"));
+    });
+    expect(strip.scrollLeft).toBe(158);
   });
 
   it("скрытые вкладки — в меню за кнопкой у строки; выбор пункта делает вкладку активной, Esc закрывает меню", async () => {
