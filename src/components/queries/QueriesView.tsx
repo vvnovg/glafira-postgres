@@ -403,21 +403,24 @@ export function QueriesView({
                   {rows.map((r) => (
                     <tr key={QUERY_KEY_ID(r.key)}>
                       <td className="diag-query-cell" title={r.text ?? undefined}>
-                        <button
-                          type="button"
-                          className="link mono"
-                          onClick={() => openQuery(r)}
-                          disabled={reportMember === null || r.datname === null}
-                          title={r.datname === null ? t("diag.queries.goneHint") : undefined}
-                        >
-                          {queryTitle(r.text, r.key.queryId, 90)}
-                        </button>
-                        {r.own && (
-                          <span className="kind-badge" title={t("diag.queries.ownHint")}>
-                            {t("diag.queries.own")}
-                          </span>
-                        )}
-                        {r.textTruncated && <span className="muted"> {t("diag.queries.truncated")}</span>}
+                        {/* Значок «Глафира» — до текста и не сжимается: «…» получает только текст запроса. */}
+                        <span className="query-cell">
+                          {r.own && (
+                            <span className="kind-badge" title={t("diag.queries.ownHint")}>
+                              {t("diag.queries.own")}
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            className="link mono"
+                            onClick={() => openQuery(r)}
+                            disabled={reportMember === null || r.datname === null}
+                            title={r.datname === null ? t("diag.queries.goneHint") : undefined}
+                          >
+                            {queryTitle(r.text, r.key.queryId, 90)}
+                          </button>
+                          {r.textTruncated && <span className="muted">{t("diag.queries.truncated")}</span>}
+                        </span>
                       </td>
                       {cols.map((c) => (
                         <td key={c.id} className="num">

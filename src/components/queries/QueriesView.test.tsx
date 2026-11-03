@@ -240,6 +240,11 @@ describe("QueriesView", () => {
     renderWithClient(view());
     const own = (await screen.findByText("select own")).closest("td")!;
     expect(within(own).getByText("Глафира")).toHaveAttribute("title", "Запрос самой Глафиры: не участвует в находках");
+    // Значок — до текста и не внутри обрезаемой «…» кнопки: длинный текст его не сжимает.
+    const badge = within(own).getByText("Глафира");
+    const text = within(own).getByRole("button", { name: "select own" });
+    expect(text).not.toContainElement(badge);
+    expect(badge.compareDocumentPosition(text) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.getByRole("button", { name: "select gone" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "select gone" })).toHaveAttribute("title", "Запроса уже нет в pg_stat_statements (сброс или вытеснение)");
     expect(within(own).queryByText("Запроса уже нет", { exact: false })).toBeNull();

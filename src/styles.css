@@ -384,6 +384,10 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 /* Инструмент «Запросы»: текст запроса в ячейке — одной строкой, без разрыва таблицы. */
 .diag-query-cell { max-width: 480px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .diag-query-cell button { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+/* Содержимое ячейки запроса: значок «Глафира» и пометка «обрезан» не сжимаются, «…» — только у текста запроса. */
+.query-cell { display: flex; align-items: baseline; gap: 4px; min-width: 0; max-width: 100%; }
+.query-cell > .kind-badge, .query-cell > .muted { flex: none; }
+.query-cell > button, .query-cell > .query-cell-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Снимки pgss (P3b): панель под фильтрами «Запросов», итог сравнения, подпись режима «между снимками». */
 .snapshots-panel { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
 .snapshots-panel h3 { margin: 0; font-size: 1em; }

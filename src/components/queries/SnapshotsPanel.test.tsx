@@ -98,6 +98,11 @@ describe("SnapshotsPanel", () => {
     // Запрос самой Глафиры помечен.
     const fresh = screen.getByRole("table", { name: "Новые" });
     expect(within(fresh).getByText("Глафира")).toBeInTheDocument();
+    // Значок — до текста и вне обрезаемого «…» текста запроса.
+    const badge = within(fresh).getByText("Глафира");
+    const text = within(fresh).getByText("/* glafira */ select 1");
+    expect(text).not.toContainElement(badge);
+    expect(badge.compareDocumentPosition(text) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // Снимки без pg_stat_kcache — колонки CPU нет.
     expect(within(fresh).queryByRole("columnheader", { name: "CPU" })).toBeNull();
     await user.click(screen.getByRole("button", { name: "Топ между снимками" }));

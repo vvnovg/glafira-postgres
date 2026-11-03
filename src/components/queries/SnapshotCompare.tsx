@@ -8,12 +8,15 @@ function QueryCell({ stat }: { stat: QueryStat }) {
   const { t } = useTranslation();
   return (
     <td className="diag-query-cell mono" title={stat.text ?? undefined}>
-      {queryTitle(stat.text, stat.key.queryId, 80)}
-      {stat.own && (
-        <span className="kind-badge" title={t("diag.queries.ownHint")}>
-          {t("diag.queries.own")}
-        </span>
-      )}
+      {/* Значок «Глафира» — до текста и не сжимается: «…» получает только текст запроса. */}
+      <span className="query-cell">
+        {stat.own && (
+          <span className="kind-badge" title={t("diag.queries.ownHint")}>
+            {t("diag.queries.own")}
+          </span>
+        )}
+        <span className="query-cell-text">{queryTitle(stat.text, stat.key.queryId, 80)}</span>
+      </span>
     </td>
   );
 }
