@@ -2,6 +2,21 @@
 
 The Russian version is in [docs/changelog](docs/changelog/). The section of a version is shown in About as the update notes, in the interface language.
 
+## 0.5.0
+Release date: 2026-11-03.
+- Plan recommendations: under the plan summary, advice with evidence from the plan's numbers, the expected effect, the risks and a ready command to copy (the app never runs it): an index for a filtered Seq Scan or an Index Scan with a heavy filter (one grouped advice for the partitions of a table), a composite index, an index under ORDER BY … LIMIT, a misestimate with ANALYZE, a statistics target and extended statistics for correlated columns, sort or hash spilling to disk with a work_mem value, a stale visibility map (VACUUM), partition pruning that does not work (with a ready range condition when the filter casts the partition key), fewer parallel workers than planned, a subquery executed per row and JIT costing more than the query. «Show node» marks the related plan nodes; rules that need an executed plan are listed when the plan has none. Plans pasted into the EXPLAIN console get recommendations too.
+- Hypothesis check with hypopg: «Check hypothesis» creates the suggested index as a virtual one in a read-only transaction, builds the plan again and shows the cost before and after and whether the plan uses the index; nothing is created on the server.
+- pg_stat_statements snapshots: take a snapshot of a node, compare two (degraded, faster, new and gone queries, with the change written as «2.5 times faster»), and open the top «between snapshots». Snapshots are stored only on this computer (owner-only permissions), are removed with their connection and stay available when the connection is closed; a statistics reset between snapshots is marked.
+- pg_stat_kcache: CPU and disk read/write per query in the top, the query card, snapshots and «Copy for LLM», with sorting by CPU; the footer says when pg_stat_kcache was reset separately from pg_stat_statements.
+- pg_wait_sampling: the exact wait profile of a query in its card (cached for 30 seconds); without the extension the card shows waits from the sessions sampler and says why there are none.
+- Readiness checklist: what hypopg, pg_stat_kcache and pg_wait_sampling give and how to enable them for the server's actual state — install the PGDG package, add the library to shared_preload_libraries and restart, or just CREATE EXTENSION.
+- Glafira's own queries carry a `/* glafira */` comment; in the Queries top they are marked «Glafira» (also the EXPLAIN console wrappers) and never produce findings.
+- A write-tier EXPLAIN ANALYZE runs only after an explicit confirmation in the dialog; the app refuses it otherwise.
+- Interface: the connection tree shows one line per object with long names cut and shown on hover, guide lines for levels, a resizable panel width and «Focus here» for a folder, connection, database or schema; the active tab is highlighted, kept in view and hidden tabs are reachable from a menu; tool headers keep «Refresh» visible in a narrow window.
+- Plan tree: «hot» marks only nodes with at least 10 % of the time; nodes stopped early by LIMIT are no longer shown as misestimated.
+- Guide: «Plan recommendations», «Snapshots» and «Extensions» sections in the «Queries» chapter; the administrator guide covers enabling the extensions and resetting pg_stat_kcache together with pg_stat_statements.
+- CI: Apple Silicon builds moved to macos-15.
+
 ## 0.4.0
 Release date: 2026-11-01.
 - Heavy queries: a “Queries” tool in the “Diagnostics” group shows the top of `pg_stat_statements` (versions 1.8–1.11, PostgreSQL 13–18) in two modes: “since reset” (cumulative) and “last 5, 15 or 60 minutes” from a per-node sampler that reads the counters once a minute while the tool or a query card is open and keeps up to an hour of deltas in memory. Columns: share, total and mean time, calls, rows per call, hit %, reads, temp, WAL, I/O, planning, JIT, stddev and max; sorting by any of them, filters by database, top level only, the number of rows, and a search by query text (on the server, case-insensitive). The window badge shows how many minutes were actually collected.
