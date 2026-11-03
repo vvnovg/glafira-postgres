@@ -51,7 +51,13 @@ function itemText(item: ReadinessItem, t: Translate) {
           : t(`readiness.${item.id}.affects`, item.params),
     // Шаги включения — по факту состояния сервера (`params.enable`: пакет → предзагрузка → CREATE EXTENSION).
     enable: item.status === "ok" || !item.params.enable ? null : t(`readiness.${item.id}.enable.${item.params.enable}`, item.params),
-    note: item.status === "ok" || !item.params.hint ? null : t(`readiness.${item.id}.notes.${item.params.hint}`, { defaultValue: "" }) || null,
+    // Примечание о порядке в shared_preload_libraries не нужно, когда библиотека уже загружена (`enable: create`).
+    note:
+      item.status === "ok" || !item.params.hint
+        ? null
+        : t(`readiness.${item.id}.notes.${item.params.hint}${item.params.enable === "create" ? "_loaded" : ""}`, {
+            defaultValue: t(`readiness.${item.id}.notes.${item.params.hint}`, { defaultValue: "" }),
+          }) || null,
   };
 }
 

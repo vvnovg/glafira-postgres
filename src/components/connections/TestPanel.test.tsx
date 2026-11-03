@@ -255,6 +255,8 @@ describe("TestPanel", () => {
     expect(screen.getByText("Включение: только CREATE EXTENSION в этой базе, перезапуск не нужен.")).toBeInTheDocument();
     expect(screen.getByText(/добавить pg_wait_sampling в shared_preload_libraries и перезапустить сервер/)).toBeInTheDocument();
     expect(screen.getByText(/EXECUTE на pg_stat_kcache\(\)/)).toBeInTheDocument();
+    // Библиотека уже загружена — примечания о порядке в shared_preload_libraries нет.
+    expect(screen.queryByText(/pg_stat_kcache идёт после pg_stat_statements/)).toBeNull();
     // Ячейка команды — со своим классом: перенос только по пробелам, без разрыва слов.
     const fix = screen.getByText("CREATE EXTENSION IF NOT EXISTS pg_stat_kcache;");
     expect(fix.closest("td")).toHaveClass("readiness-fix");

@@ -725,6 +725,7 @@
       },
       "notes": {
         "pg_stat_kcache": "In shared_preload_libraries pg_stat_kcache goes after pg_stat_statements. If the role lacks EXECUTE on pg_stat_kcache(), grant it.",
+        "pg_stat_kcache_loaded": "If the role lacks EXECUTE on pg_stat_kcache(), grant it.",
         "pg_wait_sampling": "For the per-query profile set pg_wait_sampling.profile_queries = top (on for old versions); needs version 1.1+. If the role lacks EXECUTE on the profile functions, grant it."
       }
     }
