@@ -66,7 +66,8 @@ export function ActionsJournal({ connectionId, active = true }: { connectionId: 
   const rows = q.data ?? [];
   const keys = rowKeys(rows);
   return (
-    <div className="diag-view">
+    // Вкладка журнала — страница, как вкладки инструментов: поля от краёв (.page), а не вплотную к панели и краю окна.
+    <div className="page diag-view">
       <div className="toolbar">
         <h2>{t("actions.journal.title")}</h2>
         <button type="button" onClick={() => void q.refetch()}>
