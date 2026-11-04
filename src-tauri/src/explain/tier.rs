@@ -1,11 +1,15 @@
 //! Ярус EXPLAIN ANALYZE (спец. P3 §8.3): запись — `ModifyTable` в плане (в том числе внутри CTE), инструкция
 //! `CREATE … AS` или вызов административной функции из `ADMIN_FUNCTIONS` в VERBOSE-плане пробы; иначе чтение.
 //! Ошибку яруса страхует транзакция `READ ONLY`, но административные функции она не останавливает (спец. §15 п. 10).
+//! Список и поиск вызовов — `pg_advisor::functions` (спец. P4 §7.2: тот же список входит в запрещённые для SQL модели).
 
+use pg_advisor::functions::calls_in_plan;
 use pg_advisor::plan::{PlanTree, has_modify_table};
 use serde::Serialize;
 
 use crate::explain::params::first_word;
+
+pub use pg_advisor::functions::ADMIN_FUNCTIONS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -14,86 +18,9 @@ pub enum Tier {
     Write,
 }
 
-/// Функции, которые выполняются и внутри `BEGIN READ ONLY`: завершают сессии, сбрасывают статистику, перечитывают
-/// конфигурацию, удаляют и создают слоты, переключают WAL, повышают реплику, ходят наружу. EXPLAIN ANALYZE такого
-/// `SELECT` выполнил бы функцию ярусом чтения — без подтверждения и журнала. Список закрывает случай частично: вызовы
-/// внутри тела другой функции или триггера в плане не видны.
-pub const ADMIN_FUNCTIONS: &[&str] = &[
-    "pg_cancel_backend",
-    "pg_terminate_backend",
-    "pg_reload_conf",
-    "pg_rotate_logfile",
-    "pg_stat_reset",
-    "pg_stat_reset_shared",
-    "pg_stat_reset_single_table_counters",
-    "pg_stat_reset_single_function_counters",
-    "pg_stat_reset_slru",
-    "pg_stat_reset_replication_slot",
-    "pg_stat_reset_subscription_stats",
-    "pg_stat_statements_reset",
-    "pg_stat_kcache_reset",
-    "pg_wait_sampling_reset_profile",
-    "pg_create_physical_replication_slot",
-    "pg_create_logical_replication_slot",
-    "pg_drop_replication_slot",
-    "pg_copy_physical_replication_slot",
-    "pg_copy_logical_replication_slot",
-    "pg_replication_slot_advance",
-    "pg_switch_wal",
-    "pg_create_restore_point",
-    "pg_promote",
-    "pg_wal_replay_pause",
-    "pg_wal_replay_resume",
-    "pg_log_backend_memory_contexts",
-    "pg_logical_emit_message",
-    "pg_file_write",
-    "pg_file_rename",
-    "pg_file_unlink",
-    "lo_export",
-    "dblink",
-    "dblink_exec",
-    "dblink_send_query",
-    "http",
-    "http_get",
-    "http_post",
-    "http_put",
-    "http_patch",
-    "http_delete",
-    "http_head",
-];
-
-const fn ident_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_' || c == '$'
-}
-
-/// Вызов `name(` в тексте выражения плана: перед именем — не символ идентификатора (точка схемы допустима).
-fn calls(text: &str, name: &str) -> bool {
-    text.match_indices(name).any(|(i, _)| {
-        let before_ok = text[..i].chars().next_back().is_none_or(|c| !ident_char(c));
-        let after = text[i + name.len()..].trim_start();
-        before_ok && after.starts_with('(')
-    })
-}
-
 /// Административные функции, вызванные в VERBOSE-плане пробы (`Output`, условия, `Function Call`…): все строки JSON.
-pub fn admin_calls(raw: &serde_json::Value) -> Vec<&'static str> {
-    fn walk(v: &serde_json::Value, found: &mut Vec<&'static str>) {
-        match v {
-            serde_json::Value::String(s) => {
-                for name in ADMIN_FUNCTIONS {
-                    if !found.contains(name) && calls(s, name) {
-                        found.push(name);
-                    }
-                }
-            }
-            serde_json::Value::Array(a) => a.iter().for_each(|x| walk(x, found)),
-            serde_json::Value::Object(o) => o.values().for_each(|x| walk(x, found)),
-            _ => {}
-        }
-    }
-    let mut found = Vec::new();
-    walk(raw, &mut found);
-    found
+pub fn admin_calls(raw: &serde_json::Value) -> Vec<String> {
+    calls_in_plan(raw, ADMIN_FUNCTIONS)
 }
 
 pub fn tier_of(tree: &PlanTree, sql: &str, raw: &serde_json::Value) -> Tier {

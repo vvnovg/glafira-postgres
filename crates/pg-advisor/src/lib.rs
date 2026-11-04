@@ -6,6 +6,7 @@
 pub mod ash;
 pub mod failover;
 pub mod findings;
+pub mod functions;
 pub mod locktree;
 pub mod pgss;
 pub mod plan;
