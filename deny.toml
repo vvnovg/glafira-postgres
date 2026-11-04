@@ -1,5 +1,5 @@
 # Лицензии зависимостей: `cargo deny --manifest-path <крейт>/Cargo.toml --config deny.toml check licenses`
-# для src-tauri и crates/pg-advisor (так же в CI). Белый список — только разрешительные лицензии;
+# для src-tauri, crates/pg-advisor и crates/glafira-mcp-core (так же в CI). Белый список — только разрешительные лицензии;
 # MPL-2.0 — копилефт на уровне файла, совместима, пока файлы этих крейтов не изменяются.
 # C-библиотеки, которые собирают openssl-src (OpenSSL 3, feature vendored у openssl/postgres-openssl),
 # aws-lc-sys (AWS-LC для reqwest/rustls) и pg_query (libpg_query с исходниками парсера PostgreSQL, upb и xxHash —
