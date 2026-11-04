@@ -40,11 +40,12 @@ jobs:
           workspaces: |
             src-tauri -> target
             crates/pg-advisor -> target
-      - name: Системные зависимости Tauri
+      - name: Системные зависимости Tauri и libclang
         # cmake не нужен: aws-lc-sys собирается крейтом cc, а vendored OpenSSL — Perl и make из образа раннера.
+        # libclang-dev — для bindgen: pg_query (pg-advisor) генерирует привязки к libpg_query во время сборки.
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libsecret-1-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libsecret-1-dev libclang-dev
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
       - run: pnpm test:scripts
@@ -113,10 +114,26 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # ветка stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          workspaces: src-tauri -> target
+          workspaces: |
+            src-tauri -> target
+            crates/pg-advisor -> target
+      # bindgen (pg_query в pg-advisor) грузит libclang во время сборки. macOS — libclang из Xcode образа раннера;
+      # windows-2022 — LLVM в C:\Program Files\LLVM (есть в образе): путь задаётся явно, чтобы clang-sys не взял копию
+      # из Visual Studio. Установки из сети нет намеренно: пропадёт LLVM из образа — шаг упадёт с понятной ошибкой.
+      - name: libclang для bindgen (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = "C:\Program Files\LLVM\bin"
+          if (-not (Test-Path "$dir\libclang.dll")) { Write-Output "::error::нет $dir\libclang.dll: LLVM в образе раннера не найден"; exit 1 }
+          & "$dir\clang.exe" --version
+          "LIBCLANG_PATH=$dir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
       - run: pnpm build
+      # Парсер SQL (pg_query) — C-код, собранный на этой ОС: тесты pg-advisor проверяют, что он не только собирается.
+      - name: pg-advisor (pg_query на платформе)
+        run: cargo test --manifest-path crates/pg-advisor/Cargo.toml
       - name: Unit-тесты Rust
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib
       - run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets

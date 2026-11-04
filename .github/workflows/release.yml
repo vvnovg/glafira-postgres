@@ -106,12 +106,23 @@ jobs:
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
+      # bindgen (pg_query в pg-advisor) грузит libclang во время сборки; на Windows — LLVM из образа windows-2022,
+      # без загрузок из сети (релиз собирается только из lock-файлов). macOS — libclang из Xcode образа раннера.
+      - name: libclang для bindgen (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = "C:\Program Files\LLVM\bin"
+          if (-not (Test-Path "$dir\libclang.dll")) { Write-Output "::error::нет $dir\libclang.dll: LLVM в образе раннера не найден"; exit 1 }
+          & "$dir\clang.exe" --version
+          "LIBCLANG_PATH=$dir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Системные зависимости (Linux)
         if: runner.os == 'Linux'
         # cmake и NASM не нужны: aws-lc-sys собирается крейтом cc, vendored OpenSSL — Perl и make из образа раннера.
+        # libclang-dev — для bindgen: pg_query (pg-advisor) генерирует привязки к libpg_query во время сборки.
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libsecret-1-dev rpm
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libsecret-1-dev rpm libclang-dev
       - run: pnpm install --frozen-lockfile
       # Секреты Apple — только в env шага tauri-action (не в GITHUB_ENV: иначе их видели бы все
       # следующие шаги). Пустые APPLE_* ломают сборку (bundler импортирует пустой сертификат),

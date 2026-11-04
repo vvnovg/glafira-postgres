@@ -34,10 +34,11 @@ jobs:
         with:
           workspaces: |
             src-tauri -> target
-      - name: Системные зависимости Tauri
+      - name: Системные зависимости Tauri и libclang
+        # libclang-dev — для bindgen: pg_query (pg-advisor) генерирует привязки к libpg_query во время сборки.
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libsecret-1-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libsecret-1-dev libclang-dev
       # Сборка фронтенда: контекст Tauri в тестовых бинарниках требует dist.
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
