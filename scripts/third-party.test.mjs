@@ -80,3 +80,15 @@ test("render: три раздела, счётчики, C-библиотеки и
   assert.ok(md.includes("| react | 19.1.0 | MIT | https://react.dev |"));
   assert.ok(md.endsWith("\n"));
 });
+
+test("C_LIBRARIES: libpg_query и вкомпилированный в него код (pg_query в pg-advisor, спец. P4 §12)", () => {
+  const byName = Object.fromEntries(C_LIBRARIES.map((l) => [l.name, l]));
+  assert.equal(byName["libpg_query"]?.license, "BSD-3-Clause");
+  assert.equal(byName["PostgreSQL parser (in libpg_query)"]?.license, "PostgreSQL");
+  assert.equal(byName["upb (in libpg_query)"]?.license, "BSD-3-Clause");
+  assert.equal(byName["utf8_range (in upb)"]?.license, "MIT");
+  assert.equal(byName["xxHash (in libpg_query)"]?.license, "BSD-2-Clause");
+  for (const name of ["libpg_query", "PostgreSQL parser (in libpg_query)", "upb (in libpg_query)", "utf8_range (in upb)", "xxHash (in libpg_query)"]) {
+    assert.match(byName[name].note, /pg_query/, name);
+  }
+});

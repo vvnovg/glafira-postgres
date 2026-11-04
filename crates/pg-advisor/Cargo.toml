@@ -2,11 +2,15 @@
 name = "pg-advisor"
 version = "0.1.0"
 edition = "2024"
-description = "Правила Glafira for PostgreSQL без ввода-вывода: готовность (P1), находки и данные инструментов диагностики (P2)"
+description = "Правила Glafira for PostgreSQL без ввода-вывода: готовность (P1), находки и данные инструментов диагностики (P2), разбор и проверка SQL (P4)"
 license = "Apache-2.0"
 repository = "https://github.com/vvnovg/glafira-postgres"
 publish = false
 
 [dependencies]
+# Разбор SQL от модели деревом PostgreSQL 18 (спец. P4 §7.1). Собирает C-код libpg_query крейтом cc и привязки
+# bindgen: во время сборки нужен libclang (ubuntu — libclang-dev, macOS — Xcode / Command Line Tools,
+# Windows — LLVM, путь в LIBCLANG_PATH). Лицензии вкомпилированного C-кода — в THIRD_PARTY.md (C libraries).
+pg_query = "18.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
