@@ -2,9 +2,15 @@
 //! и тела `list_tools` из `server/mod.rs` Glafira for Kafka в [`SessionCtx`] — его получает сервер сессии крейта
 //! приложения. Порядок вызова: опознание клиента → право (`Gate::access`) → лимит частоты → отметка «идёт вызов» →
 //! тело → JSON-объект не больше 100 КБ → ответ или ошибка → запись в журнал.
+//!
+//! Тело вызова и ожидание слотов живут не дольше сессии: rmcp выполняет обработчик запроса в отдельной задаче и при
+//! закрытии сессии её не обрывает, поэтому `call` и `db_slots` сами ждут отмены сессии (отключение, отклонение
+//! клиента, остановка сервера, закрытие потока) и сбрасывают тело — слоты и `LongGuard` освобождаются сразу, а
+//! вызов пишется в журнал с кодом `mcp_disabled` раньше `sessionEnded`.
 
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rmcp::RoleServer;
 use rmcp::model::{
@@ -13,7 +19,8 @@ use rmcp::model::{
 };
 use rmcp::service::RequestContext;
 use serde_json::{Map, Value};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
+use tokio_util::sync::CancellationToken;
 
 use crate::audit::{AuditConnection, AuditEvent, CallRecord, Outcome, truncate_args};
 use crate::error::ToolError;
@@ -64,6 +71,10 @@ pub struct SessionCtx {
     id: String,
     /// Слоты операций с базой этой сессии.
     local: Arc<Semaphore>,
+    /// Отмена сессии (тот же токен, что у записи реестра и у `serve_with_ct`).
+    cancel: CancellationToken,
+    /// Число вызовов сессии, ещё не записанных в журнал: сессия закрывается после них.
+    running: Arc<watch::Sender<usize>>,
 }
 
 /// Отметка «идёт длительная операция»; снимается при сбросе.
@@ -99,6 +110,22 @@ impl Drop for CallFlag {
     }
 }
 
+/// Вызов, ещё не записанный в журнал (`SessionCtx::running`); снимается при любом выходе.
+struct Running(Arc<watch::Sender<usize>>);
+
+impl Running {
+    fn new(counter: &Arc<watch::Sender<usize>>) -> Self {
+        counter.send_modify(|n| *n += 1);
+        Self(counter.clone())
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.0.send_modify(|n| *n = n.saturating_sub(1));
+    }
+}
+
 fn capped(s: &str) -> String {
     s.trim().chars().take(MAX_CLIENT_FIELD_CHARS).collect()
 }
@@ -123,12 +150,24 @@ fn tool_error(e: &ToolError) -> CallToolResult {
 }
 
 impl SessionCtx {
-    pub(crate) fn new(shared: Arc<Shared>, id: String) -> Self {
+    pub(crate) fn new(shared: Arc<Shared>, id: String, cancel: CancellationToken) -> Self {
         Self {
             shared,
             id,
             local: Arc::new(Semaphore::new(SESSION_CONCURRENCY)),
+            cancel,
+            running: Arc::new(watch::Sender::new(0)),
         }
+    }
+
+    /// Закрытие сессии: отменяет её (тела вызовов сбрасываются) и ждёт, пока вызовы запишутся в журнал, не дольше
+    /// `within`. Возвращает `false`, если не дождался.
+    pub(crate) async fn close(&self, within: Duration) -> bool {
+        self.cancel.cancel();
+        let mut idle = self.running.subscribe();
+        tokio::time::timeout(within, idle.wait_for(|n| *n == 0))
+            .await
+            .is_ok()
     }
 
     pub fn session_id(&self) -> &str {
@@ -174,12 +213,6 @@ impl SessionCtx {
         let _ = self.shared.gate.access(view);
     }
 
-    fn cancel_session(&self) {
-        if let Some(e) = self.shared.sessions().get(&self.id) {
-            e.cancel.cancel();
-        }
-    }
-
     /// Право, лимит частоты и отметка «идёт вызов».
     fn admit(&self, view: &SessionView) -> Result<CallFlag, ToolError> {
         match self.shared.gate.access(view) {
@@ -191,7 +224,7 @@ impl SessionCtx {
                 ));
             }
             SessionAccess::Rejected => {
-                self.cancel_session();
+                self.cancel.cancel();
                 return Err(ToolError::new(
                     "client_rejected",
                     "The user rejected this MCP client in Glafira",
@@ -232,8 +265,17 @@ impl SessionCtx {
         Ok(LongGuard { ctx: self.clone() })
     }
 
-    /// Слоты параллельности операции с базой: сначала сессии (2), затем всех сессий (4).
+    /// Слоты параллельности операции с базой: сначала сессии (2), затем всех сессий (4). Ожидание обрывается
+    /// закрытием сессии (`mcp_disabled`).
     pub async fn db_slots(&self) -> Result<DbSlots, ToolError> {
+        tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => Err(closed()),
+            r = self.acquire_slots() => r,
+        }
+    }
+
+    async fn acquire_slots(&self) -> Result<DbSlots, ToolError> {
         let local = self
             .local
             .clone()
@@ -253,7 +295,9 @@ impl SessionCtx {
         })
     }
 
-    /// Общая обвязка инструмента: право, лимит, предел размера, журнал, ответ или ошибка для LLM.
+    /// Общая обвязка инструмента: право, лимит, предел размера, журнал, ответ или ошибка для LLM. Закрытие сессии
+    /// сбрасывает тело (его слоты и `LongGuard` освобождаются) и отвечает `mcp_disabled`; отмена запроса клиентом
+    /// (`notifications/cancelled`) тело не сбрасывает — её видит само тело в `rctx.ct`.
     pub async fn call<Fut>(
         &self,
         rctx: &RequestContext<RoleServer>,
@@ -263,10 +307,15 @@ impl SessionCtx {
     where
         Fut: Future<Output = Result<CallOk, ToolError>>,
     {
+        let _running = Running::new(&self.running);
         let started = tokio::time::Instant::now();
         let view = self.identify(rctx.client_info());
         let result = match self.admit(&view) {
-            Ok(_flag) => body.await,
+            Ok(_flag) => tokio::select! {
+                biased;
+                _ = self.cancel.cancelled() => Err(closed()),
+                r = body => r,
+            },
             Err(e) => Err(e),
         };
         let result = result.and_then(|ok| {

@@ -18,6 +18,9 @@ use crate::endpoint::{BoxStream, Endpoint, Listener};
 use crate::gate::Gate;
 use crate::session::{SessionEntry, Shared, next_session_id};
 
+/// Сколько закрытие сессии ждёт записи сброшенных вызовов в журнал (сброс — на ближайшем опросе тела).
+const CLOSE_CALLS_WAIT: Duration = Duration::from_secs(2);
+
 #[derive(Debug, Clone)]
 pub struct GatewayOptions {
     /// Имя сервера MCP (`serverInfo.name`), например `glafira-pg`.
@@ -54,7 +57,10 @@ pub struct SessionSnapshot {
 }
 
 /// Строит сервер rmcp одной сессии. Сервер проводит каждый вызов через `SessionCtx::call`, в `initialize` зовёт
-/// `identify` и `request_approval`, а `tools/list` отвечает `SessionCtx::list_tools_result`.
+/// `identify` и `request_approval`, а `tools/list` отвечает `SessionCtx::list_tools_result`. Клиент протокола
+/// 2026-07-28 не шлёт `initialize` и может начать с `server/discover`: сервер переопределяет и `discover`
+/// (`ServerHandler::discover` rmcp 3.5.1) и опознаёт в нём клиента — `ctx.identify(context.client_info())`, тело —
+/// как по умолчанию (`DiscoverResult::from_server_info`), иначе приложение узнает клиента только из следующего запроса.
 pub trait SessionFactory: Send + Sync + 'static {
     type Server: ServerHandler + Send + Sync + 'static;
     fn create(&self, ctx: SessionCtx) -> Self::Server;
@@ -71,6 +77,7 @@ impl McpServerHandle {
         self.shared.snapshot()
     }
 
+    /// Отключённая сессия сразу пропадает из списка, хотя rmcp ещё отправляет её последние ответы.
     pub fn disconnect(&self, id: &str) -> bool {
         self.shared.cancel_where(|sid, _| sid == id) > 0
     }
@@ -84,8 +91,12 @@ impl McpServerHandle {
         self.shared.cancel_where(|_, _| true);
     }
 
-    /// Закрывает все сессии и перестаёт слушать; файл сокета удаляется.
+    /// Закрывает все сессии и перестаёт слушать; файл сокета удаляется. Возвращается, когда тела вызовов всех
+    /// сессий сброшены и записаны в журнал (`serverStopped` — последняя запись).
     pub async fn shutdown(self) {
+        // Токены сессий — дочерние от `stop`, и `stop.cancel()` отменяет их тоже; явная отмена каждой сессии не
+        // зависит от этой связи токенов (`stop` же обрывает и рукопожатия, где сессии ещё нет).
+        self.disconnect_all();
         self.stop.cancel();
         let _ = self.task.await;
     }
@@ -186,12 +197,18 @@ async fn serve_session<F: SessionFactory>(
         session: id.clone(),
     });
     shared.gate.sessions_changed();
-    let server = factory.create(SessionCtx::new(shared.clone(), id.clone()));
+    let ctx = SessionCtx::new(shared.clone(), id.clone(), ct.clone());
+    let server = factory.create(ctx.clone());
     match server.serve_with_ct(stream, ct).await {
         Ok(running) => {
             let _ = running.waiting().await;
         }
         Err(e) => tracing::debug!("mcp session {id} failed to start: {e}"),
+    }
+    // rmcp не обрывает задачи обработчиков, а после закрытия потока ждёт их до 5 с: вызовы, которые ещё идут,
+    // сбрасываются отменой сессии, и их записи `call` попадают в журнал раньше `sessionEnded`.
+    if !ctx.close(CLOSE_CALLS_WAIT).await {
+        tracing::warn!("mcp session {id}: calls did not finish after the session closed");
     }
     let entry = shared.sessions().remove(&id);
     shared.audit.record(AuditEvent::SessionEnded {

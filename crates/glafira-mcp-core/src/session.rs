@@ -66,10 +66,12 @@ impl Shared {
         self.sessions.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Открытые сессии: отменённые, которые rmcp ещё закрывает, не показываются.
     pub(crate) fn snapshot(&self) -> Vec<SessionSnapshot> {
         let mut v: Vec<SessionSnapshot> = self
             .sessions()
             .iter()
+            .filter(|(_, e)| !e.cancel.is_cancelled())
             .map(|(id, e)| SessionSnapshot {
                 id: id.clone(),
                 client_name: e.client.as_ref().map(|c| c.name.clone()),
@@ -87,11 +89,11 @@ impl Shared {
         v
     }
 
-    /// Отменяет сессии, подходящие под условие; возвращает их число.
+    /// Отменяет открытые сессии, подходящие под условие; возвращает их число (уже отменённые не считаются).
     pub(crate) fn cancel_where(&self, pick: impl Fn(&str, &SessionEntry) -> bool) -> usize {
         let mut n = 0;
         for (id, e) in self.sessions().iter() {
-            if pick(id, e) {
+            if !e.cancel.is_cancelled() && pick(id, e) {
                 e.cancel.cancel();
                 n += 1;
             }

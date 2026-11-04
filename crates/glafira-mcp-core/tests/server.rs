@@ -15,10 +15,10 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     CallToolRequest, CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig,
-    ClientRequest, Implementation, InitializeRequestParams, InitializeResult, ListToolsResult,
-    PaginatedRequestParams, ServerCapabilities, ServerConfig,
+    ClientRequest, DiscoverResult, Implementation, InitializeRequestParams, InitializeResult,
+    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig,
 };
-use rmcp::service::{PeerRequestOptions, RequestContext, RunningService};
+use rmcp::service::{Peer, PeerRequestOptions, RequestContext, RunningService, ServiceError};
 use rmcp::{
     ErrorData, RoleClient, RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router,
 };
@@ -29,6 +29,8 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const TOKEN: &str = "test-token";
 const INSTRUCTIONS: &str = "Toy gateway for the core tests.";
+/// Предел ожидания условий в тестах: хватает с запасом и на медленном CI.
+const WAIT: Duration = Duration::from_secs(5);
 
 // ---- Право: фальшивый Gate ----
 
@@ -72,12 +74,14 @@ impl Gate for FakeGate {
 
 // ---- Игрушечный сервер сессии ----
 
-/// Наблюдение за инструментами: задержка `work`, одновременных операций сейчас и наибольшее, отмена `long_wait`.
+/// Наблюдение за инструментами: задержка `work`, одновременных операций сейчас и наибольшее, начало и отмена
+/// `long_wait`.
 #[derive(Default)]
 struct Probe {
     delay_ms: AtomicU64,
     active: AtomicUsize,
     peak: AtomicUsize,
+    long_started: AtomicBool,
     long_stopped: AtomicBool,
 }
 
@@ -197,6 +201,7 @@ impl ToyServer {
                 let _long = self
                     .ctx
                     .begin_long("Another long operation is running in this session")?;
+                self.probe.long_started.store(true, Ordering::SeqCst);
                 tokio::select! {
                     _ = ctx.ct.cancelled() => self.probe.long_stopped.store(true, Ordering::SeqCst),
                     _ = tokio::time::sleep(Duration::from_millis(p.millis.unwrap_or(5_000))) => {}
@@ -215,6 +220,19 @@ impl ServerHandler for ToyServer {
         c.server_info = Implementation::new(&o.name, &o.version);
         c.instructions = Some(o.instructions.clone());
         c
+    }
+
+    /// Клиент протокола 2026-07-28 может начать с `server/discover`: опознаётся по `_meta` запроса, тело — как по
+    /// умолчанию в rmcp.
+    async fn discover(
+        &self,
+        context: RequestContext<RoleServer>,
+    ) -> Result<DiscoverResult, ErrorData> {
+        self.ctx.identify(context.client_info());
+        Ok(DiscoverResult::from_server_info(
+            self.supported_protocol_versions().into_owned(),
+            self.get_info(),
+        ))
     }
 
     async fn initialize(
@@ -322,12 +340,40 @@ async fn named_client(
     .unwrap()
 }
 
-async fn call(c: &RunningService<RoleClient, ()>, tool: &str, args: Value) -> CallToolResult {
+fn params(tool: &str, args: Value) -> CallToolRequestParams {
     let mut p = CallToolRequestParams::new(tool.to_string());
     if let Value::Object(m) = args {
         p = p.with_arguments(m);
     }
-    c.call_tool(p).await.unwrap()
+    p
+}
+
+async fn call(c: &Peer<RoleClient>, tool: &str, args: Value) -> CallToolResult {
+    c.call_tool(params(tool, args)).await.unwrap()
+}
+
+/// Вызов `work` в отдельной задаче; ответ может и не прийти (сессию закрыли).
+fn spawn_work(
+    c: Peer<RoleClient>,
+) -> tokio::task::JoinHandle<Result<CallToolResult, ServiceError>> {
+    tokio::spawn(async move {
+        c.call_tool(params("work", json!({"connectionId": "c1"})))
+            .await
+    })
+}
+
+/// Ждёт условия не дольше `within`, проверяя его каждые 10 мс; `true`, если дождался.
+async fn wait_until(mut cond: impl FnMut() -> bool, within: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        if cond() {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 fn text(r: &CallToolResult) -> String {
@@ -402,9 +448,14 @@ async fn rejected_client_is_disconnected() {
         msg,
         "client_rejected: The user rejected this MCP client in Glafira"
     );
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(e.handle.sessions().is_empty());
-    assert_eq!(e.gate.closed.lock().unwrap().len(), 1);
+    assert!(
+        e.handle.sessions().is_empty(),
+        "отклонённая сессия сразу пропадает из списка"
+    );
+    assert!(
+        wait_until(|| e.gate.closed.lock().unwrap().len() == 1, WAIT).await,
+        "сессия закрыта"
+    );
 }
 
 #[tokio::test]
@@ -547,6 +598,40 @@ async fn legacy_tool_list_has_no_cache_hints() {
     );
 }
 
+#[tokio::test]
+async fn discover_identifies_the_client() {
+    let e = env(SessionAccess::Pending).await;
+    // Протокол 2026-07-28: клиент может начать с server/discover, клиент — в _meta.
+    let mut s = endpoint::connect(&e.ep).await.unwrap();
+    handshake::client(&mut s, TOKEN).await.unwrap();
+    let discover = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "server/discover",
+        "params": {"_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {"name": "qwen-code", "version": "0.26.5"},
+        }},
+    });
+    s.write_all(format!("{discover}\n").as_bytes())
+        .await
+        .unwrap();
+    s.flush().await.unwrap();
+    let r = reply(&mut BufReader::new(&mut s), 1).await;
+    assert_eq!(r["result"]["instructions"], INSTRUCTIONS, "{r}");
+    let sessions = e.handle.sessions();
+    assert_eq!(
+        (
+            sessions.len(),
+            sessions[0].client_name.as_deref(),
+            sessions[0].client_version.as_deref()
+        ),
+        (1, Some("qwen-code"), Some("0.26.5")),
+        "клиент опознан по _meta запроса discover"
+    );
+}
+
 // ---- Лимиты ----
 
 #[tokio::test]
@@ -639,7 +724,10 @@ async fn one_long_operation_per_session_and_cancel_frees_it() {
         .send_cancellable_request(request, PeerRequestOptions::no_options())
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        wait_until(|| e.probe.long_started.load(Ordering::SeqCst), WAIT).await,
+        "длительная операция началась"
+    );
     let msg = err(&call(&c, "long_wait", json!({"millis": 10})).await);
     assert_eq!(
         msg,
@@ -647,18 +735,20 @@ async fn one_long_operation_per_session_and_cancel_frees_it() {
     );
     handle.cancel(Some("test".into())).await.unwrap();
     let mut logged = None;
-    for _ in 0..100 {
-        logged = e
-            .audit
-            .tail(5)
-            .into_iter()
-            .find(|r| r["tool"] == "long_wait" && r["outcome"] == "ok");
-        if logged.is_some() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    let logged = logged.expect("операция закончилась после отмены");
+    let ended = wait_until(
+        || {
+            logged = e
+                .audit
+                .tail(5)
+                .into_iter()
+                .find(|r| r["tool"] == "long_wait" && r["outcome"] == "ok");
+            logged.is_some()
+        },
+        WAIT,
+    )
+    .await;
+    assert!(ended, "операция закончилась после отмены");
+    let logged = logged.unwrap();
     assert!(logged["ms"].as_u64().unwrap() < 1_000, "{logged}");
     assert!(e.probe.long_stopped.load(Ordering::SeqCst));
     // Отметка «идёт длительная операция» снята.
@@ -739,7 +829,14 @@ async fn sessions_show_active_calls() {
         let c = c.clone();
         tokio::spawn(async move { call(&c, "work", json!({"connectionId": "c1"})).await })
     };
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        wait_until(
+            || e.handle.sessions().first().is_some_and(|s| s.active),
+            WAIT
+        )
+        .await,
+        "вызов начался"
+    );
     let s = e.handle.sessions();
     assert_eq!((s.len(), s[0].active, s[0].calls), (1, true, 1));
     ok(h.await.unwrap());
@@ -763,8 +860,18 @@ async fn disconnect_and_shutdown_close_sessions() {
     let id = e.handle.sessions()[0].id.clone();
     assert!(e.handle.disconnect(&id));
     assert!(!e.handle.disconnect("nope"));
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(e.handle.sessions().is_empty());
+    assert!(
+        !e.handle.disconnect(&id),
+        "закрываемая сессия не отключается второй раз"
+    );
+    assert!(
+        e.handle.sessions().is_empty(),
+        "отключённая сессия сразу пропадает из списка"
+    );
+    assert!(
+        wait_until(|| !e.gate.closed.lock().unwrap().is_empty(), WAIT).await,
+        "сессия закрыта"
+    );
     assert_eq!(
         e.gate.closed.lock().unwrap().as_slice(),
         std::slice::from_ref(&id)
@@ -783,11 +890,18 @@ async fn disconnect_and_shutdown_close_sessions() {
     let _a = client(&e.ep).await;
     let _b = named_client(&e.ep, "cursor", "1.0").await;
     assert_eq!(e.handle.disconnect_client("rmcp"), 1);
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        e.handle.disconnect_client("rmcp"),
+        0,
+        "закрываемые сессии не считаются второй раз"
+    );
     assert_eq!(e.handle.sessions().len(), 1);
     e.handle.disconnect_all();
-    tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(e.handle.sessions().is_empty());
+    assert!(
+        wait_until(|| e.gate.closed.lock().unwrap().len() == 3, WAIT).await,
+        "все три сессии закрыты"
+    );
 
     let c2 = client(&e.ep).await;
     e.handle.shutdown().await;
@@ -802,6 +916,143 @@ async fn disconnect_and_shutdown_close_sessions() {
     );
     let last = e.audit.tail(1).remove(0);
     assert_eq!(last["event"], "serverStopped");
+}
+
+/// Записи сессии `session` в журнале (новые первыми): её вызовы и индекс `sessionEnded`.
+fn session_records(recent: &[Value], session: &str) -> (Vec<Value>, Option<usize>) {
+    let calls = recent
+        .iter()
+        .filter(|r| r["event"] == "call" && r["session"] == session)
+        .cloned()
+        .collect();
+    let ended = recent
+        .iter()
+        .position(|r| r["event"] == "sessionEnded" && r["session"] == session);
+    (calls, ended)
+}
+
+#[tokio::test]
+async fn disconnect_drops_running_calls_and_frees_their_slots() {
+    let e = env(SessionAccess::Approved).await;
+    // Тело `work` не смотрит на отмену запроса: без отмены сессии оно шло бы минуту и держало слоты.
+    e.probe.delay_ms.store(60_000, Ordering::SeqCst);
+    let gone = [client(&e.ep).await, client(&e.ep).await];
+    // По 3 вызова на сессию: 2 идут (все 4 общих слота заняты), третий ждёт слот своей сессии.
+    let gone_calls: Vec<_> = gone
+        .iter()
+        .flat_map(|c| (0..3).map(|_| spawn_work(c.peer().clone())))
+        .collect();
+    assert!(
+        wait_until(
+            || {
+                let s = e.handle.sessions();
+                e.probe.active.load(Ordering::SeqCst) == 4
+                    && s.len() == 2
+                    && s.iter().all(|s| s.calls == 3)
+            },
+            WAIT
+        )
+        .await,
+        "4 тела идут, ещё 2 вызова ждут слоты сессии"
+    );
+    let gone_ids: Vec<String> = e.handle.sessions().into_iter().map(|s| s.id).collect();
+
+    // Вызов другой сессии ждёт общий слот.
+    e.probe.delay_ms.store(0, Ordering::SeqCst);
+    let other = named_client(&e.ep, "cursor", "1.0").await;
+    let other_call = spawn_work(other.peer().clone());
+    assert!(
+        wait_until(
+            || {
+                e.handle
+                    .sessions()
+                    .iter()
+                    .any(|s| s.client_name.as_deref() == Some("cursor") && s.active)
+            },
+            WAIT
+        )
+        .await,
+        "вызов другой сессии начался"
+    );
+    assert_eq!(e.probe.active.load(Ordering::SeqCst), 4);
+
+    assert_eq!(e.handle.disconnect_client("rmcp"), 2);
+    let r = tokio::time::timeout(WAIT, other_call)
+        .await
+        .expect("слоты закрытых сессий освобождены")
+        .unwrap()
+        .unwrap();
+    assert_eq!(ok(r)["ok"], true);
+    assert!(
+        wait_until(|| e.probe.active.load(Ordering::SeqCst) == 0, WAIT).await,
+        "тела вызовов закрытых сессий сброшены"
+    );
+    for h in gone_calls {
+        let r = tokio::time::timeout(WAIT, h)
+            .await
+            .expect("вызов закрытой сессии не висит")
+            .unwrap();
+        if let Ok(r) = r {
+            assert_eq!(err(&r), "mcp_disabled: The MCP session is closed");
+        }
+    }
+
+    assert!(
+        wait_until(|| e.gate.closed.lock().unwrap().len() == 2, WAIT).await,
+        "закрытые сессии убраны"
+    );
+    let recent = e.audit.tail(50);
+    for id in &gone_ids {
+        let (calls, ended) = session_records(&recent, id);
+        let ended = ended.expect("sessionEnded записан");
+        assert_eq!(calls.len(), 3, "{calls:?}");
+        for c in &calls {
+            assert_eq!(
+                (c["outcome"].as_str(), c["code"].as_str()),
+                (Some("error"), Some("mcp_disabled")),
+                "{c}"
+            );
+            assert!(c["ms"].as_u64().unwrap() < 30_000, "{c}");
+        }
+        let last_call = recent
+            .iter()
+            .position(|r| r["event"] == "call" && r["session"] == id.as_str())
+            .unwrap();
+        assert!(
+            last_call > ended,
+            "записи call закрытой сессии — раньше sessionEnded"
+        );
+    }
+}
+
+#[tokio::test]
+async fn shutdown_drops_running_calls_before_it_returns() {
+    let e = env(SessionAccess::Approved).await;
+    e.probe.delay_ms.store(60_000, Ordering::SeqCst);
+    let c = client(&e.ep).await;
+    let running = spawn_work(c.peer().clone());
+    assert!(
+        wait_until(|| e.probe.active.load(Ordering::SeqCst) == 1, WAIT).await,
+        "тело вызова идёт"
+    );
+    let started = std::time::Instant::now();
+    e.handle.shutdown().await;
+    assert!(started.elapsed() < WAIT, "{:?}", started.elapsed());
+    assert_eq!(
+        e.probe.active.load(Ordering::SeqCst),
+        0,
+        "после остановки сервера тел вызовов нет: перезапуск не превысит 4 общих слота"
+    );
+    let recent = e.audit.tail(3);
+    let events: Vec<&str> = recent
+        .iter()
+        .map(|r| r["event"].as_str().unwrap())
+        .collect();
+    assert_eq!(events, ["serverStopped", "sessionEnded", "call"]);
+    assert_eq!(recent[2]["code"], "mcp_disabled");
+    let _ = tokio::time::timeout(WAIT, running)
+        .await
+        .expect("вызов не висит после остановки сервера");
 }
 
 #[tokio::test]
