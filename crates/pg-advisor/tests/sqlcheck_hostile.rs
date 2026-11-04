@@ -155,6 +155,37 @@ const FORBIDDEN: &[(&str, &str)] = &[
         "pg_log_backend_memory_contexts",
     ),
     ("SELECT pg_file_write('x', 'y', false)", "pg_file_write"),
+    // SQL из строки (ts_stat / ts_rewrite выполняют запрос из аргумента), имена PG 13–14, сброс статистики, слоты.
+    (
+        "SELECT * FROM ts_stat('SELECT to_tsvector(pg_terminate_backend(pid)::text) FROM pg_stat_activity')",
+        "ts_stat",
+    ),
+    (
+        "SELECT * FROM ts_stat($q$SELECT to_tsvector(pg_terminate_backend(pid)::text) FROM pg_stat_activity$q$)",
+        "ts_stat",
+    ),
+    (
+        "SELECT ts_rewrite('a'::tsquery, 'SELECT t, s FROM aliases')",
+        "ts_rewrite",
+    ),
+    ("SELECT pg_start_backup('x', true)", "pg_start_backup"),
+    ("SELECT pg_stop_backup()", "pg_stop_backup"),
+    (
+        "SELECT pg_stat_reset_backend_stats(1)",
+        "pg_stat_reset_backend_stats",
+    ),
+    (
+        "SELECT pg_stat_reset_backend_stats(pid) FROM pg_stat_activity",
+        "pg_stat_reset_backend_stats",
+    ),
+    (
+        "SELECT pg_sync_replication_slots()",
+        "pg_sync_replication_slots",
+    ),
+    (
+        "SELECT pg_log_standby_snapshot()",
+        "pg_log_standby_snapshot",
+    ),
 ];
 
 #[test]
@@ -484,6 +515,9 @@ fn hypothetical_index_follows_the_p3b_rule() {
     for sql in [
         "CREATE INDEX ON t ((pg_sleep(1)::text))",
         "CREATE INDEX ON t (a) WHERE set_config('a.b', 'c', false) IS NOT NULL",
+        "CREATE INDEX ON t ((ts_stat('SELECT 1')::text))",
+        "CREATE INDEX ON t ((pg_stop_backup()::text))",
+        "CREATE INDEX ON t ((pg_stat_reset_backend_stats(1)::text))",
     ] {
         rejected(sql, Purpose::HypoIndex, RejectCode::ForbiddenFunction);
     }

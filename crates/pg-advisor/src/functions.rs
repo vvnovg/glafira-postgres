@@ -85,19 +85,31 @@ pub const DENIED_FUNCTIONS: &[&str] = admin_functions!(
     "pg_try_advisory*",
     "pg_sleep*",
     "pg_notify",
-    // Логическая репликация, резервное копирование, каталог.
+    // Логическая репликация, резервное копирование (имена PG 13–14 и 15+), статистика, каталог.
     "pg_logical_slot_*",
     "pg_replication_origin_*",
     "pg_backup_start",
     "pg_backup_stop",
+    "pg_start_backup",
+    "pg_stop_backup",
+    "pg_stat_reset*",
+    "pg_sync_replication_slots",
+    "pg_log_standby_snapshot",
     "pg_import_system_collations",
     // SQL из строки и выгрузка целых таблиц, схем и баз.
     "query_to_xml*",
     "cursor_to_xml*",
+    "ts_stat",
+    "ts_rewrite",
     "table_to_xml*",
     "schema_to_xml*",
     "database_to_xml*",
 );
+
+/// Функции, которые выполняют SQL из строки-аргумента (шаблоны с `*` — префиксы). После переноса поиска вызовов в
+/// `calls_in_text` литерал с SQL не виден, поэтому ярус EXPLAIN ANALYZE (`explain::tier`) считает вызов такой функции
+/// записью: внутри строки может быть `pg_terminate_backend(…)`. Подмножество `DENIED_FUNCTIONS`.
+pub const SQL_FROM_STRING: &[&str] = &["query_to_xml*", "cursor_to_xml*", "ts_stat", "ts_rewrite"];
 
 /// Схемы, все функции которых запрещены: pg_net (`net.http_get`, `net._http_collect_response`…).
 pub const DENIED_SCHEMAS: &[&str] = &["net"];
@@ -318,9 +330,16 @@ mod tests {
                 "pg_replication_origin_*",
                 "pg_backup_start",
                 "pg_backup_stop",
+                "pg_start_backup",
+                "pg_stop_backup",
+                "pg_stat_reset*",
+                "pg_sync_replication_slots",
+                "pg_log_standby_snapshot",
                 "pg_import_system_collations",
                 "query_to_xml*",
                 "cursor_to_xml*",
+                "ts_stat",
+                "ts_rewrite",
                 "table_to_xml*",
                 "schema_to_xml*",
                 "database_to_xml*",
@@ -331,6 +350,13 @@ mod tests {
         unique.dedup();
         assert_eq!(unique.len(), DENIED_FUNCTIONS.len(), "без повторов");
         assert_eq!(DENIED_SCHEMAS, ["net"]);
+    }
+
+    #[test]
+    fn sql_from_string_is_a_subset_of_denied() {
+        for p in SQL_FROM_STRING {
+            assert!(DENIED_FUNCTIONS.contains(p), "{p}");
+        }
     }
 
     #[test]
@@ -355,6 +381,14 @@ mod tests {
             "pg_replication_origin_session_setup",
             "Set_Config",
             "pg_terminate_backend",
+            "ts_stat",
+            "TS_REWRITE",
+            "pg_start_backup",
+            "pg_stop_backup",
+            "pg_stat_reset_backend_stats",
+            "pg_stat_reset_anything_future",
+            "pg_sync_replication_slots",
+            "pg_log_standby_snapshot",
         ] {
             assert!(is_denied(name), "{name}");
         }
@@ -373,6 +407,9 @@ mod tests {
             "pg_listening_channels",
             "xhttp_get",
             "now",
+            "ts_rank",
+            "ts_headline",
+            "ts_stats",
         ] {
             assert!(!is_denied(name), "{name}");
         }

@@ -100,6 +100,10 @@ fn invalid(message: impl Into<String>, position: Option<usize>) -> Rejection {
 }
 
 /// Число выражений в тексте по разбору `pg_query` (грамматика PostgreSQL 18); ошибка — текст `pg_query`.
+///
+/// Вызывает `pg_query::parse`: в отладочной сборке ему нужен стек потока не меньше 2 МиБ (рабочий поток tokio и
+/// `spawn_blocking` подходят); из небольших собственных потоков не вызывать — возможен `stack overflow` с аварийным
+/// завершением процесса.
 pub fn parse_count(sql: &str) -> Result<usize, String> {
     pg_query::parse(sql, pg_query::ParserOptions::DEFAULT)
         .map(|r| r.protobuf.stmts.len())
@@ -396,6 +400,10 @@ fn scan(tree: &Value) -> Found {
 /// Проверка SQL от модели (спец. §7.1): разбор, ровно одно выражение, вид по назначению, для `Explain` и `Select` — без
 /// `SELECT … INTO`, для `Select` — без блокировок строк и изменяющих CTE на любой глубине, во всех назначениях — без
 /// запрещённых функций.
+///
+/// Вызывает `pg_query::parse`: в отладочной сборке ему нужен стек потока не меньше 2 МиБ (рабочий поток tokio и
+/// `spawn_blocking` подходят); из небольших собственных потоков не вызывать — возможен `stack overflow` с аварийным
+/// завершением процесса.
 pub fn check(sql: &str, purpose: Purpose) -> Result<Checked, Rejection> {
     let parsed = pg_query::parse(sql, pg_query::ParserOptions::DEFAULT).map_err(parse_error)?;
     let stmts = &parsed.protobuf.stmts;
