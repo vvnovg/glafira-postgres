@@ -6,6 +6,7 @@ import type { AppError, ConnectionKind, ConnectionProfile, Environment, SecretsI
 import { useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { Hint } from "../common/Hint";
+import { LlmAccessGroup } from "./LlmAccessGroup";
 import { NodesSection, type PatroniSecrets } from "./NodesSection";
 import { PgSection, type PgSecrets } from "./PgSection";
 import { applyParsed, emptyKindMemo, emptySecret, hostKeyUnknown, type KindMemo, portProblem, secretValue, switchKind, visibleProfile } from "./profile";
@@ -255,6 +256,8 @@ export function ConnectionForm({ initial, tabId, copyOf }: { initial: Connection
             onChange={(e) => setProfile({ ...profile, readOnly: e.target.checked })}
           />
         </span>
+
+        <LlmAccessGroup idPrefix={uid} profile={profile} onChange={setProfile} />
 
         <label htmlFor={`${uid}-color`}>{t("connections.form.color")}</label>
         <input id={`${uid}-color`} type="color" value={profile.color} onChange={(e) => setProfile({ ...profile, color: e.target.value })} />

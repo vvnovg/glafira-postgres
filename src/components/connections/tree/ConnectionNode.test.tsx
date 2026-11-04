@@ -1,8 +1,9 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AppError, ConnectionProfile } from "../../../api/types";
+import type { AppError, ConnectionProfile, McpStatus } from "../../../api/types";
 import { member, topology, topologyView } from "../../../test/fixtures";
+import { mcpStatus } from "../../../test/mcp";
 import { renderWithClient } from "../../../test/render";
 import { newProfile } from "../profile";
 
@@ -16,6 +17,7 @@ vi.mock("../../../api/client", async (importOriginal) => {
       disconnect: vi.fn(),
       reconnect: vi.fn(),
       trustSshHostKey: vi.fn(),
+      getMcpStatus: vi.fn(),
       setCatalogMember: vi.fn(),
       getUiSettings: vi.fn(() => Promise.resolve({ showSystemObjects: false })),
       listDatabases: vi.fn(() => Promise.resolve([])),
@@ -49,6 +51,7 @@ const serverView = (role: "primary" | "replica" | "unknown") =>
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(api.getTopology).mockResolvedValue(disconnectedView);
+  vi.mocked(api.getMcpStatus).mockResolvedValue(mcpStatus());
   vi.mocked(api.getUiSettings).mockResolvedValue({ showSystemObjects: false });
   vi.mocked(api.listDatabases).mockResolvedValue([]);
   vi.mocked(api.listRoles).mockResolvedValue([]);
@@ -597,5 +600,22 @@ describe("ConnectionNode", () => {
     await screen.findByRole("img", { name: "Не подключено" });
     await user.click(screen.getByRole("button", { name: toggleName }));
     expect(await screen.findByRole("status")).toHaveTextContent("Подключение…");
+  });
+  it("значок «LLM» — у подключения с уровнем «Диагностика»; с уровнем «Нет» его нет", async () => {
+    const first = renderNode({ ...conn, llmAccess: "diagnostics" });
+    expect(await screen.findByRole("img", { name: "Доступ для LLM: диагностика" })).toHaveTextContent("LLM");
+    first.unmount();
+    renderNode({ ...conn, llmAccess: "off" });
+    await screen.findByRole("img", { name: "Не подключено" });
+    expect(screen.queryByRole("img", { name: "Доступ для LLM: диагностика" })).not.toBeInTheDocument();
+  });
+
+  it("значок по уровню профиля, пока статус MCP не пришёл; политика запрещает MCP — значка нет", async () => {
+    let resolve!: (s: McpStatus) => void;
+    vi.mocked(api.getMcpStatus).mockReturnValue(new Promise((r) => (resolve = r)));
+    renderNode({ ...conn, llmAccess: "diagnostics" });
+    expect(await screen.findByRole("img", { name: "Доступ для LLM: диагностика" })).toBeInTheDocument();
+    await act(async () => resolve(mcpStatus({ policyEnabled: false, server: "stopped" })));
+    await waitFor(() => expect(screen.queryByRole("img", { name: "Доступ для LLM: диагностика" })).not.toBeInTheDocument());
   });
 });

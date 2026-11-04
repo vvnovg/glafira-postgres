@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppError, ConnectionFolder, ConnectionProfile, SecretsSet, TestReport } from "../../api/types";
 import { useWorkspace } from "../../state/workspace";
 import { topologyView } from "../../test/fixtures";
+import { mcpStatus } from "../../test/mcp";
 import { renderWithClient } from "../../test/render";
 import { emptyPatroni, emptySsh, newProfile } from "./profile";
 
@@ -20,6 +21,7 @@ vi.mock("../../api/client", async (importOriginal) => {
       moveItems: vi.fn(),
       connectionSecrets: vi.fn(),
       trustSshHostKey: vi.fn(),
+      getMcpStatus: vi.fn(),
     },
   };
 });
@@ -49,6 +51,7 @@ function deferred<T>() {
 beforeEach(() => {
   vi.resetAllMocks(); // сбрасывает и реализации: ответы не перетекают между тестами
   vi.mocked(api.listFolders).mockResolvedValue([]);
+  vi.mocked(api.getMcpStatus).mockResolvedValue(mcpStatus());
   vi.mocked(api.connectionSecrets).mockResolvedValue(NO_SECRETS);
   useWorkspace.setState({ tabs: [], activeId: null });
 });
@@ -1001,5 +1004,36 @@ describe("ConnectionForm: SSH-туннель", () => {
       expect(await screen.findByRole("alert")).toBeInTheDocument();
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     });
+  });
+  it("доступ для LLM: сохранённый уровень показан, выбор уходит в сохранение вместе с формой", async () => {
+    vi.mocked(api.saveConnection).mockResolvedValue(existing({ llmAccess: "off" }));
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionForm initial={existing({ llmAccess: "diagnostics" })} tabId="connection-form:c1" />);
+    const group = screen.getByRole("radiogroup", { name: "Доступ для LLM" });
+    expect(within(group).getByRole("radio", { name: "Диагностика" })).toBeChecked();
+    await user.click(within(group).getByRole("radio", { name: "Нет" }));
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(api.saveConnection).toHaveBeenCalledWith(expect.objectContaining({ id: "c1", llmAccess: "off" }), expect.anything()));
+  });
+
+  it("правка других полей не меняет уровень доступа для LLM", async () => {
+    vi.mocked(api.saveConnection).mockResolvedValue(existing({ llmAccess: "diagnostics" }));
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionForm initial={existing({ llmAccess: "diagnostics" })} tabId="connection-form:c1" />);
+    const name = screen.getByRole("textbox", { name: "Имя" });
+    await user.clear(name);
+    await user.type(name, "dev-2");
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(api.saveConnection).toHaveBeenCalledWith(expect.objectContaining({ id: "c1", name: "dev-2", llmAccess: "diagnostics" }), expect.anything()));
+  });
+
+  it("профиль без поля llmAccess остаётся «Нет» и сохраняется без изменения уровня", async () => {
+    vi.mocked(api.saveConnection).mockResolvedValue(existing());
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionForm initial={existing()} tabId="connection-form:c1" />);
+    expect(screen.getByRole("radio", { name: "Нет" })).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(api.saveConnection).toHaveBeenCalled());
+    expect(vi.mocked(api.saveConnection).mock.calls[0][0].llmAccess ?? "off").toBe("off");
   });
 });

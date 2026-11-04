@@ -55,7 +55,7 @@ export function TabContent({ tab, active = true }: { tab: Tab; active?: boolean 
     case "query":
       return <QueryTab connectionId={tab.connectionId} member={tab.member} database={tab.database} queryId={tab.queryId} active={active} />;
     case "explain":
-      return <ExplainTab connectionId={tab.connectionId} member={tab.member} database={tab.database} sql={tab.sql} active={active} />;
+      return <ExplainTab connectionId={tab.connectionId} member={tab.member} database={tab.database} sql={tab.sql} prefill={tab.prefill} active={active} />;
     case "actions":
       return <ActionsJournal connectionId={tab.connectionId} active={active} />;
     default: {

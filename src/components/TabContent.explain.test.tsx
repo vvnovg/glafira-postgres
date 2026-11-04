@@ -41,4 +41,13 @@ describe("TabContent explain", () => {
     await waitFor(() => expect(client.isFetching()).toBe(0));
     expect(api.listDatabases).toHaveBeenCalledTimes(1);
   });
+  it("вкладка консоли получает подстановку из спеки (журнал MCP)", async () => {
+    renderWithClient(
+      <TabContent tab={{ kind: "explain", connectionId: "c", prefill: { sql: "SELECT 2", database: "perf", member: "pg-2", nonce: 7 }, id: "explain:c" }} />,
+    );
+    expect(await screen.findByRole("heading", { level: 2, name: "Консоль EXPLAIN" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "SQL" })).toHaveValue("SELECT 2");
+    expect(screen.getByRole("combobox", { name: "Узел" })).toHaveValue("pg-2");
+    expect(screen.getByRole("combobox", { name: "База" })).toHaveValue("perf");
+  });
 });

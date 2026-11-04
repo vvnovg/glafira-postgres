@@ -2,6 +2,17 @@ import { create } from "zustand";
 
 import type { DiagTool } from "../api/types";
 
+/**
+ * Подстановка в консоль EXPLAIN (спец. P4 §11): текст, база и узел вызова MCP из журнала (P4b — предложения модели).
+ * Консоль применяет её один раз на `nonce` и ничего не запускает; узла нет — «за лидером».
+ */
+export interface ExplainPrefill {
+  sql: string;
+  database: string;
+  member?: string;
+  nonce: number;
+}
+
 export type TabSpec =
   /** folderId — папка нового подключения («Новое подключение здесь»); copyOf — id подключения, копия которого создаётся. */
   | { kind: "connection-form"; connectionId: string | null; folderId?: string | null; copyOf?: string }
@@ -22,7 +33,7 @@ export type TabSpec =
   /** Карточка запроса pgss: узел, база и queryId; title — начало текста для заголовка вкладки (не часть id). */
   | { kind: "query"; connectionId: string; member: string; database: string; queryId: string; title?: string }
   /** Консоль EXPLAIN — одна на подключение; member/database/sql — подстановка при открытии из карточки. */
-  | { kind: "explain"; connectionId: string; member?: string | null; database?: string; sql?: string }
+  | { kind: "explain"; connectionId: string; member?: string | null; database?: string; sql?: string; prefill?: ExplainPrefill }
   /** Журнал действий подключения (одна вкладка на подключение). */
   | { kind: "actions"; connectionId: string };
 
@@ -110,3 +121,15 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
       return { tabs: s.tabs.map((t) => (t.id === id ? { ...tab, title } : t)) };
     }),
 }));
+
+let prefillNonce = 0;
+
+/**
+ * Открыть консоль EXPLAIN подключения с подстановкой (журнал MCP; панель предложений P4b). Спека вкладки заменяется
+ * целиком: member/database/sql прежнего открытия из карточки не остаются. Каждый вызов — новый nonce: консоль подставит
+ * текст и тогда, когда он совпадает с прошлой подстановкой, а пользователь успел его поправить.
+ */
+export function openExplainWithPrefill(connectionId: string, prefill: Omit<ExplainPrefill, "nonce">): void {
+  prefillNonce += 1;
+  useWorkspace.getState().open({ kind: "explain", connectionId, prefill: { ...prefill, nonce: prefillNonce } });
+}

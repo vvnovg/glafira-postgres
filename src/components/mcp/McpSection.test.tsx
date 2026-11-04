@@ -1,7 +1,9 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { MCP_CONFIGS, mcpStatus } from "../../test/mcp";
+import { useWorkspace } from "../../state/workspace";
+import { connection } from "../../test/fixtures";
+import { explainCall, MCP_CONFIGS, mcpStatus } from "../../test/mcp";
 import { renderWithClient } from "../../test/render";
 
 vi.mock("../../api/client", async (importOriginal) => {
@@ -142,5 +144,24 @@ describe("McpSection", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("boom");
     await user.click(screen.getByRole("button", { name: "Повторить" }));
     expect(await screen.findByRole("checkbox", { name: toggleName })).toBeChecked();
+  });
+  it("«Открыть в консоли EXPLAIN» из журнала открывает консоль подключения с подстановкой", async () => {
+    vi.mocked(api.getMcpStatus).mockResolvedValue(mcpStatus());
+    vi.mocked(api.listConnections).mockResolvedValue([connection({ id: "c1", name: "perf", llmAccess: "diagnostics" })]);
+    vi.mocked(api.getMcpAudit).mockResolvedValue([explainCall()]);
+    useWorkspace.setState({ tabs: [], activeId: null });
+    const user = userEvent.setup();
+    renderWithClient(<McpSection />);
+    const button = await screen.findByRole("button", { name: "Открыть в консоли EXPLAIN" });
+    await waitFor(() => expect(button).toBeEnabled());
+    await user.click(button);
+    const { tabs, activeId } = useWorkspace.getState();
+    expect(activeId).toBe("explain:c1");
+    expect(tabs).toHaveLength(1);
+    expect(tabs[0]).toMatchObject({
+      kind: "explain",
+      connectionId: "c1",
+      prefill: { sql: "SELECT * FROM shop.orders WHERE status = 'new'", database: "perf", member: "pg-2", nonce: expect.any(Number) },
+    });
   });
 });

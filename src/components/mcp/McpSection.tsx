@@ -2,13 +2,15 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
-import type { McpStatus } from "../../api/types";
+import type { McpAuditEntry, McpStatus } from "../../api/types";
 import { MCP_AUDIT_KEY, MCP_STATUS_KEY, useMcpStatus } from "../../lib/useMcpStatus";
+import { openExplainWithPrefill } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { Hint } from "../common/Hint";
 import { ApprovedClients } from "./ApprovedClients";
 import { ClientSnippets } from "./ClientSnippets";
 import { McpAudit } from "./McpAudit";
+import { consoleTarget } from "./auditOpen";
 import { McpSessions } from "./McpSessions";
 
 /** Строка статуса сервера: работает, выключен, работает в другом окне Glafira, ошибка с текстом из Rust. */
@@ -30,6 +32,12 @@ function stateText(s: McpStatus, t: TFunction): string {
  * подключений, фрагменты для клиентов, активные сессии, подтверждённые клиенты, журнал. Выключатель включён, пока
  * настройка включена: сервер работает, обслуживается другим окном или упал при запуске (`server` ≠ `stopped`).
  */
+/** «Открыть в консоли EXPLAIN» из журнала (спец. P4 §11): консоль подключения с SQL, базой и узлом вызова, без запуска. */
+function openInConsole(e: McpAuditEntry): void {
+  const r = consoleTarget(e);
+  if ("target" in r) openExplainWithPrefill(r.target.connectionId, { sql: r.target.sql, database: r.target.database, member: r.target.member });
+}
+
 export function McpSection() {
   const { t } = useTranslation();
   const qc = useQueryClient();
@@ -83,7 +91,7 @@ export function McpSection() {
           )}
           <McpSessions status={s} />
           <ApprovedClients status={s} />
-          <McpAudit status={s} />
+          <McpAudit status={s} onOpenInConsole={openInConsole} />
         </>
       )}
     </section>

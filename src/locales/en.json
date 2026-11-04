@@ -372,7 +372,15 @@
       "busy": "Working…",
       "deleteGroup": "Delete connection",
       "deleteConfirm": "Delete connection “{{name}}”?",
-      "deleteYes": "Delete"
+      "deleteYes": "Delete",
+      "llmAccess": "LLM access",
+      "llmLevels": {
+        "off": "None",
+        "diagnostics": "Diagnostics"
+      },
+      "llmPolicyOff": "MCP is disabled by your organization: the level has no effect",
+      "llmServerOff": "The MCP server is off: turn it on in Settings → LLM assistants (MCP)",
+      "llmStatusUnavailable": "MCP status is unavailable"
     }
   },
   "hostKey": {
@@ -471,7 +479,8 @@
       "failed": "Could not connect"
     },
     "diagnostics": "Diagnostics",
-    "pulse": "Pulse"
+    "pulse": "Pulse",
+    "llmBadge": "LLM access: diagnostics"
   },
   "tabs": {
     "settings": "Settings",
@@ -2084,7 +2093,8 @@
       "pgpass": "If no password is set, ~/.pgpass is used, as in psql.",
       "environment": "Marks the connection with a color. prod connections ask you to type the connection name before any change.",
       "readOnly": "Blocks everything that changes data or the cluster. Recommended for prod.",
-      "sshTarget": "A host or an alias from ~/.ssh/config, not user@host: enter the user in the “SSH user” field. ProxyJump, the agent and hardware keys are honored. Port and user come from the config when empty."
+      "sshTarget": "A host or an alias from ~/.ssh/config, not user@host: enter the user in the “SSH user” field. ProxyJump, the agent and hardware keys are honored. Port and user come from the config when empty.",
+      "llmAccess": "What an LLM assistant may read over MCP. Diagnostics: topology, reports, activity, top queries, plans without execution; literals are masked. Not exported with the connection."
     },
     "import": {
       "target": "Where new folders and connections go. Existing ones stay where they are.",

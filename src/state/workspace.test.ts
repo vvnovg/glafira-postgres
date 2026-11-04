@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { tabId, useWorkspace } from "./workspace";
+import { openExplainWithPrefill, tabId, useWorkspace } from "./workspace";
 
 beforeEach(() => {
   useWorkspace.setState({ tabs: [], activeId: null });
@@ -155,5 +155,18 @@ describe("workspace", () => {
     expect(useWorkspace.getState().tabs).toBe(before);
     retitle("settings", "x");
     expect(useWorkspace.getState().tabs[1]).toEqual({ kind: "settings", id: "settings" });
+  });
+  it("openExplainWithPrefill: та же вкладка консоли, подстановка с новым nonce, спека из карточки не остаётся", () => {
+    useWorkspace.getState().open({ kind: "explain", connectionId: "c", member: "pg-1", database: "a", sql: "SELECT 0" });
+    openExplainWithPrefill("c", { sql: "SELECT 1", database: "perf", member: "pg-2" });
+    const first = useWorkspace.getState().tabs[0];
+    expect(first).toMatchObject({ id: "explain:c", kind: "explain", connectionId: "c", prefill: { sql: "SELECT 1", database: "perf", member: "pg-2" } });
+    expect(first.kind === "explain" ? [first.member, first.database, first.sql] : null).toEqual([undefined, undefined, undefined]);
+    openExplainWithPrefill("c", { sql: "SELECT 1", database: "perf" });
+    const { tabs, activeId } = useWorkspace.getState();
+    expect(tabs).toHaveLength(1);
+    expect(activeId).toBe("explain:c");
+    const nonces = [first, tabs[0]].map((t) => (t.kind === "explain" ? t.prefill?.nonce : undefined));
+    expect(nonces[0]).not.toBe(nonces[1]);
   });
 });

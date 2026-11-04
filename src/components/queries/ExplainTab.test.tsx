@@ -337,4 +337,32 @@ describe("ExplainTab", () => {
     expect(row!.contains(llm)).toBe(true);
     expect(screen.getAllByRole("button", { name: "Скопировать для LLM" })).toHaveLength(1);
   });
+  it("подстановка из журнала MCP: SQL, база и узел ставятся один раз на nonce, план не строится", async () => {
+    const user = userEvent.setup();
+    const prefill = { sql: "SELECT 1 FROM shop.orders", database: "perf", member: "pg-2", nonce: 1 };
+    const view = (p: typeof prefill) => <ExplainTab connectionId="c" member={undefined} database={undefined} sql={undefined} prefill={p} active />;
+    const { rerender } = renderWithClient(view(prefill));
+    expect(await screen.findByRole("textbox", { name: "SQL" })).toHaveValue("SELECT 1 FROM shop.orders");
+    expect(screen.getByRole("combobox", { name: "Узел" })).toHaveValue("pg-2");
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "База" })).toHaveValue("perf"));
+    expect(api.explain).not.toHaveBeenCalled();
+    // Правку пользователя перерисовка с той же подстановкой (новый объект, тот же nonce) не затирает…
+    await user.clear(screen.getByRole("textbox", { name: "SQL" }));
+    await user.type(screen.getByRole("textbox", { name: "SQL" }), "SELECT 2");
+    rerender(view({ ...prefill }));
+    expect(screen.getByRole("textbox", { name: "SQL" })).toHaveValue("SELECT 2");
+    // …а новое открытие (новый nonce) подставляет снова.
+    rerender(view({ ...prefill, nonce: 2 }));
+    expect(screen.getByRole("textbox", { name: "SQL" })).toHaveValue("SELECT 1 FROM shop.orders");
+  });
+
+  it("подстановка без узла — лидер; консоль переходит из «Вставить план» на «Запрос»", async () => {
+    const user = userEvent.setup();
+    const { rerender } = renderWithClient(<ExplainTab connectionId="c" member="pg-2" database={undefined} sql={undefined} active />);
+    await user.click(await screen.findByRole("tab", { name: "Вставить план" }));
+    expect(screen.queryByRole("textbox", { name: "SQL" })).not.toBeInTheDocument();
+    rerender(<ExplainTab connectionId="c" member={undefined} database={undefined} sql={undefined} prefill={{ sql: "SELECT 3", database: "postgres", nonce: 5 }} active />);
+    expect(await screen.findByRole("textbox", { name: "SQL" })).toHaveValue("SELECT 3");
+    expect(screen.getByRole("combobox", { name: "Узел" })).toHaveValue("pg-1");
+  });
 });

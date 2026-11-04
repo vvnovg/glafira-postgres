@@ -5,7 +5,7 @@ import { api, toAppError } from "../../api/client";
 import type { AppError, ParsedPlan, PlanTree } from "../../api/types";
 import { useConnectionProfile } from "../../lib/useConnectionProfile";
 import { useTopology } from "../../lib/useConnectionEvents";
-import { tabId, useWorkspace } from "../../state/workspace";
+import { type ExplainPrefill, tabId, useWorkspace } from "../../state/workspace";
 import { SubTabs } from "../catalog/SubTabs";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { CopyLlmButton } from "./CopyLlmButton";
@@ -41,6 +41,7 @@ function versionNum(text: string | null | undefined): number {
  * подставляет узел, базу и текст сюда же, а открытие из дерева (без подстановки) оставляет набранное.
  * active — вкладка сейчас видна: скрытая список баз не читает, а при возвращении читает заново. Список нужен только режиму
  * «Запрос» и только пока база не известна (спека или выбор): «Вставить план» от него не зависит.
+ * prefill — подстановка «Открыть в консоли EXPLAIN» из журнала MCP: применяется один раз на nonce.
  * «Скопировать для LLM» получает план последнего запуска, пока SQL, узел и база не менялись, иначе Rust строит пробный план сам.
  */
 export function ExplainTab({
@@ -48,12 +49,14 @@ export function ExplainTab({
   member,
   database,
   sql: initialSql,
+  prefill,
   active,
 }: {
   connectionId: string;
   member: string | null | undefined;
   database: string | undefined;
   sql: string | undefined;
+  prefill?: ExplainPrefill;
   active: boolean;
 }) {
   const { t } = useTranslation();
@@ -79,6 +82,15 @@ export function ExplainTab({
     if (database !== undefined) setDb(database);
     if (initialSql !== undefined) setSql(initialSql);
   }, [spec, member, database, initialSql]);
+  // Подстановка из журнала MCP (и панели предложений P4b): SQL, база и узел ставятся один раз на nonce — перерисовка с той
+  // же подстановкой правку пользователя не затирает; консоль переходит на «Запрос» и ничего не запускает. Узла нет — лидер.
+  useEffect(() => {
+    if (!prefill) return;
+    setSql(prefill.sql);
+    setDb(prefill.database);
+    setNode(prefill.member ?? null);
+    setSource("sql");
+  }, [prefill?.nonce]);
 
   if (view.data === undefined) {
     return <div className="page">{view.error ? <ErrorBanner error={view.error} onRetry={() => void view.refetch()} /> : <p className="empty">{t("common.loading")}</p>}</div>;
