@@ -499,6 +499,82 @@
     "showSystemObjects": "Show system objects (pg_catalog, information_schema, pg_* roles)",
     "display": {
       "section": "Display"
+    },
+    "mcp": {
+      "section": "LLM assistants (MCP)",
+      "intro": "Glafira can give an LLM assistant (Qwen Code, Claude Code, Claude Desktop, Cursor) the diagnostics of the connections you open to it, over MCP. The assistant only reads: it cannot change databases.",
+      "enable": "Allow the MCP server",
+      "policy": "Disabled by your organization",
+      "state": {
+        "running": "The server is running",
+        "stopped": "The server is off",
+        "otherInstance": "The server runs in another Glafira window",
+        "error": "Server error: {{message}}"
+      },
+      "open": "Open to LLM: {{n}}",
+      "openData": "Open to LLM: {{n}}, with data: {{m}}",
+      "openHint": "A connection is opened to the assistant in its form, the “LLM access” group.",
+      "dataPolicy": "Data access is limited by your organization",
+      "connect": {
+        "title": "Connect a client",
+        "hint": "If Glafira is closed, the client starts it and waits up to 25 seconds; opening Glafira first is more reliable.",
+        "command": "{{client}}: command",
+        "file": "{{client}}: file {{file}}",
+        "stdio": "Any stdio client: command and arguments",
+        "copy": "Copy: {{name}}"
+      },
+      "clients": {
+        "title": "Approved clients",
+        "none": "No approved clients",
+        "colClient": "Client",
+        "colVersion": "Version",
+        "colFirstSeen": "First seen",
+        "colLastSeen": "Last seen",
+        "revoke": "Revoke",
+        "revokeAria": "Revoke the approval of client {{name}}"
+      },
+      "sessions": {
+        "title": "Active sessions",
+        "none": "No sessions",
+        "colClient": "Client",
+        "colSince": "Started",
+        "colCalls": "Calls",
+        "waiting": "waiting for approval",
+        "disconnect": "Disconnect",
+        "disconnectAria": "Disconnect the session of client {{client}}",
+        "disconnectAll": "Disconnect all"
+      },
+      "audit": {
+        "title": "Journal",
+        "refresh": "Refresh",
+        "reveal": "Show file",
+        "empty": "No records",
+        "colTime": "Time",
+        "colClient": "Client",
+        "colWhat": "Tool or event",
+        "colConnection": "Connection",
+        "colResult": "Result",
+        "colMs": "ms",
+        "colDetails": "Details",
+        "ok": "success",
+        "masked": "masked: {{n}}",
+        "rows": "rows: {{n}}",
+        "events": {
+          "sessionStarted": "Session started",
+          "sessionEnded": "Session ended",
+          "approved": "Client approved",
+          "rejected": "Client rejected",
+          "revoked": "Client revoked",
+          "serverStarted": "Server started",
+          "serverStopped": "Server stopped"
+        },
+        "openInConsole": "Open in EXPLAIN console",
+        "openArgsCut": "Unavailable: the call arguments are truncated in the journal",
+        "openNoSql": "Unavailable: the call gave a queryId, the journal has no query text",
+        "openNoConnection": "Unavailable: the connection no longer exists",
+        "openOff": "Unavailable: LLM access is off for the connection",
+        "openConnectionsFailed": "Unavailable: the connection list could not be read"
+      }
     }
   },
   "layout": {
@@ -1978,6 +2054,25 @@
       "disk": "Disk read / written (OS level)"
     }
   },
+  "mcp": {
+    "unknownClient": "Unknown MCP client",
+    "approval": {
+      "title": "{{client}} wants to connect to Glafira",
+      "body": "It will see the diagnostics of the connections open to LLM assistants: {{n}}.",
+      "bodyData": "It will see the diagnostics of the connections open to LLM assistants: {{n}}, and the data in {{m}} of them.",
+      "readOnly": "The assistant cannot change databases through Glafira.",
+      "unnamed": "The client did not send its name: the answer applies to this session only.",
+      "more": "More waiting: {{n}}",
+      "allow": "Allow",
+      "reject": "Reject"
+    },
+    "indicator": {
+      "one": "LLM: {{client}}",
+      "clients_one": "LLM: {{count}} client",
+      "clients_other": "LLM: {{count}} clients",
+      "title": "LLM assistant sessions: open the MCP section of Settings"
+    }
+  },
   "hints": {
     "label": "Hint: {{name}}",
     "connections": {
@@ -2009,6 +2104,9 @@
       "health": "Response codes of Patroni REST API endpoints per member, as a load balancer sees them. 200 means the node fits the endpoint, 503 means it does not.",
       "lastEnd": "When the replica last reported a new WAL position to the primary. If nothing is written to the cluster, the position stays put and this time grows; that is normal.",
       "queries": "Top queries from pg_stat_statements: since the last reset or over the last 5, 15 or 60 minutes (the sampler reads the statistics once a minute while the tab is open). Click a row for the query card."
+    },
+    "settings": {
+      "mcpEnable": "Glafira listens on a local socket (a named pipe on Windows) available only to your user. A client runs <code>glafira-pg mcp</code>, which connects to it. Off by default."
     }
   },
   "recommend": {

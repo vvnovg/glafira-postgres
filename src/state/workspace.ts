@@ -10,7 +10,8 @@ export type TabSpec =
   | { kind: "about" }
   /** Справка: глава и раздел руководства (F1, ссылки). */
   | { kind: "help"; chapter?: string; anchor?: string }
-  | { kind: "settings" }
+  /** Настройки; section — раздел, к которому прокрутить (индикатор LLM открывает раздел MCP). Вкладка одна. */
+  | { kind: "settings"; section?: "mcp" }
   /** Объекты базы из дерева каталога. Таблица, представление и последовательность — по схеме и имени, функция — по oid (имена перегружены). */
   | { kind: "table"; connectionId: string; database: string; schema: string; name: string }
   | { kind: "view"; connectionId: string; database: string; schema: string; name: string; matview: boolean }

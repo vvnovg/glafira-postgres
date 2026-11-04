@@ -1,9 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
 import { LANGUAGES } from "../../i18n/languages";
 import { i18n, setLanguage } from "../../i18n";
+import { tabId, useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
+import { McpSection } from "../mcp/McpSection";
 
 export function SettingsPanel() {
   const { t } = useTranslation();
@@ -22,6 +25,16 @@ export function SettingsPanel() {
     mutationFn: (showSystemObjects: boolean) => api.setUiSettings({ showSystemObjects }),
     onSuccess: (saved) => qc.setQueryData(["uiSettings"], saved),
   });
+  // Индикатор LLM внизу боковой панели открывает настройки с разделом MCP (`section: "mcp"`): раздел прокручивается в
+  // видимую часть, когда страница нарисована. Каждое открытие — новый объект спеки вкладки, поэтому повторный щелчок
+  // прокручивает снова. jsdom не знает scrollIntoView — вызов необязательный.
+  const spec = useWorkspace((st) => st.tabs.find((x) => x.id === tabId({ kind: "settings" })));
+  const showMcp = spec?.kind === "settings" && spec.section === "mcp";
+  const loaded = lang.data !== undefined;
+  const mcpRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (showMcp && loaded) mcpRef.current?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+  }, [spec, showMcp, loaded]);
 
   if (lang.error) return <ErrorBanner error={lang.error} onRetry={() => lang.refetch()} />;
   const s = lang.data;
@@ -76,6 +89,9 @@ export function SettingsPanel() {
         {ui.error && <ErrorBanner error={ui.error} onRetry={() => void ui.refetch()} />}
         {changeUi.error && <ErrorBanner error={changeUi.error} />}
       </section>
+      <div ref={mcpRef}>
+        <McpSection />
+      </div>
     </div>
   );
 }

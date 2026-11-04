@@ -501,3 +501,8 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .choice { border: 0; margin: 0; padding: 0; min-width: 0; }
 .choice legend { padding: 0; margin-bottom: 2px; color: var(--muted); }
 .choice label { display: flex; flex-wrap: wrap; gap: 0 6px; align-items: baseline; margin: 3px 0; }
+
+/* MCP (спец. P4 §11): индикатор сессий внизу боковой панели и фрагменты конфигураций клиентов в «Настройках». */
+.llm-indicator.active::before { content: "● "; color: var(--accent); }
+.mcp-section h4 { margin: 16px 0 4px; }
+.mcp-snippet pre { margin: 4px 0 8px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-alt); white-space: pre-wrap; word-break: break-all; font-size: 12px; }

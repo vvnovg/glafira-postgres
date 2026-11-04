@@ -6,6 +6,14 @@ beforeEach(() => {
 });
 
 describe("workspace", () => {
+  it("«Настройки» с разделом MCP — та же вкладка, спека заменяется", () => {
+    const { open } = useWorkspace.getState();
+    open({ kind: "settings" });
+    open({ kind: "settings", section: "mcp" });
+    expect(useWorkspace.getState().tabs).toEqual([{ kind: "settings", section: "mcp", id: "settings" }]);
+    expect(tabId({ kind: "settings", section: "mcp" })).toBe("settings");
+  });
+
   it("повторное открытие активирует существующую вкладку", () => {
     const { open } = useWorkspace.getState();
     open({ kind: "settings" });

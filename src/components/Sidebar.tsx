@@ -4,6 +4,7 @@ import { openSupport } from "../lib/links";
 import { clampSidebar, SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, useSidebarWidth } from "../lib/useSidebarWidth";
 import { useWorkspace } from "../state/workspace";
 import { ConnectionTree } from "./connections/tree/ConnectionTree";
+import { LlmIndicator } from "./mcp/LlmIndicator";
 
 /** Шаг изменения ширины стрелками, px; с Shift — крупный. */
 const STEP = 16;
@@ -108,6 +109,7 @@ export function Sidebar() {
       <aside className="sidebar" ref={asideRef} style={{ width }}>
         <ConnectionTree />
         <div className="sidebar-footer">
+          <LlmIndicator />
           <button type="button" className="link" onClick={() => open({ kind: "settings" })}>
             {t("sidebar.settings")}
           </button>

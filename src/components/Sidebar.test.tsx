@@ -10,6 +10,7 @@ vi.mock("../api/client", async (importOriginal) => {
   return {
     ...orig,
     api: {
+      getMcpStatus: vi.fn(() => new Promise(() => {})),
       getTopology: vi.fn(() => new Promise(() => {})),
       listFolders: vi.fn(() => Promise.resolve([])),
       listConnections: vi.fn(() => Promise.resolve([{ ...newProfile(), id: "c", name: "billing" }])),
@@ -18,6 +19,8 @@ vi.mock("../api/client", async (importOriginal) => {
 });
 
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { api } from "../api/client";
+import { mcpStatus } from "../test/mcp";
 import { SUPPORT_URL } from "../lib/links";
 import { useWorkspace } from "../state/workspace";
 import { Sidebar } from "./Sidebar";
@@ -29,6 +32,15 @@ beforeEach(() => {
 });
 
 describe("Sidebar", () => {
+  it("индикатор LLM — первым внизу панели, пока есть сессии MCP", async () => {
+    vi.mocked(api.getMcpStatus).mockResolvedValueOnce(
+      mcpStatus({ sessions: [{ id: "s1", clientName: "qwen-code", clientVersion: "0.26.7", startedMs: 0, calls: 1, active: false }] }),
+    );
+    const { container } = renderWithClient(<Sidebar />);
+    const indicator = await screen.findByRole("button", { name: "LLM: qwen-code" });
+    expect(container.querySelector(".sidebar-footer button")).toBe(indicator);
+  });
+
   it("показывает дерево подключений и ссылки внизу в заданном порядке", async () => {
     const user = userEvent.setup();
     const { container } = renderWithClient(<Sidebar />);

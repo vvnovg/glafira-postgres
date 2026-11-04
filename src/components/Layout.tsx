@@ -8,10 +8,12 @@ import { type Tab, useWorkspace } from "../state/workspace";
 import { UpdateNotice } from "./about/UpdateNotice";
 import { EnvBadge } from "./common/EnvBadge";
 import { FolderMenu } from "./connections/tree/FolderMenu";
+import { ApprovalDialog } from "./mcp/ApprovalDialog";
 import { Sidebar } from "./Sidebar";
 import { i18n } from "../i18n";
 import { TabContent } from "./TabContent";
 import { useConnectionEvents } from "../lib/useConnectionEvents";
+import { useMcpEvents } from "../lib/useMcpStatus";
 import { useHelpShortcut } from "../lib/useHelpShortcut";
 import { hiddenTabIds, revealScrollLeft } from "../lib/tabOverflow";
 
@@ -110,6 +112,7 @@ export function Layout() {
   const { tabs, activeId, activate, close } = useWorkspace();
   useHelpShortcut();
   useConnectionEvents();
+  useMcpEvents();
   const { data: connections = [] } = useQuery({ queryKey: ["connections"], queryFn: api.listConnections });
   const byId = new Map(connections.map((c) => [c.id, c]));
   const active = tabs.find((x) => x.id === activeId);
@@ -200,6 +203,7 @@ export function Layout() {
           </section>
         ))}
       </main>
+      <ApprovalDialog />
     </div>
   );
 }

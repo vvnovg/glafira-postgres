@@ -2,6 +2,8 @@ import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import { listen } from "@tauri-apps/api/event";
+import { api } from "../api/client";
+import { mcpStatus } from "../test/mcp";
 import { ENV_COLORS } from "../lib/env";
 import type { ConnectionProfile } from "../api/types";
 import { useHelpContext } from "../state/helpContext";
@@ -25,7 +27,7 @@ vi.mock("../api/client", async (importOriginal) => {
     pg: { username: "u", database: "postgres", sslMode: "prefer", tls: { caPath: null, clientCert: null }, connectTimeoutS: 10, databases: null },
     ssh: null,
   } as ConnectionProfile;
-  return { ...actual, api: { ...actual.api, listConnections: vi.fn().mockResolvedValue([conn]) } };
+  return { ...actual, api: { ...actual.api, getMcpStatus: vi.fn(() => new Promise(() => {})), listConnections: vi.fn().mockResolvedValue([conn]) } };
 });
 vi.mock("./TabContent", () => ({ TabContent: () => <div /> }));
 
@@ -46,6 +48,13 @@ describe("Layout tabs", () => {
       ],
       activeId: "settings",
     });
+  });
+
+  it("диалог подтверждения MCP-клиента — поверх любой вкладки; подписка на mcp://state", async () => {
+    vi.mocked(api.getMcpStatus).mockResolvedValueOnce(mcpStatus({ pending: [{ sessionId: "s1", clientName: "qwen-code", clientVersion: "0.26.7" }] }));
+    renderWithClient(<Layout />);
+    expect(await screen.findByRole("dialog", { name: "qwen-code 0.26.7 хочет подключиться к Glafira" })).toBeInTheDocument();
+    expect(listen).toHaveBeenCalledWith("mcp://state", expect.any(Function));
   });
 
   it("shows tab titles with accessible tab roles", () => {

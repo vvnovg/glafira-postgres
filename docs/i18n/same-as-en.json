@@ -87,6 +87,7 @@
     "llm.stats.minMax",
     "llm.stats.stddev",
     "llm.stats.wal",
+    "mcp.indicator.one",
     "object.constraintKinds.n",
     "object.ddl",
     "object.identity",

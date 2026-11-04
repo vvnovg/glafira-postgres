@@ -1,8 +1,10 @@
-import { act, screen } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LanguageSettings } from "../../api/types";
 import { i18n } from "../../i18n";
+import { useWorkspace } from "../../state/workspace";
+import { MCP_CONFIGS, mcpStatus } from "../../test/mcp";
 import { renderWithClient } from "../../test/render";
 
 const base: LanguageSettings = {
@@ -19,6 +21,14 @@ vi.mock("../../api/client", async (importOriginal) => {
       setLanguage: vi.fn(),
       getUiSettings: vi.fn(),
       setUiSettings: vi.fn(),
+      getMcpStatus: vi.fn(),
+      setMcpEnabled: vi.fn(),
+      revokeMcpClient: vi.fn(),
+      disconnectMcpSessions: vi.fn(),
+      getMcpAudit: vi.fn(),
+      getMcpClientConfigs: vi.fn(),
+      revealMcpAudit: vi.fn(),
+      listConnections: vi.fn(),
     },
   };
 });
@@ -28,6 +38,11 @@ import { SettingsPanel } from "./SettingsPanel";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(api.getMcpStatus).mockResolvedValue(mcpStatus());
+  vi.mocked(api.getMcpClientConfigs).mockResolvedValue(MCP_CONFIGS);
+  vi.mocked(api.getMcpAudit).mockResolvedValue([]);
+  vi.mocked(api.listConnections).mockResolvedValue([]);
+  useWorkspace.setState({ tabs: [], activeId: null });
   vi.mocked(api.getUiSettings).mockResolvedValue({ showSystemObjects: false });
 });
 
@@ -36,6 +51,28 @@ beforeEach(() => {
 afterEach(() => act(() => i18n.changeLanguage("ru")));
 
 describe("SettingsPanel", () => {
+  it("раздел «LLM-ассистенты (MCP)» — после «Отображения»", async () => {
+    vi.mocked(api.getLanguageSettings).mockResolvedValue(base);
+    renderWithClient(<SettingsPanel />);
+    expect(await screen.findByRole("checkbox", { name: "Разрешить MCP-сервер" })).toBeInTheDocument();
+    expect(screen.getAllByRole("heading", { level: 3 }).map((h) => h.textContent)).toEqual(["Язык", "Отображение", "LLM-ассистенты (MCP)"]);
+  });
+
+  it("открытие с разделом MCP (индикатор) прокручивает к нему, каждый раз; обычное — нет", async () => {
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
+    vi.mocked(api.getLanguageSettings).mockResolvedValue(base);
+    useWorkspace.setState({ tabs: [{ kind: "settings", id: "settings" }], activeId: "settings" });
+    renderWithClient(<SettingsPanel />);
+    await screen.findByRole("heading", { level: 3, name: "LLM-ассистенты (MCP)" });
+    expect(scroll).not.toHaveBeenCalled();
+    act(() => useWorkspace.getState().open({ kind: "settings", section: "mcp" }));
+    await waitFor(() => expect(scroll).toHaveBeenCalledTimes(1));
+    // Повторный щелчок по индикатору — новый объект спеки: прокрутка снова.
+    act(() => useWorkspace.getState().open({ kind: "settings", section: "mcp" }));
+    await waitFor(() => expect(scroll).toHaveBeenCalledTimes(2));
+  });
+
   it("выбор языка; доступны все языки", async () => {
     vi.mocked(api.getLanguageSettings).mockResolvedValue(base);
     vi.mocked(api.setLanguage).mockResolvedValue({ ...base, chosen: "en", effective: "en", reason: "user" });

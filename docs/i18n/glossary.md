@@ -24,6 +24,7 @@ Glafira, PostgreSQL, Patroni, WAL, LSN, DCS, REST API, DNS, TCP, TLS, SSL, mTLS,
 названия ОС и хранилищ: Keychain, Credential Manager, Secret Service;
 роли узла в подписях интерфейса: Leader, Primary, Sync, Quorum (см. «Термины PostgreSQL и Patroni»);
 значения окружения: local, dev, test, stage, prod (в ru — строчными, как в en).
+LLM, MCP; названия MCP-клиентов: Qwen Code, Claude Code, Claude Desktop, Cursor; имена инструментов MCP (`explain_query`, `get_activity`…) и коды их ошибок (`not_allowed`, `client_not_approved`…).
 
 ## Стиль по языкам
 
@@ -79,6 +80,19 @@ Glafira, PostgreSQL, Patroni, WAL, LSN, DCS, REST API, DNS, TCP, TLS, SSL, mTLS,
 | retained WAL | удерживаемый WAL | Сколько WAL не даёт удалить слот; в узком столбце — «Удерживает WAL» |
 | failover readiness | готовность к failover | Вердикт по каждому кандидату: готов ли принять роль лидера |
 | health matrix | матрица health | Коды ответов адресов проверки здоровья Patroni; `health` не переводится |
+
+## Термины MCP
+
+| en | ru | Примечание |
+|---|---|---|
+| LLM assistant | LLM-ассистент | Клиент MCP с моделью (Qwen Code, Claude Code…); в тексте после первого упоминания — «ассистент» |
+| MCP server | MCP-сервер | Шлюз внутри Glafira; выключатель «Разрешить MCP-сервер» |
+| MCP client | MCP-клиент | Программа, которая подключается к шлюзу; без имени — «Неизвестный MCP-клиент» |
+| session | сессия | Подключение клиента к шлюзу; где возможна путаница с сессией PostgreSQL — «сессия MCP» |
+| approve / reject / revoke | разрешить / отклонить / отозвать | Ответы в диалоге подтверждения и отзыв разрешения в «Настройках» |
+| LLM access | доступ для LLM | Группа формы подключения; уровни «Нет», «Диагностика» |
+| masking | маскирование | Замена литералов в текстах запросов на `$N` перед отправкой модели |
+| journal | журнал | Журнал MCP (`mcp-audit.jsonl`); не путать с «Журналом действий» |
 
 ## Термины приложения
 
