@@ -1,20 +1,36 @@
 //! Вычистка секретов из значений `pg_settings` (спец. P4 §6.2, уточнение 6 плана P4a): строка подключения
 //! (`primary_conninfo` и другие `…conninfo`) теряет `password` и `sslpassword`, команды (`*_command`) и значения прочих
-//! параметров — значения паролей, токенов и ключей (пары `ИМЯ=значение`, опции `--имя значение`, пароль в URI
-//! `user:password@`); параметр с секретом в самом имени (`myext.api_token`) скрывается целиком. Функция чистая:
-//! `get_settings` зовёт её на каждой строке. Разбор команд — эвристика: секрет без имени (`curl -u user:pw`) она не
-//! узнает.
+//! параметров — значения паролей, токенов и ключей (пары `ИМЯ=значение` и `имя = значение`, опции `--имя значение`,
+//! пароль в URI `user:password@`); параметр с секретом в самом имени (`myext.api_token`, `myext.dbpass`, `anon.salt`)
+//! и команда с секретом в имени (`ssl_passphrase_command`) скрываются целиком. Функция чистая: `get_settings` зовёт её
+//! на каждой строке. Разбор команд — эвристика: секрет без имени (`curl -u user:pw`) она не узнает.
 
 const MASK: &str = "***";
 /// Части имени переменной окружения или опции команды, значение которых — секрет (`PGPASSWORD`, `--password`,
 /// `--repo1-cipher-pass`, `AWS_SECRET_ACCESS_KEY`, `API_TOKEN`, `-passin`).
 const SECRET_WORDS: [&str; 5] = ["pass", "secret", "token", "key", "credential"];
-/// Части имени самого параметра сервера; `pass` здесь нет (`ssl_passphrase_command` — команда, её значение чистится
-/// по частям), `key` проверяется отдельно (`secret_setting`).
-const SECRET_SETTING_WORDS: [&str; 5] = ["password", "passwd", "secret", "token", "credential"];
+/// Подстроки имени самого параметра сервера, значение которого — секрет; `key` проверяется отдельно
+/// (`secret_setting`).
+const SECRET_SETTING_WORDS: [&str; 6] = [
+    "password",
+    "passwd",
+    "passphrase",
+    "secret",
+    "token",
+    "credential",
+];
+/// Окончания слова имени параметра (слова — через `.`, `_`, `-`), значение которого — секрет: `myext.dbpass`,
+/// `myext.db_pwd`, `anon.salt`. `pgtle.passcheck_db_name` (имя базы) сюда не попадает.
+const SECRET_SETTING_ENDINGS: [&str; 3] = ["pass", "pwd", "salt"];
 /// Параметры ядра с «секретным» словом в имени, значение которых — не секрет.
-const PLAIN_SETTINGS: [&str; 2] = ["password_encryption", "md5_password_warnings"];
-/// Ключи строки подключения libpq, значение которых — пароль (в парах и в запросе URI).
+const PLAIN_SETTINGS: [&str; 3] = [
+    "password_encryption",
+    "md5_password_warnings",
+    "ssl_passphrase_command_supports_reload",
+];
+/// Значения-флаги: секретом не бывают (`credcheck.password_contain_username = on`).
+const FLAGS: [&str; 6] = ["on", "off", "true", "false", "yes", "no"];
+/// Ключи строки подключения libpq, значение которых — пароль (в парах и в запросе URI); сравниваются без регистра.
 const CONNINFO_SECRETS: [&str; 2] = ["password", "sslpassword"];
 
 /// Значение параметра без секретов и признак «значение изменено» (`hidden` в ответе `get_settings`).
@@ -23,12 +39,15 @@ pub fn redact_setting(name: &str, value: &str) -> (String, bool) {
         return (String::new(), false);
     }
     let lower = name.to_ascii_lowercase();
-    let out = if lower.contains("conninfo") {
-        redact_conninfo(value)
-    } else if lower.ends_with("_command") {
-        redact_command(value)
-    } else if secret_setting(&lower) {
+    let command = lower.ends_with("_command");
+    let out = if secret_setting(&lower) && (command || !password_knob(&lower, value)) {
+        // Спец. §6.2: вывод `ssl_passphrase_command` — пароль ключа, а сама команда обычно его и содержит
+        // (`echo FooBaR1`, `printf %s s3cret`) — поэтому команда с секретом в имени скрывается целиком.
         MASK.to_string()
+    } else if command {
+        redact_command(value)
+    } else if lower.contains("conninfo") {
+        redact_conninfo(value)
     } else {
         // Строка подключения или команда бывает и в параметре расширения с другим именем (`myext.connstr`).
         redact_command(value)
@@ -37,9 +56,9 @@ pub fn redact_setting(name: &str, value: &str) -> (String, bool) {
     (out, hidden)
 }
 
-/// Секрет в имени параметра: пароль, секрет, токен, учётные данные или ключ — часть имени после точки, кончающаяся на
-/// `key` (`openai_key`, `apikey`), но не путь к файлу ключа (`ssl_key_file`, `krb_server_keyfile`) и не
-/// `max_index_keys`.
+/// Секрет в имени параметра: пароль, фраза-пароль, секрет, токен, учётные данные (`SECRET_SETTING_WORDS`), слово на
+/// `pass`, `pwd`, `salt` или ключ — слово последней части имени (после точки), кончающееся на `key` (`openai_key`,
+/// `apikey`), но не путь к файлу ключа (`ssl_key_file`, `krb_server_keyfile`) и не `max_index_keys`.
 fn secret_setting(lower: &str) -> bool {
     if PLAIN_SETTINGS.contains(&lower) {
         return false;
@@ -50,7 +69,40 @@ fn secret_setting(lower: &str) -> bool {
         .unwrap_or(lower)
         .split(['_', '-'])
         .any(|part| part.ends_with("key"));
-    SECRET_SETTING_WORDS.iter().any(|w| lower.contains(w)) || (key && !lower.ends_with("file"))
+    let ending = lower
+        .split(['.', '_', '-'])
+        .any(|w| SECRET_SETTING_ENDINGS.iter().any(|e| w.ends_with(e)));
+    SECRET_SETTING_WORDS.iter().any(|w| lower.contains(w))
+        || ending
+        || (key && !lower.ends_with("file"))
+}
+
+/// Параметр с секретным словом в имени — настройка паролей, а не пароль: значение — флаг (`on`, `off`, `true`,
+/// `false`, `yes`, `no`), или имя — ручка (`enable_…`, `…_length`, `…_check`, слово `min` или `max` в последней части)
+/// и значение — число или одно слово строчными латинскими буквами (перечисление: `require`). Иначе значение
+/// скрывается: лишнее спрятать безопаснее, чем отдать пароль (`myext.dbpass = 123456`, `anon.salt = 42`).
+fn password_knob(lower: &str, value: &str) -> bool {
+    if FLAGS.iter().any(|f| value.eq_ignore_ascii_case(f)) {
+        return true;
+    }
+    let words: Vec<&str> = lower
+        .rsplit('.')
+        .next()
+        .unwrap_or(lower)
+        .split(['_', '-'])
+        .collect();
+    let knob = words.first() == Some(&"enable")
+        || matches!(words.last(), Some(&("length" | "check")))
+        || words.iter().any(|w| matches!(*w, "min" | "max"));
+    let number = value.parse::<f64>().is_ok_and(f64::is_finite)
+        && value
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+'));
+    let keyword = value.len() <= 32
+        && value
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || matches!(c, '-' | '_'));
+    knob && (number || keyword)
 }
 
 fn secret_name(name: &str) -> bool {
@@ -125,16 +177,19 @@ fn conninfo_pairs(s: &str) -> Option<Vec<(&str, &str)>> {
 }
 
 /// Тело URI после `://`: пароль в `user:password@` и параметры запроса `password=` / `sslpassword=` убираются.
+/// `user[:password]@` libpq ищет до первого `/`: пароль без кодирования может содержать `?`, `#` и `@`, поэтому
+/// берётся последний `@` перед `/` (лишнее убрать безопаснее, чем отдать пароль), а узел, путь и запрос — после него.
 fn redact_uri_body(body: &str) -> String {
-    let authority_end = body.find(['/', '?', '#']).unwrap_or(body.len());
-    let (authority, tail) = body.split_at(authority_end);
-    let authority = match authority.rfind('@') {
-        Some(at) => {
-            let user = authority[..at].split(':').next().unwrap_or_default();
-            format!("{user}@{}", &authority[at + 1..])
-        }
-        None => authority.to_string(),
+    let path_start = body.find('/').unwrap_or(body.len());
+    let (user, rest) = match body[..path_start].rfind('@') {
+        Some(at) => (
+            Some(body[..at].split(':').next().unwrap_or_default()),
+            &body[at + 1..],
+        ),
+        None => (None, body),
     };
+    let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (host, tail) = rest.split_at(host_end);
     let tail = match tail.split_once('?') {
         Some((path, query)) => {
             let kept: Vec<&str> = query
@@ -154,7 +209,10 @@ fn redact_uri_body(body: &str) -> String {
         }
         None => tail.to_string(),
     };
-    format!("{authority}{tail}")
+    match user {
+        Some(user) => format!("{user}@{host}{tail}"),
+        None => format!("{host}{tail}"),
+    }
 }
 
 /// Все URI в тексте (`postgresql://…`, `https://…`): тело — до пробела или кавычки, чистится `redact_uri_body`.
@@ -181,10 +239,11 @@ fn redact_conninfo(value: &str) -> String {
     if head.starts_with("postgresql://") || head.starts_with("postgres://") {
         return redact_uris(value);
     }
+    let secret = |k: &str| CONNINFO_SECRETS.iter().any(|s| k.eq_ignore_ascii_case(s));
     match conninfo_pairs(value) {
-        Some(pairs) if pairs.iter().any(|(k, _)| CONNINFO_SECRETS.contains(k)) => pairs
+        Some(pairs) if pairs.iter().any(|(k, _)| secret(k)) => pairs
             .iter()
-            .filter(|(k, _)| !CONNINFO_SECRETS.contains(k))
+            .filter(|(k, _)| !secret(k))
             .map(|(k, v)| format!("{k}={v}"))
             .collect::<Vec<_>>()
             .join(" "),
@@ -199,14 +258,15 @@ fn redact_command(value: &str) -> String {
     redact_option_values(&redact_assignments(&redact_uris(value)))
 }
 
-/// Пары `ИМЯ=значение` в команде: значение секретного имени (`SECRET_WORDS`) — `***` (слово оболочки целиком),
-/// остальное как есть.
+/// Пары `ИМЯ=значение` в команде и `имя = значение` (libpq разрешает пробелы вокруг `=`): значение секретного имени
+/// (`SECRET_WORDS`, без учёта регистра) — `***` (слово оболочки целиком), остальное как есть.
 fn redact_assignments(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(eq) = rest.find('=') {
         let (before, after) = rest.split_at(eq);
-        let name_start = before
+        let name = before.trim_end();
+        let name_start = name
             .char_indices()
             .rev()
             .find(|(_, c)| !is_name_char(*c))
@@ -214,9 +274,12 @@ fn redact_assignments(s: &str) -> String {
         out.push_str(before);
         out.push('=');
         let after = &after[1..];
-        if secret_name(&before[name_start..]) {
+        if secret_name(&name[name_start..]) {
+            // Пробелы (и лишние `=`) перед значением остаются, значение — слово после них.
+            let value = after.trim_start_matches(|c: char| c.is_whitespace() || c == '=');
+            out.push_str(&after[..after.len() - value.len()]);
             out.push_str(MASK);
-            rest = &after[shell_word_len(after)..];
+            rest = &value[shell_word_len(value)..];
         } else {
             rest = after;
         }
@@ -315,8 +378,9 @@ mod tests {
             (plain.to_string(), false)
         );
         assert_eq!(
-            redact_setting("ssl_passphrase_command", "echo key=topsecret").0,
-            "echo key=***"
+            redact_setting("ssl_passphrase_command", "echo key=topsecret"),
+            ("***".to_string(), true),
+            "команда пароля ключа — целиком"
         );
     }
 
@@ -438,5 +502,156 @@ mod tests {
         assert_eq!((v.as_str(), hidden), ("host=x password=*** dbname=z", true));
         let (v, _) = redact_setting("myext.dsn", "postgresql://u:pw@h/db");
         assert_eq!(v, "postgresql://u@h/db");
+    }
+
+    // Исправления ревью (раунд 1).
+
+    /// libpq ищет `@` до первого `/`, а не до `?` или `#`: в пароле без кодирования они не обрывают `user:password@`.
+    #[test]
+    fn uri_password_with_reserved_characters_is_removed() {
+        for (raw, clean) in [
+            (
+                "postgresql://rep:pa?ss@db:5432/postgres",
+                "postgresql://rep@db:5432/postgres",
+            ),
+            (
+                "postgresql://rep:pa#ss@db:5432/postgres?sslmode=require",
+                "postgresql://rep@db:5432/postgres?sslmode=require",
+            ),
+            (
+                "postgresql://rep:p@ss@db/postgres",
+                "postgresql://rep@db/postgres",
+            ),
+            (
+                "postgres://rep:pa?ss@db?sslmode=require&password=x",
+                "postgres://rep@db?sslmode=require",
+            ),
+            (
+                "postgresql://rep:pa?s#s@db1:5432,db2:5432/postgres?target_session_attrs=any",
+                "postgresql://rep@db1:5432,db2:5432/postgres?target_session_attrs=any",
+            ),
+        ] {
+            assert_eq!(
+                redact_setting("primary_conninfo", raw),
+                (clean.to_string(), true),
+                "{raw}"
+            );
+        }
+        for plain in [
+            "postgresql://rep@db:5432/postgres?application_name=a",
+            "postgresql://db:5432/postgres?sslmode=require#frag",
+            "postgresql://db/postgres",
+        ] {
+            assert_eq!(
+                redact_setting("primary_conninfo", plain),
+                (plain.to_string(), false),
+                "без пароля значение не меняется"
+            );
+        }
+        let (v, hidden) = redact_setting(
+            "archive_command",
+            "pg_receivewal -d postgresql://rep:pa?ss@db/postgres -D /arch",
+        );
+        assert_eq!(
+            (v.as_str(), hidden),
+            (
+                "pg_receivewal -d postgresql://rep@db/postgres -D /arch",
+                true
+            )
+        );
+    }
+
+    /// Спец. §6.2 сильнее правила пар: `ssl_passphrase_command` обычно и есть пароль (`echo FooBaR1`), поэтому
+    /// непустое значение скрывается целиком; так же — команда с секретным словом в имени.
+    #[test]
+    fn passphrase_command_is_hidden_whole() {
+        for v in [
+            "echo FooBaR1",
+            "printf %s s3cret",
+            "/usr/local/bin/get-ssl-pass.sh %p",
+        ] {
+            assert_eq!(
+                redact_setting("ssl_passphrase_command", v),
+                ("***".to_string(), true),
+                "{v}"
+            );
+        }
+        assert_eq!(
+            redact_setting("ssl_passphrase_command", ""),
+            (String::new(), false)
+        );
+        assert_eq!(
+            redact_setting("myext.key_passphrase_command", "echo k"),
+            ("***".to_string(), true)
+        );
+        assert_eq!(
+            redact_setting("ssl_passphrase_command_supports_reload", "on"),
+            ("on".to_string(), false)
+        );
+    }
+
+    /// Параметры расширений: пароль (`dbpass`, `pwd`), фраза-пароль и соль скрываются; ручки «про» пароли (длина,
+    /// проверка, флаг) — нет. Строка под секретным именем скрывается, даже если похожа на настройку.
+    #[test]
+    fn extension_secret_names_are_hidden_and_password_knobs_are_kept() {
+        for (name, value) in [
+            ("myext.dbpass", "s3cret"),
+            ("myext.dbpass", "123456"),
+            ("myext.db_pwd", "s3cret"),
+            ("myext.dbpwd", "s3cret"),
+            ("myext.passphrase", "correct horse"),
+            ("myext.key_passphrase", "x"),
+            ("anon.salt", "a1b2c3"),
+            ("anon.salt", "42"),
+            ("myext.password_check", "hunter2!"),
+            ("credcheck.password_not_contain", "admin,root"),
+        ] {
+            assert_eq!(
+                redact_setting(name, value),
+                ("***".to_string(), true),
+                "{name} = {value}"
+            );
+        }
+        for (name, value) in [
+            ("passwordcheck.min_password_length", "8"),
+            ("pgtle.enable_password_check", "require"),
+            ("pgtle.enable_password_check", "on"),
+            ("pgtle.passcheck_db_name", "postgres"),
+            ("credcheck.password_min_length", "12"),
+            ("credcheck.password_min_digit", "1"),
+            ("credcheck.password_contain_username", "on"),
+            ("credcheck.encrypted_password_allowed", "off"),
+            ("credcheck.password_ignore_case", "false"),
+            ("myext.rls_bypass", "true"),
+            ("password_encryption", "scram-sha-256"),
+        ] {
+            assert_eq!(
+                redact_setting(name, value),
+                (value.to_string(), false),
+                "{name} = {value}"
+            );
+        }
+    }
+
+    /// libpq разрешает пробелы вокруг `=`, а ключи сравниваются без регистра: ни разбор пар, ни запасная чистка
+    /// команды не отдают пароль.
+    #[test]
+    fn spaces_around_equals_and_uppercase_keys_do_not_leak() {
+        let (v, hidden) = redact_setting("myext.connstr", "host=db password = s3cret");
+        assert_eq!((v.as_str(), hidden), ("host=db password = ***", true));
+        let (v, hidden) = redact_setting("primary_conninfo", "host=db password = s3cret ???");
+        assert!(!v.contains("s3cret") && hidden, "{v}");
+        let (v, hidden) = redact_setting("primary_conninfo", "host=db PASSWORD=s3cret user=r");
+        assert_eq!((v.as_str(), hidden), ("host=db user=r", true));
+        let (v, hidden) = redact_setting("primary_conninfo", "host=db SslPassword =k3y user=r");
+        assert_eq!((v.as_str(), hidden), ("host=db user=r", true));
+        let (v, hidden) = redact_setting("myext.connstr", "host=db PASSWORD=s3cret");
+        assert_eq!((v.as_str(), hidden), ("host=db PASSWORD=***", true));
+        let (v, _) = redact_setting("myext.connstr", "host=db password =\ts3cret port=5432");
+        assert_eq!(v, "host=db password =\t*** port=5432");
+        let (v, _) = redact_setting("archive_command", "PGPASSWORD = s3cret cmd %p");
+        assert_eq!(v, "PGPASSWORD = *** cmd %p");
+        let (v, _) = redact_setting("myext.connstr", "user=a password= next=1");
+        assert!(!v.contains("next=1") && v.contains("password="), "{v}");
     }
 }

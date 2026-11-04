@@ -31,7 +31,8 @@ use super::access::{
 use super::mask::{MAX_QUERY_BYTES, cut_text, has_texts, mask_opt, mask_query_detail, mask_report};
 use super::secrets::redact_setting;
 use super::texts::{diag_catalog, finding_out, tool_id};
-use crate::catalog::table::{self as catalog_table, Column};
+use crate::catalog::ddl::quote_ident;
+use crate::catalog::table::{self as catalog_table, Column, RelationRef, TableDetails};
 use crate::commands::catalog::{catalog_limit, on_catalog_node_within};
 use crate::conn::errors::from_pg;
 use crate::conn::profile::{ConnectionKind, LlmAccess};
@@ -66,6 +67,12 @@ const NO_WINDOW_HINT: &str = "Glafira has no pg_stat_statements history for this
 /// Значение `pg_stats` длиннее — обрезается (спец. §5.2).
 pub const MAX_STATS_VALUE_BYTES: usize = 2048;
 const TRUNCATED_MARK: &str = "…[truncated]";
+/// Выполняющихся экземпляров в карточке `get_query_details` — самые долгие; полное число — в `runningTotal`
+/// (запрос карточки их не ограничивает, а предел ответа — 100 КБ, спец. §10.1).
+pub const MAX_RUNNING: usize = 20;
+/// Партиций в `get_table_details` (список и строка `-- partitions:` в DDL); полное число — в
+/// `partitioning.partitionsTotal`.
+pub const MAX_PARTITIONS: usize = 200;
 
 /// Операция чтения. Варианты задачи 12 (`explain_query`, `hypothetical_index`) до неё отвечают
 /// `internal: not implemented yet`.
@@ -747,7 +754,8 @@ async fn query_details(st: &AppState, p: QueryDetailsParams) -> Result<PgAnswer,
     query_detail_answer(d, &member, access)
 }
 
-/// Карточка для модели — JSON-сериализация `QueryDetail` (та же форма, что у интерфейса): тексты маскируются (уровень
+/// Карточка для модели — JSON-сериализация `QueryDetail` (та же форма, что у интерфейса): выполняющихся экземпляров —
+/// не больше `MAX_RUNNING` самых долгих (полное число — в `runningTotal`), тексты маскируются (уровень
 /// `diagnostics`, `mask_query_detail`), тексты выполняющихся экземпляров затем — не длиннее `MAX_QUERY_BYTES` (как у
 /// `get_activity`, на любом уровне; обрезанный помечается `truncated`), находки — с английскими текстами, причины
 /// недоступности — английским текстом, узел — в поле `member`.
@@ -756,6 +764,12 @@ fn query_detail_answer(
     member: &str,
     access: LlmAccess,
 ) -> Result<PgAnswer, ToolError> {
+    // Сначала предел (литералы считаются только у отданных экземпляров): самые долгие, без длительности — в конце.
+    let running_total = d.running.len();
+    let duration = |r: &query_detail::RunningInstance| r.duration_s.unwrap_or(f64::NEG_INFINITY);
+    d.running
+        .sort_by(|a, b| duration(b).total_cmp(&duration(a)));
+    d.running.truncate(MAX_RUNNING);
     let masked = masks(access).then(|| mask_query_detail(&mut d) as u64);
     for r in &mut d.running {
         let len = r.query.len();
@@ -770,6 +784,9 @@ fn query_detail_answer(
     let mut v =
         serde_json::to_value(&d).map_err(|e| tool_error(AppError::internal_with(e.to_string())))?;
     v["member"] = json!(member);
+    if running_total > MAX_RUNNING {
+        v["runningTotal"] = json!(running_total);
+    }
     v["findings"] = serde_json::to_value(findings).unwrap_or_default();
     v["unavailable"] = serde_json::to_value(unavailable).unwrap_or_default();
     Ok(PgAnswer {
@@ -891,13 +908,57 @@ async fn table_details(st: &AppState, p: TableDetailsParams) -> Result<PgAnswer,
     )
     .await
     .map_err(tool_error)?;
+    Ok(answer(PgOutput::Table(table_out(details, stats)?)))
+}
+
+/// Таблица для модели — JSON-сериализация `TableDetails` (форма интерфейса) с партициями не длиннее `MAX_PARTITIONS`
+/// (`cut_partitions`, полное число — в `partitioning.partitionsTotal`) и статистика колонок в порядке таблицы.
+fn table_out(mut details: TableDetails, stats: Vec<ColumnStat>) -> Result<TableOut, ToolError> {
+    let total = cut_partitions(&mut details);
     let column_stats = order_like(stats, &details.columns);
-    let table = serde_json::to_value(&details)
+    let mut table = serde_json::to_value(&details)
         .map_err(|e| tool_error(AppError::internal_with(e.to_string())))?;
-    Ok(answer(PgOutput::Table(TableOut {
+    if let Some(total) = total {
+        table["partitioning"]["partitionsTotal"] = json!(total);
+    }
+    Ok(TableOut {
         table,
         column_stats,
-    })))
+    })
+}
+
+/// Прямые партиции — первые `MAX_PARTITIONS` (в порядке каталога); строка `-- partitions:` в DDL (`ddl::build_ddl`:
+/// `schema.name` через `quote_ident`, управляющие символы — пробелы) заменяется строкой с теми же партициями и
+/// полным числом. Вернёт полное число, если список обрезан.
+fn cut_partitions(d: &mut TableDetails) -> Option<usize> {
+    let total = d.partitioning.partitions.len();
+    if total <= MAX_PARTITIONS {
+        return None;
+    }
+    let names = |parts: &[RelationRef]| -> String {
+        parts
+            .iter()
+            .map(|r| format!("{}.{}", quote_ident(&r.schema), quote_ident(&r.name)))
+            .collect::<Vec<_>>()
+            .join(", ")
+            .chars()
+            .map(|c| {
+                if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+                    ' '
+                } else {
+                    c
+                }
+            })
+            .collect()
+    };
+    let full = format!("\n-- partitions: {}\n", names(&d.partitioning.partitions));
+    d.partitioning.partitions.truncate(MAX_PARTITIONS);
+    let cut = format!(
+        "\n-- partitions ({MAX_PARTITIONS} of {total}): {}\n",
+        names(&d.partitioning.partitions)
+    );
+    d.ddl = d.ddl.replacen(&full, &cut, 1);
+    Some(total)
 }
 
 /// Параметры сервера (спец. §5.2): `$1` — ровно эти имена (без учёта регистра: `DateStyle`, `TimeZone` в `pg_settings`
@@ -965,6 +1026,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::catalog::table::Partitioning;
     use crate::conn::profile::{ConnectionProfile, sample_profile};
     use crate::diag::pulse::PulseData;
     use crate::error::AppResult;
@@ -1978,6 +2040,107 @@ mod tests {
         assert_eq!(a.masked, None);
         assert!(v["text"].as_str().unwrap().contains("ann@example.com"));
         assert!(v["running"][0]["query"].as_str().unwrap().len() <= MAX_QUERY_BYTES);
+        assert!(v.get("runningTotal").is_none(), "два экземпляра не режутся");
+    }
+
+    /// Выполняющиеся экземпляры не ограничены запросом карточки: модели — `MAX_RUNNING` самых долгих (по
+    /// длительности, по убыванию) и полное число в `runningTotal`; литералы считаются только у отданных.
+    #[test]
+    fn query_card_keeps_the_twenty_longest_running_instances() {
+        let mut d = QueryDetail::unavailable_pgss(170_000, false);
+        // 25 экземпляров вперемешку (7 и 25 взаимно просты), у нулевого длительности нет.
+        d.running = (0..25)
+            .map(|i| (i * 7) % 25)
+            .map(|k| {
+                let mut r = running(format!("SELECT {k}"));
+                r.pid = k;
+                r.duration_s = (k > 0).then_some(f64::from(k));
+                r
+            })
+            .collect();
+        let a = query_detail_answer(d, "pg-1", LlmAccess::Diagnostics).unwrap();
+        let PgOutput::QueryDetails(v) = &a.body else {
+            panic!("не карточка")
+        };
+        let pids: Vec<i64> = v["running"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["pid"].as_i64().unwrap())
+            .collect();
+        assert_eq!(pids, (5..=24).rev().collect::<Vec<i64>>());
+        assert_eq!(v["runningTotal"], 25);
+        assert_eq!(
+            a.masked,
+            Some(20),
+            "литералы — только у отданных экземпляров"
+        );
+    }
+
+    fn partitioned(n: usize) -> TableDetails {
+        let mut t = TableDetails {
+            oid: 1,
+            schema: "shop".into(),
+            name: "events".into(),
+            relkind: "p".into(),
+            unlogged: false,
+            owner: "postgres".into(),
+            tablespace: None,
+            comment: None,
+            reloptions: vec![],
+            columns: vec![],
+            indexes: vec![],
+            constraints: vec![],
+            incoming_fks: vec![],
+            stats: Default::default(),
+            partitioning: Partitioning {
+                key: Some("RANGE (at)".into()),
+                // Первое имя — в кавычках в DDL (заглавные), как у `ddl::table_ddl`.
+                partitions: (0..n)
+                    .map(|i| RelationRef {
+                        schema: "shop".into(),
+                        name: if i == 0 {
+                            "Events-0".into()
+                        } else {
+                            format!("events_{i:04}")
+                        },
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+            triggers: vec![],
+            ddl: String::new(),
+        };
+        t.ddl = crate::catalog::ddl::table_ddl(&t);
+        t
+    }
+
+    /// Список партиций не ограничен каталогом: модели — первые `MAX_PARTITIONS` и полное число в
+    /// `partitioning.partitionsTotal`; строка `-- partitions:` в DDL режется так же.
+    #[test]
+    fn table_partitions_are_cut_in_the_list_and_the_ddl() {
+        let out = table_out(partitioned(250), vec![]).unwrap();
+        let p = &out.table["partitioning"];
+        assert_eq!(p["partitions"].as_array().unwrap().len(), MAX_PARTITIONS);
+        assert_eq!(p["partitions"][199]["name"], "events_0199");
+        assert_eq!(p["partitionsTotal"], 250);
+        let ddl = out.table["ddl"].as_str().unwrap();
+        assert!(
+            ddl.contains("\n-- partitions (200 of 250): shop.\"Events-0\", shop.events_0001, "),
+            "{ddl}"
+        );
+        assert!(
+            ddl.contains(", shop.events_0199\n") && !ddl.contains("events_0200"),
+            "{ddl}"
+        );
+        // До предела — как у интерфейса.
+        let t = partitioned(MAX_PARTITIONS);
+        let ddl = t.ddl.clone();
+        let out = table_out(t, vec![]).unwrap();
+        let p = &out.table["partitioning"];
+        assert_eq!(p["partitions"].as_array().unwrap().len(), MAX_PARTITIONS);
+        assert!(p.get("partitionsTotal").is_none());
+        assert_eq!(out.table["ddl"], ddl.as_str());
     }
 
     #[tokio::test]

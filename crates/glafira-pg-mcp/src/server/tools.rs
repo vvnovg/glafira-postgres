@@ -242,7 +242,7 @@ impl PgServer {
     }
 
     #[tool(
-        description = "Top queries from pg_stat_statements on a member. mode sinceReset (default) gives totals since the last statistics reset; mode window gives the last windowS seconds (300, 900 or 3600, default 900) from Glafira's buffer, which fills while the Queries tab or a query card is open in Glafira; without the buffer the coverage is 0, then use observe_top_queries or sinceReset. sort: totalTime (default), meanTime, maxTime, stddevTime, calls, rowsPerCall, sharedRead, hitRatio, tempWritten, walBytes, ioTime, planTime, jitTime or cpuTime. limit 1..=100, default 20; filters database and search (a substring of the query text).",
+        description = "Top queries from pg_stat_statements on a member. mode sinceReset (default) gives totals since the last statistics reset; mode window gives the last windowS seconds (300, 900 or 3600, default 900) from Glafira's buffer, which fills while the Queries tab or a query card is open in Glafira; without the buffer the coverage is 0, then use observe_top_queries or sinceReset. sort: totalTime (default), meanTime, maxTime, stddevTime, calls, rowsPerCall, sharedRead, hitRatio, tempWritten, walBytes, ioTime, planTime, jitTime or cpuTime. limit 1..=100, default 20; filters database and search (a case-insensitive substring of the query text). At the diagnostics access level search matches the masked text ($N in place of literals) within the top 200 queries by the chosen sort, so an empty result may mean the query is outside that window.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -307,7 +307,7 @@ impl PgServer {
     }
 
     #[tool(
-        description = "Card of one query by queryId from get_top_queries: text, metrics since the statistics reset and for the window, history, running instances, waits, tables and findings. database is the database of the query.",
+        description = "Card of one query by queryId from get_top_queries: text, metrics since the statistics reset and for the window, history, running instances (the 20 longest-running; runningTotal is the full count when there are more), waits, tables and findings. database is the database of the query.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -338,7 +338,7 @@ impl PgServer {
     }
 
     #[tool(
-        description = "Table details: columns, indexes, constraints, statistics, partitions, triggers and DDL, plus pg_stats per column in columnStats (null fraction, average width, distinct values, correlation; at the data access level also most common values and histogram bounds).",
+        description = "Table details: columns, indexes, constraints, statistics, partitions (up to 200, also in the DDL comment; partitioning.partitionsTotal is the full count when there are more), triggers and DDL, plus pg_stats per column in columnStats (null fraction, average width, distinct values, correlation; at the data access level also most common values and histogram bounds).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -369,7 +369,7 @@ impl PgServer {
     }
 
     #[tool(
-        description = "Server settings from pg_settings on a member: name, value, unit, source, context and pending restart. By default only settings changed from their defaults (changedOnly true); names (up to 200) returns exactly these settings. Passwords and secrets in connection strings and *_command settings are removed and such settings have hidden: true.",
+        description = "Server settings from pg_settings on a member: name, value, unit, source, context and pending restart. By default only settings changed from their defaults (changedOnly true); names (up to 200) returns exactly these settings. Rows with source client or session (returned when asked by names) show the settings of Glafira's own connection, for example statement_timeout, lock_timeout, search_path, DateStyle or default_transaction_read_only, not the values configured on the server. Passwords and secrets in connection strings, *_command settings and secret-named settings are removed or replaced with ***, and such settings have hidden: true.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
