@@ -15,9 +15,14 @@ use crate::topology::runtime::ConnState;
 const INTERNAL_MESSAGE: &str = "Internal error in Glafira; retry the call, and if it repeats ask the user to check the Glafira log";
 /// Ошибки файлов настроек подключения (сертификаты, ключи) и файлов данных Glafira: путь модели не нужен.
 const SETTINGS_MESSAGE: &str = "The settings or certificate files of this connection cannot be used; ask the user to check the connection in Glafira";
+/// Ошибки туннеля ssh: цель бастиона, адрес узла за ним и вывод ssh модели не нужны (§6.2: настройки SSH не
+/// отдаются никогда) — подробности пользователь видит в Glafira.
+const SSH_MESSAGE: &str = "The SSH tunnel to the server failed; see Glafira for details";
 const PATH_ERROR_PREFIXES: [&str; 3] =
     ["errors.tls.", "errors.storage.", "errors.connections.path"];
 const FILE_ERROR_KEYS: [&str; 2] = ["errors.io", "errors.json"];
+/// Параметры ошибки, которых модель не получает ни у одной ошибки: пути файлов и цель ssh.
+const HIDDEN_PARAMS: [&str; 3] = ["path", "file", "target"];
 
 /// Действующий уровень: меньшее из уровня подключения и потолка политики `mcpMaxAccess` (§4.2). Потолок `data` выше
 /// любого уровня P4a (`off`, `diagnostics`) и ничего не сужает; P4b сопоставит его с `LlmAccess::Data`.
@@ -93,31 +98,64 @@ pub fn invalid_argument(message: impl Into<String>) -> ToolError {
     err("invalid_argument", message)
 }
 
-/// Ошибка приложения → ошибка инструмента (§10.2): код `ErrorCode` строкой (`NODE_UNAVAILABLE`, `TIMEOUT`…) и
-/// английский текст `AppError`; ввод — `invalid_argument`, «нет объекта» — `not_found`; внутренняя ошибка и ошибки
-/// файлов — общим текстом (пути и подробности уходят в лог приложения).
-pub fn tool_error(e: AppError) -> ToolError {
+/// Ошибка, текст которой модель получает общим: внутренняя (пути, паники), файлов настроек и данных (пути), туннеля
+/// ssh (цель бастиона, адрес узла, вывод ssh).
+fn hidden_message(e: &AppError) -> Option<&'static str> {
     let file_error = FILE_ERROR_KEYS.contains(&e.key.as_str())
         || PATH_ERROR_PREFIXES.iter().any(|p| e.key.starts_with(p));
-    if e.code == ErrorCode::Internal || file_error {
+    if e.code == ErrorCode::Internal {
+        Some(INTERNAL_MESSAGE)
+    } else if file_error {
+        Some(SETTINGS_MESSAGE)
+    } else if e.code == ErrorCode::SshError {
+        Some(SSH_MESSAGE)
+    } else {
+        None
+    }
+}
+
+/// Ошибка приложения → ошибка инструмента (§10.2): код `ErrorCode` строкой (`NODE_UNAVAILABLE`, `TIMEOUT`…) и
+/// английский текст `AppError`; ввод — `invalid_argument`, «нет объекта» — `not_found`; внутренняя ошибка, ошибки
+/// файлов и туннеля ssh — общим текстом (пути, цель ssh и подробности уходят в лог приложения).
+pub fn tool_error(e: AppError) -> ToolError {
+    if let Some(message) = hidden_message(&e) {
         tracing::warn!(
             key = %e.key,
             details = e.details.as_deref().unwrap_or_default(),
             "MCP tool error hidden from the model: {}",
             e.message
         );
-    }
-    if e.code == ErrorCode::Internal {
-        return err("internal", INTERNAL_MESSAGE);
-    }
-    if file_error {
-        return err(&code_name(e.code), SETTINGS_MESSAGE);
+        let code = if e.code == ErrorCode::Internal {
+            "internal".to_string()
+        } else {
+            code_name(e.code)
+        };
+        return err(&code, message);
     }
     match e.code {
         ErrorCode::InvalidInput => invalid_argument(e.message),
         ErrorCode::NotFound => err("not_found", e.message),
         code => err(&code_name(code), e.message),
     }
+}
+
+/// Ошибка приложения внутри данных отчёта для модели (`PulseNode.error`, `HealthCell.error`): код и ключ — как есть,
+/// без `details`; у скрытых ошибок (`tool_error`: внутренняя, файлов, ssh) текст — общий, а из параметров остаётся
+/// только вид (`kind`), у остальных из параметров уходят пути и цель ssh. Интерфейс получает исходную ошибку: замена —
+/// только в ответе модели.
+pub fn model_app_error(e: &AppError) -> AppError {
+    let mut out = e.clone();
+    out.details = None;
+    match hidden_message(e) {
+        Some(message) => {
+            out.message = message.to_string();
+            out.params.retain(|k, _| k == "kind");
+        }
+        None => out
+            .params
+            .retain(|k, _| !HIDDEN_PARAMS.contains(&k.as_str())),
+    }
+    out
 }
 
 #[cfg(test)]
@@ -206,5 +244,86 @@ mod tests {
             name = "t"
         ));
         assert_eq!(e.code, "not_found");
+    }
+
+    /// Цель бастиона, адрес узла за ним и вывод ssh модели не уходят: код `SSH_ERROR` и общий текст (§6.2, §10.2).
+    #[test]
+    fn ssh_errors_reach_the_model_without_the_bastion() {
+        use crate::net::ssh::process::{SshErrorKind, ssh_error};
+        use crate::net::ssh::socks::{forward_failed, tunnel_down};
+        for e in [
+            ssh_error(
+                SshErrorKind::AuthFailed,
+                "admin@bastion.corp.example",
+                "admin@bastion.corp.example: Permission denied (publickey)",
+            ),
+            ssh_error(SshErrorKind::Exited, "admin@bastion.corp.example", ""),
+            forward_failed(
+                "admin@bastion.corp.example",
+                "pg-hidden.internal",
+                5432,
+                "early eof",
+            ),
+            tunnel_down("admin@bastion.corp.example", 40123, "connection refused"),
+        ] {
+            let t = tool_error(e.clone());
+            assert_eq!(
+                (t.code.as_str(), t.message.as_str()),
+                ("SSH_ERROR", SSH_MESSAGE),
+                "{e:?}"
+            );
+            let m = serde_json::to_string(&model_app_error(&e)).unwrap();
+            assert!(
+                !m.contains("bastion") && !m.contains("pg-hidden") && !m.contains("Permission"),
+                "{m}"
+            );
+            assert!(m.contains("SSH_ERROR") && m.contains(SSH_MESSAGE), "{m}");
+        }
+        let kind = model_app_error(&ssh_error(SshErrorKind::AuthFailed, "bastion", ""));
+        assert_eq!(
+            kind.params.get("kind").map(String::as_str),
+            Some("authFailed")
+        );
+    }
+
+    /// Ошибка внутри данных (`PulseNode.error`, `HealthCell.error`): без `details`, путей и цели ssh; остальное — как
+    /// у интерфейса.
+    #[test]
+    fn embedded_errors_lose_details_and_paths() {
+        let e = app_err!(
+            ErrorCode::NodeUnavailable,
+            "errors.pg.tcpFailed",
+            "Could not reach {{host}}:{{port}}",
+            host = "pg-1",
+            port = 5432
+        )
+        .with_details("tcp connect error: /var/run/secret.sock");
+        let m = model_app_error(&e);
+        assert_eq!(m.details, None);
+        assert_eq!(
+            (m.code, m.key.as_str(), m.message.as_str()),
+            (e.code, e.key.as_str(), e.message.as_str())
+        );
+        assert_eq!(m.params, e.params);
+        let e = app_err!(
+            ErrorCode::TlsError,
+            "errors.tls.readFailed",
+            "Cannot read {{path}}",
+            path = "/Users/me/ca.pem"
+        );
+        let m = serde_json::to_string(&model_app_error(&e)).unwrap();
+        assert!(!m.contains("/Users/me"), "{m}");
+        assert!(
+            m.contains(SETTINGS_MESSAGE) && m.contains("TLS_ERROR"),
+            "{m}"
+        );
+        let m = serde_json::to_string(&model_app_error(&AppError::internal_with(
+            "panic at src/x.rs:1",
+        )))
+        .unwrap();
+        assert!(
+            !m.contains("src/x.rs") && m.contains(INTERNAL_MESSAGE),
+            "{m}"
+        );
     }
 }

@@ -15,19 +15,19 @@ use glafira_pg_mcp::model::{
 use glafira_pg_mcp::params::{
     ACTIVITY_LIMIT_DEFAULT, ActivityParams, RunDiagnosticParams, TOPOLOGY_EVENTS_MAX,
 };
+use pg_advisor::findings::FindingTarget;
 use pg_advisor::rules::sessions::SessionRow;
-use pg_advisor::sqltext::MaskOptions;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use super::access::{
-    check_connection, effective_access, ensure_open, err, invalid_argument, masks, open_for_llm,
-    tool_error,
+    check_connection, effective_access, ensure_open, err, invalid_argument, masks, model_app_error,
+    open_for_llm, tool_error,
 };
-use super::mask::{has_texts, mask_report, scs_on};
+use super::mask::{MAX_QUERY_BYTES, cut_text, has_texts, mask_report};
 use super::texts::{diag_catalog, finding_out, tool_id};
 use crate::conn::profile::{ConnectionKind, LlmAccess};
-use crate::diag::queries::{QueriesMode, QueriesParams};
+use crate::diag::queries::{LIMITS, QueriesMode, QueriesParams};
 use crate::diag::{self, DiagData, DiagReport, DiagRequest, Tool, Unavailable};
 use crate::state::AppState;
 use crate::storage::connections::ConnectionFolder;
@@ -233,9 +233,38 @@ pub(crate) fn unavailable_out(tool: Option<&str>, u: Unavailable) -> Unavailable
     }
 }
 
-/// Отчёт инструмента для модели: конверт P2, `data` — JSON-сериализация P2/P3 (та же форма, что у интерфейса),
-/// находки — с английскими текстами, причины недоступности — английским текстом.
-pub fn report_out(r: DiagReport) -> Report {
+/// Ошибки узлов в данных отчёта (`PulseNode.error`, клетки `HealthCell.error`) — в виде для модели
+/// (`access::model_app_error`: без `details`, путей и цели ssh). Интерфейс получает данные как есть: замена — только на
+/// границе MCP. Исчерпывающий `match`: новый инструмент с ошибками в данных не пройдёт сборку незамеченным.
+fn hide_error_details(data: &mut DiagData) {
+    let hide = |e: &mut Option<crate::error::AppError>| {
+        if let Some(e) = e.as_mut() {
+            *e = model_app_error(e);
+        }
+    };
+    match data {
+        DiagData::Pulse(d) => d.nodes.iter_mut().for_each(|n| hide(&mut n.error)),
+        DiagData::Health(d) => d
+            .members
+            .iter_mut()
+            .flat_map(|m| m.cells.iter_mut())
+            .for_each(|c| hide(&mut c.error)),
+        DiagData::Sessions(_)
+        | DiagData::Waits(_)
+        | DiagData::Locks(_)
+        | DiagData::Horizon(_)
+        | DiagData::Replication(_)
+        | DiagData::Slots(_)
+        | DiagData::Failover(_)
+        | DiagData::Queries(_) => {}
+    }
+}
+
+/// Отчёт инструмента для модели: конверт P2, `data` — JSON-сериализация P2/P3 (та же форма, что у интерфейса, но
+/// ошибки узлов — без подробностей, `hide_error_details`), находки — с английскими текстами, причины недоступности —
+/// английским текстом.
+pub fn report_out(mut r: DiagReport) -> Report {
+    hide_error_details(&mut r.data);
     Report {
         tool: tool_id(r.tool),
         data: serde_json::to_value(&r.data).unwrap_or(Value::Null),
@@ -255,22 +284,65 @@ pub fn report_out(r: DiagReport) -> Report {
     }
 }
 
-/// Маскирует тексты отчёта на уровне `diagnostics` (`standard_conforming_strings` — узла отчёта); итог — число
-/// литералов для журнала. Отчёт без текстов и уровень без маскирования — `None`.
-pub(crate) async fn mask_if(
-    st: &AppState,
-    id: &str,
-    access: LlmAccess,
-    report: &mut DiagReport,
-) -> Option<u64> {
+/// Маскирует тексты отчёта на уровне `diagnostics` (`mask::mask_report`, без чтения `standard_conforming_strings`);
+/// итог — число литералов для журнала. Отчёт без текстов и уровень без маскирования — `None`.
+pub(crate) fn mask_if(access: LlmAccess, report: &mut DiagReport) -> Option<u64> {
     if !masks(access) || !has_texts(&report.data) {
         return None;
     }
-    let opts = match report.member.as_deref() {
-        Some(m) => scs_on(st, id, m, None).await,
-        None => MaskOptions::default(),
+    Some(mask_report(report) as u64)
+}
+
+/// Поиск по тексту запроса, отложенный до маскирования (`take_masked_search`).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MaskedSearch {
+    /// Искомая подстрока в нижнем регистре.
+    needle: String,
+    /// Строк в ответе — предел запроса до расширения.
+    limit: usize,
+}
+
+/// Поиск `search` инструмента `queries` на уровне, где тексты маскируются (решение владельца 2026-11-04). Поиск P3
+/// идёт по исходным текстам pgss (`ILIKE` на сервере, кеш текстов узла), и ответ «есть строки / нет строк» выдавал
+/// бы литералы по символу. Поэтому здесь `search` убирается из параметров P3, а предел строк расширяется до
+/// наибольшего (`LIMITS`: тексты читаются только у строк топа); после `mask_if` `keep_masked_matches` оставляет строки,
+/// чей ЗАМАСКИРОВАННЫЙ текст содержит подстроку (без учёта регистра), и возвращает предел запроса. Итоги не меняются:
+/// поиск сужает строки, а не итоги (`search_restricts_rows_but_not_the_totals`). Строки вне расширенного топа и без
+/// прочитанного текста поиск не находит. На уровне без маскирования (P4b `data`) — `None`, поиск P3 по исходным
+/// текстам остаётся. Тот же порядок — у `run_diagnostic` (`queries.search`) и `get_top_queries` (`search`, задача 11):
+/// `take_masked_search` до `diag::run`, `mask_if`, затем `keep_masked_matches`, затем свой предел ответа.
+pub(crate) fn take_masked_search(q: &mut QueriesParams, access: LlmAccess) -> Option<MaskedSearch> {
+    if !masks(access) {
+        return None;
+    }
+    let needle = q.search()?.to_lowercase();
+    q.search = None;
+    let limit = q.limit;
+    q.limit = LIMITS.iter().copied().max().unwrap_or(limit).max(limit);
+    Some(MaskedSearch { needle, limit })
+}
+
+/// Строки отчёта `queries`, замаскированный текст которых содержит подстроку поиска, не больше предела запроса;
+/// находки строк, не попавших в ответ, уходят (как у поиска P3: правила видят только найденные строки), находки без
+/// запроса (`queries_incomplete`) остаются. Вызывать после `mask_if` (`take_masked_search`).
+pub(crate) fn keep_masked_matches(report: &mut DiagReport, s: &MaskedSearch) {
+    let DiagData::Queries(d) = &mut report.data else {
+        return;
     };
-    Some(mask_report(report, opts) as u64)
+    d.rows.retain(|r| {
+        r.text
+            .as_deref()
+            .is_some_and(|t| t.to_lowercase().contains(&s.needle))
+    });
+    d.rows.truncate(s.limit);
+    let rows = &d.rows;
+    report.findings.retain(|f| match &f.target {
+        Some(FindingTarget::Query { query_id, database }) => rows.iter().any(|r| {
+            r.key.query_id.to_string() == *query_id
+                && r.datname.as_deref().unwrap_or_default() == database
+        }),
+        _ => true,
+    });
 }
 
 /// id инструмента из параметра `tool`.
@@ -309,11 +381,12 @@ fn queries_params(v: Option<Value>) -> Result<QueriesParams, ToolError> {
 async fn run_diagnostic(st: &AppState, p: RunDiagnosticParams) -> Result<PgAnswer, ToolError> {
     let (profile, access) = check_connection(st, &p.connection_id)?;
     let tool = parse_tool(&p.tool)?;
-    let queries = if tool == Tool::Queries {
+    let mut queries = if tool == Tool::Queries {
         Some(queries_params(p.queries)?)
     } else {
         None
     };
+    let search = queries.as_mut().and_then(|q| take_masked_search(q, access));
     let req = DiagRequest {
         tool,
         member: p.member,
@@ -326,7 +399,10 @@ async fn run_diagnostic(st: &AppState, p: RunDiagnosticParams) -> Result<PgAnswe
     let mut report = diag::run(st, &p.connection_id, req)
         .await
         .map_err(tool_error)?;
-    let masked = mask_if(st, &p.connection_id, access, &mut report).await;
+    let masked = mask_if(access, &mut report);
+    if let Some(s) = &search {
+        keep_masked_matches(&mut report, s);
+    }
     Ok(PgAnswer {
         body: PgOutput::Report(report_out(report)),
         masked,
@@ -343,13 +419,14 @@ pub fn health_of(results: Vec<(Tool, Result<DiagReport, String>)>) -> HealthSumm
     for (tool, result) in results {
         let id = tool_id(tool);
         match result {
-            Ok(r) => {
+            Ok(mut r) => {
                 unavailable.extend(
                     r.unavailable
                         .into_iter()
                         .map(|u| unavailable_out(Some(&id), u)),
                 );
                 if tool == Tool::Pulse {
+                    hide_error_details(&mut r.data);
                     pulse = serde_json::to_value(&r.data).unwrap_or(Value::Null);
                     from_pulse.extend(r.findings);
                 } else {
@@ -462,7 +539,7 @@ pub fn filter_sessions(rows: Vec<SessionRow>, p: &ActivityParams) -> (u64, Vec<S
     (total, out)
 }
 
-/// `get_activity`: строки инструмента `sessions` после фильтров; маскируются только отданные строки.
+/// `get_activity`: строки инструмента `sessions` после фильтров (`activity_answer`).
 async fn activity(st: &AppState, p: ActivityParams) -> Result<PgAnswer, ToolError> {
     let access = open_for_llm(st, &p.connection_id).await?;
     let req = DiagRequest {
@@ -471,22 +548,36 @@ async fn activity(st: &AppState, p: ActivityParams) -> Result<PgAnswer, ToolErro
         window_s: None,
         queries: None,
     };
-    let mut report = diag::run(st, &p.connection_id, req)
+    let report = diag::run(st, &p.connection_id, req)
         .await
         .map_err(tool_error)?;
+    activity_answer(report, &p, access)
+}
+
+/// Ответ `get_activity` из отчёта `sessions`: фильтры и предел (`filter_sessions`), маскирование только отданных строк
+/// (уровень `diagnostics`), затем тексты — не длиннее `MAX_QUERY_BYTES` по границе символа, как у `observe_activity`
+/// (на любом уровне: 500 строк по 1 МБ `track_activity_query_size` не уложились бы в ответ).
+fn activity_answer(
+    mut report: DiagReport,
+    p: &ActivityParams,
+    access: LlmAccess,
+) -> Result<PgAnswer, ToolError> {
     let DiagData::Sessions(d) = &mut report.data else {
         return Err(tool_error(crate::error::AppError::internal_with(
             "sessions report without sessions data",
         )));
     };
-    let (total, rows) = filter_sessions(std::mem::take(&mut d.rows), &p);
+    let (total, rows) = filter_sessions(std::mem::take(&mut d.rows), p);
     d.rows = rows;
-    let masked = mask_if(st, &p.connection_id, access, &mut report).await;
-    let DiagData::Sessions(d) = report.data else {
+    let masked = mask_if(access, &mut report);
+    let DiagData::Sessions(mut d) = report.data else {
         return Err(tool_error(crate::error::AppError::internal_with(
             "sessions report without sessions data",
         )));
     };
+    for q in d.rows.iter_mut().filter_map(|r| r.query.as_mut()) {
+        cut_text(q, MAX_QUERY_BYTES);
+    }
     Ok(PgAnswer {
         body: PgOutput::Activity(ActivityOut {
             total,
@@ -972,6 +1063,254 @@ mod tests {
             st.runtimes.view("on").state,
             ConnState::Connected,
             "открытие доведено до конца без вызова"
+        );
+    }
+
+    // Исправления первого раунда ревью: поиск по замаскированному тексту, предел текста сеанса, ошибки узлов.
+
+    fn statement(id: i64, text: &str, calls: i64) -> pg_advisor::queries::QueryStat {
+        use pg_advisor::queries::{Counters, QueryKey, Totals, stat};
+        let mut row = stat(
+            QueryKey {
+                query_id: id,
+                dbid: 1,
+                userid: 10,
+                toplevel: true,
+            },
+            Some("orders".into()),
+            None,
+            &Counters {
+                calls,
+                ..Counters::default()
+            },
+            None,
+            &Totals::default(),
+        );
+        row.text = Some(text.into());
+        row
+    }
+
+    /// Отчёт `queries` с ответом сервера на поиск без `search`: строки топа с исходными текстами pgss.
+    fn statements_report() -> DiagReport {
+        use crate::diag::queries::QueriesData;
+        use pg_advisor::queries::Totals;
+        let query = |id: i64| {
+            Finding::new("query_n_plus_one", Severity::Warning).target(FindingTarget::Query {
+                query_id: id.to_string(),
+                database: "orders".into(),
+            })
+        };
+        report(
+            Tool::Queries,
+            DiagData::Queries(QueriesData {
+                totals: Totals {
+                    calls: 1_000,
+                    ..Totals::default()
+                },
+                rows: vec![
+                    statement(1, "ALTER ROLE app PASSWORD 'hunter2'", 1),
+                    statement(2, "SELECT * FROM orders WHERE note = 'hunter'", 900),
+                    statement(3, "SELECT 1", 99),
+                ],
+                ..QueriesData::empty(QueriesMode::SinceReset)
+            }),
+            vec![
+                query(1),
+                query(2),
+                Finding::new("queries_incomplete", Severity::Warning),
+            ],
+        )
+    }
+
+    fn texts(r: &DiagReport) -> Vec<String> {
+        let DiagData::Queries(d) = &r.data else {
+            panic!("не queries")
+        };
+        d.rows.iter().filter_map(|r| r.text.clone()).collect()
+    }
+
+    /// `search` на уровне `diagnostics` ищет по замаскированному тексту: по исходному ответ «есть / нет строк»
+    /// выдавал бы литералы по символу (решение владельца 2026-11-04).
+    #[test]
+    fn diagnostics_search_looks_only_at_masked_texts() {
+        let mut q = queries_params(Some(json!({"search": "hunter", "limit": 50}))).unwrap();
+        let s = take_masked_search(&mut q, LlmAccess::Diagnostics).expect("отложен");
+        assert_eq!(
+            (q.search(), q.limit),
+            (None, 200),
+            "серверу поиск не уходит, топ шире"
+        );
+        let mut r = statements_report();
+        assert_eq!(mask_if(LlmAccess::Diagnostics, &mut r), Some(3));
+        keep_masked_matches(&mut r, &s);
+        assert!(texts(&r).is_empty(), "{:?}", texts(&r));
+        assert_eq!(
+            r.findings.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
+            ["queries_incomplete"],
+            "находки строк вне ответа уходят"
+        );
+        let DiagData::Queries(d) = &r.data else {
+            unreachable!()
+        };
+        assert_eq!(d.totals.calls, 1_000, "итоги не меняются");
+
+        let mut q = queries_params(Some(json!({"search": "alter ROLE"}))).unwrap();
+        let s = take_masked_search(&mut q, LlmAccess::Diagnostics).unwrap();
+        let mut r = statements_report();
+        mask_if(LlmAccess::Diagnostics, &mut r);
+        keep_masked_matches(&mut r, &s);
+        assert_eq!(texts(&r), ["ALTER ROLE app PASSWORD $1"]);
+        assert_eq!(r.findings.len(), 2, "находка найденной строки остаётся");
+
+        // Совпадение по замаскированному тексту: `$1` есть у всех трёх строк; строк — не больше предела запроса.
+        let mut q = queries_params(Some(json!({"search": "$1"}))).unwrap();
+        let mut s = take_masked_search(&mut q, LlmAccess::Diagnostics).unwrap();
+        s.limit = 2;
+        let mut r = statements_report();
+        mask_if(LlmAccess::Diagnostics, &mut r);
+        keep_masked_matches(&mut r, &s);
+        assert_eq!(
+            texts(&r),
+            [
+                "ALTER ROLE app PASSWORD $1",
+                "SELECT * FROM orders WHERE note = $1"
+            ]
+        );
+    }
+
+    #[test]
+    fn search_without_masking_stays_on_the_server() {
+        let mut q = queries_params(Some(json!({"search": "hunter"}))).unwrap();
+        assert_eq!(take_masked_search(&mut q, LlmAccess::Off), None);
+        assert_eq!((q.search(), q.limit), (Some("hunter"), 50));
+        let mut q = queries_params(Some(json!({"search": "  "}))).unwrap();
+        assert_eq!(
+            take_masked_search(&mut q, LlmAccess::Diagnostics),
+            None,
+            "пусто — не поиск"
+        );
+        assert_eq!(q.limit, 50);
+    }
+
+    /// Текст сеанса в `get_activity` — не длиннее 2 КБ, обрезка по символу после маскирования (как `observe_activity`).
+    #[test]
+    fn activity_texts_are_masked_then_cut_to_two_kilobytes() {
+        let long = format!(
+            "SELECT * FROM t WHERE email = 'ann@example.com' AND x IN ({}) /* ё */",
+            "aaaa, ".repeat(600)
+        );
+        let rows = vec![
+            SessionRow {
+                pid: 1,
+                state: Some("active".into()),
+                query_age_s: Some(9.0),
+                query: Some(long.clone()),
+                ..Default::default()
+            },
+            SessionRow {
+                pid: 2,
+                state: Some("active".into()),
+                query_age_s: Some(1.0),
+                query: Some("SELECT 'короткий'".into()),
+                ..Default::default()
+            },
+        ];
+        let r = report(
+            Tool::Sessions,
+            DiagData::Sessions(SessionsData {
+                rows,
+                settings: Default::default(),
+            }),
+            vec![],
+        );
+        let p: ActivityParams = serde_json::from_value(json!({"connectionId": "c"})).unwrap();
+        let a = activity_answer(r.clone(), &p, LlmAccess::Diagnostics).unwrap();
+        assert_eq!(a.masked, Some(2));
+        let PgOutput::Activity(out) = a.body else {
+            panic!("не активность")
+        };
+        let first = out.sessions[0]["query"].as_str().unwrap();
+        assert!(
+            first.len() <= MAX_QUERY_BYTES && first.len() > MAX_QUERY_BYTES - 4,
+            "{}",
+            first.len()
+        );
+        assert!(
+            first.starts_with("SELECT * FROM t WHERE email = $1 AND"),
+            "{first}"
+        );
+        assert_eq!(out.sessions[1]["query"], "SELECT $1");
+        // Без маскирования текст тоже обрезается.
+        let a = activity_answer(r, &p, LlmAccess::Off).unwrap();
+        let PgOutput::Activity(out) = a.body else {
+            panic!("не активность")
+        };
+        let first = out.sessions[0]["query"].as_str().unwrap();
+        assert_eq!(first, &long[..MAX_QUERY_BYTES]);
+        assert_eq!(a.masked, None);
+    }
+
+    /// Ошибки узлов в данных (`PulseNode.error`, `HealthCell.error`) уходят модели без цели ssh, путей и `details`.
+    #[test]
+    fn node_errors_in_reports_lose_ssh_targets_and_details() {
+        use crate::diag::patroni::{HealthCell, HealthData, HealthMember};
+        use crate::diag::pulse::PulseNode;
+        use crate::net::ssh::process::{SshErrorKind, ssh_error};
+        use pg_advisor::rules::patroni::HealthGrade;
+        let ssh = || {
+            ssh_error(
+                SshErrorKind::AuthFailed,
+                "admin@bastion.corp.example",
+                "admin@bastion.corp.example: Permission denied",
+            )
+        };
+        let pulse = DiagData::Pulse(PulseData {
+            nodes: vec![PulseNode {
+                member: "pg-1".into(),
+                role: Role::Primary,
+                reachable: false,
+                error: Some(ssh()),
+                facts: None,
+                rates: None,
+            }],
+        });
+        let health = DiagData::Health(HealthData {
+            endpoints: vec!["/health".into()],
+            members: vec![HealthMember {
+                member: "pg-1".into(),
+                api_url: Some("http://10.0.0.1:8008".into()),
+                cells: vec![HealthCell {
+                    endpoint: "/health".into(),
+                    status: None,
+                    error: Some(ssh()),
+                    grade: HealthGrade::Bad,
+                }],
+            }],
+        });
+        for (tool, data) in [(Tool::Pulse, pulse.clone()), (Tool::Health, health)] {
+            let v = serde_json::to_string(&report_out(report(tool, data, vec![]))).unwrap();
+            assert!(
+                !v.contains("bastion") && !v.contains("Permission") && v.contains("SSH_ERROR"),
+                "{v}"
+            );
+        }
+        let h = health_of(vec![(
+            Tool::Pulse,
+            Ok(report(Tool::Pulse, pulse.clone(), vec![])),
+        )]);
+        let v = serde_json::to_string(&h).unwrap();
+        assert!(!v.contains("bastion") && v.contains("SSH_ERROR"), "{v}");
+        let DiagData::Pulse(d) = &pulse else {
+            unreachable!()
+        };
+        assert!(
+            d.nodes[0]
+                .error
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("bastion"),
+            "данные интерфейса не меняются"
         );
     }
 }

@@ -171,7 +171,7 @@ pub struct ActivityParams {
     /// Only sessions whose application_name contains this text (case-insensitive).
     #[serde(default)]
     pub application: Option<String>,
-    /// Only sessions whose current state has lasted at least this many seconds.
+    /// Only sessions whose running query (active) or open transaction (idle in transaction) has lasted at least this many seconds; other states never match.
     #[serde(default)]
     pub min_duration_s: Option<u32>,
     /// Only sessions waiting on this wait event type: Lock, LWLock, IO, IPC, Client, Timeout, BufferPin, Activity, Extension.

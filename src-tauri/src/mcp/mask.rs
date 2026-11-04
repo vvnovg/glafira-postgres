@@ -1,16 +1,15 @@
 //! Маскирование литералов на уровне `diagnostics` (спец. P4 §6.1): тексты `pg_stat_activity` и pgss в данных
 //! инструментов и выражения узлов планов, построенных не по SQL модели. Лексер — `pg_advisor::sqltext::mask_literals`;
-//! здесь — где в данных тексты. `standard_conforming_strings` узла (уточнение 3 плана) читается тем же узлом перед
-//! маскированием; неизвестно — `on`.
+//! здесь — где в данных тексты и маскирование, не зависящее от `standard_conforming_strings` (`mask_fail_closed`,
+//! решение владельца 2026-11-04): настройка может быть своей у базы, роли и сеанса, и её значение у узла ничего не
+//! гарантирует.
 
+use pg_advisor::ash::text_key;
 use pg_advisor::locktree::LockNode;
-use pg_advisor::sqltext::{MaskOptions, mask_literals};
+use pg_advisor::sqltext::{MaskOptions, count_params, mask_literals};
 use serde_json::Value;
-use tokio_postgres::Client;
 
-use crate::commands::catalog::{catalog_limit, on_catalog_node_within};
 use crate::diag::{DiagData, DiagReport};
-use crate::state::AppState;
 
 /// Строковые выражения узлов JSON-плана (`EXPLAIN (FORMAT JSON, VERBOSE)`): в них сервер печатает литералы запроса.
 pub const PLAN_EXPRESSION_KEYS: [&str; 24] = [
@@ -40,57 +39,124 @@ pub const PLAN_EXPRESSION_KEYS: [&str; 24] = [
     "Window",
 ];
 
-/// Маскирует текст на месте; итог — число замаскированных литералов (комментарии не считаются).
-pub fn mask_text(text: &mut String, opts: MaskOptions) -> usize {
-    let (masked, n) = mask_literals(text, opts);
+/// Тексты запросов сеансов в ответе модели — не длиннее (спец. §5.3, как у `observe_activity`); обрезаются после
+/// маскирования.
+pub const MAX_QUERY_BYTES: usize = 2048;
+
+/// Обрезка до `max` байт по границе символа, без отметки (соглашение текстов `observe_activity`, спец. §5.3).
+pub fn cut_text(text: &mut String, max: usize) {
+    if text.len() > max {
+        let mut end = max;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+}
+
+const SCS_ON: MaskOptions = MaskOptions {
+    standard_conforming_strings: true,
+};
+const SCS_OFF: MaskOptions = MaskOptions {
+    standard_conforming_strings: false,
+};
+
+/// Маскирование, которому не важно значение `standard_conforming_strings` (решение владельца 2026-11-04). Обратная
+/// косая в `'…'` при `off` экранирует кавычку, при `on` — нет, и граница литерала у двух прочтений разная. Текст
+/// лексится при обоих значениях: совпали итоги — это и есть ответ (у текста без `\` в `'…'` он равен
+/// `mask_literals`). Разошлись — остаётся их общее начало, а всё дальше заменяется одной меткой `$N…`: общее начало —
+/// начало верного итога при любом значении настройки, поэтому литерал не откроется ни при каком. `$N` на конце общей
+/// части (литерал, чья граница и разошлась) уходит в метку; номер метки — следующий после наибольшего `$N` общей части
+/// и текста, как у `mask_literals`. Второе значение — число литералов: замаскированные в общей части и метка.
+pub fn mask_fail_closed(text: &str) -> (String, usize) {
+    let (on, masked) = mask_literals(text, SCS_ON);
+    let (off, _) = mask_literals(text, SCS_OFF);
+    if on == off {
+        return (on, masked);
+    }
+    let mut common = on
+        .bytes()
+        .zip(off.bytes())
+        .take_while(|(a, b)| a == b)
+        .count();
+    while !on.is_char_boundary(common) {
+        common -= 1;
+    }
+    let mut prefix = on[..common].to_string();
+    let tail = prefix.trim_end_matches(|c: char| c.is_ascii_digit());
+    if tail.ends_with('$') {
+        prefix.truncate(tail.len() - 1);
+    }
+    // `mask_literals` нумерует с `count_params(text) + 1`: литералы общей части — номера выше `count_params(text)`.
+    let before = count_params(text);
+    let n = before.max(count_params(&prefix)) + 1;
+    prefix.push('$');
+    prefix.push_str(&n.to_string());
+    prefix.push('…');
+    (prefix, n - before)
+}
+
+/// Маскирует текст на месте (`mask_fail_closed`); итог — число замаскированных литералов (комментарии не считаются).
+/// Единственный путь маскирования текстов для модели: сеансы, блокировки, ожидания, pgss, выражения планов.
+pub fn mask_text(text: &mut String) -> usize {
+    let (masked, n) = mask_fail_closed(text);
     *text = masked;
     n
 }
 
-pub fn mask_opt(text: &mut Option<String>, opts: MaskOptions) -> usize {
-    text.as_mut().map_or(0, |t| mask_text(t, opts))
+pub fn mask_opt(text: &mut Option<String>) -> usize {
+    text.as_mut().map_or(0, mask_text)
 }
 
-/// В данных инструмента бывают тексты запросов.
+/// В данных инструмента бывают тексты запросов. Исчерпывающий `match`: новый инструмент (P5) не пройдёт сборку, пока
+/// здесь не решено, есть ли у него тексты.
 pub fn has_texts(d: &DiagData) -> bool {
-    matches!(
-        d,
-        DiagData::Sessions(_) | DiagData::Locks(_) | DiagData::Waits(_) | DiagData::Queries(_)
-    )
+    match d {
+        DiagData::Sessions(_) | DiagData::Locks(_) | DiagData::Waits(_) | DiagData::Queries(_) => {
+            true
+        }
+        DiagData::Pulse(_)
+        | DiagData::Horizon(_)
+        | DiagData::Replication(_)
+        | DiagData::Slots(_)
+        | DiagData::Failover(_)
+        | DiagData::Health(_) => false,
+    }
 }
 
-fn mask_lock_node(n: &mut LockNode, opts: MaskOptions) -> usize {
-    mask_opt(&mut n.session.query, opts)
-        + n.children
-            .iter_mut()
-            .map(|c| mask_lock_node(c, opts))
-            .sum::<usize>()
+fn mask_lock_node(n: &mut LockNode) -> usize {
+    mask_opt(&mut n.session.query) + n.children.iter_mut().map(mask_lock_node).sum::<usize>()
 }
 
 /// Тексты запросов в данных отчёта: сессии, дерево блокировок и очередь DDL, топ профиля ожиданий, строки pgss.
+/// Ключ `text:<хэш>` строки профиля ожиданий без `query_id` считается по исходному тексту — он пересчитывается по
+/// замаскированному (`ash::text_key`), иначе по хэшу проверялись бы догадки о литералах. Строки с одинаковым после
+/// маскирования текстом получают один ключ.
 /// Исчерпывающий `match`: новый инструмент (P5) не пройдёт сборку, пока здесь не решено, есть ли у него тексты.
-pub fn mask_report(report: &mut DiagReport, opts: MaskOptions) -> usize {
+pub fn mask_report(report: &mut DiagReport) -> usize {
     match &mut report.data {
-        DiagData::Sessions(d) => d
-            .rows
-            .iter_mut()
-            .map(|r| mask_opt(&mut r.query, opts))
-            .sum(),
+        DiagData::Sessions(d) => d.rows.iter_mut().map(|r| mask_opt(&mut r.query)).sum(),
         DiagData::Locks(d) => {
-            let roots: usize = d.roots.iter_mut().map(|n| mask_lock_node(n, opts)).sum();
+            let roots: usize = d.roots.iter_mut().map(mask_lock_node).sum();
             let queue: usize = d
                 .ddl_queue
                 .iter_mut()
-                .map(|q| mask_opt(&mut q.session.query, opts))
+                .map(|q| mask_opt(&mut q.session.query))
                 .sum();
             roots + queue
         }
         DiagData::Waits(d) => d
             .top_queries
             .iter_mut()
-            .map(|q| mask_text(&mut q.text, opts))
+            .map(|q| {
+                let n = mask_text(&mut q.text);
+                if q.key.starts_with("text:") {
+                    q.key = text_key(&q.text);
+                }
+                n
+            })
             .sum(),
-        DiagData::Queries(d) => d.rows.iter_mut().map(|r| mask_opt(&mut r.text, opts)).sum(),
+        DiagData::Queries(d) => d.rows.iter_mut().map(|r| mask_opt(&mut r.text)).sum(),
         // Держатели горизонта — сессии без текста, остальное — счётчики, имена слотов и состояния узлов.
         DiagData::Pulse(_)
         | DiagData::Horizon(_)
@@ -101,84 +167,48 @@ pub fn mask_report(report: &mut DiagReport, opts: MaskOptions) -> usize {
     }
 }
 
-fn mask_strings(v: &mut Value, opts: MaskOptions) -> usize {
+fn mask_strings(v: &mut Value) -> usize {
     match v {
-        Value::String(s) => mask_text(s, opts),
-        Value::Array(a) => a.iter_mut().map(|x| mask_strings(x, opts)).sum(),
-        Value::Object(_) => mask_plan_value(v, opts),
+        Value::String(s) => mask_text(s),
+        Value::Array(a) => a.iter_mut().map(mask_strings).sum(),
+        Value::Object(_) => mask_plan_value(v),
         _ => 0,
     }
 }
 
 /// Выражения узлов JSON-плана (`PLAN_EXPRESSION_KEYS`) на любой глубине; числа плана, имена отношений и индексов и
 /// настройки (`Settings`) не меняются.
-pub fn mask_plan_value(raw: &mut Value, opts: MaskOptions) -> usize {
+pub fn mask_plan_value(raw: &mut Value) -> usize {
     match raw {
         Value::Object(m) => m
             .iter_mut()
             .map(|(k, v)| {
                 if PLAN_EXPRESSION_KEYS.contains(&k.as_str()) {
-                    mask_strings(v, opts)
+                    mask_strings(v)
                 } else {
-                    mask_plan_value(v, opts)
+                    mask_plan_value(v)
                 }
             })
             .sum(),
-        Value::Array(a) => a.iter_mut().map(|v| mask_plan_value(v, opts)).sum(),
+        Value::Array(a) => a.iter_mut().map(mask_plan_value).sum(),
         _ => 0,
     }
 }
 
-const SCS_SQL: &str = marked_sql!("SHOW standard_conforming_strings");
-
-/// `standard_conforming_strings` на соединении: `off` — обратная косая в '…' экранирует; ошибка или неизвестное
-/// значение — `on` (значение по умолчанию сервера).
-pub async fn scs_of(c: &Client) -> MaskOptions {
-    let on = match c.query_one(SCS_SQL, &[]).await {
-        Ok(r) => r.get::<_, Option<String>>(0).as_deref() != Some("off"),
-        Err(_) => true,
-    };
-    MaskOptions {
-        standard_conforming_strings: on,
-    }
-}
-
-/// То же на узле `member` открытого подключения (пул каталога, БД `database` или БД профиля). Подключение или узел
-/// недоступны — `on`.
-pub async fn scs_on(
-    st: &AppState,
-    connection_id: &str,
-    member: &str,
-    database: Option<&str>,
-) -> MaskOptions {
-    let Ok((_, profile)) = st.runtimes.target(connection_id, Some(member)) else {
-        return MaskOptions::default();
-    };
-    on_catalog_node_within(
-        catalog_limit(&profile),
-        st.client(connection_id, Some(member), database),
-        |c| Box::pin(async move { Ok(scs_of(c).await) }),
-    )
-    .await
-    .unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
-    use pg_advisor::ash::{TopQuery, WaitsData};
+    use pg_advisor::ash::{TopQuery, WaitsData, text_key};
     use pg_advisor::locktree::{DdlQueueItem, LockNode, LockSession, LocksData};
     use pg_advisor::queries::{Counters, QueryKey, Totals, stat};
     use pg_advisor::rules::horizon::{Holder, HorizonData};
     use pg_advisor::rules::sessions::{SessionRow, SessionsData};
+    use pg_advisor::sqltext::{MaskOptions, mask_literals};
     use serde_json::json;
 
     use super::*;
     use crate::diag::queries::{QueriesData, QueriesMode};
     use crate::diag::{DiagReport, Tool};
 
-    const ON: MaskOptions = MaskOptions {
-        standard_conforming_strings: true,
-    };
     const SECRET: &str = "SELECT * FROM shop.customers WHERE email = 'ann@example.com' AND id = 42 /* tenant=acme */";
 
     fn report(tool: Tool, data: DiagData) -> DiagReport {
@@ -223,7 +253,7 @@ mod tests {
                 settings: Default::default(),
             }),
         );
-        assert_eq!(mask_report(&mut r, ON), 2);
+        assert_eq!(mask_report(&mut r), 2);
         let DiagData::Sessions(d) = &r.data else {
             unreachable!()
         };
@@ -262,7 +292,7 @@ mod tests {
                 }],
             }),
         );
-        assert_eq!(mask_report(&mut r, ON), 8, "4 сессии × 2 литерала");
+        assert_eq!(mask_report(&mut r), 8, "4 сессии × 2 литерала");
         let v = serde_json::to_string(&r.data).unwrap();
         assert!(
             !v.contains("ann@example.com") && !v.contains("tenant=acme"),
@@ -284,11 +314,39 @@ mod tests {
                 ..Default::default()
             }),
         );
-        assert_eq!(mask_report(&mut r, ON), 2);
+        assert_eq!(mask_report(&mut r), 2);
         let DiagData::Waits(d) = &r.data else {
             unreachable!()
         };
         clean(&d.top_queries[0].text);
+        assert_eq!(d.top_queries[0].key, "id:7", "ключ по queryid не меняется");
+    }
+
+    /// Ключ `text:<хэш>` строки без `query_id` считается по исходному тексту: по нему модель проверяла бы догадки о
+    /// литералах. На уровне `diagnostics` ключ пересчитывается по замаскированному тексту.
+    #[test]
+    fn wait_profile_text_keys_come_from_the_masked_text() {
+        let raw = "UPDATE users SET password = 'hunter2' WHERE id = 7";
+        let mut r = report(
+            Tool::Waits,
+            DiagData::Waits(WaitsData {
+                top_queries: vec![TopQuery {
+                    key: text_key(raw),
+                    text: raw.into(),
+                    samples: 3,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+        );
+        assert_eq!(mask_report(&mut r), 2);
+        let DiagData::Waits(d) = &r.data else {
+            unreachable!()
+        };
+        let q = &d.top_queries[0];
+        assert_eq!(q.text, "UPDATE users SET password = $1 WHERE id = $2");
+        assert_eq!(q.key, text_key(&q.text));
+        assert_ne!(q.key, text_key(raw));
     }
 
     #[test]
@@ -314,7 +372,7 @@ mod tests {
                 ..QueriesData::empty(QueriesMode::SinceReset)
             }),
         );
-        assert_eq!(mask_report(&mut r, ON), 1);
+        assert_eq!(mask_report(&mut r), 1);
         let DiagData::Queries(d) = &r.data else {
             unreachable!()
         };
@@ -336,26 +394,66 @@ mod tests {
         });
         assert!(!has_texts(&data));
         let mut r = report(Tool::Horizon, data.clone());
-        assert_eq!(mask_report(&mut r, ON), 0);
+        assert_eq!(mask_report(&mut r), 0);
         assert_eq!(r.data, data);
     }
 
+    /// Граница литерала с обратной косой зависит от `standard_conforming_strings` сессии, а её значение у базы, роли
+    /// или сеанса может быть любым. Маскирование не читает настройку: текст лексится при `on` и при `off`, и всё, где
+    /// результаты расходятся, уходит в одну метку `$N…`.
     #[test]
-    fn backslash_follows_standard_conforming_strings() {
-        // При `off` обратная косая в '…' экранирует кавычку, как на сервере: литерал тянется до второй кавычки, и
-        // «OR 1=1» остаётся внутри него. При `on` литерал кончается на первой кавычке.
-        let text = r"SELECT 'a\' OR 1=1 --', 'b'";
-        let mut off = text.to_string();
-        mask_text(
-            &mut off,
-            MaskOptions {
-                standard_conforming_strings: false,
-            },
+    fn masking_does_not_depend_on_standard_conforming_strings() {
+        // `on`: литерал кончается на второй кавычке, и «OR 1=1» вне его; `off`: «OR 1=1» внутри литерала.
+        let (out, n) = mask_fail_closed(r"SELECT 'a\' OR 1=1 --', 'b'");
+        assert!(!out.contains("OR") && !out.contains("1=1"), "{out}");
+        assert_eq!((out.as_str(), n), ("SELECT $1…", 1));
+        // `on`: «Brien» и «123» вне литералов; `off`: «Brien» внутри первого, 123 — внутри второго.
+        let (out, _) =
+            mask_fail_closed(r"SELECT * FROM people WHERE name = 'O\'Brien' AND ssn = '123'");
+        assert!(!out.contains("Brien") && !out.contains("123"), "{out}");
+        assert!(
+            out.starts_with("SELECT * FROM people WHERE name = $1"),
+            "{out}"
         );
-        assert!(!off.contains("OR"), "{off}");
-        let mut on = text.to_string();
-        mask_text(&mut on, ON);
-        assert!(on.contains("OR"), "{on}");
+        // Номер метки — после литералов общей части и `$N` текста; метка считается одним литералом.
+        let (out, n) = mask_fail_closed(r"SELECT $1, 'x', 'a\' OR 1=1");
+        assert_eq!((out.as_str(), n), ("SELECT $1, $2, $3…", 2));
+        let mut text = r"/* glafira */ SELECT 'a\' OR 1=1 --'".to_string();
+        assert_eq!(mask_text(&mut text), 1);
+        assert_eq!(text, "/* glafira */ SELECT $1…");
+    }
+
+    /// Без обратной косой в '…' оба прочтения совпадают: итог — ровно `mask_literals`.
+    #[test]
+    fn plain_texts_are_masked_exactly_as_mask_literals_does() {
+        for text in [
+            SECRET,
+            "SELECT 'it''s', E'\\n\\'', $$body$$, U&'d\\0061t\\+000061', B'101', X'ff', 1.5e3, 0x1F",
+            "/* glafira */ SELECT n.nspname FROM pg_namespace n WHERE n.oid = 42",
+            "INSERT INTO t VALUES ($1, 'x') -- tail",
+            r"SELECT '\\', 'C:\\dir\\file'",
+            "SELECT 'unclosed",
+            "SELECT \"col'name\", 'v' FROM t",
+        ] {
+            let expected = mask_literals(text, MaskOptions::default());
+            assert_eq!(mask_fail_closed(text), expected, "{text}");
+        }
+        let (kept, _) = mask_fail_closed("/* glafira */ SELECT 1");
+        assert_eq!(kept, "/* glafira */ SELECT $1");
+    }
+
+    #[test]
+    fn cut_keeps_whole_characters() {
+        let mut s = "a".repeat(MAX_QUERY_BYTES - 1) + "€tail";
+        cut_text(&mut s, MAX_QUERY_BYTES);
+        assert_eq!(
+            s,
+            "a".repeat(MAX_QUERY_BYTES - 1),
+            "€ (3 байта) не режется пополам"
+        );
+        let mut short = "SELECT $1".to_string();
+        cut_text(&mut short, MAX_QUERY_BYTES);
+        assert_eq!(short, "SELECT $1");
     }
 
     #[test]
@@ -368,7 +466,7 @@ mod tests {
             },
             "Settings": {"work_mem": "1MB"}
         }]);
-        assert_eq!(mask_plan_value(&mut raw, ON), 3);
+        assert_eq!(mask_plan_value(&mut raw), 3);
         let p = &raw[0]["Plan"];
         assert_eq!(p["Filter"], "(status = $1::text)");
         assert_eq!(p["Output"][1], "$1::text");
@@ -376,5 +474,13 @@ mod tests {
         assert_eq!(p["Total Cost"], 12.5);
         assert_eq!(p["Relation Name"], "orders");
         assert_eq!(raw[0]["Settings"]["work_mem"], "1MB");
+    }
+
+    #[test]
+    fn plan_expressions_are_masked_whatever_standard_conforming_strings_is() {
+        let mut raw = json!({"Plan": {"Node Type": "Seq Scan", "Filter": r"(name = 'O\'Brien' AND ssn = '123')"}});
+        mask_plan_value(&mut raw);
+        let f = raw["Plan"]["Filter"].as_str().unwrap();
+        assert!(!f.contains("Brien") && !f.contains("123"), "{f}");
     }
 }

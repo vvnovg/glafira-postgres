@@ -160,9 +160,15 @@ impl QueryKey<'_> {
     fn render(self) -> String {
         match self {
             Self::Id(id) => format!("id:{id}"),
-            Self::Text(t) => format!("text:{:016x}", hash64(&format!("text:{t}"))),
+            Self::Text(t) => text_key(t),
         }
     }
+}
+
+/// Ключ строки топа без `query_id`: `text:<хэш текста>`. Шлюз MCP на уровне `diagnostics` пересчитывает им ключ по
+/// замаскированному тексту: хэш исходного текста позволял бы проверять догадки о литералах.
+pub fn text_key(text: &str) -> String {
+    format!("text:{:016x}", hash64(&format!("text:{text}")))
 }
 
 /// Счётчик запроса: `query_id`, текст первого сэмпла, число сэмплов, ожидания.
@@ -494,6 +500,16 @@ mod tests {
             Some("CPU*"),
             "равные счёты — меньшая подпись"
         );
+    }
+
+    /// Ключ строки без `query_id` — `text_key` её текста: шлюз MCP пересчитывает им ключ по замаскированному тексту.
+    #[test]
+    fn text_key_is_the_key_of_a_query_without_id() {
+        let v = vec![s(1_000, None, None, None, "select 'x'")];
+        let d = profile(&v, &[1_000], &[], 300, 2_000, Some(1_000), true);
+        assert_eq!(d.top_queries[0].key, text_key("select 'x'"));
+        assert_ne!(text_key("select 'x'"), text_key("select $1"));
+        assert!(text_key("").starts_with("text:") && text_key("").len() == 21);
     }
 
     #[test]
