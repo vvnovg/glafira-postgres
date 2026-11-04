@@ -178,6 +178,108 @@ async fn pid(c: &tokio_postgres::Client) -> i32 {
         .get(0)
 }
 
+/// Бэкенд без базы: `tools/list` и рукопожатие отвечают без данных, любой вызов данных — ошибка.
+struct NoData;
+
+impl Gate for NoData {
+    fn access(&self, _session: &SessionView) -> SessionAccess {
+        SessionAccess::Approved
+    }
+
+    fn connection_name(&self, _id: &str) -> Option<String> {
+        None
+    }
+
+    fn session_closed(&self, _session_id: &str) {}
+
+    fn sessions_changed(&self) {}
+}
+
+impl PgBackend for NoData {
+    fn read(&self, _op: PgRead) -> BoxFuture<'_, Result<PgAnswer, ToolError>> {
+        Box::pin(async { Err(ToolError::not_allowed()) })
+    }
+
+    fn observe(
+        &self,
+        _op: PgObserve,
+        _ctx: ObserveCtx,
+    ) -> BoxFuture<'_, Result<PgAnswer, ToolError>> {
+        Box::pin(async { Err(ToolError::not_allowed()) })
+    }
+}
+
+/// Без стенда (§17 P4a, критерий 2): по протоколу сервер отдаёт ровно 14 инструментов, у каждого все четыре подсказки
+/// (`crates/glafira-pg-mcp/tests/tools.rs` проверяет то же на уровне крейта; здесь — через приложение и `serve_stream`).
+#[tokio::test(flavor = "multi_thread")]
+async fn tools_list_has_the_fourteen_tools_with_read_only_annotations() {
+    let dir = tempfile::tempdir().unwrap();
+    let audit = Arc::new(AuditLog::new(dir.path()));
+    let backend = Arc::new(NoData);
+    let (server_io, client_io) = tokio::io::duplex(1 << 20);
+    tokio::spawn(serve_stream(
+        Box::new(server_io),
+        backend.clone(),
+        audit,
+        GatewayOptions::new("glafira-pg", "it", INSTRUCTIONS),
+        Arc::new(PgFactory::new(backend)),
+    ));
+    let client = ().serve(client_io).await.unwrap();
+    let mut tools = client.list_all_tools().await.unwrap();
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+    assert_eq!(
+        names,
+        [
+            "explain_query",
+            "get_activity",
+            "get_health_summary",
+            "get_query_details",
+            "get_settings",
+            "get_table_details",
+            "get_top_queries",
+            "get_topology",
+            "hypothetical_index",
+            "list_connections",
+            "list_diagnostics",
+            "observe_activity",
+            "observe_top_queries",
+            "run_diagnostic",
+        ]
+    );
+    for t in &tools {
+        let a = t
+            .annotations
+            .as_ref()
+            .unwrap_or_else(|| panic!("{}: нет подсказок", t.name));
+        assert_eq!(
+            (
+                a.read_only_hint,
+                a.destructive_hint,
+                a.idempotent_hint,
+                a.open_world_hint
+            ),
+            (Some(true), Some(false), Some(true), Some(false)),
+            "{}",
+            t.name
+        );
+    }
+}
+
+/// Счётчик записей в таблицах `shop` (вставки + изменения + удаления; откаченные тоже считаются). Статистика
+/// сбрасывается в разделяемую память с задержкой до секунды — перед чтением ждём.
+async fn shop_writes(su: &tokio_postgres::Client) -> i64 {
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    su.query_one(
+        "SELECT coalesce(sum(n_tup_ins + n_tup_upd + n_tup_del), 0)::bigint \
+         FROM pg_stat_user_tables WHERE schemaname = 'shop'",
+        &[],
+    )
+    .await
+    .unwrap()
+    .get(0)
+}
+
 /// Держатель с XID и блокировкой таблицы, жертва ждёт; литералы и комментарий в текстах не доходят до модели ни в
 /// одном инструменте, а журнал MCP получает их число.
 #[tokio::test(flavor = "multi_thread")]
@@ -190,6 +292,8 @@ async fn lab_sessions_locks_and_horizon_are_read_with_masked_texts() {
     let g = gateway(st).await;
     let c = &g.client;
     assert_eq!(c.list_all_tools().await.unwrap().len(), 14);
+    let su = common::superuser(&lab, "orders").await;
+    let writes_before = shop_writes(&su).await;
     let conns = ok(call(c, "list_connections", json!({})).await);
     assert_eq!(
         (
@@ -340,6 +444,12 @@ async fn lab_sessions_locks_and_horizon_are_read_with_masked_texts() {
     .await);
     assert!(unknown.starts_with("not_allowed:"), "{unknown}");
 
+    // Чтение не пишет: счётчики записей `shop.*` не сдвинулись (держатель сбросит свои при откате — после замера).
+    assert_eq!(
+        shop_writes(&su).await,
+        writes_before,
+        "инструменты чтения ничего не записали в shop.*"
+    );
     holder.batch_execute("ROLLBACK").await.unwrap();
     waiting.await.unwrap().unwrap();
 }
@@ -423,17 +533,23 @@ async fn patroni_topology_summary_and_cluster_tools() {
             .all(|u| u["tool"] != "failover" && u["tool"] != "health"),
         "{h}"
     );
-    let f = ok(call(
-        c,
-        "run_diagnostic",
-        json!({"connectionId": "it", "tool": "failover"}),
+    // Реплики могут ещё догонять после соседних тестов (failover, пауза): ждём два готовых узла, но не дольше 30 с.
+    let mut f = Value::Null;
+    common::wait_until(
+        "два готовых узла в сводке failover",
+        Duration::from_secs(30),
+        async || {
+            f = ok(call(
+                c,
+                "run_diagnostic",
+                json!({"connectionId": "it", "tool": "failover"}),
+            )
+            .await);
+            f["data"]["readyCount"] == json!(2)
+        },
     )
-    .await);
-    assert_eq!(
-        (&f["data"]["kind"], &f["data"]["readyCount"]),
-        (&json!("failover"), &json!(2)),
-        "{f}"
-    );
+    .await;
+    assert_eq!(f["data"]["kind"], "failover", "{f}");
     assert!(f["member"].is_null(), "кластерный инструмент без узла: {f}");
     let health = ok(call(
         c,
@@ -476,6 +592,13 @@ async fn replica_conninfo_password_is_hidden() {
         .await
         .unwrap()
         .get(0);
+    // Предусловие: на стенде пароль в `primary_conninfo` есть — иначе тест прошёл бы вхолостую.
+    let secret = raw
+        .split_whitespace()
+        .find_map(|kv| kv.strip_prefix("password="))
+        .map(|p| p.trim_matches('\'').to_string())
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| panic!("в primary_conninfo реплики стенда нет пароля: {raw}"));
     let (_dir, st) = common::open_server(&replica).await;
     let g = gateway(st).await;
     let c = &g.client;
@@ -489,20 +612,15 @@ async fn replica_conninfo_password_is_hidden() {
     assert_eq!(s["name"], "primary_conninfo", "{v}");
     let setting = s["setting"].as_str().unwrap();
     assert!(!setting.contains("password"), "{setting}");
-    assert!(!v.to_string().contains("replicator-secret"), "{v}");
-    if raw.contains("password") {
-        assert_eq!(s["hidden"], true, "{v}");
-        assert!(
-            setting.contains("user=replicator"),
-            "остальные пары на месте: {setting}"
-        );
-    }
+    assert!(!v.to_string().contains(&secret), "{v}");
+    assert_eq!(s["hidden"], true, "{v}");
+    assert!(
+        setting.contains("user=replicator"),
+        "остальные пары на месте: {setting}"
+    );
     // Изменённые параметры (по умолчанию): `primary_conninfo` из `postgresql.auto.conf` — среди них, тоже без пароля.
     let changed = ok(call(c, "get_settings", json!({"connectionId": "it"})).await);
-    assert!(
-        !changed.to_string().contains("replicator-secret"),
-        "{changed}"
-    );
+    assert!(!changed.to_string().contains(&secret), "{changed}");
     let conninfo = changed["settings"]
         .as_array()
         .unwrap()
@@ -604,12 +722,44 @@ async fn perf_top_queries_and_statements_observation() {
         .await
         .unwrap();
     }
+    // Запрос с характерным литералом (простым протоколом — литерал в тексте): до модели он не доходит ни в топе,
+    // ни в диагностике `queries`.
+    warm.batch_execute("SELECT count(*) FROM shop.orders WHERE status = 'top-secret-lit-93'")
+        .await
+        .unwrap();
     let top = ok(call(
         c,
         "get_top_queries",
         json!({"connectionId": "it", "mode": "sinceReset", "limit": 5}),
     )
     .await);
+    assert!(!top.to_string().contains("top-secret-lit-93"), "{top}");
+    let found = ok(call(
+        c,
+        "get_top_queries",
+        json!({
+            "connectionId": "it", "mode": "sinceReset", "search": "FROM shop.orders WHERE status", "limit": 50
+        }),
+    )
+    .await);
+    assert!(
+        found["data"]["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["text"]
+                .as_str()
+                .is_some_and(|t| t.contains("shop.orders"))),
+        "запрос с литералом в топе: {found}"
+    );
+    assert!(!found.to_string().contains("top-secret-lit-93"), "{found}");
+    let diag = ok(call(
+        c,
+        "run_diagnostic",
+        json!({"connectionId": "it", "tool": "queries"}),
+    )
+    .await);
+    assert!(!diag.to_string().contains("top-secret-lit-93"), "{diag}");
     assert_eq!(top["tool"], "queries");
     let rows = top["data"]["rows"].as_array().unwrap();
     assert!(!rows.is_empty() && rows.len() <= 5, "{top}");
@@ -707,6 +857,7 @@ async fn perf_explain_and_hypotheses_never_change_the_database() {
         .get::<_, String>(0)
     };
     let (rows_before, reset_before) = (count().await, stats_reset().await);
+    let writes_before = shop_writes(&su).await;
     let (_dir, st) = common::open_server_in(&perf, "perf").await;
     let g = gateway(st).await;
     let c = &g.client;
@@ -836,16 +987,72 @@ async fn perf_explain_and_hypotheses_never_change_the_database() {
         hypo["costAfter"].as_f64().unwrap() < hypo["costBefore"].as_f64().unwrap(),
         "{hypo}"
     );
+    let hypo_call = |sql: &str, idx: &str| {
+        json!({
+            "connectionId": "it", "database": "perf", "sql": sql, "indexes": [idx]
+        })
+    };
+    let ddl = "CREATE INDEX ON shop.orders (status)";
+    // Тот же враждебный набор, что у `explain_query`, — в `sql` гипотезы при корректном DDL индекса.
+    for (sql, code) in [
+        ("SELECT pg_sleep(1)", "forbidden_function:"),
+        (
+            "SELECT * FROM shop.orders WHERE pg_catalog.set_config('a.b', '1', false) IS NOT NULL",
+            "forbidden_function:",
+        ),
+        (
+            "SELECT pg_terminate_backend(pg_backend_pid())",
+            "forbidden_function:",
+        ),
+        (
+            "SELECT * FROM ts_stat('SELECT to_tsvector(status) FROM shop.orders')",
+            "forbidden_function:",
+        ),
+        ("SELECT 1; DELETE FROM shop.orders", "invalid_sql:"),
+        ("DO $$ BEGIN PERFORM 1; END $$", "invalid_sql:"),
+    ] {
+        let e = err(&call(c, "hypothetical_index", hypo_call(sql, ddl)).await);
+        assert!(e.starts_with(code), "hypothetical_index sql {sql}: {e}");
+    }
     let e = err(&call(
         c,
         "hypothetical_index",
-        json!({
-            "connectionId": "it", "database": "perf", "sql": "SELECT 1",
-            "indexes": ["CREATE INDEX CONCURRENTLY ON shop.orders (status)"]
-        }),
+        hypo_call("SELECT shop.it_mcp_cfg()", ddl),
     )
     .await);
-    assert!(e.starts_with("invalid_sql:"), "{e}");
+    assert!(
+        e.starts_with("forbidden_function:") && e.contains("set_config"),
+        "встроенная функция: запрещённое найдено в плане: {e}"
+    );
+    // И в тексте DDL индекса: не-индекс, несколько команд, CONCURRENTLY, запрещённые вызовы в выражении индекса.
+    for (idx, code) in [
+        (
+            "CREATE INDEX CONCURRENTLY ON shop.orders (status)",
+            "invalid_sql:",
+        ),
+        ("DROP TABLE shop.orders", "invalid_sql:"),
+        (
+            "CREATE INDEX ON shop.orders (status); DROP TABLE shop.orders",
+            "invalid_sql:",
+        ),
+        ("DO $$ BEGIN PERFORM 1; END $$", "invalid_sql:"),
+        (
+            "CREATE INDEX ON shop.orders ((pg_sleep(1)::text))",
+            "forbidden_function:",
+        ),
+        (
+            "CREATE INDEX ON shop.orders ((set_config('a.b', '1', false)))",
+            "forbidden_function:",
+        ),
+    ] {
+        let e = err(&call(
+            c,
+            "hypothetical_index",
+            hypo_call("SELECT count(*) FROM shop.orders WHERE status = 'x'", idx),
+        )
+        .await);
+        assert!(e.starts_with(code), "hypothetical_index DDL {idx}: {e}");
+    }
 
     // Запись только планируется: под суперпользователем (права записи есть) строки на месте.
     let (_dir_su, st_su) =
@@ -869,6 +1076,11 @@ async fn perf_explain_and_hypotheses_never_change_the_database() {
         "суперпользователь не обходит пробу плана: {e}"
     );
     assert_eq!(count().await, rows_before, "ничего не удалено");
+    assert_eq!(
+        shop_writes(&su).await,
+        writes_before,
+        "EXPLAIN и гипотезы не записали ни строки в shop.*"
+    );
     assert_eq!(
         stats_reset().await,
         reset_before,
