@@ -9,6 +9,7 @@ mod common;
 use std::time::Duration;
 
 use glafira_pg_lib::conn::profile::LlmAccess;
+use glafira_pg_lib::explain::Params;
 use glafira_pg_lib::mcp::guard;
 use glafira_pg_lib::mcp::read::{EXPLAIN_TIMEOUT_S, observe_op, read_op};
 use glafira_pg_lib::state::AppState;
@@ -129,6 +130,24 @@ async fn dropped_guard_leaves_no_session_and_no_hypothesis() {
         .unwrap_err();
     assert_eq!(e.code().map(|c| c.code()), Some("25006"), "{e:?}");
     tx.rollback().await.unwrap();
+    // Защита вглубь: сессия SQL модели — только чтение и вне транзакции защиты (`default_transaction_read_only`).
+    let ro: String = tx
+        .client()
+        .query_one("SHOW default_transaction_read_only", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(ro, "on");
+    let e = tx
+        .client()
+        .batch_execute("CREATE TEMP TABLE it_guard_write (a int)")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        e.code().map(|c| c.code()),
+        Some("25006"),
+        "запись вне транзакции защиты: {e:?}"
+    );
     // Виртуальный индекс в новой транзакции той же сессии, без сброса — и брошенный `GuardTx`.
     tx.client()
         .batch_execute(
@@ -275,6 +294,53 @@ async fn model_sql_is_planned_without_execution() {
     .unwrap_err();
     assert_eq!(e.code, "invalid_argument", "{}", e.message);
     wait_no_mcp_sessions(&probe, "после EXPLAIN").await;
+}
+
+/// Позиции ошибок сервера — в тексте, как его прислала модель: ведущие пробелы и переводы строк, которые снимает
+/// нормализация, в счёте есть — и у `prepare` под точкой сохранения, и у пробы плана.
+#[tokio::test]
+async fn server_positions_refer_to_the_text_the_model_sent() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st, m) = open_for_llm(&perf).await;
+    let probe = common::superuser(&perf, "perf").await;
+    // «  SELECT » — 9 символов: `no_such_column` — 10-й.
+    let e = read_op(
+        &st,
+        explain(json!({
+            "connectionId": "it", "database": "perf",
+            "sql": "  SELECT no_such_column FROM shop.orders;"
+        })),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, "invalid_sql", "{}", e.message);
+    assert!(e.message.ends_with("(position 10)"), "{}", e.message);
+    let e = read_op(
+        &st,
+        hypo(json!({
+            "connectionId": "it", "database": "perf", "sql": "\n\tSELECT no_such_column FROM shop.orders",
+            "indexes": ["CREATE INDEX ON shop.orders (status)"]
+        })),
+    )
+    .await
+    .unwrap_err();
+    assert!(e.message.ends_with("(position 10)"), "{}", e.message);
+    // Слои `GuardTx` по отдельности: `prepare` и проба (без `prepare` — отказ даёт EXPLAIN пробы).
+    let tx = guard::begin(&st, "it", Some(&m), "perf", EXPLAIN_TIMEOUT_S)
+        .await
+        .unwrap();
+    let e = tx.prepare_one("\n  SELECT nope").await.unwrap_err();
+    assert!(e.message.ends_with("(position 11)"), "{}", e.message);
+    let e = tx
+        .probe(" \n SELECT nope", &Params::None)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, "invalid_sql", "{}", e.message);
+    assert!(e.message.ends_with("(position 11)"), "{}", e.message);
+    tx.finish().await;
+    wait_no_mcp_sessions(&probe, "после проверки позиций").await;
 }
 
 /// Запрещённая функция за представлением: `sqlcheck` её не видит (в тексте только имя представления), VERBOSE-план —

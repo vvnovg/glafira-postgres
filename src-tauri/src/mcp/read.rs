@@ -1039,21 +1039,33 @@ const GENERIC_WARNING: &str = "The plan is generic (GENERIC_PLAN): parameter val
 /// Текст pgss чужого запроса без `pg_read_all_stats`.
 const HIDDEN_PGSS_TEXT: &str = "<insufficient privilege>";
 
-/// Проверка SQL модели до соединения (§7.1): длина и `sqlcheck` с позицией в тексте (без ведущих пробелов и хвостовых
-/// `;` — так же сервер видит нормализованный текст). `pg_query` разбирает на рабочем потоке tokio (стек 2 МиБ).
-fn check_sql(sql: &str, purpose: Purpose) -> Result<(), ToolError> {
+/// Проверка SQL модели до соединения (§7.1): длина и `sqlcheck` нормализованного текста (без ведущих пробелов и
+/// хвостовых `;` — его же получит сервер), позиция отказа — в тексте `original`, как его прислала модель (ведущие
+/// пробельные символы прибавляются). `pg_query` разбирает на рабочем потоке tokio (стек 2 МиБ).
+fn check_sql(original: &str, purpose: Purpose) -> Result<(), ToolError> {
+    let sql = normalize(original);
     if sql.len() > MAX_SQL_BYTES {
         return Err(invalid_argument(format!(
             "The SQL is longer than {MAX_SQL_BYTES} bytes"
         )));
     }
-    sqlcheck::check(sql, purpose).map(|_| ()).map_err(|r| {
-        let message = match r.position {
-            Some(p) => format!("{} (position {p})", r.message),
-            None => r.message,
-        };
-        err(r.code.as_str(), message)
+    sqlcheck::check(&sql, purpose).map(|_| ()).map_err(|r| {
+        err(
+            r.code.as_str(),
+            guard::with_position(&r.message, r.position, guard::leading_chars(original)),
+        )
     })
+}
+
+/// Текст pgss по `queryId` — те же проверки, что у SQL модели; слишком длинный называется хранимым текстом запроса:
+/// модель прислала только `queryId`, не SQL.
+fn check_pgss_text(query_id: i64, text: &str) -> Result<(), ToolError> {
+    if normalize(text).len() > MAX_SQL_BYTES {
+        return Err(invalid_argument(format!(
+            "The text of query {query_id} stored in pg_stat_statements is longer than {MAX_SQL_BYTES} bytes: the gateway does not plan it"
+        )));
+    }
+    check_sql(text, Purpose::Explain)
 }
 
 /// Строки `indexes` у `hypothetical_index` до соединения: число (1–`MAX_HYPO_INDEXES`), `sqlcheck` (`HypoIndex`) и
@@ -1065,7 +1077,7 @@ fn check_index_ddls(ddls: &[String]) -> Result<(), ToolError> {
         )));
     }
     for ddl in ddls {
-        check_sql(&normalize(ddl), Purpose::HypoIndex)?;
+        check_sql(ddl, Purpose::HypoIndex)?;
         hypopg::validate_ddl(ddl).map_err(|e| err("invalid_sql", e.message))?;
     }
     Ok(())
@@ -1086,7 +1098,7 @@ enum Asked<'a> {
 fn asked<'a>(sql: Option<&'a str>, query_id: Option<&str>) -> Result<Asked<'a>, ToolError> {
     match (sql, query_id) {
         (Some(s), None) => {
-            check_sql(&normalize(s), Purpose::Explain)?;
+            check_sql(s, Purpose::Explain)?;
             Ok(Asked::Sql(s))
         }
         (None, Some(q)) => Ok(Asked::QueryId(
@@ -1165,7 +1177,7 @@ async fn sql_source(
         }),
         Asked::QueryId(q) => {
             let text = pgss_text(st, id, member, database, q).await?;
-            check_sql(&normalize(&text), Purpose::Explain)?;
+            check_pgss_text(q, &text)?;
             Ok(SqlSource {
                 text,
                 from_pgss: true,
@@ -1219,7 +1231,6 @@ async fn explain(st: &AppState, p: ExplainParams) -> Result<PgAnswer, ToolError>
     ensure_open(st, &p.connection_id).await?;
     let member = member_or_leader(st, &p.connection_id, p.member.as_deref())?;
     let source = sql_source(st, &p.connection_id, &member, &p.database, asked).await?;
-    let sql = normalize(&source.text);
     let tx = guard::begin(
         st,
         &p.connection_id,
@@ -1230,13 +1241,14 @@ async fn explain(st: &AppState, p: ExplainParams) -> Result<PgAnswer, ToolError>
     .await?;
     let probed = async {
         let params = plan_params(
-            &sql,
+            &normalize(&source.text),
             p.params.as_deref(),
             p.generic_plan.unwrap_or(false),
             tx.version_num(),
         )?;
-        tx.prepare_one(&sql).await?;
-        let raw = tx.probe(&sql, &params).await?;
+        // Текст — как его прислала модель: `GuardTx` нормализует сам, позиции ошибок — в исходном тексте.
+        tx.prepare_one(&source.text).await?;
+        let raw = tx.probe(&source.text, &params).await?;
         Ok::<_, ToolError>((params, raw))
     }
     .await;
@@ -1314,7 +1326,6 @@ async fn hypo(st: &AppState, p: HypoIndexParams) -> Result<PgAnswer, ToolError> 
     ensure_open(st, &p.connection_id).await?;
     let member = member_or_leader(st, &p.connection_id, p.member.as_deref())?;
     let source = sql_source(st, &p.connection_id, &member, &p.database, asked).await?;
-    let sql = normalize(&source.text);
     let tx = guard::begin(
         st,
         &p.connection_id,
@@ -1324,14 +1335,20 @@ async fn hypo(st: &AppState, p: HypoIndexParams) -> Result<PgAnswer, ToolError> 
     )
     .await?;
     let checked = async {
-        let params = plan_params(&sql, p.params.as_deref(), false, tx.version_num())?;
-        tx.prepare_one(&sql).await?;
-        tx.probe(&sql, &params).await?;
+        let params = plan_params(
+            &normalize(&source.text),
+            p.params.as_deref(),
+            false,
+            tx.version_num(),
+        )?;
+        tx.prepare_one(&source.text).await?;
+        tx.probe(&source.text, &params).await?;
         tx.rollback().await?;
+        // Исходный текст: `check_many` нормализует его сам (`validate_many`), а позиции ошибок EXPLAIN считает по нему.
         let req = HypoManyRequest {
             member,
             database: p.database.clone(),
-            sql,
+            sql: source.text.clone(),
             params,
             search_path: None,
             index_ddls: p.indexes.clone(),
@@ -2715,6 +2732,51 @@ mod tests {
             let e = asked(sql, qid).err().unwrap();
             assert_eq!(e.code, code, "{sql:?} {qid:?}");
         }
+    }
+
+    /// Позиция отказа `sqlcheck` — в тексте, как его прислала модель: ведущие пробелы и переводы строк, которые снимает
+    /// `normalize`, в счёте есть (сервер и `sqlcheck` видят нормализованный текст).
+    #[test]
+    fn rejection_positions_refer_to_the_text_the_model_sent() {
+        // « \n  » — 4 символа, «SELECT » — 7: имя функции — 12-й символ.
+        let e = asked(Some(" \n  SELECT pg_terminate_backend(1);"), None)
+            .err()
+            .unwrap();
+        assert_eq!(
+            (e.code.as_str(), e.message.as_str()),
+            (
+                "forbidden_function",
+                "Function pg_terminate_backend is not allowed (position 12)"
+            )
+        );
+        let e = check_sql("  SELECT 1; SELECT 2", Purpose::Explain).unwrap_err();
+        assert!(e.message.ends_with("(position 13)"), "{}", e.message);
+        // Без ведущих пробелов позиция та же, что у `sqlcheck`.
+        let e = check_sql("SELECT 1; SELECT 2", Purpose::Explain).unwrap_err();
+        assert!(e.message.ends_with("(position 11)"), "{}", e.message);
+        // DDL гипотезы: «  CREATE INDEX ON t ((» — 22 символа.
+        let e = check_index_ddls(&["  CREATE INDEX ON t ((pg_sleep(1)))".to_string()]).unwrap_err();
+        assert!(e.message.ends_with("(position 23)"), "{}", e.message);
+    }
+
+    /// Слишком длинный текст pgss по `queryId`: модель прислала только id — сообщение называет хранимый текст запроса.
+    #[test]
+    fn too_long_pgss_text_is_named_as_the_stored_text() {
+        let long = format!("SELECT {}", "1,".repeat(MAX_SQL_BYTES));
+        let e = check_pgss_text(42, &long).unwrap_err();
+        assert_eq!(e.code, "invalid_argument");
+        assert!(
+            e.message.contains("query 42")
+                && e.message.contains("pg_stat_statements")
+                && !e.message.starts_with("The SQL is longer"),
+            "{}",
+            e.message
+        );
+        assert!(check_pgss_text(42, "SELECT * FROM t WHERE a = $1").is_ok());
+        assert_eq!(
+            check_pgss_text(42, "SELECT pg_sleep($1)").unwrap_err().code,
+            "forbidden_function"
+        );
     }
 
     #[tokio::test]

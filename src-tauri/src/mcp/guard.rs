@@ -1,10 +1,12 @@
 //! Слои защиты SQL модели на сервере (спец. P4 §7.3, шаги 1–3), общие для `explain_query`, `hypothetical_index` и P4b
-//! (`run_select`, проверка предложения): своё соединение на вызов (`for_explain`, `application_name = glafira-pg-mcp`:
+//! (`run_select`, проверка предложения): своё соединение на вызов (`for_mcp`: сессия EXPLAIN с
+//! `default_transaction_read_only = on` — только чтение и вне транзакции защиты, `application_name = glafira-pg-mcp`:
 //! нагрузку модели видно в `pg_stat_activity` отдельно от Glafira), `standard_conforming_strings = on` на всю сессию
 //! (разбор `sqlcheck` и сервера сходятся, в том числе в транзакциях hypopg на том же соединении), транзакция
 //! `READ ONLY` со сроками, `prepare` под точкой сохранения (сервер подтверждает, что выражение одно) и проба
 //! `EXPLAIN (FORMAT JSON, VERBOSE, SETTINGS)` с поиском запрещённых функций в выражениях плана. В конце — `ROLLBACK`
-//! (`finish`).
+//! (`finish`). Текст модели `prepare_one` и `probe` получают как есть и нормализуют сами: позиции ошибок сервера — в
+//! исходном тексте (ведущие пробельные символы, снятые `normalize`, прибавляются, как у `Origin` P3).
 //!
 //! Сброс. Ядро шлюза бросает тело вызова на любом `await`, когда сессия MCP закрывается. Транзакция и виртуальные
 //! индексы hypopg живут только в сессии сервера этого соединения, а соединение — только в `GuardTx`: сброс `GuardTx`
@@ -26,11 +28,11 @@ use crate::conn::pg::ConnectSpec;
 use crate::diag::head;
 use crate::error::AppError;
 use crate::explain::Params;
-use crate::explain::params::first_word;
+use crate::explain::params::{first_word, normalize};
 use crate::explain::run::{
     Context, Origin, ROLLBACK_SQL, Step, classify, explain_in_open_tx, probe_options, within,
 };
-use crate::product::{MCP_APPLICATION_NAME, SQL_MARKER};
+use crate::product::SQL_MARKER;
 use crate::state::AppState;
 
 /// Настройка сессии SQL модели — своим запросом, до транзакции: в одном пакете с `BEGIN` сервер включает `SET` в
@@ -56,10 +58,24 @@ fn begin_sql(timeout_s: u32) -> String {
     )
 }
 
-/// Параметры соединения SQL модели: как у EXPLAIN P3 (схемы пользователя видны), своё `application_name`.
+/// Параметры соединения SQL модели: как у EXPLAIN P3 (схемы пользователя видны), только чтение на всю сессию, своё
+/// `application_name`.
 fn mcp_session(spec: ConnectSpec) -> ConnectSpec {
-    spec.for_explain()
-        .with_application_name(MCP_APPLICATION_NAME)
+    spec.for_mcp()
+}
+
+/// Ведущих пробельных символов в тексте модели — их снимает `normalize` (`str::trim`), и сервер их не видит
+/// (так же считает `Origin` P3).
+pub(crate) fn leading_chars(original: &str) -> usize {
+    original.chars().take_while(|c| c.is_whitespace()).count()
+}
+
+/// Сообщение с позицией в тексте модели: позиция по нормализованному тексту (символы с 1) плюс `leading`.
+pub(crate) fn with_position(message: &str, position: Option<usize>, leading: usize) -> String {
+    match position {
+        Some(p) => format!("{message} (position {})", p + leading),
+        None => message.to_string(),
+    }
 }
 
 /// Служебный шаг (сессия, версия, точка сохранения): его ошибка — не в тексте модели.
@@ -97,10 +113,10 @@ fn step_error(s: Step, ctx: Context) -> ToolError {
     })
 }
 
-/// Отказ сервера при `prepare`: ошибка самого текста — `invalid_sql` с его текстом и позицией в тексте запроса
-/// (символы с 1); срок и права — `TIMEOUT` и `NOT_AUTHORIZED`, как у пробы; прочее (соединение, сервер) — как у
-/// остальных инструментов.
-fn prepare_error(e: &tokio_postgres::Error) -> ToolError {
+/// Отказ сервера при `prepare`: ошибка самого текста — `invalid_sql` с его текстом и позицией в тексте модели
+/// (символы с 1; `leading` — ведущие пробельные символы, снятые `normalize`); срок и права — `TIMEOUT` и
+/// `NOT_AUTHORIZED`, как у пробы; прочее (соединение, сервер) — как у остальных инструментов.
+fn prepare_error(e: &tokio_postgres::Error, leading: usize) -> ToolError {
     let Some(db) = e.as_db_error() else {
         return tool_error(from_pg(e));
     };
@@ -111,12 +127,13 @@ fn prepare_error(e: &tokio_postgres::Error) -> ToolError {
     if !SQL_ERROR_CLASSES.iter().any(|c| code.code().starts_with(c)) {
         return tool_error(from_pg(e));
     }
+    let position = match db.position() {
+        Some(ErrorPosition::Original(p)) => Some(*p as usize),
+        _ => None,
+    };
     err(
         "invalid_sql",
-        match db.position() {
-            Some(ErrorPosition::Original(p)) => format!("{} (position {p})", db.message()),
-            _ => db.message().to_string(),
-        },
+        with_position(db.message(), position, leading),
     )
 }
 
@@ -191,13 +208,15 @@ impl GuardTx {
     }
 
     /// Сервер разбирает текст расширенным протоколом под точкой сохранения: второе выражение он отвергает (механизм P3),
-    /// ошибка разбора и анализа — `invalid_sql` с его текстом. Невыведенный тип параметра (`$1 IS NULL`) — не ошибка:
-    /// анализ идёт уже после проверки числа выражений. Без выполнения: `prepare` — только Parse и Describe.
+    /// ошибка разбора и анализа — `invalid_sql` с его текстом и позицией в `sql`. Невыведенный тип параметра
+    /// (`$1 IS NULL`) — не ошибка: анализ идёт уже после проверки числа выражений. Без выполнения: `prepare` — только
+    /// Parse и Describe. `sql` — текст, как его прислала модель (нормализуется здесь).
     pub async fn prepare_one(&self, sql: &str) -> Result<(), ToolError> {
         let c = self.client();
+        let text = normalize(sql);
         let rejected = within(self.timeout_s, async {
             c.batch_execute(SAVEPOINT_SQL).await?;
-            match c.prepare(sql).await {
+            match c.prepare(&text).await {
                 Ok(_) => Ok(None),
                 Err(e) if e.code() == Some(&SqlState::INDETERMINATE_DATATYPE) => {
                     c.batch_execute(ROLLBACK_TO_SQL).await?;
@@ -214,17 +233,19 @@ impl GuardTx {
         .map_err(|s| step_error(s, service_ctx()))?;
         match rejected {
             None => Ok(()),
-            Some(e) => Err(prepare_error(&e)),
+            Some(e) => Err(prepare_error(&e, leading_chars(sql))),
         }
     }
 
     /// Проба `EXPLAIN (FORMAT JSON, VERBOSE, SETTINGS[, GENERIC_PLAN])` в открытой транзакции и поиск запрещённых функций
     /// в выражениях плана (`functions::denied_in_plan`): ловит расхождение нашего разбора с сервером, представления и
-    /// встроенные SQL-функции. План — итог пробы.
+    /// встроенные SQL-функции. План — итог пробы. `sql` — текст, как его прислала модель: EXPLAIN идёт по
+    /// нормализованному, позиция ошибки сервера пересчитывается в исходный (`Origin`).
     pub async fn probe(&self, sql: &str, params: &Params) -> Result<serde_json::Value, ToolError> {
         let options = probe_options(params);
+        let text = normalize(sql);
         let write = matches!(
-            first_word(sql).to_ascii_lowercase().as_str(),
+            first_word(&text).to_ascii_lowercase().as_str(),
             "insert" | "update" | "delete" | "merge"
         );
         let ctx = Context {
@@ -234,7 +255,7 @@ impl GuardTx {
         };
         let raw = within(
             self.timeout_s,
-            explain_in_open_tx(self.client(), &options, sql, params),
+            explain_in_open_tx(self.client(), &options, &text, params),
         )
         .await
         .map_err(|s| step_error(s, ctx))?;
@@ -318,9 +339,38 @@ mod tests {
         .unwrap();
         let cfg = mcp_session(spec).pg_config();
         assert_eq!(cfg.get_application_name(), Some("glafira-pg-mcp"));
+        // Вся сессия — только чтение (защита вглубь: и вне транзакции `GuardTx`).
         assert_eq!(
             cfg.get_options(),
-            Some(crate::conn::pg::EXPLAIN_SESSION_OPTIONS)
+            Some(crate::conn::pg::MCP_SESSION_OPTIONS)
+        );
+        assert!(
+            cfg.get_options()
+                .is_some_and(|o| o.contains("default_transaction_read_only=on"))
+        );
+    }
+
+    /// Позиция отказа сервера при `prepare` — в тексте модели: сервер считает от начала нормализованного текста,
+    /// ведущие пробельные символы (`normalize`) прибавляются.
+    #[test]
+    fn prepare_positions_count_the_leading_whitespace() {
+        assert_eq!(
+            with_position("column \"nope\" does not exist", Some(8), 0),
+            "column \"nope\" does not exist (position 8)"
+        );
+        assert_eq!(
+            with_position(
+                "column \"nope\" does not exist",
+                Some(8),
+                leading_chars(" \n SELECT nope")
+            ),
+            "column \"nope\" does not exist (position 11)"
+        );
+        assert_eq!(with_position("x", None, 3), "x");
+        assert_eq!(
+            leading_chars("\u{3000}\tSELECT 1"),
+            2,
+            "символы, а не байты"
         );
     }
 

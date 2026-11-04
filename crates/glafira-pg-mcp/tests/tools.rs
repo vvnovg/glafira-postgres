@@ -29,6 +29,8 @@ const UNIT: Duration = Duration::from_millis(10);
 struct FakePg {
     reads: Mutex<Vec<PgRead>>,
     observed: Mutex<Vec<(PgObserve, Duration)>>,
+    /// Срок ядра от начала вызова (`ctx.deadline - ctx.started`) у каждого наблюдения.
+    observe_limits: Mutex<Vec<Duration>>,
     /// Наблюдение увидело отмену: досрочный конец или страховочный срок крейта.
     observe_cancelled: Arc<AtomicBool>,
 }
@@ -267,6 +269,10 @@ impl PgBackend for FakePg {
                 .lock()
                 .unwrap()
                 .push((op.clone(), ctx.duration));
+            self.observe_limits
+                .lock()
+                .unwrap()
+                .push(ctx.deadline - ctx.started);
             match op.connection_id() {
                 "c1" => {}
                 "stuck" => {
@@ -690,6 +696,11 @@ async fn defaults_are_filled_before_the_backend() {
         duration,
         UNIT * 10,
         "ctx.duration = durationSeconds × единица времени"
+    );
+    assert_eq!(
+        e.fake.observe_limits.lock().unwrap()[0],
+        UNIT * (10 + OBSERVE_GRACE_S),
+        "ctx.deadline — страховочный срок ядра от начала вызова: приложение отсчитывает окно от ctx.started"
     );
     let PgObserve::TopQueries(q) = &op else {
         panic!("{op:?}")

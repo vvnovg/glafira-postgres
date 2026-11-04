@@ -1391,6 +1391,16 @@ fn observed_reset() -> Unavailable {
     }
 }
 
+/// Сортировка наблюдения (`observe_top_queries`: окно, чтение без `pg_stat_kcache`) на этой версии pgss: наблюдение
+/// проверяет её сразу после первого чтения — до окна, а не через 10–50 с после него.
+pub fn ensure_observed_sort(sort: QuerySort, pgss: &PgssInstalled) -> AppResult<()> {
+    if sort.available(&pgss.caps, true, false) {
+        Ok(())
+    } else {
+        Err(sort_unavailable())
+    }
+}
+
 /// Отчёт `observe_top_queries` в форме топа окна (`mode: window`, покрытие — длительность наблюдения): свои запросы
 /// Глафиры и тексты — как у окна (`resolve_own`, кеш текстов узла), правила находок — `Mode::Window`.
 pub async fn report_observed(
@@ -1400,9 +1410,7 @@ pub async fn report_observed(
     o: &Observed,
     p: &QueriesParams,
 ) -> AppResult<DiagReport> {
-    if !p.sort.available(&o.pgss.caps, true, false) {
-        return Err(sort_unavailable());
-    }
+    ensure_observed_sort(p.sort, &o.pgss)?;
     let (entries, reset) = observed_entries(&o.from, &o.to, p);
     let node = node_of(id, target)?;
     let own = resolve_own(st, id, target, &node, &entries, None, p).await;
@@ -1563,6 +1571,31 @@ mod tests {
             database: None,
             toplevel_only: true,
             search: None,
+        }
+    }
+
+    /// Сортировка наблюдения проверяется по первому чтению, до окна: JIT — с pgss 1.10 (PG 15+), CPU — только с
+    /// `pg_stat_kcache`, которого чтение наблюдения не берёт; `min` / `max` / `stddev` в окне нет.
+    #[test]
+    fn observed_sort_is_checked_by_the_installed_pgss() {
+        let pgss = |v: &str| PgssInstalled {
+            schema: "public".into(),
+            version: v.into(),
+            caps: caps(v),
+            kcache: KcacheCaps::from_version("2.2.3", "public".into()),
+        };
+        for (sort, version, ok) in [
+            (QuerySort::JitTime, "1.9", false),
+            (QuerySort::JitTime, "1.10", true),
+            (QuerySort::CpuTime, "1.11", false),
+            (QuerySort::MaxTime, "1.11", false),
+            (QuerySort::TotalTime, "1.8", true),
+        ] {
+            let r = ensure_observed_sort(sort, &pgss(version));
+            assert_eq!(r.is_ok(), ok, "{sort:?} {version}");
+            if let Err(e) = r {
+                assert_eq!(e.key, "errors.queries.sortUnavailable");
+            }
         }
     }
 

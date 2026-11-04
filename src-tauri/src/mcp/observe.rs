@@ -3,8 +3,16 @@
 //! `pg_stat_statements` (`showtext := false`) в начале и в конце окна и отдаёт разницу в форме топа. Прогресс — после
 //! каждого тика сэмплера (у pgss — раз в секунду) через `ObserveCtx::progress`; отмена клиентом (`ObserveCtx::cancel`)
 //! завершает окно досрочно с уже собранным. Одну длительную операцию на сессию и предел длительности держит крейт шлюза.
+//!
+//! Сроки. Ядро обрывает вызов через `durationSeconds + 6` единиц от создания `ObserveCtx` (`ObserveCtx::deadline`), и
+//! собранное тогда теряется. Поэтому окно отсчитывается от начала вызова (`ObserveCtx::started`), а не от конца
+//! подготовки: открытие подключения (туннель ssh, keychain) и первое чтение pgss входят в `durationSeconds`, остаток окна
+//! сокращается, а последнему чтению pgss оставляется время до срока ядра (`window_end`). Окно короче запрошенного на
+//! 1/10 и больше — ответ с собранным и подсказкой (как при отмене); окна не осталось вовсе (собирать нечего) — `TIMEOUT`
+//! сразу (`rest_of_window`).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,13 +24,13 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::time::Instant;
 
-use super::access::{check_connection, ensure_open, masks, open_for_llm, tool_error};
+use super::access::{check_connection, ensure_open, err, masks, open_for_llm, tool_error};
 use super::mask::{MAX_QUERY_BYTES, cut_text, mask_text};
 use super::read::{TOP_LIMIT, mask_statements, member_or_leader, parse_sort, report_out};
 use crate::conn::run_blocking;
 use crate::diag::queries::{
-    Detect, Observed, PgssInstalled, QueriesMode, QueriesParams, Snapshot, detect, read_cumulative,
-    report_observed,
+    Detect, Observed, PgssInstalled, QueriesMode, QueriesParams, Snapshot, detect,
+    ensure_observed_sort, read_cumulative, report_observed,
 };
 use crate::diag::{Head, head, on_member};
 use crate::error::AppError;
@@ -41,15 +49,21 @@ const TOP: usize = 10;
 /// Сессий в списках «появились» и «пропали».
 const MAX_SESSIONS: usize = 20;
 const CANCELLED_HINT: &str = "The observation ended early (cancelled): the numbers cover only the elapsed part of the window";
+/// Имена инструментов в сообщениях модели.
+const ACTIVITY_TOOL: &str = "observe_activity";
+const STATEMENTS_TOOL: &str = "observe_top_queries";
+/// Подсказка о коротком окне — если оно короче запрошенного на 1/`SHORTENED_SHARE` и больше.
+const SHORTENED_SHARE: u32 = 10;
 
 /// Тип и событие ожидания; `(None, None)` — CPU.
 type WaitKey<'s> = (Option<&'s str>, Option<&'s str>);
 
-/// Ключ запроса в топе: `query_id`, если он есть и не 0, иначе текст.
+/// Ключ запроса в топе: `query_id`, если он есть и не 0, иначе номер группы текста (`summarize`: на уровне
+/// `diagnostics` — по замаскированному тексту).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum QueryKey<'s> {
+enum QueryKey {
     Id(i64),
-    Text(&'s str),
+    Text(usize),
 }
 
 /// Счётчик запроса окна: id, текст первого сэмпла, сэмплы и ожидания.
@@ -95,7 +109,10 @@ fn shown_text(text: &str, mask: bool) -> (String, usize) {
 /// ожиданиями, сессии, ставшие активными и переставшие быть активными (по pid лидера: параллельные воркеры несут его
 /// запрос), пики по тикам. Тексты (`mask` — маскировать, уровень `diagnostics`) — не длиннее `MAX_QUERY_BYTES`.
 /// Порядок запросов с равным числом сэмплов — по показанному (замаскированному) тексту: порядок исходных текстов
-/// выдавал бы сравнение литералов. Второе значение — число замаскированных литералов у отданных запросов.
+/// выдавал бы сравнение литералов. Без `query_id` (PG 13, `compute_query_id = off`) запросы с маскированием сводятся по
+/// замаскированному тексту: одна инструкция с разными литералами — одна строка (сэмплы и ожидания сложены), а не
+/// строки с одинаковым текстом, которые занимали бы топ и выдавали число вариантов литералов. Второе значение — число
+/// замаскированных литералов у отданных запросов.
 pub fn summarize(
     samples: &[Sample<'_>],
     ticks: &[i64],
@@ -130,11 +147,21 @@ pub fn summarize(
     }
     let waits = ranked(waits);
     let top_wait = waits.first().map(|(w, _)| label(*w));
-    let mut queries: HashMap<QueryKey<'_>, QueryAcc<'_>> = HashMap::new();
+    let mut queries: HashMap<QueryKey, QueryAcc<'_>> = HashMap::new();
+    // Группы текстов без `query_id`: исходный текст → группа, ключ группы (замаскированный или исходный) → номер.
+    let mut group_of: HashMap<&str, usize> = HashMap::new();
+    let mut groups: HashMap<String, usize> = HashMap::new();
     for s in &samples {
         let key = match s.query_id {
             Some(id) if id != 0 => QueryKey::Id(id),
-            _ => QueryKey::Text(s.query),
+            _ => QueryKey::Text(*group_of.entry(s.query).or_insert_with(|| {
+                let mut text = s.query.to_string();
+                if mask {
+                    mask_text(&mut text);
+                }
+                let next = groups.len();
+                *groups.entry(text).or_insert(next)
+            })),
         };
         let q = queries.entry(key).or_insert_with(|| QueryAcc {
             query_id: s.query_id.filter(|i| *i != 0),
@@ -307,11 +334,58 @@ fn model_error(e: AppError) -> String {
     format!("{}: {}", e.code, e.message)
 }
 
-/// Окно наблюдения активности: до `ctx.duration`, отмены клиентом или остановки сэмплера; прогресс — на каждый тик.
-async fn watch(rx: &mut UnboundedReceiver<SamplerEvent>, ctx: &ObserveCtx) -> Watch {
+/// Ход для клиента: секунд от начала вызова из `durationSeconds`.
+fn report_progress(ctx: &ObserveCtx) {
     let total = u32::try_from(ctx.duration.as_secs()).unwrap_or(u32::MAX);
-    let started = Instant::now();
-    let deadline = started + ctx.duration;
+    let done = u32::try_from(ctx.started.elapsed().as_secs()).unwrap_or(u32::MAX);
+    (ctx.progress)(done.min(total), total);
+}
+
+/// Конец окна наблюдения (спец. §5.3: вызов — не дольше `durationSeconds` + 6 с): `duration` от начала вызова
+/// (`ObserveCtx::started`; подготовка — открытие подключения, туннель ssh, keychain, первое чтение pgss — входит в
+/// окно), но не позже страховочного срока ядра (`ObserveCtx::deadline`) за вычетом `reserve` — времени шага после окна.
+fn window_end(ctx: &ObserveCtx, reserve: Duration) -> Instant {
+    let end = ctx.started + ctx.duration;
+    match ctx.deadline.checked_sub(reserve) {
+        Some(latest) => end.min(latest),
+        None => ctx.started,
+    }
+}
+
+/// Конец окна после подготовки (`window_end`); окна не осталось — `TIMEOUT` сразу: собранного нет, а ожидание до срока
+/// ядра лишь отняло бы время. Подключение к этому моменту открыто — повторный вызов не тратит окно на открытие.
+fn rest_of_window(ctx: &ObserveCtx, reserve: Duration, tool: &str) -> Result<Instant, ToolError> {
+    let end = window_end(ctx, reserve);
+    if end > Instant::now() {
+        return Ok(end);
+    }
+    Err(err(
+        "TIMEOUT",
+        format!(
+            "Preparing the observation (opening the connection, the first read) took {:.1} s and left no time of the {:.1} s window; call {tool} again: the connection is open now",
+            ctx.started.elapsed().as_secs_f64(),
+            ctx.duration.as_secs_f64()
+        ),
+    ))
+}
+
+/// Подсказка, если окно `window_start`…`end` короче запрошенного на 1/`SHORTENED_SHARE` и больше: часть
+/// `durationSeconds` ушла на подготовку и запас для последнего чтения.
+fn shortened_hint(ctx: &ObserveCtx, window_start: Instant, end: Instant) -> Option<String> {
+    let lost = ctx
+        .duration
+        .saturating_sub(end.saturating_duration_since(window_start));
+    (!lost.is_zero() && lost * SHORTENED_SHARE >= ctx.duration).then(|| {
+        format!(
+            "The observation window is {:.1} s shorter than requested: preparing it (opening the connection, the first read) and the final read had to fit into durationSeconds",
+            lost.as_secs_f64()
+        )
+    })
+}
+
+/// Окно наблюдения активности: до `end` (`rest_of_window`), отмены клиентом или остановки сэмплера; прогресс — на
+/// каждый тик.
+async fn watch(rx: &mut UnboundedReceiver<SamplerEvent>, ctx: &ObserveCtx, end: Instant) -> Watch {
     let mut w = Watch::default();
     loop {
         tokio::select! {
@@ -319,12 +393,11 @@ async fn watch(rx: &mut UnboundedReceiver<SamplerEvent>, ctx: &ObserveCtx) -> Wa
                 w.cancelled = true;
                 break;
             }
-            _ = tokio::time::sleep_until(deadline) => break,
+            _ = tokio::time::sleep_until(end) => break,
             e = rx.recv() => match e {
                 Some(SamplerEvent::Tick { .. }) => {
                     w.ticks += 1;
-                    let done = u32::try_from(started.elapsed().as_secs()).unwrap_or(u32::MAX);
-                    (ctx.progress)(done.min(total), total);
+                    report_progress(ctx);
                 }
                 Some(SamplerEvent::Error { error }) => {
                     w.errors += 1;
@@ -341,8 +414,9 @@ async fn watch(rx: &mut UnboundedReceiver<SamplerEvent>, ctx: &ObserveCtx) -> Wa
     w
 }
 
-/// `observe_activity`: подписка на сэмплер узла на окно, затем сводка его буфера за окно; тексты на уровне
-/// `diagnostics` маскируются (`mask::mask_text`, без чтения `standard_conforming_strings`).
+/// `observe_activity`: подписка на сэмплер узла на остаток окна от начала вызова (открытие подключения уже заняло его
+/// часть; после окна — только сводка буфера в памяти, запас до срока ядра ей не нужен), затем сводка его буфера за
+/// окно; тексты на уровне `diagnostics` маскируются (`mask::mask_text`, без чтения `standard_conforming_strings`).
 pub async fn observe_activity(
     st: &AppState,
     p: ObserveActivityParams,
@@ -352,14 +426,16 @@ pub async fn observe_activity(
     let mask = masks(access);
     let id = p.connection_id.as_str();
     let member = member_or_leader(st, id, p.member.as_deref())?;
+    let end = rest_of_window(&ctx, Duration::ZERO, ACTIVITY_TOOL)?;
     let (tx, mut rx) = unbounded_channel();
+    let window_start = Instant::now();
     let started_at_ms = now_ms();
     let subscription = Subscription {
         sessions: &st.sessions,
         id: crate::sampler::start(st, id, Some(&member), Arc::new(ChannelSink(tx)))
             .map_err(tool_error)?,
     };
-    let w = watch(&mut rx, &ctx).await;
+    let w = watch(&mut rx, &ctx, end).await;
     drop(subscription);
     let ended_at_ms = now_ms();
     let (mut out, masked) = match st.samplers.buffer(id, &member) {
@@ -384,6 +460,9 @@ pub async fn observe_activity(
     }
     if w.cancelled || w.stopped {
         out.summary["endedEarly"] = json!(true);
+    }
+    if let Some(h) = shortened_hint(&ctx, window_start, end) {
+        out.summary["hint"] = json!(h);
     }
     Ok(PgAnswer {
         body: PgOutput::ObservedActivity(out),
@@ -415,28 +494,64 @@ async fn read_statements(
     .map_err(tool_error)
 }
 
-/// Окно между чтениями pgss: прогресс раз в секунду; `true` — клиент отменил вызов.
-async fn wait_window(ctx: &ObserveCtx, started: Instant) -> bool {
-    let total = u32::try_from(ctx.duration.as_secs()).unwrap_or(u32::MAX);
-    let deadline = started + ctx.duration;
+/// Окно между чтениями pgss до `end`: прогресс раз в секунду; `true` — клиент отменил вызов.
+async fn wait_window(ctx: &ObserveCtx, end: Instant) -> bool {
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.tick().await;
     loop {
         tokio::select! {
             _ = ctx.cancel.cancelled() => return true,
-            _ = tokio::time::sleep_until(deadline) => return false,
-            _ = tick.tick() => {
-                let done = u32::try_from(started.elapsed().as_secs()).unwrap_or(u32::MAX);
-                (ctx.progress)(done.min(total), total);
-            }
+            _ = tokio::time::sleep_until(end) => return false,
+            _ = tick.tick() => report_progress(ctx),
         }
     }
 }
 
-/// `observe_top_queries`: два чтения pgss (`showtext := false`) и разница в форме топа окна; тексты — только у строк
-/// ответа (кеш текстов узла), на уровне `diagnostics` маскируются, в журнал — литералы отданных строк
-/// (`read::mask_statements`, как у `get_top_queries`; поиска у наблюдения нет). Доступ и сортировка проверяются до
-/// открытия подключения.
+/// Два чтения вокруг окна (`around_window`).
+#[derive(Debug)]
+struct Around<S> {
+    from: S,
+    to: S,
+    /// От конца первого чтения до конца второго — покрытие разницы.
+    between: Duration,
+    cancelled: bool,
+    /// Окно заметно короче запрошенного (`shortened_hint`).
+    hint: Option<String>,
+}
+
+/// Первое чтение; проверка по нему (`check`: сортировка — сразу, а не после окна); окно до `rest_of_window` с запасом
+/// на второе чтение вдвое больше первого (на нагруженном сервере второе может идти дольше; обычно запас тонет в
+/// страховочных 6 с ядра и окно не сокращает); второе чтение. Окна не осталось — `TIMEOUT` без второго чтения.
+async fn around_window<S, F, Fut>(
+    ctx: &ObserveCtx,
+    mut read: F,
+    check: impl FnOnce(&S) -> Result<(), ToolError>,
+) -> Result<Around<S>, ToolError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<S, ToolError>>,
+{
+    let t = Instant::now();
+    let from = read().await?;
+    check(&from)?;
+    let first = Instant::now();
+    let end = rest_of_window(ctx, (first - t) * 2, STATEMENTS_TOOL)?;
+    let cancelled = wait_window(ctx, end).await;
+    let to = read().await?;
+    Ok(Around {
+        from,
+        to,
+        between: first.elapsed(),
+        cancelled,
+        hint: shortened_hint(ctx, first, end),
+    })
+}
+
+/// `observe_top_queries`: два чтения pgss (`showtext := false`) вокруг остатка окна от начала вызова (`around_window`)
+/// и разница в форме топа окна; тексты — только у строк ответа (кеш текстов узла), на уровне `diagnostics`
+/// маскируются, в журнал — литералы отданных строк (`read::mask_statements`, как у `get_top_queries`; поиска у
+/// наблюдения нет). Доступ и имя сортировки проверяются до открытия подключения, её доступность на версии pgss — сразу
+/// после первого чтения (`ensure_observed_sort`).
 pub async fn observe_top_queries(
     st: &AppState,
     p: ObserveQueriesParams,
@@ -450,11 +565,16 @@ pub async fn observe_top_queries(
         .runtimes
         .diag_target(id, p.member.as_deref(), false)
         .map_err(tool_error)?;
-    let (_, pgss, from) = read_statements(st, id, &target).await?;
-    let started = Instant::now();
-    let cancelled = wait_window(&ctx, started).await;
-    let (head, _, to) = read_statements(st, id, &target).await?;
-    let duration_s = u32::try_from(started.elapsed().as_secs())
+    let around = around_window(
+        &ctx,
+        || read_statements(st, id, &target),
+        |(_, pgss, _)| ensure_observed_sort(sort, pgss).map_err(tool_error),
+    )
+    .await?;
+    let ((_, pgss, from), (head, _, to)) = (around.from, around.to);
+    // Секунды окна — до ближайшей: окно от начала вызова короче `durationSeconds` на подготовку (миллисекунды при
+    // открытом подключении), и отбрасывание дробной части занижало бы его на секунду.
+    let duration_s = u32::try_from((around.between.as_millis() + 500) / 1000)
         .unwrap_or(u32::MAX)
         .max(1);
     let observed = Observed {
@@ -478,8 +598,15 @@ pub async fn observe_top_queries(
         .map_err(tool_error)?;
     let masked = mask_statements(access, &mut report, None, Some(limit));
     let mut out = report_out(report);
-    if cancelled {
-        out.hint = Some(CANCELLED_HINT.to_string());
+    let hints: Vec<&str> = [
+        around.cancelled.then_some(CANCELLED_HINT),
+        around.hint.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !hints.is_empty() {
+        out.hint = Some(hints.join(" "));
     }
     Ok(PgAnswer {
         body: PgOutput::ObservedQueries(out),
@@ -492,6 +619,7 @@ pub async fn observe_top_queries(
 mod tests {
     use std::sync::Mutex;
 
+    use glafira_pg_mcp::params::OBSERVE_GRACE_S;
     use tokio_util::sync::CancellationToken;
 
     use super::*;
@@ -617,6 +745,34 @@ mod tests {
         );
     }
 
+    /// Без `query_id` (PG 13, `compute_query_id = off`) запросы на уровне `diagnostics` сводятся по замаскированному
+    /// тексту: одна инструкция с разными литералами — одна строка топа (сэмплы сложены), а не строки с одинаковым
+    /// текстом, выдающие число вариантов литералов.
+    #[test]
+    fn queries_without_an_id_are_grouped_by_the_masked_text() {
+        let no_id = |at_ms, pid, query| Sample {
+            query_id: None,
+            ..sample(at_ms, pid, None, 0, query)
+        };
+        let samples = [
+            no_id(1, 1, "SELECT * FROM t WHERE email = 'ann@example.com'"),
+            no_id(1, 2, "SELECT * FROM t WHERE email = 'bob@example.com'"),
+            no_id(2, 1, "SELECT * FROM t WHERE email = 'cid@example.com'"),
+            no_id(2, 3, "SELECT now()"),
+        ];
+        let (o, masked) = summarize(&samples, &[1, 2], 0, 10, true);
+        assert_eq!(o.top_queries.len(), 2, "{:?}", o.top_queries);
+        assert_eq!(
+            (&o.top_queries[0]["query"], &o.top_queries[0]["samples"]),
+            (&json!("SELECT * FROM t WHERE email = $1"), &json!(3))
+        );
+        assert_eq!(o.top_queries[0]["queryId"], Value::Null);
+        assert_eq!(masked, 1, "литералы — у отданного текста строки");
+        // Без маскирования (уровень выше `diagnostics`) — по исходному тексту, как раньше.
+        let (o, masked) = summarize(&samples, &[1, 2], 0, 10, false);
+        assert_eq!((o.top_queries.len(), masked), (4, 0));
+    }
+
     #[tokio::test]
     async fn sampler_errors_reach_the_model_without_the_bastion() {
         use crate::net::ssh::process::{SshErrorKind, ssh_error};
@@ -631,7 +787,7 @@ mod tests {
         })
         .unwrap();
         tx.send(SamplerEvent::Stopped).unwrap();
-        let w = watch(&mut rx, &ctx).await;
+        let w = watch(&mut rx, &ctx, window_end(&ctx, Duration::ZERO)).await;
         let last = w.last_error.unwrap();
         assert!(
             last.starts_with("SSH_ERROR: ") && !last.contains("bastion"),
@@ -641,11 +797,10 @@ mod tests {
 
     fn ctx_with(progress: ProgressCalls) -> ObserveCtx {
         ObserveCtx {
-            duration: Duration::from_secs(30),
-            cancel: CancellationToken::new(),
             progress: Arc::new(move |done: u32, total: u32| {
                 progress.lock().unwrap().push((done, total))
             }),
+            ..ObserveCtx::new(Duration::from_secs(30))
         }
     }
 
@@ -672,7 +827,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
             cancel.cancel();
         });
-        let w = watch(&mut rx, &ctx).await;
+        let w = watch(&mut rx, &ctx, window_end(&ctx, Duration::ZERO)).await;
         assert_eq!(
             (w.ticks, w.errors, w.cancelled, w.stopped),
             (2, 1, true, false)
@@ -690,7 +845,7 @@ mod tests {
         let (tx, mut rx) = unbounded_channel();
         let ctx = ctx_with(Arc::default());
         tx.send(SamplerEvent::Stopped).unwrap();
-        let w = watch(&mut rx, &ctx).await;
+        let w = watch(&mut rx, &ctx, window_end(&ctx, Duration::ZERO)).await;
         assert!(w.stopped && !w.cancelled);
     }
 
@@ -704,9 +859,149 @@ mod tests {
             cancel.cancel();
         });
         assert!(
-            wait_window(&ctx, Instant::now()).await,
+            wait_window(&ctx, window_end(&ctx, Duration::ZERO)).await,
             "отмена завершила окно досрочно"
         );
         assert!(!calls.lock().unwrap().is_empty(), "прогресс раз в секунду");
+    }
+
+    // Окно от начала вызова (страховочный срок ядра — `durationSeconds + 6` единиц от создания `ObserveCtx`).
+
+    /// Единица времени тестов, как `with_time_unit` ядра: окно — 30 единиц, срок ядра — ещё `OBSERVE_GRACE_S`.
+    const UNIT: Duration = Duration::from_millis(10);
+    const WINDOW_UNITS: u32 = 30;
+
+    /// Контекст, каким его создаёт ядро шлюза в тестовой единице времени.
+    fn unit_ctx() -> ObserveCtx {
+        let started = Instant::now();
+        ObserveCtx {
+            duration: UNIT * WINDOW_UNITS,
+            started,
+            deadline: started + UNIT * (WINDOW_UNITS + OBSERVE_GRACE_S),
+            cancel: CancellationToken::new(),
+            progress: Arc::new(|_, _| {}),
+        }
+    }
+
+    /// Медленная подготовка (холодное открытие: туннель ssh, keychain) входит в окно: оно кончается через `duration`
+    /// от начала вызова, а не после подготовки, и вызов укладывается в срок ядра.
+    #[tokio::test(start_paused = true)]
+    async fn activity_window_is_counted_from_the_start_of_the_call() {
+        let ctx = unit_ctx();
+        tokio::time::sleep(UNIT * 25).await;
+        let end = rest_of_window(&ctx, Duration::ZERO, ACTIVITY_TOOL).unwrap();
+        assert_eq!(end, ctx.started + ctx.duration);
+        let (_tx, mut rx) = unbounded_channel();
+        let w = watch(&mut rx, &ctx, end).await;
+        assert!(!w.cancelled && !w.stopped);
+        assert_eq!(ctx.started.elapsed(), UNIT * WINDOW_UNITS);
+        assert!(Instant::now() < ctx.deadline);
+        let hint = shortened_hint(&ctx, ctx.started + UNIT * 25, end).unwrap();
+        assert!(hint.contains("shorter than requested"), "{hint}");
+        assert_eq!(
+            shortened_hint(&ctx, ctx.started + UNIT, end),
+            None,
+            "почти полное окно — без подсказки"
+        );
+    }
+
+    /// Подготовка заняла всё окно: собранного нет — `TIMEOUT` сразу, без ожидания до срока ядра.
+    #[tokio::test(start_paused = true)]
+    async fn preparation_that_took_the_whole_window_is_a_timeout() {
+        let ctx = unit_ctx();
+        tokio::time::sleep(UNIT * (WINDOW_UNITS + 1)).await;
+        let e = rest_of_window(&ctx, Duration::ZERO, ACTIVITY_TOOL).unwrap_err();
+        assert_eq!(e.code, "TIMEOUT");
+        assert!(
+            e.message.contains("observe_activity again"),
+            "{}",
+            e.message
+        );
+    }
+
+    /// Чтение pgss: `delay` единиц, итог — номер чтения.
+    fn slow_read(
+        calls: Arc<Mutex<u32>>,
+        delay: u32,
+    ) -> impl FnMut() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u32, ToolError>>>>
+    {
+        move || {
+            let calls = calls.clone();
+            Box::pin(async move {
+                tokio::time::sleep(UNIT * delay).await;
+                let mut n = calls.lock().unwrap();
+                *n += 1;
+                Ok(*n)
+            })
+        }
+    }
+
+    /// `observe_top_queries` после медленного открытия: окно — остаток от начала вызова, второе чтение — до срока ядра
+    /// (раньше: открытие + первое чтение + полное окно + второе чтение — дальше срока, и собранное терялось).
+    #[tokio::test(start_paused = true)]
+    async fn statements_window_after_a_slow_open_ends_before_the_deadline() {
+        let ctx = unit_ctx();
+        tokio::time::sleep(UNIT * 20).await;
+        let calls = Arc::new(Mutex::new(0));
+        let r = around_window(&ctx, slow_read(calls.clone(), 2), |_| Ok(()))
+            .await
+            .unwrap();
+        assert_eq!((r.from, r.to, r.cancelled), (1, 2, false));
+        assert_eq!(ctx.started.elapsed(), UNIT * (WINDOW_UNITS + 2));
+        assert!(Instant::now() <= ctx.deadline);
+        // Между чтениями: от конца первого (22) до конца второго (32).
+        assert_eq!(r.between, UNIT * 10);
+        assert!(r.hint.is_some(), "окно короче запрошенного — с подсказкой");
+    }
+
+    /// Чтение pgss дольше страховочного запаса: окно кончается раньше, чтобы второе чтение успело до срока ядра.
+    #[tokio::test(start_paused = true)]
+    async fn slow_reads_shorten_the_window_to_leave_time_for_the_final_read() {
+        let ctx = unit_ctx();
+        let calls = Arc::new(Mutex::new(0));
+        let r = around_window(&ctx, slow_read(calls, 8), |_| Ok(()))
+            .await
+            .unwrap();
+        assert_eq!(r.to, 2);
+        assert!(
+            Instant::now() <= ctx.deadline,
+            "второе чтение — до срока ядра: {:?} > {:?}",
+            ctx.started.elapsed(),
+            ctx.deadline - ctx.started
+        );
+        assert!(r.hint.is_some());
+    }
+
+    /// Недоступная сортировка — ошибка сразу после первого чтения, а не после окна.
+    #[tokio::test(start_paused = true)]
+    async fn unavailable_sort_fails_right_after_the_first_read() {
+        let ctx = unit_ctx();
+        let calls = Arc::new(Mutex::new(0));
+        let e = around_window(&ctx, slow_read(calls.clone(), 2), |_| {
+            Err(crate::mcp::access::invalid_argument("no such sort"))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(e.code, "invalid_argument");
+        assert_eq!(ctx.started.elapsed(), UNIT * 2);
+        assert_eq!(*calls.lock().unwrap(), 1, "второго чтения нет");
+    }
+
+    /// Первое чтение съело всё окно: `TIMEOUT` без второго чтения.
+    #[tokio::test(start_paused = true)]
+    async fn first_read_that_took_the_whole_window_is_a_timeout() {
+        let ctx = unit_ctx();
+        tokio::time::sleep(UNIT * 25).await;
+        let calls = Arc::new(Mutex::new(0));
+        let e = around_window(&ctx, slow_read(calls.clone(), 6), |_| Ok(()))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, "TIMEOUT");
+        assert!(
+            e.message.contains("observe_top_queries again"),
+            "{}",
+            e.message
+        );
+        assert_eq!(*calls.lock().unwrap(), 1);
     }
 }

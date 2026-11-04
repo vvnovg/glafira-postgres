@@ -8,12 +8,13 @@ use std::time::Duration;
 use glafira_mcp_core::{BoxFuture, Gate, ToolError};
 use serde::Serialize;
 use serde_json::Value;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::params::{
-    ActivityParams, ConnectionParams, ExplainParams, HypoIndexParams, ObserveActivityParams,
-    ObserveQueriesParams, QueryDetailsParams, RunDiagnosticParams, SettingsParams,
-    TableDetailsParams, TopQueriesParams,
+    ActivityParams, ConnectionParams, ExplainParams, HypoIndexParams, OBSERVE_GRACE_S,
+    ObserveActivityParams, ObserveQueriesParams, QueryDetailsParams, RunDiagnosticParams,
+    SettingsParams, TableDetailsParams, TopQueriesParams,
 };
 
 /// Источник данных шлюза. Реализация приложения на каждый вызов проверяет доступ к подключению (§4.3), открывает его
@@ -82,15 +83,25 @@ pub type ProgressFn = Arc<dyn Fn(u32, u32) + Send + Sync>;
 #[derive(Clone)]
 pub struct ObserveCtx {
     pub duration: Duration,
+    /// Начало вызова (создание контекста): окно отсчитывается от него — подготовка приложения (открытие подключения,
+    /// туннель ssh, первое чтение) входит в `duration`, а не добавляется к нему.
+    pub started: Instant,
+    /// Страховочный срок ядра (`started` + `durationSeconds` + `OBSERVE_GRACE_S` единиц): в этот момент вызов
+    /// обрывается с `TIMEOUT`, и собранное теряется — последний шаг приложения должен закончиться раньше.
+    pub deadline: Instant,
     pub cancel: CancellationToken,
     pub progress: ProgressFn,
 }
 
 impl ObserveCtx {
-    /// Контекст без хода и без внешней отмены (тесты приложения).
+    /// Контекст без хода и без внешней отмены (тесты приложения): начало — сейчас, срок — через `duration` и
+    /// `OBSERVE_GRACE_S` секунд, как у ядра в обычной единице времени.
     pub fn new(duration: Duration) -> Self {
+        let started = Instant::now();
         Self {
             duration,
+            started,
+            deadline: started + duration + Duration::from_secs(u64::from(OBSERVE_GRACE_S)),
             cancel: CancellationToken::new(),
             progress: Arc::new(|_, _| {}),
         }

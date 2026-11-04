@@ -34,6 +34,11 @@ pub const ACTION_SESSION_OPTIONS: &str =
 pub const EXPLAIN_SESSION_OPTIONS: &str =
     "-c statement_timeout=5000 -c lock_timeout=1000 -c DateStyle=ISO";
 
+/// Параметры сессии SQL модели MCP (спец. P4 §7.3): как у EXPLAIN (схемы пользователя видны), и каждая транзакция
+/// сессии — только чтение (`default_transaction_read_only`): защита вглубь и вне транзакции `READ ONLY` шлюза
+/// (`SET`, `BEGIN READ ONLY` и hypopg с ней совместимы). Соединения интерфейса этого не получают.
+pub const MCP_SESSION_OPTIONS: &str = "-c statement_timeout=5000 -c lock_timeout=1000 -c DateStyle=ISO -c default_transaction_read_only=on";
+
 /// Отсечка молчащего соединения на уровне TCP: после 60 с тишины зонды раз в 10 с. После failover
 /// полуоткрытое соединение иначе живёт в пуле, пока его не попробуют использовать.
 const KEEPALIVE_IDLE: Duration = Duration::from_secs(60);
@@ -70,7 +75,7 @@ pub struct ConnectSpec {
     /// Цель ssh туннеля — для сообщения о сбое проброса.
     pub ssh_target: Option<String>,
     /// Параметры сессии (`-c …`): `SESSION_OPTIONS` у пулов, `ACTION_SESSION_OPTIONS` у действий,
-    /// `EXPLAIN_SESSION_OPTIONS` у EXPLAIN.
+    /// `EXPLAIN_SESSION_OPTIONS` у EXPLAIN, `MCP_SESSION_OPTIONS` у SQL модели MCP.
     pub options: &'static str,
     /// Имя приложения сессии (`application_name`): `glafira-pg`; у соединений SQL модели MCP — `glafira-pg-mcp`.
     pub application_name: &'static str,
@@ -157,6 +162,13 @@ impl ConnectSpec {
     pub fn with_application_name(mut self, name: &'static str) -> Self {
         self.application_name = name;
         self
+    }
+
+    /// То же соединение для SQL модели MCP (P4 §7.3): сессия EXPLAIN только для чтения, `application_name` —
+    /// `product::MCP_APPLICATION_NAME` (нагрузку модели видно в `pg_stat_activity` отдельно от Glafira).
+    pub fn for_mcp(mut self) -> Self {
+        self.options = MCP_SESSION_OPTIONS;
+        self.with_application_name(crate::product::MCP_APPLICATION_NAME)
     }
 
     pub fn pg_config(&self) -> tokio_postgres::Config {
@@ -367,6 +379,28 @@ mod tests {
         let cfg = mcp.pg_config();
         assert_eq!(cfg.get_application_name(), Some("glafira-pg-mcp"));
         assert_eq!(cfg.get_options(), Some(EXPLAIN_SESSION_OPTIONS));
+    }
+
+    /// Соединение SQL модели MCP: как у EXPLAIN (схемы пользователя видны, те же пределы), но каждая транзакция сессии —
+    /// только чтение и вне транзакции защиты; своё `application_name`. Соединения интерфейса не меняются.
+    #[test]
+    fn mcp_spec_is_read_only_explain_session_with_its_own_name() {
+        let spec = loopback_spec(5432, "localhost", SslMode::Disable, None);
+        let cfg = spec.clone().for_mcp().pg_config();
+        assert_eq!(cfg.get_application_name(), Some("glafira-pg-mcp"));
+        assert_eq!(cfg.get_options(), Some(MCP_SESSION_OPTIONS));
+        assert!(
+            MCP_SESSION_OPTIONS.starts_with(EXPLAIN_SESSION_OPTIONS)
+                && MCP_SESSION_OPTIONS.contains("-c default_transaction_read_only=on"),
+            "{MCP_SESSION_OPTIONS}"
+        );
+        assert!(!MCP_SESSION_OPTIONS.contains("search_path"));
+        assert!(!EXPLAIN_SESSION_OPTIONS.contains("default_transaction_read_only"));
+        assert_eq!(
+            spec.for_explain().pg_config().get_options(),
+            Some(EXPLAIN_SESSION_OPTIONS),
+            "EXPLAIN консоли — без умолчания только для чтения (ярус записи)"
+        );
     }
 
     #[test]

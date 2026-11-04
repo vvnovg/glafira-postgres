@@ -127,7 +127,8 @@ impl PgServer {
     }
 
     /// Наблюдение (§5.3): одна длительная операция на сессию, ход клиенту по его `progressToken`, отмена запроса
-    /// отменяет `ctx.cancel`, страховочный срок — `durationSeconds + 6` единиц.
+    /// отменяет `ctx.cancel`, страховочный срок — `durationSeconds + 6` единиц от создания `ctx` (`ctx.deadline`:
+    /// приложение отсчитывает окно от `ctx.started` и заканчивает последний шаг до срока).
     async fn observe(
         &self,
         op: PgObserve,
@@ -152,13 +153,16 @@ impl PgServer {
                 }
             })
         });
+        let started = tokio::time::Instant::now();
+        let deadline = started + self.time_unit * (seconds + OBSERVE_GRACE_S);
         let ctx = ObserveCtx {
             duration: self.time_unit * seconds,
+            started,
+            deadline,
             cancel: cancel.clone(),
             progress,
         };
-        let safety = self.time_unit * (seconds + OBSERVE_GRACE_S);
-        let result = tokio::time::timeout(safety, self.backend.observe(op, ctx)).await;
+        let result = tokio::time::timeout_at(deadline, self.backend.observe(op, ctx)).await;
         if let Some(mut f) = forward {
             // Отправитель хода закрыт вместе с `ctx`: пересылка доносит последнее уведомление и заканчивается сама;
             // если приложение держит копию `progress`, пересылка обрывается.
