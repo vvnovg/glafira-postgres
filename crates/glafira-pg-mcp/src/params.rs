@@ -244,7 +244,7 @@ pub struct TopQueriesParams {
     /// Only queries of this database.
     #[serde(default)]
     pub database: Option<String>,
-    /// Case-insensitive substring of the query text.
+    /// Case-insensitive substring of the query text. At the diagnostics access level it matches the masked text ($N in place of literals) within the top 200 queries by the chosen sort, so an empty result may mean the query is outside that window.
     #[serde(default)]
     pub search: Option<String>,
 }

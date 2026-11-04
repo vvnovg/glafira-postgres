@@ -16,6 +16,7 @@ use glafira_pg_mcp::params::{
     ACTIVITY_LIMIT_DEFAULT, ActivityParams, RunDiagnosticParams, TOPOLOGY_EVENTS_MAX,
 };
 use pg_advisor::findings::FindingTarget;
+use pg_advisor::queries::QueryStat;
 use pg_advisor::rules::sessions::SessionRow;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -24,7 +25,7 @@ use super::access::{
     check_connection, effective_access, ensure_open, err, invalid_argument, masks, model_app_error,
     open_for_llm, tool_error,
 };
-use super::mask::{MAX_QUERY_BYTES, cut_text, has_texts, mask_report};
+use super::mask::{MAX_QUERY_BYTES, cut_text, has_texts, mask_opt, mask_report};
 use super::texts::{diag_catalog, finding_out, tool_id};
 use crate::conn::profile::{ConnectionKind, LlmAccess};
 use crate::diag::queries::{LIMITS, QueriesMode, QueriesParams};
@@ -302,15 +303,25 @@ pub(crate) struct MaskedSearch {
     limit: usize,
 }
 
+impl MaskedSearch {
+    /// Замаскированный текст строки содержит подстроку (без учёта регистра); строки без прочитанного текста — нет.
+    fn matches(&self, r: &QueryStat) -> bool {
+        r.text
+            .as_deref()
+            .is_some_and(|t| t.to_lowercase().contains(&self.needle))
+    }
+}
+
 /// Поиск `search` инструмента `queries` на уровне, где тексты маскируются (решение владельца 2026-11-04). Поиск P3
 /// идёт по исходным текстам pgss (`ILIKE` на сервере, кеш текстов узла), и ответ «есть строки / нет строк» выдавал
 /// бы литералы по символу. Поэтому здесь `search` убирается из параметров P3, а предел строк расширяется до
-/// наибольшего (`LIMITS`: тексты читаются только у строк топа); после `mask_if` `keep_masked_matches` оставляет строки,
-/// чей ЗАМАСКИРОВАННЫЙ текст содержит подстроку (без учёта регистра), и возвращает предел запроса. Итоги не меняются:
-/// поиск сужает строки, а не итоги (`search_restricts_rows_but_not_the_totals`). Строки вне расширенного топа и без
-/// прочитанного текста поиск не находит. На уровне без маскирования (P4b `data`) — `None`, поиск P3 по исходным
-/// текстам остаётся. Тот же порядок — у `run_diagnostic` (`queries.search`) и `get_top_queries` (`search`, задача 11):
-/// `take_masked_search` до `diag::run`, `mask_if`, затем `keep_masked_matches`, затем свой предел ответа.
+/// наибольшего (`LIMITS`, 200: тексты читаются только у строк топа); `mask_statements` маскирует строки и
+/// оставляет те, чей ЗАМАСКИРОВАННЫЙ текст содержит подстроку (без учёта регистра), не больше предела запроса. Итоги не
+/// меняются: поиск сужает строки, а не итоги (`search_restricts_rows_but_not_the_totals`). Строки вне расширенного топа
+/// (по выбранной сортировке) и без прочитанного текста поиск не находит — об этом говорит описание параметра модели.
+/// На уровне без маскирования (P4b `data`) — `None`, поиск P3 по исходным текстам остаётся. Тот же порядок — у
+/// `run_diagnostic` (`queries.search`) и `get_top_queries` (`search`): `take_masked_search` до `diag::run`, затем
+/// `mask_statements` (маскирование, поиск, свой предел ответа).
 pub(crate) fn take_masked_search(q: &mut QueriesParams, access: LlmAccess) -> Option<MaskedSearch> {
     if !masks(access) {
         return None;
@@ -322,27 +333,45 @@ pub(crate) fn take_masked_search(q: &mut QueriesParams, access: LlmAccess) -> Op
     Some(MaskedSearch { needle, limit })
 }
 
-/// Строки отчёта `queries`, замаскированный текст которых содержит подстроку поиска, не больше предела запроса;
-/// находки строк, не попавших в ответ, уходят (как у поиска P3: правила видят только найденные строки), находки без
-/// запроса (`queries_incomplete`) остаются. Вызывать после `mask_if` (`take_masked_search`).
-pub(crate) fn keep_masked_matches(report: &mut DiagReport, s: &MaskedSearch) {
+/// Тексты отчёта `queries` для модели и строки ответа, по шагам: тексты маскируются (уровень `diagnostics`, `mask_opt`
+/// у каждой строки); поиск `take_masked_search` оставляет строки с подстрокой в замаскированном тексте, не больше
+/// предела запроса, и находки строк, не попавших в результат поиска, уходят (как у поиска P3: правила видят только
+/// найденные строки; находки без запроса, `queries_incomplete`, остаются); затем строки режутся до `limit` ответа
+/// (`None` — не режутся). Итог — литералы строк, оставшихся в ответе (журнал `masked`); уровень без маскирования —
+/// `None`. Отчёт другого инструмента — `mask_if`.
+pub(crate) fn mask_statements(
+    access: LlmAccess,
+    report: &mut DiagReport,
+    search: Option<&MaskedSearch>,
+    limit: Option<usize>,
+) -> Option<u64> {
     let DiagData::Queries(d) = &mut report.data else {
-        return;
+        return mask_if(access, report);
     };
-    d.rows.retain(|r| {
-        r.text
-            .as_deref()
-            .is_some_and(|t| t.to_lowercase().contains(&s.needle))
-    });
-    d.rows.truncate(s.limit);
-    let rows = &d.rows;
-    report.findings.retain(|f| match &f.target {
-        Some(FindingTarget::Query { query_id, database }) => rows.iter().any(|r| {
-            r.key.query_id.to_string() == *query_id
-                && r.datname.as_deref().unwrap_or_default() == database
-        }),
-        _ => true,
-    });
+    let mask = masks(access);
+    // Литералы считаются у каждой строки: поиск и предел ниже убирают строки, а в журнал идут только отданные.
+    let mut rows: Vec<(QueryStat, usize)> = std::mem::take(&mut d.rows)
+        .into_iter()
+        .map(|mut r| {
+            let n = if mask { mask_opt(&mut r.text) } else { 0 };
+            (r, n)
+        })
+        .collect();
+    if let Some(s) = search {
+        rows.retain(|(r, _)| s.matches(r));
+        rows.truncate(s.limit);
+        report.findings.retain(|f| match &f.target {
+            Some(FindingTarget::Query { query_id, database }) => rows.iter().any(|(r, _)| {
+                r.key.query_id.to_string() == *query_id
+                    && r.datname.as_deref().unwrap_or_default() == database
+            }),
+            _ => true,
+        });
+    }
+    rows.truncate(limit.unwrap_or(usize::MAX));
+    let masked: usize = rows.iter().map(|(_, n)| n).sum();
+    d.rows = rows.into_iter().map(|(r, _)| r).collect();
+    mask.then_some(masked as u64)
 }
 
 /// id инструмента из параметра `tool`.
@@ -399,10 +428,7 @@ async fn run_diagnostic(st: &AppState, p: RunDiagnosticParams) -> Result<PgAnswe
     let mut report = diag::run(st, &p.connection_id, req)
         .await
         .map_err(tool_error)?;
-    let masked = mask_if(access, &mut report);
-    if let Some(s) = &search {
-        keep_masked_matches(&mut report, s);
-    }
+    let masked = mask_statements(access, &mut report, search.as_ref(), None);
     Ok(PgAnswer {
         body: PgOutput::Report(report_out(report)),
         masked,
@@ -1141,8 +1167,11 @@ mod tests {
             "серверу поиск не уходит, топ шире"
         );
         let mut r = statements_report();
-        assert_eq!(mask_if(LlmAccess::Diagnostics, &mut r), Some(3));
-        keep_masked_matches(&mut r, &s);
+        assert_eq!(
+            mask_statements(LlmAccess::Diagnostics, &mut r, Some(&s), None),
+            Some(0),
+            "литералы считаются только у отданных строк"
+        );
         assert!(texts(&r).is_empty(), "{:?}", texts(&r));
         assert_eq!(
             r.findings.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
@@ -1157,8 +1186,10 @@ mod tests {
         let mut q = queries_params(Some(json!({"search": "alter ROLE"}))).unwrap();
         let s = take_masked_search(&mut q, LlmAccess::Diagnostics).unwrap();
         let mut r = statements_report();
-        mask_if(LlmAccess::Diagnostics, &mut r);
-        keep_masked_matches(&mut r, &s);
+        assert_eq!(
+            mask_statements(LlmAccess::Diagnostics, &mut r, Some(&s), None),
+            Some(1)
+        );
         assert_eq!(texts(&r), ["ALTER ROLE app PASSWORD $1"]);
         assert_eq!(r.findings.len(), 2, "находка найденной строки остаётся");
 
@@ -1167,14 +1198,55 @@ mod tests {
         let mut s = take_masked_search(&mut q, LlmAccess::Diagnostics).unwrap();
         s.limit = 2;
         let mut r = statements_report();
-        mask_if(LlmAccess::Diagnostics, &mut r);
-        keep_masked_matches(&mut r, &s);
+        assert_eq!(
+            mask_statements(LlmAccess::Diagnostics, &mut r, Some(&s), None),
+            Some(2)
+        );
         assert_eq!(
             texts(&r),
             [
                 "ALTER ROLE app PASSWORD $1",
                 "SELECT * FROM orders WHERE note = $1"
             ]
+        );
+    }
+
+    /// Без поиска строки режутся до предела ответа после маскирования, и в журнал идут литералы оставшихся строк;
+    /// без маскирования тексты и счёт не трогаются.
+    #[test]
+    fn statements_are_cut_to_the_answer_limit_and_counted_after_the_cut() {
+        let mut r = statements_report();
+        assert_eq!(
+            mask_statements(LlmAccess::Diagnostics, &mut r, None, Some(1)),
+            Some(1)
+        );
+        assert_eq!(texts(&r), ["ALTER ROLE app PASSWORD $1"]);
+        assert_eq!(r.findings.len(), 3, "без поиска находки не сужаются");
+        let mut r = statements_report();
+        assert_eq!(mask_statements(LlmAccess::Off, &mut r, None, Some(2)), None);
+        assert_eq!(
+            texts(&r),
+            [
+                "ALTER ROLE app PASSWORD 'hunter2'",
+                "SELECT * FROM orders WHERE note = 'hunter'"
+            ]
+        );
+        // Отчёт другого инструмента — как `mask_if`.
+        let mut r = report(
+            Tool::Sessions,
+            DiagData::Sessions(SessionsData {
+                rows: vec![SessionRow {
+                    pid: 1,
+                    query: Some("SELECT 'x'".into()),
+                    ..Default::default()
+                }],
+                settings: Default::default(),
+            }),
+            vec![],
+        );
+        assert_eq!(
+            mask_statements(LlmAccess::Diagnostics, &mut r, None, Some(0)),
+            Some(1)
         );
     }
 
@@ -1300,17 +1372,7 @@ mod tests {
         )]);
         let v = serde_json::to_string(&h).unwrap();
         assert!(!v.contains("bastion") && v.contains("SSH_ERROR"), "{v}");
-        let DiagData::Pulse(d) = &pulse else {
-            unreachable!()
-        };
-        assert!(
-            d.nodes[0]
-                .error
-                .as_ref()
-                .unwrap()
-                .message
-                .contains("bastion"),
-            "данные интерфейса не меняются"
-        );
+        // Без цели и текста ssh модель всё же узнаёт, что именно не так: вид ошибки остаётся.
+        assert!(v.contains("\"kind\":\"authFailed\""), "{v}");
     }
 }

@@ -6,7 +6,7 @@
 
 use pg_advisor::ash::text_key;
 use pg_advisor::locktree::LockNode;
-use pg_advisor::sqltext::{MaskOptions, count_params, mask_literals};
+use pg_advisor::sqltext::{MAX_PARAMS, MaskOptions, count_params, mask_literals};
 use serde_json::Value;
 
 use crate::diag::{DiagData, DiagReport};
@@ -67,7 +67,8 @@ const SCS_OFF: MaskOptions = MaskOptions {
 /// `mask_literals`). Разошлись — остаётся их общее начало, а всё дальше заменяется одной меткой `$N…`: общее начало —
 /// начало верного итога при любом значении настройки, поэтому литерал не откроется ни при каком. `$N` на конце общей
 /// части (литерал, чья граница и разошлась) уходит в метку; номер метки — следующий после наибольшего `$N` общей части
-/// и текста, как у `mask_literals`. Второе значение — число литералов: замаскированные в общей части и метка.
+/// (любого, и приклеенного к слову или числу: `date$1`, `$1$2`) и текста. Второе значение — число литералов:
+/// замаскированные в общей части (`literals_in`) и метка.
 pub fn mask_fail_closed(text: &str) -> (String, usize) {
     let (on, masked) = mask_literals(text, SCS_ON);
     let (off, _) = mask_literals(text, SCS_OFF);
@@ -87,13 +88,70 @@ pub fn mask_fail_closed(text: &str) -> (String, usize) {
     if tail.ends_with('$') {
         prefix.truncate(tail.len() - 1);
     }
-    // `mask_literals` нумерует с `count_params(text) + 1`: литералы общей части — номера выше `count_params(text)`.
+    // `mask_literals` нумерует с `count_params(text) + 1`; `count_params` не видит `$N` в идентификаторе и после
+    // символа слова, а в общей части такой `$N` бывает и номером литерала (`date'…'` → `date$1`). Метка — выше любого.
     let before = count_params(text);
-    let n = before.max(count_params(&prefix)) + 1;
+    let n = before.max(largest_number(&prefix)).saturating_add(1);
+    let literals = literals_in(text, before, &prefix).unwrap_or(n - before - 1);
     prefix.push('$');
     prefix.push_str(&n.to_string());
     prefix.push('…');
-    (prefix, n - before)
+    (prefix, literals + 1)
+}
+
+/// Длина `$N` (знак и цифры) в `at`; не `$N` — `None`.
+fn number_token(b: &[u8], at: usize) -> Option<usize> {
+    (b.get(at) == Some(&b'$') && b.get(at + 1).is_some_and(u8::is_ascii_digit)).then(|| {
+        1 + b[at + 1..]
+            .iter()
+            .take_while(|c| c.is_ascii_digit())
+            .count()
+    })
+}
+
+/// Наибольший номер `$N` в тексте простым просмотром, без правил лексера (в идентификаторе, после буквы или цифры —
+/// тоже); номер за пределом `usize` насыщается.
+fn largest_number(s: &str) -> usize {
+    let b = s.as_bytes();
+    let (mut max, mut i) = (0usize, 0usize);
+    while i < b.len() {
+        match number_token(b, i) {
+            Some(len) => {
+                let n = b[i + 1..i + len].iter().fold(0usize, |n, d| {
+                    n.saturating_mul(10).saturating_add(usize::from(d - b'0'))
+                });
+                max = max.max(n);
+                i += len;
+            }
+            None => i += 1,
+        }
+    }
+    max
+}
+
+/// Сколько литералов замаскировано в `prefix` — начале итога `mask_literals(text)` при `on`. Текст лексится ещё раз с
+/// номерами на один выше (`$M` перед ним поднимает `count_params`): у литерала номер в двух итогах разный, а `$N` самого
+/// текста (параметр, `$N` в идентификаторе или после буквы) — тот же. `None` — сдвинуть номера нельзя (в тексте уже
+/// `$N` предельного номера) или итоги не сошлись по форме.
+fn literals_in(text: &str, before: usize, prefix: &str) -> Option<usize> {
+    if before >= MAX_PARAMS {
+        return None;
+    }
+    let head = format!("${} ", before + 1);
+    let (shifted, _) = mask_literals(&format!("{head}{text}"), SCS_ON);
+    let (a, b) = (prefix.as_bytes(), shifted.strip_prefix(&head)?.as_bytes());
+    let (mut i, mut j, mut literals) = (0usize, 0usize, 0usize);
+    while i < a.len() {
+        match (number_token(a, i), number_token(b, j)) {
+            (Some(la), Some(lb)) => {
+                literals += usize::from(a[i..i + la] != b[j..j + lb]);
+                (i, j) = (i + la, j + lb);
+            }
+            _ if b.get(j) == Some(&a[i]) => (i, j) = (i + 1, j + 1),
+            _ => return None,
+        }
+    }
+    Some(literals)
 }
 
 /// Маскирует текст на месте (`mask_fail_closed`); итог — число замаскированных литералов (комментарии не считаются).
@@ -421,6 +479,49 @@ mod tests {
         let mut text = r"/* glafira */ SELECT 'a\' OR 1=1 --'".to_string();
         assert_eq!(mask_text(&mut text), 1);
         assert_eq!(text, "/* glafira */ SELECT $1…");
+    }
+
+    /// Расхождение после E-строки, долларовых кавычек, вложенного комментария и `N'…'`: общее начало остаётся, всё
+    /// дальше — одна метка, и ни одно прочтение не открывает литерал.
+    #[test]
+    fn divergent_texts_after_other_literal_kinds_are_cut_at_the_first_divergence() {
+        for (text, expected, n) in [
+            (r"SELECT E'a\'b', 'c\' OR 1=1 --'", "SELECT $1, $2…", 2),
+            (r"$$it's \' here$$, 'z\' AND secret = 1 --'", "$1, $2…", 2),
+            (r"/* a /* 'b\' */ c */ 'secret\' x'", "/*…*/ $1…", 1),
+            (r"N'O\'Brien', 'x'", "$1…", 1),
+        ] {
+            assert_eq!(mask_fail_closed(text), (expected.to_string(), n), "{text}");
+        }
+    }
+
+    /// Номер метки — после наибольшего `$N` общей части, даже приклеенного к слову или числу (`date$1`, `$1$2`):
+    /// `count_params` такие `$N` за параметры не считает, и метка совпала бы с номером литерала.
+    #[test]
+    fn divergence_marker_never_repeats_a_number_of_the_common_part() {
+        for (text, expected, n) in [
+            (
+                r"SELECT date'2024-01-01', 'a\' OR 1=1",
+                "SELECT date$1, $2…",
+                2,
+            ),
+            (r"SELECT 1'a', 'b\' OR 1=1", "SELECT $1$2, $3…", 3),
+            // `$9` в идентификаторе — номер метки выше него, а в счёте только литерал общей части и метка.
+            (
+                r#"SELECT "col$9", 7, 'a\' OR 1=1"#,
+                r#"SELECT "col$9", $1, $10…"#,
+                2,
+            ),
+            (r"SELECT x$1, 'a\' OR 1=1", "SELECT x$1, $2…", 1),
+            // Предельный номер в тексте: сдвинуть номера нельзя, счёт — по номеру метки.
+            (
+                r"SELECT $65535, 'a', 'b\' OR 1=1",
+                "SELECT $65535, $65536, $65537…",
+                2,
+            ),
+        ] {
+            assert_eq!(mask_fail_closed(text), (expected.to_string(), n), "{text}");
+        }
     }
 
     /// Без обратной косой в '…' оба прочтения совпадают: итог — ровно `mask_literals`.

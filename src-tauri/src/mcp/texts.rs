@@ -336,7 +336,7 @@ fn describe(t: Tool) -> (&'static str, &'static [&'static str]) {
             &[],
         ),
         Tool::Queries => (
-            "Top queries from pg_stat_statements since the statistics reset or for a window of 300, 900 or 3600 s with heuristics (N+1, unstable time, low hit ratio, temp files, heavy planning); queries = {mode: {kind: sinceReset} | {kind: window, s}, sort, limit: 50 | 100 | 200, database?, search?}",
+            "Top queries from pg_stat_statements since the statistics reset or for a window of 300, 900 or 3600 s with heuristics (N+1, unstable time, low hit ratio, temp files, heavy planning); queries = {mode: {kind: sinceReset} | {kind: window, s}, sort, limit: 50 | 100 | 200, database?, search?}. At the diagnostics access level search matches the masked query text ($N in place of literals) within the top 200 queries by sort, so an empty result may mean the query is outside that window",
             &["member", "queries"],
         ),
     }
