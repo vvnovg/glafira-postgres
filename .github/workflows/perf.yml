@@ -1,7 +1,8 @@
 name: perf
 
-# Тесты на стенде тяжёлых запросов pg-perf (it_queries, it_explain). Образ pg-perf собирается из пакетов PGDG на каждом
-# запуске, поэтому они не идут на каждый push (спец. P3 §15 п. 16): ночью и по кнопке.
+# Тесты на стенде тяжёлых запросов pg-perf (it_queries, it_explain, it_hypopg, it_snapshots, it_mcp_backend, it_mcp). Образ
+# pg-perf собирается из пакетов PGDG на каждом запуске, поэтому они не идут на каждый push (спец. P3 §15 п. 16): ночью и по
+# кнопке.
 on:
   schedule:
     - cron: "17 3 * * *"
@@ -51,8 +52,10 @@ jobs:
           scripts/wait-stand.sh
           scripts/wait-matrix.sh
           scripts/wait-perf.sh
-      - name: it_queries и it_explain
-        run: cargo test --manifest-path src-tauri/Cargo.toml --test it_queries --test it_explain --test it_hypopg --test it_snapshots -- --test-threads=1
+      - name: it_queries, it_explain, it_hypopg, it_snapshots, it_mcp_backend и it_mcp
+        # GPG_IT_PATRONI здесь не задан: части Patroni в it_mcp пропускаются (они идут в ci.yml); лаборатория, реплика и
+        # матрица идут и здесь.
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test it_queries --test it_explain --test it_hypopg --test it_snapshots --test it_mcp_backend --test it_mcp -- --test-threads=1
         env:
           GPG_IT_SINGLE: localhost:5460
           GPG_IT_PRIMARY: localhost:5451
