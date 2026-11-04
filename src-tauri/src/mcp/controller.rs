@@ -671,8 +671,8 @@ mod tests {
         assert!(s.pending.is_empty());
         assert_eq!(s.approved_clients[0].name, "rmcp");
         let r = client.call_tool(list()).await.unwrap();
-        // Право пройдено: отвечает заготовка AppBackend (данные инструментов ещё не подключены).
-        assert_eq!(text(&r), "internal: not implemented yet");
+        // Право пройдено: отвечает AppBackend (подключений, открытых для LLM, нет).
+        assert_eq!(text(&r), r#"{"connections":[]}"#);
         assert!(logged(&c, "approved"));
         drop(client);
         c.shutdown().await;
@@ -720,11 +720,7 @@ mod tests {
             .call_tool(CallToolRequestParams::new("list_connections"))
             .await
             .unwrap();
-        assert_eq!(
-            text(&r),
-            "internal: not implemented yet",
-            "клиент уже подтверждён"
-        );
+        assert_eq!(text(&r), r#"{"connections":[]}"#, "клиент уже подтверждён");
         assert_eq!(c.status().sessions.len(), 1);
 
         let c2 = c.clone();

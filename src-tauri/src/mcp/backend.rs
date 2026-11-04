@@ -55,22 +55,22 @@ impl Gate for AppBackend {
     }
 }
 
-/// Ответ инструмента, пока его данные не подключены к функциям приложения.
-const NOT_CONNECTED: &str = "not implemented yet";
-
 impl PgBackend for AppBackend {
-    fn read(&self, _op: PgRead) -> BoxFuture<'_, Result<PgAnswer, ToolError>> {
-        Box::pin(async { Err(ToolError::new("internal", NOT_CONNECTED)) })
+    fn read(&self, op: PgRead) -> BoxFuture<'_, Result<PgAnswer, ToolError>> {
+        Box::pin(super::read::read_op(&self.st, op))
     }
 
     fn observe(
         &self,
-        _op: PgObserve,
-        _ctx: ObserveCtx,
+        op: PgObserve,
+        ctx: ObserveCtx,
     ) -> BoxFuture<'_, Result<PgAnswer, ToolError>> {
-        Box::pin(async { Err(ToolError::new("internal", NOT_CONNECTED)) })
+        Box::pin(super::read::observe_op(&self.st, op, ctx))
     }
 }
+
+/// Отчёт инструмента для модели (`mcp::read::report_out`): имя из плана P4a.
+pub use super::read::report_out;
 
 #[cfg(test)]
 mod tests {
@@ -78,6 +78,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use glafira_mcp_core::gate::ClientIdent;
+    use glafira_pg_mcp::model::PgOutput;
 
     use super::*;
     use crate::conn::profile::sample_profile;
@@ -163,13 +164,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn data_operations_answer_internal_until_tools_are_connected() {
+    async fn data_operations_go_to_mcp_read() {
         let dir = tempfile::tempdir().unwrap();
         let (b, _) = backend(dir.path(), true, true);
-        let e = b.read(PgRead::ListConnections).await.unwrap_err();
-        assert_eq!(
-            (e.code.as_str(), e.message.as_str()),
-            ("internal", "not implemented yet")
-        );
+        let a = b.read(PgRead::ListConnections).await.unwrap();
+        assert_eq!(a.body, PgOutput::Connections(vec![]));
+        let e = b
+            .read(PgRead::Topology(
+                serde_json::from_value(serde_json::json!({ "connectionId": "nope" })).unwrap(),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, "not_allowed");
+        // Наблюдение подключает задача 12 плана P4a.
+        let e = b
+            .observe(
+                PgObserve::Activity(
+                    serde_json::from_value(serde_json::json!({ "connectionId": "nope" })).unwrap(),
+                ),
+                ObserveCtx::new(std::time::Duration::from_secs(10)),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, "internal");
     }
 }

@@ -2,11 +2,15 @@
 //! крейтов `glafira-mcp-core` и `glafira-pg-mcp` с приложением — контроллер и `mcp.json`, подтверждение клиентов,
 //! право сессий и данные инструментов (`AppBackend`), фрагменты конфигов клиентов.
 
+pub mod access;
 pub mod approvals;
 pub mod backend;
 pub mod controller;
 pub mod files;
+pub mod mask;
+pub mod read;
 pub mod shim;
+pub mod texts;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
