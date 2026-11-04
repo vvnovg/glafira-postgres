@@ -1,0 +1,378 @@
+//! Контракт крейта с приложением (спец. P4 §3.2): операции, ответы и трейт [`PgBackend`]. Типы ответов — стабильный
+//! контракт для LLM, а не DTO интерфейса; исключения — `data` отчёта инструмента, карточка запроса и описание таблицы:
+//! они идут JSON-сериализацией P2/P3 (Уточнение 1 плана P4a), их изменение — изменение контракта.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use glafira_mcp_core::{BoxFuture, Gate, ToolError};
+use serde::Serialize;
+use serde_json::Value;
+use tokio_util::sync::CancellationToken;
+
+use crate::params::{
+    ActivityParams, ConnectionParams, ExplainParams, HypoIndexParams, ObserveActivityParams,
+    ObserveQueriesParams, QueryDetailsParams, RunDiagnosticParams, SettingsParams,
+    TableDetailsParams, TopQueriesParams,
+};
+
+/// Источник данных шлюза. Реализация приложения на каждый вызов проверяет доступ к подключению (§4.3), открывает его
+/// при необходимости, маскирует литералы на уровне `diagnostics` и ставит английские тексты находок.
+pub trait PgBackend: Gate {
+    /// Операция чтения; параметры уже проверены и нормализованы (`validate`).
+    fn read(&self, op: PgRead) -> BoxFuture<'_, Result<PgAnswer, ToolError>>;
+    /// Наблюдение `observe_*`: до `ctx.duration`, `ctx.progress` после каждого образца, по `ctx.cancel` — досрочно с
+    /// уже собранным.
+    fn observe(&self, op: PgObserve, ctx: ObserveCtx)
+    -> BoxFuture<'_, Result<PgAnswer, ToolError>>;
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PgRead {
+    ListConnections,
+    Topology(ConnectionParams),
+    HealthSummary(ConnectionParams),
+    ListDiagnostics,
+    RunDiagnostic(RunDiagnosticParams),
+    Activity(ActivityParams),
+    TopQueries(TopQueriesParams),
+    QueryDetails(QueryDetailsParams),
+    TableDetails(TableDetailsParams),
+    Settings(SettingsParams),
+    Explain(ExplainParams),
+    HypoIndex(HypoIndexParams),
+}
+
+impl PgRead {
+    pub fn connection_id(&self) -> Option<&str> {
+        match self {
+            PgRead::ListConnections | PgRead::ListDiagnostics => None,
+            PgRead::Topology(p) | PgRead::HealthSummary(p) => Some(&p.connection_id),
+            PgRead::RunDiagnostic(p) => Some(&p.connection_id),
+            PgRead::Activity(p) => Some(&p.connection_id),
+            PgRead::TopQueries(p) => Some(&p.connection_id),
+            PgRead::QueryDetails(p) => Some(&p.connection_id),
+            PgRead::TableDetails(p) => Some(&p.connection_id),
+            PgRead::Settings(p) => Some(&p.connection_id),
+            PgRead::Explain(p) => Some(&p.connection_id),
+            PgRead::HypoIndex(p) => Some(&p.connection_id),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PgObserve {
+    Activity(ObserveActivityParams),
+    TopQueries(ObserveQueriesParams),
+}
+
+impl PgObserve {
+    pub fn connection_id(&self) -> &str {
+        match self {
+            PgObserve::Activity(p) => &p.connection_id,
+            PgObserve::TopQueries(p) => &p.connection_id,
+        }
+    }
+}
+
+/// Ход наблюдения: собрано образцов и всего (`notifications/progress`, если клиент передал `progressToken`).
+pub type ProgressFn = Arc<dyn Fn(u32, u32) + Send + Sync>;
+
+/// Окно наблюдения, отмена (клиент отменил вызов или вышел страховочный срок) и ход.
+#[derive(Clone)]
+pub struct ObserveCtx {
+    pub duration: Duration,
+    pub cancel: CancellationToken,
+    pub progress: ProgressFn,
+}
+
+impl ObserveCtx {
+    /// Контекст без хода и без внешней отмены (тесты приложения).
+    pub fn new(duration: Duration) -> Self {
+        Self {
+            duration,
+            cancel: CancellationToken::new(),
+            progress: Arc::new(|_, _| {}),
+        }
+    }
+}
+
+/// Ответ бэкенда и счётчики для журнала: замаскировано литералов, строк (P4b `run_select`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PgAnswer {
+    pub body: PgOutput,
+    pub masked: Option<u64>,
+    pub rows: Option<u64>,
+}
+
+impl PgAnswer {
+    pub fn new(body: PgOutput) -> Self {
+        Self {
+            body,
+            masked: None,
+            rows: None,
+        }
+    }
+
+    pub fn with_masked(mut self, n: u64) -> Self {
+        self.masked = Some(n);
+        self
+    }
+
+    pub fn with_rows(mut self, n: u64) -> Self {
+        self.rows = Some(n);
+        self
+    }
+}
+
+/// Варианты разного размера живут недолго и один на вызов: `Box` не нужен (как `DiagData` приложения).
+#[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
+pub enum PgOutput {
+    Connections(Vec<ConnectionInfo>),
+    Topology(TopologyInfo),
+    HealthSummary(HealthSummary),
+    Diagnostics(Vec<DiagToolInfo>),
+    Report(Report),
+    Activity(ActivityOut),
+    QueryDetails(Value),
+    Table(TableOut),
+    Settings(Vec<SettingOut>),
+    Explain(ExplainOut),
+    Hypo(HypoOut),
+    ObservedActivity(ObservedActivity),
+    ObservedQueries(Report),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionInfo {
+    pub id: String,
+    pub name: String,
+    /// `local`, `dev`, `test`, `stage` или `prod`.
+    pub environment: String,
+    /// `server`, `hosts` или `patroni`.
+    pub kind: String,
+    pub folder_path: Vec<String>,
+    pub read_only: bool,
+    /// Действующий уровень с учётом политики: `diagnostics` (P4b — ещё `data`).
+    pub llm_access: String,
+    pub connected: bool,
+    /// Предупреждение о роли (P4b, §4.5), английский текст.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role_warning: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberInfo {
+    pub name: String,
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    pub host: String,
+    pub port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lag_bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_restart: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nofailover: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatroniInfo {
+    pub paused: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduled_switchover: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduled_restart: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TopologyInfo {
+    pub kind: String,
+    pub members: Vec<MemberInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patroni: Option<PatroniInfo>,
+    /// События журнала топологии за сессию приложения, новые первыми; крейт отдаёт первые 50.
+    pub events: Vec<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FindingOut {
+    pub id: String,
+    /// `info`, `warning` или `critical`.
+    pub severity: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<Value>,
+    pub params: Value,
+    pub title: String,
+    pub fix: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnavailableOut {
+    /// Инструмент — у `get_health_summary`; у отчёта одного инструмента пусто.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    pub part: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member: Option<String>,
+    /// Причина по-английски.
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthSummary {
+    pub pulse: Value,
+    pub findings: Vec<FindingOut>,
+    pub unavailable: Vec<UnavailableOut>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagToolInfo {
+    pub id: String,
+    pub title: String,
+    /// `node` или `cluster`.
+    pub scope: String,
+    pub patroni_only: bool,
+    pub params: Vec<String>,
+}
+
+/// Конверт `DiagReport` P2 для модели; `data` — JSON-сериализация данных инструмента.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Report {
+    pub tool: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member: Option<String>,
+    pub follows_leader: bool,
+    pub observed_at_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_version_num: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub in_recovery: Option<bool>,
+    pub data: Value,
+    pub findings: Vec<FindingOut>,
+    pub unavailable: Vec<UnavailableOut>,
+    /// Массивы в `data` урезаны до 100 КБ (§10.1); ставит крейт.
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityOut {
+    /// Сессий после фильтров до `limit`.
+    pub total: u64,
+    pub sessions: Vec<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnStat {
+    pub column: String,
+    pub null_frac: f64,
+    pub avg_width: i32,
+    pub n_distinct: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation: Option<f64>,
+    /// Только на уровне `data` (P4b).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub most_common_vals: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub most_common_freqs: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub histogram_bounds: Option<Value>,
+}
+
+/// `TableDetails` P1 (`table`, JSON-сериализация) и статистика колонок из `pg_stats`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableOut {
+    pub table: Value,
+    pub column_stats: Vec<ColumnStat>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingOut {
+    pub name: String,
+    pub setting: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    pub source: String,
+    pub context: String,
+    pub pending_restart: bool,
+    /// Значение вычищено (секреты, §6.2); выводится только при `true`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanSummaryOut {
+    pub total_cost: f64,
+    pub plan_rows: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub planning_ms: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplainOut {
+    pub member: String,
+    /// План текстом в виде psql (`plan::text_out::to_text`).
+    pub plan_text: String,
+    pub summary: PlanSummaryOut,
+    pub recommendations: Vec<FindingOut>,
+    pub tables: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HypoIndexOut {
+    pub ddl: String,
+    pub used: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_size_bytes: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HypoOut {
+    pub cost_before: f64,
+    pub cost_after: f64,
+    pub indexes: Vec<HypoIndexOut>,
+    pub plan_text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObservedActivity {
+    pub started_at_ms: i64,
+    pub duration_ms: u64,
+    pub samples: u32,
+    pub waits: Vec<Value>,
+    pub top_queries: Vec<Value>,
+    pub appeared: Vec<Value>,
+    pub disappeared: Vec<Value>,
+    pub peak_sessions: u32,
+    pub peak_lock_waits: u32,
+    pub summary: Value,
+}

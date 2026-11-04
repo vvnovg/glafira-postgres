@@ -41,6 +41,7 @@ jobs:
             src-tauri -> target
             crates/pg-advisor -> target
             crates/glafira-mcp-core -> target
+            crates/glafira-pg-mcp -> target
       - name: Системные зависимости Tauri и libclang
         # cmake не нужен: aws-lc-sys собирается крейтом cc, а vendored OpenSSL — Perl и make из образа раннера.
         # libclang-dev — для bindgen: pg_query (pg-advisor) генерирует привязки к libpg_query во время сборки.
@@ -62,6 +63,11 @@ jobs:
           cargo fmt --manifest-path crates/glafira-mcp-core/Cargo.toml --check
           cargo clippy --manifest-path crates/glafira-mcp-core/Cargo.toml --all-targets -- -D warnings
           cargo test --manifest-path crates/glafira-mcp-core/Cargo.toml
+      - name: MCP-шлюз — инструменты PostgreSQL (glafira-pg-mcp)
+        run: |
+          cargo fmt --manifest-path crates/glafira-pg-mcp/Cargo.toml --check
+          cargo clippy --manifest-path crates/glafira-pg-mcp/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path crates/glafira-pg-mcp/Cargo.toml
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - name: Лицензии зависимостей (cargo deny, белый список — deny.toml)
@@ -70,6 +76,7 @@ jobs:
           cargo deny --manifest-path src-tauri/Cargo.toml --config deny.toml check licenses
           cargo deny --manifest-path crates/pg-advisor/Cargo.toml --config deny.toml check licenses
           cargo deny --manifest-path crates/glafira-mcp-core/Cargo.toml --config deny.toml check licenses
+          cargo deny --manifest-path crates/glafira-pg-mcp/Cargo.toml --config deny.toml check licenses
       - name: Ключи bastion
         run: dev/ssh/gen-keys.sh
       - name: Стенд
