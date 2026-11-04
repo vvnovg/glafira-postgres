@@ -8,6 +8,9 @@ pub const POLICY_VENDOR: &str = "Glafira";
 pub const POLICY_PRODUCT: &str = "PostgreSQL";
 /// `application_name` соединений приложения: так их видно в `pg_stat_activity`.
 pub const PG_APPLICATION_NAME: &str = "glafira-pg";
+/// Имя MCP-сервера: имя в `initialize`, ключ в конфигах клиентов (`qwen mcp add glafira-pg …`) и основа имени
+/// сокета или named pipe (`glafira-pg-mcp…`, спец. P4 §3.3).
+pub const MCP_SERVER_NAME: &str = "glafira-pg";
 
 /// Литерал SQL с ведущей меткой запросов Глафиры: `marked_sql!("SELECT …")`. Метка — комментарий:
 /// `pg_stat_statements` хранит его в тексте строки, а `queryid` его не учитывает (спец. P3 §4).

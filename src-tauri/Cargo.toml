@@ -51,6 +51,11 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 futures-util = "0.3"
 socket2 = { version = "0.6", features = ["all"] }
 pg-advisor = { path = "../crates/pg-advisor" }
+# MCP-шлюз (P4): ядро (транспорт, сессии, подтверждение, журнал) и инструменты PostgreSQL.
+glafira-mcp-core = { path = "../crates/glafira-mcp-core" }
+glafira-pg-mcp = { path = "../crates/glafira-pg-mcp" }
+# Токен `mcp.json`: 32 байта из генератора ОС (версия уже в дереве зависимостей).
+getrandom = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
@@ -58,6 +63,8 @@ winreg = "0.55"
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "test-util"] }
+# Клиент MCP в тестах контроллера и в интеграции `it_mcp` (версия — как у крейтов шлюза).
+rmcp = { version = "3.5.1", features = ["client", "transport-async-rw"] }
 
 [profile.release]
 codegen-units = 1

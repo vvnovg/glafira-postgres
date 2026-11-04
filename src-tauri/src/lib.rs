@@ -12,6 +12,7 @@ pub mod error;
 pub mod explain;
 pub mod guard;
 pub mod logging;
+pub mod mcp;
 pub mod migrate;
 pub mod net;
 pub mod policy;
