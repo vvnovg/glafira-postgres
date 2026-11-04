@@ -12,6 +12,29 @@ beforeEach(() => {
 });
 
 describe("api client", () => {
+  it("команды MCP: имена и аргументы (задача 8)", async () => {
+    invoke.mockResolvedValue(undefined);
+    await api.getMcpStatus();
+    expect(invoke).toHaveBeenLastCalledWith("get_mcp_status", undefined);
+    await api.setMcpEnabled(true);
+    expect(invoke).toHaveBeenLastCalledWith("set_mcp_enabled", { on: true });
+    await api.answerMcpApproval("s1", false);
+    expect(invoke).toHaveBeenLastCalledWith("answer_mcp_approval", { sessionId: "s1", approve: false });
+    await api.revokeMcpClient("qwen-code");
+    expect(invoke).toHaveBeenLastCalledWith("revoke_mcp_client", { name: "qwen-code" });
+    await api.disconnectMcpSessions("s2");
+    expect(invoke).toHaveBeenLastCalledWith("disconnect_mcp_sessions", { sessionId: "s2" });
+    // Без id — все сессии: Option<String> в Rust получает null.
+    await api.disconnectMcpSessions();
+    expect(invoke).toHaveBeenLastCalledWith("disconnect_mcp_sessions", { sessionId: null });
+    await api.getMcpAudit(200);
+    expect(invoke).toHaveBeenLastCalledWith("get_mcp_audit", { limit: 200 });
+    await api.getMcpClientConfigs();
+    expect(invoke).toHaveBeenLastCalledWith("get_mcp_client_configs", undefined);
+    await api.revealMcpAudit();
+    expect(invoke).toHaveBeenLastCalledWith("reveal_mcp_audit", undefined);
+  });
+
   it("передаёт аргументы в camelCase", async () => {
     invoke.mockResolvedValue({});
     await api.setLanguage("ru");

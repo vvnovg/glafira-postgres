@@ -1679,3 +1679,88 @@ export interface ActionRecord {
   /** Только `explainAnalyze`: запись яруса записи EXPLAIN ANALYZE. */
   explain?: ExplainRecord;
 }
+
+/** Состояние MCP-сервера (спец. P4 §11): выключен, работает, обслуживает другой экземпляр Glafira, ошибка запуска. */
+export type McpServerState = "stopped" | "running" | "otherInstance" | "error";
+
+/** Сессия MCP-клиента (`glafira_mcp_core::server::SessionSnapshot`); `active` — сейчас идёт вызов. */
+export interface McpSessionSnapshot {
+  id: string;
+  clientName: string | null;
+  clientVersion: string | null;
+  startedMs: number;
+  calls: number;
+  active: boolean;
+}
+
+/** Сессия ждёт ответа пользователя в диалоге подтверждения; без имени — «Неизвестный MCP-клиент». */
+export interface McpPendingApproval {
+  sessionId: string;
+  clientName: string | null;
+  clientVersion: string | null;
+}
+
+/** Подтверждённый клиент (`settings.json` → `mcp.approvedClients`). */
+export interface McpApprovedClient {
+  name: string;
+  version: string | null;
+  firstSeenMs: number;
+  lastSeenMs: number;
+}
+
+/**
+ * Статус MCP целиком: ответ `get_mcp_status` и полезная нагрузка события `mcp://state` (задача 8, `mcp::McpStatus`).
+ */
+export interface McpStatus {
+  server: McpServerState;
+  /** Текст ошибки запуска сервера (английский, из Rust) при `server: "error"`. */
+  error: string | null;
+  /** Выключатель «Разрешить MCP-сервер» в `settings.json` (задача 8). */
+  enabled: boolean;
+  sessions: McpSessionSnapshot[];
+  pending: McpPendingApproval[];
+  approvedClients: McpApprovedClient[];
+  /** Подключений с действующим уровнем ≠ off и из них — с уровнем data (оба счётчика с учётом политики). */
+  openConnections: number;
+  dataConnections: number;
+  /** Политика `mcpEnabled` (нет политики — true). */
+  policyEnabled: boolean;
+  /** Потолок политики `mcpMaxAccess`. */
+  maxAccess: PolicyStatus["mcpMaxAccess"];
+}
+
+/**
+ * Строка журнала MCP `mcp-audit.jsonl` (спец. P4 §10.3): `event` — "call", "sessionStarted", "sessionEnded", "approved",
+ * "rejected", "revoked", "serverStarted", "serverStopped" (P4b и новее добавят свои); поля — по виду события.
+ */
+export interface McpAuditEntry {
+  ts: number;
+  event: string;
+  session?: string;
+  client?: string | null;
+  tool?: string;
+  connection?: { id: string; name: string } | null;
+  member?: string | null;
+  /** Аргументы вызова; длиннее 1 КБ (кроме `sql`) журнал хранит усечённой строкой. */
+  args?: unknown;
+  outcome?: "ok" | "error";
+  code?: string | null;
+  bytes?: number;
+  ms?: number;
+  /** Счётчики приложения (`CallRecord.extra`): замаскировано литералов; строк `run_select` (P4b). */
+  masked?: number;
+  rows?: number;
+  calls?: number;
+  endpoint?: string;
+}
+
+/** Фрагменты конфигураций MCP-клиентов (`get_mcp_client_configs`): путь — к установленному приложению (AppImage — `$APPIMAGE`). */
+export interface McpClientConfigs {
+  command: string;
+  args: string[];
+  qwenCode: string;
+  qwenSettings: string;
+  claudeCode: string;
+  claudeDesktop: string;
+  cursor: string;
+}

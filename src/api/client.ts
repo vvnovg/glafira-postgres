@@ -22,6 +22,9 @@ import type {
   LanguageSettings,
   LlmBundle,
   LlmSource,
+  McpAuditEntry,
+  McpClientConfigs,
+  McpStatus,
   MemberFacts,
   ObjectKind,
   ObjectPage,
@@ -88,6 +91,22 @@ export const api = {
   exportDiagnostics: (path: string) => call<void>("export_diagnostics", { path }),
   checkUpdate: () => call<UpdateCheck>("check_update"),
   installUpdate: () => call<void>("install_update"),
+  getMcpStatus: () => call<McpStatus>("get_mcp_status"),
+  /** Включить или выключить MCP-сервер; ответ — статус после запуска или остановки. */
+  setMcpEnabled: (on: boolean) => call<McpStatus>("set_mcp_enabled", { on }),
+  /**
+   * Ответ на запрос подтверждения клиента; новый статус приходит событием `mcp://state`.
+   */
+  answerMcpApproval: (sessionId: string, approve: boolean) => call<void>("answer_mcp_approval", { sessionId, approve }),
+  /** Забыть клиента и закрыть его сессии. */
+  revokeMcpClient: (name: string) => call<void>("revoke_mcp_client", { name }),
+  /** Закрыть одну сессию или все (без id). */
+  disconnectMcpSessions: (sessionId?: string) => call<void>("disconnect_mcp_sessions", { sessionId: sessionId ?? null }),
+  /** Последние записи журнала MCP, новые первыми. */
+  getMcpAudit: (limit: number) => call<McpAuditEntry[]>("get_mcp_audit", { limit }),
+  getMcpClientConfigs: () => call<McpClientConfigs>("get_mcp_client_configs"),
+  /** Показать `mcp-audit.jsonl` в файловом менеджере. */
+  revealMcpAudit: () => call<void>("reveal_mcp_audit"),
 
   listConnections: () => call<ConnectionProfile[]>("list_connections"),
   saveConnection: (profile: ConnectionProfile, secrets: SecretsInput) =>
