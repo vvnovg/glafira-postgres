@@ -11,6 +11,28 @@ use crate::i18n::LocalizedText;
 pub const KEY_UPDATES_ENABLED: &str = "updatesEnabled";
 pub const KEY_UPDATE_URL: &str = "updateUrl";
 pub const KEY_LANGUAGE: &str = "language";
+pub const KEY_MCP_ENABLED: &str = "mcpEnabled";
+pub const KEY_MCP_MAX_ACCESS: &str = "mcpMaxAccess";
+
+/// Потолок уровня доступа LLM, заданный администратором (спец. P4 §4.2): действующий уровень подключения —
+/// минимум из `llmAccess` и потолка.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpMaxAccess {
+    Diagnostics,
+    #[default]
+    Data,
+}
+
+impl McpMaxAccess {
+    fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "diagnostics" => Some(McpMaxAccess::Diagnostics),
+            "data" => Some(McpMaxAccess::Data),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PolicyValue {
@@ -69,7 +91,18 @@ pub struct PolicyStatus {
     pub update_url: Option<String>,
     /// Язык интерфейса, заданный администратором.
     pub language: Option<String>,
+    /// `false` — MCP-шлюз запрещён администратором (спец. P4 §4.2): сервер не запускается, шим выходит с ошибкой.
+    pub mcp_enabled: bool,
+    /// Потолок уровня доступа LLM к подключениям.
+    pub mcp_max_access: McpMaxAccess,
     pub errors: Vec<LocalizedText>,
+}
+
+impl PolicyStatus {
+    /// MCP разрешён политикой.
+    pub fn mcp_allowed(&self) -> bool {
+        self.mcp_enabled
+    }
 }
 
 impl Default for PolicyStatus {
@@ -80,6 +113,8 @@ impl Default for PolicyStatus {
             updates_enabled: true,
             update_url: None,
             language: None,
+            mcp_enabled: true,
+            mcp_max_access: McpMaxAccess::Data,
             errors: Vec::new(),
         }
     }
@@ -90,8 +125,8 @@ pub struct Policy {
     pub status: PolicyStatus,
 }
 
-/// Политика, которую задал администратор, но которую не удалось понять, выключает обновления:
-/// раз политика есть, администратор хотел ограничений.
+/// Политика, которую задал администратор, но которую не удалось понять, выключает обновления и MCP:
+/// раз политика есть, администратор хотел ограничений. Неверный ключ MCP запрещает только MCP.
 pub fn resolve(source: &str, raw: RawPolicy) -> Policy {
     let map = match raw {
         RawPolicy::Absent => return Policy::default(),
@@ -101,6 +136,7 @@ pub fn resolve(source: &str, raw: RawPolicy) -> Policy {
                     managed: true,
                     source: Some(source.to_string()),
                     updates_enabled: false,
+                    mcp_enabled: false,
                     errors: vec![ltext!(
                         "errors.policy.unreadable",
                         "Policy cannot be read: {{reason}}",
@@ -118,6 +154,7 @@ pub fn resolve(source: &str, raw: RawPolicy) -> Policy {
         ..PolicyStatus::default()
     };
     let mut broken = false;
+    let mut mcp_broken = false;
     for (key, value) in map {
         match (key.as_str(), value) {
             (KEY_UPDATES_ENABLED, PolicyValue::Bool(b)) => status.updates_enabled = b,
@@ -146,6 +183,20 @@ pub fn resolve(source: &str, raw: RawPolicy) -> Policy {
                 value = s
             )),
             (KEY_LANGUAGE, other) => status.errors.push(other.invalid(&key)),
+            (KEY_MCP_ENABLED, PolicyValue::Bool(b)) => status.mcp_enabled = b,
+            (KEY_MCP_ENABLED, PolicyValue::Int(i @ (0 | 1))) => status.mcp_enabled = i == 1,
+            (KEY_MCP_MAX_ACCESS, PolicyValue::Str(s)) => match McpMaxAccess::parse(&s) {
+                Some(level) => status.mcp_max_access = level,
+                None => {
+                    mcp_broken = true;
+                    status.errors.push(PolicyValue::Str(s).invalid(&key));
+                }
+            },
+            // Непонятое значение ключа MCP запрещает MCP целиком, но обновления не выключает.
+            (KEY_MCP_ENABLED | KEY_MCP_MAX_ACCESS, other) => {
+                mcp_broken = true;
+                status.errors.push(other.invalid(&key));
+            }
             (KEY_UPDATES_ENABLED | KEY_UPDATE_URL, other) => {
                 broken = true;
                 status.errors.push(other.invalid(&key));
@@ -155,6 +206,9 @@ pub fn resolve(source: &str, raw: RawPolicy) -> Policy {
     }
     if broken {
         status.updates_enabled = false;
+    }
+    if mcp_broken {
+        status.mcp_enabled = false;
     }
     Policy { status }
 }
@@ -313,5 +367,111 @@ mod tests {
         let p = resolve("src", values(&[("licenseKey", PolicyValue::Bool(true))]));
         assert!(p.status.updates_enabled);
         assert!(p.status.errors.is_empty());
+    }
+
+    #[test]
+    fn mcp_is_allowed_with_full_ceiling_by_default() {
+        for p in [
+            resolve("src", RawPolicy::Absent),
+            resolve("src", values(&[])),
+        ] {
+            assert!(p.status.mcp_enabled);
+            assert!(p.status.mcp_allowed());
+            assert_eq!(p.status.mcp_max_access, McpMaxAccess::Data);
+        }
+    }
+
+    #[test]
+    fn mcp_policy_values_are_applied() {
+        let p = resolve(
+            "src",
+            values(&[
+                ("mcpEnabled", PolicyValue::Bool(false)),
+                ("mcpMaxAccess", PolicyValue::Str("diagnostics".into())),
+            ]),
+        );
+        assert!(!p.status.mcp_allowed());
+        assert_eq!(p.status.mcp_max_access, McpMaxAccess::Diagnostics);
+        assert!(p.status.errors.is_empty());
+        assert!(p.status.updates_enabled, "ключи MCP обновлений не касаются");
+        // Реестр Windows: dword 0/1; строка уровня — с пробелами по краям.
+        let p = resolve(
+            "src",
+            values(&[
+                ("mcpEnabled", PolicyValue::Int(1)),
+                ("mcpMaxAccess", PolicyValue::Str(" data ".into())),
+            ]),
+        );
+        assert!(p.status.mcp_enabled);
+        assert_eq!(p.status.mcp_max_access, McpMaxAccess::Data);
+        let p = resolve("src", values(&[("mcpEnabled", PolicyValue::Int(0))]));
+        assert!(!p.status.mcp_enabled);
+    }
+
+    #[test]
+    fn unreadable_policy_forbids_mcp() {
+        let p = resolve("src", RawPolicy::Unreadable("plist: unexpected EOF".into()));
+        assert!(!p.status.mcp_allowed());
+    }
+
+    #[test]
+    fn invalid_mcp_values_forbid_mcp_but_keep_updates() {
+        let cases = [
+            (
+                "mcpEnabled",
+                PolicyValue::Str("yes".into()),
+                "errors.policy.invalidString",
+            ),
+            (
+                "mcpEnabled",
+                PolicyValue::Int(2),
+                "errors.policy.invalidNumber",
+            ),
+            (
+                "mcpMaxAccess",
+                PolicyValue::Str("full".into()),
+                "errors.policy.invalidString",
+            ),
+            (
+                "mcpMaxAccess",
+                PolicyValue::Bool(true),
+                "errors.policy.invalidBool",
+            ),
+            (
+                "mcpMaxAccess",
+                PolicyValue::Other("array".into()),
+                "errors.policy.invalidType",
+            ),
+        ];
+        for (key, value, error) in cases {
+            // mcpEnabled = true рядом не спасает: раз политика есть, администратор хотел ограничений.
+            let p = resolve(
+                "src",
+                values(&[
+                    ("mcpEnabled", PolicyValue::Bool(true)),
+                    (key, value.clone()),
+                ]),
+            );
+            assert!(!p.status.mcp_enabled, "{key}: {value:?}");
+            assert!(p.status.updates_enabled, "{key}: обновления не выключаются");
+            assert_eq!(p.status.errors.len(), 1, "{:?}", p.status.errors);
+            assert_eq!(p.status.errors[0].key, error);
+            assert_eq!(p.status.errors[0].params["key"], key);
+        }
+    }
+
+    #[test]
+    fn mcp_policy_wire_format() {
+        let p = resolve(
+            "src",
+            values(&[("mcpMaxAccess", PolicyValue::Str("diagnostics".into()))]),
+        );
+        let v = serde_json::to_value(&p.status).unwrap();
+        assert_eq!(v["mcpEnabled"], true);
+        assert_eq!(v["mcpMaxAccess"], "diagnostics");
+        assert_eq!(
+            serde_json::to_value(PolicyStatus::default()).unwrap()["mcpMaxAccess"],
+            "data"
+        );
     }
 }

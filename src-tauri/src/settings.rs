@@ -1,4 +1,4 @@
-//! Пользовательские настройки (язык интерфейса) и выбор действующего языка.
+//! Пользовательские настройки (язык интерфейса, вид дерева, MCP) и выбор действующего языка.
 
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -6,7 +6,7 @@ use std::sync::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppResult, ErrorCode};
-use crate::storage::fs::{read_json_or_quarantine, write_json};
+use crate::storage::fs::{read_json, read_json_or_quarantine, write_json};
 use crate::sync::RwLockExt;
 
 pub const LANGUAGES: [&str; 2] = ["en", "ru"];
@@ -80,6 +80,27 @@ pub struct UiSettings {
     pub show_system_objects: bool,
 }
 
+/// Клиент MCP, которому пользователь разрешил подключаться (спец. P4 §4.4). Имя и версия — как их прислал клиент
+/// (до 128 символов, обрезает ядро шлюза).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovedClient {
+    pub name: String,
+    pub version: String,
+    pub first_seen_ms: i64,
+    pub last_seen_ms: i64,
+}
+
+/// Раздел `mcp` файла `settings.json` (спец. P4 §3.3): выключатель сервера и подтверждённые клиенты.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub approved_clients: Vec<ApprovedClient>,
+}
+
 #[derive(Serialize, Deserialize, Default, Clone)]
 #[serde(rename_all = "camelCase")]
 struct SettingsFile {
@@ -88,6 +109,17 @@ struct SettingsFile {
     language: Option<String>,
     #[serde(default)]
     ui: UiSettings,
+    #[serde(default)]
+    mcp: McpSettings,
+}
+
+/// Включён ли MCP в `settings.json` каталога `dir` — для шима `glafira-pg mcp`: без карантина и без записи
+/// (файл принадлежит приложению); нечитаемый или отсутствующий файл означает «выключено».
+pub fn mcp_enabled_in(dir: &Path) -> bool {
+    read_json::<SettingsFile>(&dir.join("settings.json"))
+        .ok()
+        .flatten()
+        .is_some_and(|f| f.mcp.enabled)
 }
 
 pub struct SettingsStore {
@@ -118,13 +150,88 @@ impl SettingsStore {
 
     /// Блокирующий вызов: меняет копию, пишет файл и только потом обновляет кэш.
     fn update(&self, f: impl FnOnce(&mut SettingsFile)) -> AppResult<()> {
+        self.update_if(|d| {
+            f(d);
+            true
+        })
+        .map(|_| ())
+    }
+
+    /// Как `update`, но файл пишется, только если `f` что-то изменил (`true`); проверка и запись идут под одной
+    /// блокировкой. Блокирующий вызов.
+    fn update_if(&self, f: impl FnOnce(&mut SettingsFile) -> bool) -> AppResult<bool> {
         let mut data = self.data.write_safe();
         let mut next = data.clone();
-        f(&mut next);
+        if !f(&mut next) {
+            return Ok(false);
+        }
         next.schema_version = 1;
         write_json(&self.path, &next)?;
         *data = next;
-        Ok(())
+        Ok(true)
+    }
+
+    pub fn mcp(&self) -> McpSettings {
+        self.data.read_safe().mcp.clone()
+    }
+
+    /// Блокирующий вызов (запись файла).
+    pub fn set_mcp_enabled(&self, on: bool) -> AppResult<()> {
+        self.update(|d| d.mcp.enabled = on)
+    }
+
+    pub fn is_client_approved(&self, name: &str) -> bool {
+        self.data
+            .read_safe()
+            .mcp
+            .approved_clients
+            .iter()
+            .any(|c| c.name == name)
+    }
+
+    /// «Разрешить» в диалоге подтверждения: запоминает клиента или обновляет его версию и время последней
+    /// сессии (`firstSeenMs` не меняется). Блокирующий вызов.
+    pub fn approve_client(&self, name: &str, version: &str, now_ms: i64) -> AppResult<()> {
+        self.update(|d| {
+            let clients = &mut d.mcp.approved_clients;
+            match clients.iter_mut().find(|c| c.name == name) {
+                Some(c) => {
+                    c.version = version.to_string();
+                    c.last_seen_ms = now_ms;
+                }
+                None => clients.push(ApprovedClient {
+                    name: name.to_string(),
+                    version: version.to_string(),
+                    first_seen_ms: now_ms,
+                    last_seen_ms: now_ms,
+                }),
+            }
+        })
+    }
+
+    /// Новая сессия уже подтверждённого клиента: обновляет версию и `lastSeenMs`. Проверка и запись — под одной
+    /// блокировкой, поэтому параллельный отзыв клиента не отменяется. `Ok(false)` — клиента нет (файл не пишется).
+    /// Блокирующий вызов.
+    pub fn touch_client(&self, name: &str, version: &str, now_ms: i64) -> AppResult<bool> {
+        self.update_if(
+            |d| match d.mcp.approved_clients.iter_mut().find(|c| c.name == name) {
+                Some(c) => {
+                    c.version = version.to_string();
+                    c.last_seen_ms = now_ms;
+                    true
+                }
+                None => false,
+            },
+        )
+    }
+
+    /// «Отозвать» в «Настройках». `Ok(false)` — такого клиента не было. Блокирующий вызов.
+    pub fn revoke_client(&self, name: &str) -> AppResult<bool> {
+        self.update_if(|d| {
+            let before = d.mcp.approved_clients.len();
+            d.mcp.approved_clients.retain(|c| c.name != name);
+            d.mcp.approved_clients.len() != before
+        })
     }
 
     /// Блокирующий вызов (запись файла).
@@ -322,5 +429,128 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("settings.json"), "{broken").unwrap();
         assert_eq!(SettingsStore::open(dir.path()).language(), None);
+    }
+
+    #[test]
+    fn mcp_is_off_by_default_and_the_switch_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = SettingsStore::open(dir.path());
+        assert_eq!(s.mcp(), McpSettings::default());
+        assert!(!mcp_enabled_in(dir.path()));
+        s.set_mcp_enabled(true).unwrap();
+        assert!(SettingsStore::open(dir.path()).mcp().enabled);
+        assert!(mcp_enabled_in(dir.path()));
+        // Язык и MCP живут в одном файле и не затирают друг друга.
+        s.set_language(Some("ru")).unwrap();
+        let reopened = SettingsStore::open(dir.path());
+        assert!(reopened.mcp().enabled);
+        assert_eq!(reopened.language().as_deref(), Some("ru"));
+        s.set_mcp_enabled(false).unwrap();
+        assert!(!mcp_enabled_in(dir.path()));
+    }
+
+    #[test]
+    fn approved_clients_are_remembered_touched_and_revoked() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = SettingsStore::open(dir.path());
+        assert!(
+            !s.touch_client("qwen-code", "0.26.7", 5).unwrap(),
+            "незнакомого клиента touch не запоминает"
+        );
+        assert!(
+            !dir.path().join("settings.json").exists(),
+            "файл не пишется"
+        );
+        s.approve_client("qwen-code", "0.26.7", 10).unwrap();
+        assert!(s.is_client_approved("qwen-code"));
+        assert!(s.touch_client("qwen-code", "0.27.0", 20).unwrap());
+        s.approve_client("claude-code", "2.1.0", 30).unwrap();
+        assert_eq!(
+            SettingsStore::open(dir.path()).mcp().approved_clients,
+            vec![
+                ApprovedClient {
+                    name: "qwen-code".into(),
+                    version: "0.27.0".into(),
+                    first_seen_ms: 10,
+                    last_seen_ms: 20,
+                },
+                ApprovedClient {
+                    name: "claude-code".into(),
+                    version: "2.1.0".into(),
+                    first_seen_ms: 30,
+                    last_seen_ms: 30,
+                },
+            ]
+        );
+        // Повторное «Разрешить» не дублирует клиента и не меняет firstSeen.
+        s.approve_client("claude-code", "2.1.1", 40).unwrap();
+        let c = s.mcp().approved_clients;
+        assert_eq!(c.len(), 2);
+        assert_eq!((c[1].first_seen_ms, c[1].last_seen_ms), (30, 40));
+        assert!(s.revoke_client("qwen-code").unwrap());
+        assert!(
+            !s.revoke_client("qwen-code").unwrap(),
+            "второй отзыв — нечего отзывать"
+        );
+        assert!(!s.is_client_approved("qwen-code"));
+        assert_eq!(
+            SettingsStore::open(dir.path()).mcp().approved_clients.len(),
+            1
+        );
+    }
+
+    #[test]
+    fn mcp_settings_wire_format_is_camel_case() {
+        let m = McpSettings {
+            enabled: true,
+            approved_clients: vec![ApprovedClient {
+                name: "qwen-code".into(),
+                version: "0.26.7".into(),
+                first_seen_ms: 1,
+                last_seen_ms: 2,
+            }],
+        };
+        assert_eq!(
+            serde_json::to_value(&m).unwrap(),
+            serde_json::json!({
+                "enabled": true,
+                "approvedClients": [
+                    {"name": "qwen-code", "version": "0.26.7", "firstSeenMs": 1, "lastSeenMs": 2}
+                ]
+            })
+        );
+        assert_eq!(
+            serde_json::from_str::<McpSettings>("{}").unwrap(),
+            McpSettings::default()
+        );
+    }
+
+    #[test]
+    fn old_settings_file_without_mcp_reads_as_off() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"schemaVersion":1,"language":"ru"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            SettingsStore::open(dir.path()).mcp(),
+            McpSettings::default()
+        );
+        assert!(!mcp_enabled_in(dir.path()));
+    }
+
+    #[test]
+    fn shim_check_never_touches_a_broken_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, "{broken").unwrap();
+        assert!(!mcp_enabled_in(dir.path()));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{broken",
+            "шим не переименовывает файл в .corrupt"
+        );
+        assert!(!mcp_enabled_in(&dir.path().join("missing")));
     }
 }

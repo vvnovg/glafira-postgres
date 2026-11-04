@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use glafira_pg_lib::conn::pg::ConnectSpec;
 use glafira_pg_lib::conn::pool::PoolRegistry;
 use glafira_pg_lib::conn::profile::{
-    ConnectionKind, ConnectionProfile, Environment, HostOverride, HostPort, PatroniSettings,
-    PgSettings, PgTls, SshAuth, SshSettings, SslMode, TargetServerType,
+    ConnectionKind, ConnectionProfile, Environment, HostOverride, HostPort, LlmAccess,
+    PatroniSettings, PgSettings, PgTls, SshAuth, SshSettings, SslMode, TargetServerType,
 };
 use glafira_pg_lib::net::ssh::tunnel::{TunnelConfig, TunnelRegistry};
 use glafira_pg_lib::secrets::{MemoryStore, PG_PASSWORD, SecretStore, secret_key};
@@ -205,6 +205,7 @@ pub fn server_profile(id: &str, addr: &str) -> ConnectionProfile {
         ssh: None,
         folder_id: None,
         order: 0,
+        llm_access: LlmAccess::Off,
         extra: Default::default(),
     }
 }

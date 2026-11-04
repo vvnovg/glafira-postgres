@@ -268,4 +268,41 @@ mod tests {
             assert!(reg.contains(line), "{line}");
         }
     }
+
+    #[test]
+    fn mcp_keys_are_read_from_json_and_plist() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = dir.path().join("policy.json");
+        std::fs::write(
+            &json,
+            r#"{"mcpEnabled": false, "mcpMaxAccess": "diagnostics"}"#,
+        )
+        .unwrap();
+        let p = crate::policy::resolve("json", read_json_file(&json));
+        assert!(p.status.errors.is_empty(), "{:?}", p.status.errors);
+        assert!(!p.status.mcp_enabled);
+        assert_eq!(
+            p.status.mcp_max_access,
+            crate::policy::McpMaxAccess::Diagnostics
+        );
+
+        let plist = dir.path().join("p.plist");
+        std::fs::write(
+            &plist,
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>mcpEnabled</key><true/>
+  <key>mcpMaxAccess</key><string>diagnostics</string>
+</dict></plist>"#,
+        )
+        .unwrap();
+        let p = crate::policy::resolve("plist", read_plist_file(&plist));
+        assert!(p.status.errors.is_empty(), "{:?}", p.status.errors);
+        assert!(p.status.mcp_enabled);
+        assert_eq!(
+            p.status.mcp_max_access,
+            crate::policy::McpMaxAccess::Diagnostics
+        );
+    }
 }

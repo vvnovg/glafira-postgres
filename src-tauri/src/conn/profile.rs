@@ -173,6 +173,44 @@ pub struct SshSettings {
     pub key_path: Option<String>,
 }
 
+/// Доступ LLM-ассистентов к подключению через MCP (спец. P4 §4.1). Локальное поле, как папка и порядок: экспорт
+/// его не пишет, импорт не переносит, на соединение оно не влияет (`same_connection_settings`). Неизвестное значение
+/// из более новой версии читается как `Off`: откат версии доступ только сужает. Варианты — по возрастанию доступа
+/// (`Ord`): действующий уровень — минимум с потолком политики `mcpMaxAccess`. P4b добавит `Data` последним.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LlmAccess {
+    #[default]
+    Off,
+    Diagnostics,
+}
+
+// `#[serde(other)]` обязан стоять на последнем варианте, а варианты идут по возрастанию доступа (P4b добавит `Data`
+// в конец), поэтому «неизвестное значение — Off» реализовано вручную.
+impl<'de> Deserialize<'de> for LlmAccess {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = serde_json::Value::deserialize(d)?;
+        Ok(match v.as_str() {
+            Some("diagnostics") => LlmAccess::Diagnostics,
+            _ => LlmAccess::Off,
+        })
+    }
+}
+
+impl LlmAccess {
+    pub fn is_off(&self) -> bool {
+        *self == LlmAccess::Off
+    }
+
+    /// Строка как в JSON: уходит модели в `list_connections`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LlmAccess::Off => "off",
+            LlmAccess::Diagnostics => "diagnostics",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionProfile {
@@ -196,6 +234,9 @@ pub struct ConnectionProfile {
     pub folder_id: Option<String>,
     #[serde(default)]
     pub order: i64,
+    /// Доступ LLM через MCP (спец. P4 §4.1); `off` в файл не пишется.
+    #[serde(default, skip_serializing_if = "LlmAccess::is_off")]
+    pub llm_access: LlmAccess,
     /// Поля из более новой версии Glafira: сохраняются при записи как есть.
     /// `ConnectionStore::upsert` входящий `extra` не принимает.
     #[serde(flatten)]
@@ -222,8 +263,8 @@ impl ConnectionProfile {
 }
 
 /// Совпадают ли настройки, от которых зависит соединение с кластером: вид, адреса, целевой узел,
-/// Patroni, PostgreSQL и туннель SSH. Имя, цвет, окружение, read-only, папка и порядок в дереве на
-/// соединение не влияют: их правка не должна его переоткрывать. Поля перечислены явно — новое поле
+/// Patroni, PostgreSQL и туннель SSH. Имя, цвет, окружение, read-only, папка, порядок в дереве и уровень доступа
+/// LLM на соединение не влияют: их правка не должна его переоткрывать. Поля перечислены явно — новое поле
 /// профиля не скомпилируется, пока его не отнесут к одной из групп.
 pub fn same_connection_settings(a: &ConnectionProfile, b: &ConnectionProfile) -> bool {
     let ConnectionProfile {
@@ -240,6 +281,7 @@ pub fn same_connection_settings(a: &ConnectionProfile, b: &ConnectionProfile) ->
         ssh,
         folder_id: _,
         order: _,
+        llm_access: _,
         extra: _,
     } = a;
     *kind == b.kind
@@ -674,6 +716,7 @@ pub fn sample_profile(id: &str) -> ConnectionProfile {
         ssh: None,
         folder_id: None,
         order: 0,
+        llm_access: LlmAccess::Off,
         extra: Default::default(),
     }
 }
@@ -1329,6 +1372,7 @@ mod tests {
         cosmetic.read_only = !base.read_only;
         cosmetic.folder_id = Some("folder".into());
         cosmetic.order = 7;
+        cosmetic.llm_access = LlmAccess::Diagnostics;
         cosmetic
             .extra
             .insert("future".into(), serde_json::json!(true));
@@ -1584,5 +1628,41 @@ mod tests {
         });
         normalize_profile(&mut p);
         assert_eq!(p.ssh.as_ref().unwrap().key_path, None);
+    }
+
+    #[test]
+    fn llm_access_defaults_to_off_and_is_written_only_when_open() {
+        let mut v = serde_json::to_value(sample_profile("a")).unwrap();
+        assert!(v.get("llmAccess").is_none(), "off не пишется: {v}");
+        let p: ConnectionProfile = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(p.llm_access, LlmAccess::Off);
+        v["llmAccess"] = "diagnostics".into();
+        let p: ConnectionProfile = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(p.llm_access, LlmAccess::Diagnostics);
+        assert!(p.extra.is_empty(), "известное поле не попадает в extra");
+        assert_eq!(
+            serde_json::to_value(&p).unwrap()["llmAccess"],
+            "diagnostics"
+        );
+        // Значение более новой версии (уровень `data` из P4b) читается как off: откат версии доступ только сужает.
+        v["llmAccess"] = "data".into();
+        let p: ConnectionProfile = serde_json::from_value(v).unwrap();
+        assert_eq!(p.llm_access, LlmAccess::Off);
+        assert!(p.llm_access.is_off());
+        assert!(
+            LlmAccess::Off < LlmAccess::Diagnostics,
+            "варианты — по возрастанию доступа"
+        );
+    }
+
+    #[test]
+    fn llm_access_as_str_matches_serde() {
+        // `as_str` уходит модели в `list_connections`, serde — в файл подключений и интерфейс: строки обязаны совпадать.
+        for v in [LlmAccess::Off, LlmAccess::Diagnostics] {
+            assert_eq!(
+                serde_json::to_value(v).unwrap(),
+                serde_json::Value::from(v.as_str())
+            );
+        }
     }
 }

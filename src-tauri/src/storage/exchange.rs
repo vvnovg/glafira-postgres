@@ -8,8 +8,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::conn::profile::{
-    ConnectionProfile, normalize_profile, same_connection_settings, strip_patroni_url_credentials,
-    validate_profile,
+    ConnectionProfile, LlmAccess, normalize_profile, same_connection_settings,
+    strip_patroni_url_credentials, validate_profile,
 };
 use crate::error::{AppResult, ErrorCode};
 use crate::i18n::LocalizedText;
@@ -151,6 +151,8 @@ pub fn build_export(
         .filter(|p| in_scope(p.folder_id.as_deref()))
         .map(|mut profile| {
             profile.extra.clear();
+            // Доступ LLM — локальное решение получателя (спец. P4 §4.1): в файл не пишется.
+            profile.llm_access = LlmAccess::Off;
             // Профили с диска не валидируются: пароль, вписанный в адрес Patroni (так мог сохранить
             // профиль старый билд), не выносим, а получателя просим ввести пароль Patroni заново.
             let url_password_stripped = strip_patroni_url_credentials(&mut profile);
@@ -283,6 +285,8 @@ pub fn parse_exchange(bytes: &[u8]) -> AppResult<ParsedExchange> {
         };
         // Неизвестные поля файла не переносятся в хранилище.
         c.profile.extra.clear();
+        // Уровень доступа LLM из файла не переносится: чужой файл не может открыть базу модели (спец. P4 §4.1).
+        c.profile.llm_access = LlmAccess::Off;
         // Профиль проходит ту же нормализацию и проверку, что и при сохранении формы
         // (в том числе: пароля в адресе Patroni API быть не может).
         normalize_profile(&mut c.profile);
@@ -477,12 +481,13 @@ pub fn read_import_file(path: &Path) -> AppResult<Vec<u8>> {
     read_capped(path, MAX_IMPORT_BYTES)
 }
 
-/// Настройки подключения без места в дереве и локальных неизвестных полей.
+/// Настройки подключения без места в дереве, уровня доступа LLM и локальных неизвестных полей.
 fn same_settings(a: &ConnectionProfile, b: &ConnectionProfile) -> bool {
     let strip = |p: &ConnectionProfile| ConnectionProfile {
         id: String::new(),
         folder_id: None,
         order: 0,
+        llm_access: LlmAccess::Off,
         extra: Default::default(),
         ..p.clone()
     };
@@ -563,11 +568,12 @@ pub(crate) fn plan_import(
                 unchanged.push((TreeItemKind::Connection, profile.id.clone()));
                 continue;
             }
-            // Место в дереве и неизвестные поля — локальные. Пароли получателя остаются, только пока
+            // Место в дереве, уровень доступа LLM и неизвестные поля — локальные. Пароли получателя остаются, только пока
             // подключение идёт по тому же адресу и с теми же настройками безопасности; иначе они
             // были бы отправлены на адрес из файла (см. `ImportPlan::secrets_reset`).
             profile.folder_id = slot.folder_id.clone();
             profile.order = slot.order;
+            profile.llm_access = slot.llm_access;
             profile.extra = std::mem::take(&mut slot.extra);
             missing_files += usize::from(misses_files(&profile, file_exists));
             if !same_connection_settings(slot, &profile) {
@@ -609,6 +615,7 @@ pub(crate) fn plan_import(
         profile.folder_id = folder;
         profile.name = name;
         profile.extra = Default::default();
+        profile.llm_access = LlmAccess::Off;
         missing_files += usize::from(misses_files(&profile, file_exists));
         if needs.any() {
             preview.needs_passwords += 1;
@@ -1920,5 +1927,52 @@ mod tests {
         };
         assert_eq!(sort_f(p.next.folders.clone()), sort_f(s.list_folders()));
         assert_eq!(sort_c(p.next.connections.clone()), sort_c(s.list()));
+    }
+
+    #[test]
+    fn llm_access_is_never_exported_or_imported() {
+        let (_d, s) = store();
+        let mut open = sample_profile("a");
+        open.llm_access = LlmAccess::Diagnostics;
+        s.upsert(open).unwrap();
+        let out = build_export(&s, &MemoryStore::default(), None, "1", "now").unwrap();
+        let json = serde_json::to_value(&out).unwrap();
+        assert!(json["connections"][0].get("llmAccess").is_none(), "{json}");
+
+        let mut local = sample_profile("a");
+        local.llm_access = LlmAccess::Diagnostics;
+        let data = StoreData {
+            connections: vec![local],
+            ..Default::default()
+        };
+        // a — обновление (другой адрес), b — новое подключение, оба с уровнем из файла.
+        let mut incoming_a = conn_json("a", "conn-a", None);
+        incoming_a["llmAccess"] = "off".into();
+        incoming_a["hosts"] = serde_json::json!([{"host": "other", "port": 5432}]);
+        let mut incoming_b = conn_json("b", "conn-b", None);
+        incoming_b["llmAccess"] = "diagnostics".into();
+        let p = plan(
+            &data,
+            &file(vec![], vec![incoming_a, incoming_b]),
+            &opts(None),
+        );
+        assert_eq!(preview_ids(&p.preview.updated), ["a"]);
+        assert_eq!(
+            conn(&p.next, "a").llm_access,
+            LlmAccess::Diagnostics,
+            "своё решение сохраняется"
+        );
+        assert_eq!(
+            conn(&p.next, "b").llm_access,
+            LlmAccess::Off,
+            "чужой файл не открывает базу модели"
+        );
+
+        // Отличие только в llmAccess — «без изменений».
+        let mut same = conn_json("a", "conn-a", None);
+        same["llmAccess"] = "diagnostics".into();
+        let p = plan(&data, &file(vec![], vec![same]), &opts(None));
+        assert_eq!(preview_ids(&p.preview.unchanged), ["a"]);
+        assert!(p.secrets_reset.is_empty());
     }
 }

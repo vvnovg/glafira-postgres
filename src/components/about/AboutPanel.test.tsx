@@ -11,7 +11,7 @@ vi.mock("../../api/client", async (importOriginal) => {
     ...orig,
     api: {
       getAppInfo: vi.fn().mockResolvedValue({ name: "X", version: "0.1.0", commit: "abc123", os: "macos", arch: "aarch64", dataDir: "/d", logDir: "/l" }),
-      getPolicyStatus: vi.fn().mockResolvedValue({ managed: false, source: null, updatesEnabled: true, updateUrl: null, language: null, errors: [] }),
+      getPolicyStatus: vi.fn().mockResolvedValue({ managed: false, source: null, updatesEnabled: true, updateUrl: null, language: null, mcpEnabled: true, mcpMaxAccess: "data", errors: [] }),
       exportDiagnostics: vi.fn().mockResolvedValue(undefined),
       checkUpdate: vi.fn().mockResolvedValue({ status: "upToDate" }),
       installUpdate: vi.fn().mockResolvedValue(undefined),
@@ -234,6 +234,8 @@ describe("AboutPanel", () => {
       updatesEnabled: false,
       updateUrl: null,
       language: null,
+      mcpEnabled: false,
+      mcpMaxAccess: "data",
       errors: [
         {
           key: "errors.policy.httpsRequired",

@@ -36,6 +36,10 @@ export interface AppError {
 
 export type Environment = "local" | "dev" | "test" | "stage" | "prod";
 export type ConnectionKind = "server" | "hostList" | "patroni";
+/** Доступ LLM-ассистентов к подключению через MCP (P4 §4.1); P4b добавит "data". */
+export type LlmAccess = "off" | "diagnostics";
+/** Потолок уровня доступа LLM по политике администратора (`mcpMaxAccess`). */
+export type McpMaxAccess = "diagnostics" | "data";
 export type TargetServerType = "primary" | "standby" | "preferStandby" | "any";
 export type SslMode = "disable" | "prefer" | "require" | "verify-ca" | "verify-full";
 export type CertFormat = "pem" | "pkcs12";
@@ -103,6 +107,8 @@ export interface ConnectionProfile {
   ssh: SshSettings | null;
   folderId?: string | null;
   order?: number;
+  /** Доступ LLM через MCP; нет поля — "off". Локальное: экспорт его не пишет, импорт не переносит. */
+  llmAccess?: LlmAccess;
 }
 /** У каждого поля: null/нет — оставить сохранённый, "" — удалить, иначе — новый. */
 export interface SecretsInput {
@@ -518,6 +524,10 @@ export interface PolicyStatus {
   updatesEnabled: boolean;
   updateUrl: string | null;
   language: string | null;
+  /** false — MCP-шлюз запрещён администратором. */
+  mcpEnabled: boolean;
+  /** Потолок уровня доступа LLM к подключениям. */
+  mcpMaxAccess: McpMaxAccess;
   errors: LocalizedText[];
 }
 
