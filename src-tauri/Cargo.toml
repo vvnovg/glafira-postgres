@@ -27,7 +27,7 @@ thiserror = "2"
 uuid = { version = "1", features = ["v4"] }
 time = { version = "0.3", features = ["formatting", "parsing"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "macros", "sync", "io-util", "process"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "macros", "sync", "io-util", "io-std", "process"] }
 # SOCKS5 к узлу через порт туннеля `ssh -D` (имя узла разрешает бастион).
 tokio-socks = "0.5"
 tracing = "0.1"

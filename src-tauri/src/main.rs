@@ -6,5 +6,9 @@ fn main() {
     if std::env::var_os("GLAFIRA_ASKPASS").is_some() {
         std::process::exit(glafira_pg_lib::askpass_main());
     }
+    // Шим MCP (спец. P4 §3.3): `glafira-pg mcp` — без окна и Tauri, stdio клиента ↔ сокет запущенной Glafira.
+    if std::env::args_os().nth(1).is_some_and(|a| a == "mcp") {
+        std::process::exit(glafira_pg_lib::mcp_main());
+    }
     glafira_pg_lib::run()
 }

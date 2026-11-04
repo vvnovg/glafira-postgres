@@ -47,6 +47,12 @@ pub fn askpass_main() -> i32 {
     crate::net::askpass::run(&args)
 }
 
+/// Режим `glafira-pg mcp` (спец. P4 §3.3): шим MCP без Tauri и окна — stdio клиента ↔ сокет запущенной Glafira.
+/// Возвращает код выхода процесса.
+pub fn mcp_main() -> i32 {
+    crate::mcp::shim::run()
+}
+
 /// Сколько ждать остановки MCP-сервера при выходе: сессии закрываются сразу, ожидание — страховка от зависшего
 /// соединения.
 const MCP_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
