@@ -12,6 +12,8 @@
       <key>updatesEnabled</key><false/>
       <key>updateUrl</key><string>https://mirror.example.corp/glafira-postgres/latest.json</string>
       <key>language</key><string>en</string>
+      <key>mcpEnabled</key><true/>
+      <key>mcpMaxAccess</key><string>diagnostics</string>
     </dict>
   </array>
   <key>PayloadDisplayName</key><string>Glafira for PostgreSQL policy</string>

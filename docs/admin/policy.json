@@ -1,5 +1,7 @@
 {
   "updatesEnabled": false,
   "updateUrl": "https://mirror.example.corp/glafira-postgres/latest.json",
-  "language": "en"
+  "language": "en",
+  "mcpEnabled": true,
+  "mcpMaxAccess": "diagnostics"
 }

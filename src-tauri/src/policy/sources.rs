@@ -216,6 +216,12 @@ mod tests {
             Some("https://mirror.example.corp/glafira-postgres/latest.json")
         );
         assert_eq!(p.status.language.as_deref(), Some("en"));
+        // Ключи MCP (спец. P4 §4.2): пример включает MCP явно и ставит потолок «диагностика».
+        assert!(p.status.mcp_enabled);
+        assert_eq!(
+            p.status.mcp_max_access,
+            crate::policy::McpMaxAccess::Diagnostics
+        );
 
         // Профиль MDM: содержимое PayloadContent[0] попадает в Managed Preferences как есть.
         let profile = plist::Value::from_file(format!("{base}/policy.mobileconfig")).unwrap();
@@ -230,7 +236,13 @@ mod tests {
             content.get("PayloadType").and_then(|v| v.as_string()),
             Some(crate::product::IDENTIFIER)
         );
-        for key in ["updatesEnabled", "updateUrl", "language"] {
+        for key in [
+            "updatesEnabled",
+            "updateUrl",
+            "language",
+            "mcpEnabled",
+            "mcpMaxAccess",
+        ] {
             assert!(content.contains_key(key), "{key}");
         }
         assert_eq!(
@@ -244,6 +256,14 @@ mod tests {
         assert_eq!(
             content.get("language").and_then(|v| v.as_string()),
             Some("en")
+        );
+        assert_eq!(
+            content.get("mcpEnabled").and_then(|v| v.as_boolean()),
+            Some(true)
+        );
+        assert_eq!(
+            content.get("mcpMaxAccess").and_then(|v| v.as_string()),
+            Some("diagnostics")
         );
         // Читается только политика уровня устройства (docs/admin.md): профиль ставится на всю систему.
         assert_eq!(
@@ -264,6 +284,8 @@ mod tests {
             "\"updatesEnabled\"=dword:00000000",
             "\"updateUrl\"=\"https://mirror.example.corp/glafira-postgres/latest.json\"",
             "\"language\"=\"en\"",
+            "\"mcpEnabled\"=dword:00000001",
+            "\"mcpMaxAccess\"=\"diagnostics\"",
         ] {
             assert!(reg.contains(line), "{line}");
         }

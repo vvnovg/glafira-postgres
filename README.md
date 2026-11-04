@@ -4,9 +4,9 @@ Desktop-приложение (Tauri 2 + Rust + React) для диагности�
 
 PostgreSQL is a registered trademark of the PostgreSQL Community Association of Canada; this project is not affiliated with it.
 
-Концепция: `docs/superpowers/specs/2026-10-19-glafira-postgres-concept-design.md`; этап P1: `docs/superpowers/specs/2026-10-19-glafira-postgres-p1-design.md`; этап P2: `docs/superpowers/specs/2026-10-24-glafira-postgres-p2-design.md`; этап P3: `docs/superpowers/specs/2026-10-29-glafira-postgres-p3-design.md`.
+Концепция: `docs/superpowers/specs/2026-10-19-glafira-postgres-concept-design.md`; этап P1: `docs/superpowers/specs/2026-10-19-glafira-postgres-p1-design.md`; этап P2: `docs/superpowers/specs/2026-10-24-glafira-postgres-p2-design.md`; этап P3: `docs/superpowers/specs/2026-10-29-glafira-postgres-p3-design.md`; этап P4: `docs/superpowers/specs/2026-11-04-glafira-postgres-p4-design.md`.
 Руководство администратора (установка, политика, роль для диагностики, сеть, OpenSSH): `docs/admin.md`.
-Руководство пользователя (в приложении — вкладка «Справка», F1): `docs/guide/en/` и `docs/guide/ru/` — «Начало работы», «Подключения», «Дерево и объекты», «Диагностика», «Запросы», «Обновления и диагностика».
+Руководство пользователя (в приложении — вкладка «Справка», F1): `docs/guide/en/` и `docs/guide/ru/` — «Начало работы», «Подключения», «Дерево и объекты», «Диагностика», «Запросы», «LLM-ассистенты (MCP)», «Обновления и диагностика».
 
 ## Установка
 Установщики (macOS `.dmg`/`.pkg`, Windows `.msi`, Linux `.deb`/`.rpm`/`.AppImage`) — в разделе релизов:
@@ -28,8 +28,20 @@ https://github.com/vvnovg/glafira-postgres-releases/releases
 - Диагностика дежурного (группа «Диагностика» в дереве): пульс узлов кластера, сессии и idle in transaction, профиль ожиданий (сэмплер раз в секунду, история в памяти), дерево блокировок и DDL в очереди, горизонт xmin, реплики, слоты репликации и подписки; у кластера Patroni — готовность к failover и матрица health. Находки с порогами и подсказками «что сделать»; запланированные switchover и restart Patroni — в обзоре. Инструменты диагностики только читают (`SELECT` и `GET`; исключение — EXPLAIN ANALYZE запроса, который пишет данные: ярус записи с подтверждением, журналом и откатом), для полной картины нужна роль `pg_monitor`.
 - Действия дежурного: отмена запроса и завершение сессий (поштучно и пакетом «idle in transaction старше N минут»), удаление неактивного слота репликации; у кластера Patroni — switchover (сейчас и по расписанию), failover, restart, пауза и отмена запланированных действий, с наблюдением за ходом до «готово». Каждому действию предшествует предпросмотр и подтверждение (на prod — именем подключения); на подключении «только чтение» действий нет; журнал `actions.jsonl` и его вкладка «Журнал действий». Права и риски — в `docs/admin.md`.
 - Тяжёлые запросы (инструмент «Запросы» и консоль EXPLAIN в группе «Диагностика»): топ по `pg_stat_statements` с момента сброса и за 5, 15 или 60 минут, находки без плана (N+1, нестабильное время, низкий hit ratio, temp-файлы, планирование), карточка запроса с историей, выполняющимися экземплярами и ожиданиями, EXPLAIN и EXPLAIN ANALYZE с деревом плана (запрос на чтение — без подтверждения в транзакции `READ ONLY`, запрос с записью — в транзакции с откатом, подтверждением и записью в журнал), вставка JSON-плана, «Скопировать для LLM». Права и нагрузка — в `docs/admin.md`.
+- LLM-ассистенты по MCP (Qwen Code, Claude Code, Claude Desktop, Cursor): шлюз только для чтения — топология, сводка здоровья, отчёты диагностики с находками, активность и наблюдение, топ запросов и карточки, таблицы со статистикой колонок, параметры сервера, планы без выполнения и гипотезы индексов hypopg. Уровень доступа задаётся на каждом подключении (по умолчанию выключен), литералы в текстах запросов маскируются, SQL модели проверяется разбором; подтверждение клиентов, журнал `mcp-audit.jsonl`, политика `mcpEnabled` / `mcpMaxAccess`.
 - Папки, экспорт и импорт подключений без секретов, дублирование подключения.
 - Интерфейс на английском и русском, встроенное руководство (вкладка «Справка», F1, меню Help на macOS), автообновление.
+
+## LLM и MCP
+LLM-ассистент подключается к Glafira по MCP через тот же исполняемый файл в режиме `glafira-pg mcp`: это stdio-шим к локальному
+сокету (на Windows — именованному каналу) работающего приложения с токеном из `mcp.json`. Включение: «Настройки» →
+«LLM-ассистенты (MCP)» → «Разрешить MCP-сервер», затем в форме подключения «Доступ для LLM» → «Диагностика»; там же, в
+«Настройках», — готовые команды и блоки конфигурации для клиентов. 14 инструментов только читают; подробности — глава
+«LLM-ассистенты (MCP)» руководства, администратору — `docs/admin.md` («LLM-ассистенты (MCP)», политика).
+
+Разработка: из `pnpm tauri dev` шим приложение не запускает — сначала `pnpm tauri dev` и включённый MCP, фрагменты в «Настройках»
+тогда указывают на `src-tauri/target/debug/glafira-pg`. Крейты шлюза — `crates/glafira-mcp-core` (транспорт, рукопожатие, сессии,
+подтверждение, журнал, лимиты) и `crates/glafira-pg-mcp` (инструменты PostgreSQL и Patroni, контракт ответов).
 
 ## Лицензия и поддержка проекта
 - Код открыт под [Apache License 2.0](LICENSE). Все функции приложения бесплатны и доступны всем: платных тарифов и лицензионных ключей нет.
@@ -111,9 +123,13 @@ docker exec gp-pg-single dropdb -U postgres wide_demo     # убрать, ког
 pnpm test                                               # фронтенд
 pnpm test:scripts && pnpm i18n:check                     # скрипты, словари и руководство
 cargo test --manifest-path crates/pg-advisor/Cargo.toml  # правила
+cargo test --manifest-path crates/glafira-mcp-core/Cargo.toml  # ядро MCP-шлюза
+cargo test --manifest-path crates/glafira-pg-mcp/Cargo.toml    # инструменты MCP
 cargo test --manifest-path src-tauri/Cargo.toml --lib    # Rust unit
 cargo deny --manifest-path src-tauri/Cargo.toml --config deny.toml check licenses   # лицензии зависимостей
 cargo deny --manifest-path crates/pg-advisor/Cargo.toml --config deny.toml check licenses
+cargo deny --manifest-path crates/glafira-mcp-core/Cargo.toml --config deny.toml check licenses
+cargo deny --manifest-path crates/glafira-pg-mcp/Cargo.toml --config deny.toml check licenses
 GPG_IT_SINGLE=localhost:5460 GPG_IT_PRIMARY=localhost:5451 GPG_IT_REPLICA=localhost:5452 \
 GPG_IT_PATRONI=http://localhost:8011,http://localhost:8012,http://localhost:8013 GPG_IT_LAB=localhost:5470 GPG_IT_PERF=localhost:5471 GPG_IT_DOCKER=1 \
 GPG_IT_BASTION=localhost:2222 GPG_IT_SSH_KEYS=$PWD/dev/ssh/keys \
@@ -121,7 +137,7 @@ GPG_IT_MATRIX=localhost:5513,localhost:5514,localhost:5515,localhost:5516,localh
   cargo test --manifest-path src-tauri/Cargo.toml --tests -- --test-threads=1   # интеграционные (нужен стенд)
 ```
 Без переменной `GPG_IT_*` интеграционный тест пропускается (`it_ssh` — без `GPG_IT_BASTION` или `GPG_IT_SSH_KEYS`; он запускает
-настоящий OpenSSH 8.4+ из `PATH`; проход по матрице версий — без `GPG_IT_MATRIX`: по ней идут тесты каталога, `it_diag` (SQL каждого инструмента диагностики) и `it_sampler` (запрос сэмплера) на PG 13–18; сценарии лаборатории — без `GPG_IT_LAB`; тесты «Запросов» и EXPLAIN на `pg-perf` — без `GPG_IT_PERF`, нагрузка `heavy.sql` им не нужна; на CI они идут в отдельном workflow `perf` — ночью и по кнопке, а не на каждый push). `GPG_IT_DOCKER=1` разрешает тестам останавливать контейнеры,
+настоящий OpenSSH 8.4+ из `PATH`; проход по матрице версий — без `GPG_IT_MATRIX`: по ней идут тесты каталога, `it_diag` (SQL каждого инструмента диагностики) и `it_sampler` (запрос сэмплера) на PG 13–18; сценарии лаборатории — без `GPG_IT_LAB`; тесты «Запросов» и EXPLAIN на `pg-perf` — без `GPG_IT_PERF`, нагрузка `heavy.sql` им не нужна; на CI они идут в отдельном workflow `perf` — ночью и по кнопке, а не на каждый push; MCP на стенде — `it_mcp` (сервер в том же процессе, клиент rmcp): сценарии лаборатории с `GPG_IT_LAB`, Patroni с `GPG_IT_PATRONI`, топ и EXPLAIN с `GPG_IT_PERF`, параметры и таблицы по матрице с `GPG_IT_MATRIX`). `GPG_IT_DOCKER=1` разрешает тестам останавливать контейнеры,
 делать switchover и promote; после них стенд возвращается в исходное состояние.
 
 Действия: `it_actions` (сессии и слоты; нужны `GPG_IT_SINGLE`, `GPG_IT_PRIMARY`, `GPG_IT_LAB`) и `it_patroni_actions` (Patroni; нужен `GPG_IT_PATRONI`). Сценарии `it_patroni_actions`, которые меняют кластер (switchover сейчас и по расписанию, restart реплики, пауза), идут только с `GPG_IT_DOCKER=1` и возвращают стенд сами: восстановление при любом выходе и ожидание, пока стенд придёт в норму. Failover останавливает PostgreSQL лидера и идёт только ещё и с `GPG_IT_FAILOVER=1`:
@@ -139,4 +155,5 @@ GPG_IT_PATRONI=http://localhost:8011,http://localhost:8012,http://localhost:8013
 - Профили: `connections.json` в каталоге данных (macOS: `~/Library/Application Support/io.github.vvnovg.glafira.postgres/`).
 - Пароли — в системном хранилище секретов, сервис `glafira-postgres`.
 - Настройки: `settings.json`.
+- MCP: `mcp.json` (адрес и токен работающего сервера, 0600), `mcp.sock`, журнал `mcp-audit.jsonl` — в каталоге данных (`docs/admin.md`, «Данные и логи»).
 - Логи: `RUST_LOG=debug pnpm tauri dev`.
