@@ -442,8 +442,8 @@ tables [{ schema?, name }] }`; `Rejection { code ("invalid_sql" / "forbidden_fun
 `LATERAL`, выражения `FROM`, аргументы), по имени без учёта схемы и регистра.
 
 **Сборка.** `pg_query` 18.1 (MIT; внутри libpg_query — BSD-3 и лицензия PostgreSQL) собирает C-код через `cc` и генерирует
-привязки `bindgen` (нужен libclang). Первая задача P4a: сборка и тесты на раннерах `ci.yml` (linux, macos-14, macos-15-intel,
-windows-2022) и `release.yml`; при необходимости — шаги установки libclang; `cargo deny check licenses`; строки в
+привязки `bindgen` (нужен libclang). Первая задача P4a: сборка и тесты на раннерах `ci.yml` и `release.yml` (ubuntu-22.04,
+macos-15, macos-15-intel, windows-2022); при необходимости — шаги установки libclang; `cargo deny check licenses`; строки в
 `THIRD_PARTY.md`. Если на каком-то раннере не собирается и это не лечится шагом сборки — откат: `sqlcheck` на лексере `sqltext`
 (первое слово; отказ при ключевых словах `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `INTO`, `FOR UPDATE|SHARE`; вызовы `имя(` с
 учётом кавычек, схем и комментариев) с тем же интерфейсом и тем же враждебным набором; откат фиксируется в журнале плана и в
