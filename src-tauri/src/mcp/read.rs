@@ -9,27 +9,36 @@ use std::time::Duration;
 use futures_util::future::join_all;
 use glafira_mcp_core::error::ToolError;
 use glafira_pg_mcp::model::{
-    ActivityOut, ConnectionInfo, HealthSummary, MemberInfo, ObserveCtx, PatroniInfo, PgAnswer,
-    PgObserve, PgOutput, PgRead, Report, TopologyInfo, UnavailableOut,
+    ActivityOut, ColumnStat, ConnectionInfo, FindingOut, HealthSummary, MemberInfo, ObserveCtx,
+    PatroniInfo, PgAnswer, PgObserve, PgOutput, PgRead, Report, SettingOut, TableOut, TopologyInfo,
+    UnavailableOut,
 };
 use glafira_pg_mcp::params::{
-    ACTIVITY_LIMIT_DEFAULT, ActivityParams, RunDiagnosticParams, TOPOLOGY_EVENTS_MAX,
+    ACTIVITY_LIMIT_DEFAULT, ActivityParams, QueryDetailsParams, RunDiagnosticParams,
+    SettingsParams, TOP_LIMIT_DEFAULT, TOPOLOGY_EVENTS_MAX, TableDetailsParams, TopQueriesParams,
 };
 use pg_advisor::findings::FindingTarget;
-use pg_advisor::queries::QueryStat;
+use pg_advisor::queries::{QuerySort, QueryStat};
 use pg_advisor::rules::sessions::SessionRow;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
+use tokio_postgres::{Client, Row};
 
 use super::access::{
     check_connection, effective_access, ensure_open, err, invalid_argument, masks, model_app_error,
     open_for_llm, tool_error,
 };
-use super::mask::{MAX_QUERY_BYTES, cut_text, has_texts, mask_opt, mask_report};
+use super::mask::{MAX_QUERY_BYTES, cut_text, has_texts, mask_opt, mask_query_detail, mask_report};
+use super::secrets::redact_setting;
 use super::texts::{diag_catalog, finding_out, tool_id};
+use crate::catalog::table::{self as catalog_table, Column};
+use crate::commands::catalog::{catalog_limit, on_catalog_node_within};
+use crate::conn::errors::from_pg;
 use crate::conn::profile::{ConnectionKind, LlmAccess};
 use crate::diag::queries::{LIMITS, QueriesMode, QueriesParams};
-use crate::diag::{self, DiagData, DiagReport, DiagRequest, Tool, Unavailable};
+use crate::diag::query_detail::{self, QueryDetail};
+use crate::diag::{self, DEFAULT_WINDOW_S, DiagData, DiagReport, DiagRequest, Tool, Unavailable};
+use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use crate::storage::connections::ConnectionFolder;
 use crate::topology::journal::TopologyEvent;
@@ -50,8 +59,16 @@ const HEALTH_TOOLS: [Tool; 5] = [
 ];
 /// Строк `get_activity` по умолчанию (спец. §5.2); крейт шлюза подставляет его сам, здесь — для вызова без `validate`.
 pub const ACTIVITY_LIMIT: u32 = ACTIVITY_LIMIT_DEFAULT;
+/// Строк `get_top_queries` и `observe_top_queries` по умолчанию (спец. §5.2).
+pub(crate) const TOP_LIMIT: u32 = TOP_LIMIT_DEFAULT;
+/// Истории pgss узла для окна ещё нет: подсказка модели (спец. §5.2).
+const NO_WINDOW_HINT: &str = "Glafira has no pg_stat_statements history for this node yet (it is collected while the Queries tab or a query card is open in Glafira): call observe_top_queries for a fresh window or use mode sinceReset";
+/// Значение `pg_stats` длиннее — обрезается (спец. §5.2).
+pub const MAX_STATS_VALUE_BYTES: usize = 2048;
+const TRUNCATED_MARK: &str = "…[truncated]";
 
-/// Операция чтения. Варианты задач 11–12 до них отвечают `internal: not implemented yet`.
+/// Операция чтения. Варианты задачи 12 (`explain_query`, `hypothetical_index`) до неё отвечают
+/// `internal: not implemented yet`.
 pub async fn read_op(st: &AppState, op: PgRead) -> Result<PgAnswer, ToolError> {
     match op {
         PgRead::ListConnections => Ok(answer(PgOutput::Connections(list_connections(st)))),
@@ -60,12 +77,11 @@ pub async fn read_op(st: &AppState, op: PgRead) -> Result<PgAnswer, ToolError> {
         PgRead::HealthSummary(p) => health_summary(st, &p.connection_id).await,
         PgRead::RunDiagnostic(p) => run_diagnostic(st, p).await,
         PgRead::Activity(p) => activity(st, p).await,
-        PgRead::TopQueries(_)
-        | PgRead::QueryDetails(_)
-        | PgRead::TableDetails(_)
-        | PgRead::Settings(_)
-        | PgRead::Explain(_)
-        | PgRead::HypoIndex(_) => Err(not_yet()),
+        PgRead::TopQueries(p) => top_queries(st, p).await,
+        PgRead::QueryDetails(p) => query_details(st, p).await,
+        PgRead::TableDetails(p) => table_details(st, p).await,
+        PgRead::Settings(p) => settings(st, p).await,
+        PgRead::Explain(_) | PgRead::HypoIndex(_) => Err(not_yet()),
     }
 }
 
@@ -589,7 +605,7 @@ fn activity_answer(
     access: LlmAccess,
 ) -> Result<PgAnswer, ToolError> {
     let DiagData::Sessions(d) = &mut report.data else {
-        return Err(tool_error(crate::error::AppError::internal_with(
+        return Err(tool_error(AppError::internal_with(
             "sessions report without sessions data",
         )));
     };
@@ -597,7 +613,7 @@ fn activity_answer(
     d.rows = rows;
     let masked = mask_if(access, &mut report);
     let DiagData::Sessions(mut d) = report.data else {
-        return Err(tool_error(crate::error::AppError::internal_with(
+        return Err(tool_error(AppError::internal_with(
             "sessions report without sessions data",
         )));
     };
@@ -616,6 +632,327 @@ fn activity_answer(
         masked,
         rows: None,
     })
+}
+
+/// Узел операции: названный или «за лидером» (`diag_target`, как у вкладок). Подключение должно быть открыто.
+pub(crate) fn member_or_leader(
+    st: &AppState,
+    id: &str,
+    member: Option<&str>,
+) -> Result<String, ToolError> {
+    st.runtimes
+        .diag_target(id, member, false)
+        .map_err(tool_error)?
+        .member
+        .map(|m| m.name)
+        .ok_or_else(|| tool_error(AppError::internal_with("node operation without a member")))
+}
+
+/// Сортировка топа (`totalTime` по умолчанию) — имена P3 (`QuerySort`, camelCase).
+pub(crate) fn parse_sort(s: Option<&str>) -> Result<QuerySort, ToolError> {
+    let s = s.unwrap_or("totalTime");
+    serde_json::from_value(Value::String(s.to_string())).map_err(|_| {
+        invalid_argument(format!(
+            "Unknown sort {s}: use totalTime, meanTime, maxTime, stddevTime, calls, rowsPerCall, sharedRead, hitRatio, tempWritten, walBytes, ioTime, planTime, jitTime or cpuTime"
+        ))
+    })
+}
+
+/// Запрос инструмента `queries` по параметрам `get_top_queries`: предел отчёта — ближайший допустимый в P3 (50 или 100),
+/// ответ потом режется до `limit`; окно по умолчанию — 900 с, окно проверяется P3 (`diag::queries::validate`) до
+/// открытия подключения. Итог: параметры, `limit`, режим окна.
+pub(crate) fn top_request(p: &TopQueriesParams) -> Result<(QueriesParams, usize, bool), ToolError> {
+    let limit = p.limit.unwrap_or(TOP_LIMIT) as usize;
+    let window = match p.mode.as_deref() {
+        None | Some("sinceReset") => false,
+        Some("window") => true,
+        Some(m) => {
+            return Err(invalid_argument(format!(
+                "Unknown mode {m}: use sinceReset or window"
+            )));
+        }
+    };
+    let q = QueriesParams {
+        mode: if window {
+            QueriesMode::Window {
+                s: p.window_s.unwrap_or(DEFAULT_WINDOW_S),
+            }
+        } else {
+            QueriesMode::SinceReset
+        },
+        sort: parse_sort(p.sort.as_deref())?,
+        limit: if limit <= 50 { 50 } else { 100 },
+        database: p.database.clone(),
+        toplevel_only: true,
+        search: p.search.clone(),
+    };
+    diag::queries::validate(&q).map_err(tool_error)?;
+    Ok((q, limit, window))
+}
+
+/// `get_top_queries`: отчёт инструмента `queries` (P3 §4.5). Порядок (решение владельца 2026-11-04): доступ и
+/// аргументы — до открытия подключения; поиск на уровне `diagnostics` откладывается (`take_masked_search`), затем
+/// `diag::run` и `top_answer`.
+async fn top_queries(st: &AppState, p: TopQueriesParams) -> Result<PgAnswer, ToolError> {
+    let (_, access) = check_connection(st, &p.connection_id)?;
+    let (mut q, limit, window) = top_request(&p)?;
+    let search = take_masked_search(&mut q, access);
+    ensure_open(st, &p.connection_id).await?;
+    let req = DiagRequest {
+        tool: Tool::Queries,
+        member: p.member.clone(),
+        window_s: None,
+        queries: Some(q),
+    };
+    let report = diag::run(st, &p.connection_id, req)
+        .await
+        .map_err(tool_error)?;
+    Ok(top_answer(report, access, search.as_ref(), limit, window))
+}
+
+/// Ответ `get_top_queries` из отчёта `queries`: маскирование, поиск по замаскированному тексту и только потом предел
+/// ответа `limit` (`mask_statements`); окно без истории — покрытие 0 и подсказка.
+fn top_answer(
+    mut report: DiagReport,
+    access: LlmAccess,
+    search: Option<&MaskedSearch>,
+    limit: usize,
+    window: bool,
+) -> PgAnswer {
+    let no_history =
+        window && matches!(&report.data, DiagData::Queries(d) if d.coverage_s.is_none());
+    let masked = mask_statements(access, &mut report, search, Some(limit));
+    let mut out = report_out(report);
+    if no_history {
+        out.data["coverageS"] = json!(0);
+        out.hint = Some(NO_WINDOW_HINT.to_string());
+    }
+    PgAnswer {
+        body: PgOutput::Report(out),
+        masked,
+        rows: None,
+    }
+}
+
+/// `get_query_details`: карточка P3 §7.2 (`query_detail_answer`); доступ и `queryId` проверяются до открытия
+/// подключения.
+async fn query_details(st: &AppState, p: QueryDetailsParams) -> Result<PgAnswer, ToolError> {
+    let (_, access) = check_connection(st, &p.connection_id)?;
+    let qid = query_detail::parse_query_id(&p.query_id).map_err(tool_error)?;
+    ensure_open(st, &p.connection_id).await?;
+    let member = member_or_leader(st, &p.connection_id, p.member.as_deref())?;
+    let d = query_detail::detail(st, &p.connection_id, &member, &p.database, qid)
+        .await
+        .map_err(tool_error)?;
+    query_detail_answer(d, &member, access)
+}
+
+/// Карточка для модели — JSON-сериализация `QueryDetail` (та же форма, что у интерфейса): тексты маскируются (уровень
+/// `diagnostics`, `mask_query_detail`), тексты выполняющихся экземпляров затем — не длиннее `MAX_QUERY_BYTES` (как у
+/// `get_activity`, на любом уровне; обрезанный помечается `truncated`), находки — с английскими текстами, причины
+/// недоступности — английским текстом, узел — в поле `member`.
+fn query_detail_answer(
+    mut d: QueryDetail,
+    member: &str,
+    access: LlmAccess,
+) -> Result<PgAnswer, ToolError> {
+    let masked = masks(access).then(|| mask_query_detail(&mut d) as u64);
+    for r in &mut d.running {
+        let len = r.query.len();
+        cut_text(&mut r.query, MAX_QUERY_BYTES);
+        r.truncated |= r.query.len() < len;
+    }
+    let findings: Vec<FindingOut> = d.findings.iter().map(finding_out).collect();
+    let unavailable: Vec<UnavailableOut> = std::mem::take(&mut d.unavailable)
+        .into_iter()
+        .map(|u| unavailable_out(None, u))
+        .collect();
+    let mut v =
+        serde_json::to_value(&d).map_err(|e| tool_error(AppError::internal_with(e.to_string())))?;
+    v["member"] = json!(member);
+    v["findings"] = serde_json::to_value(findings).unwrap_or_default();
+    v["unavailable"] = serde_json::to_value(unavailable).unwrap_or_default();
+    Ok(PgAnswer {
+        body: PgOutput::QueryDetails(v),
+        masked,
+        rows: None,
+    })
+}
+
+/// Статистика колонок без значений (уровень `diagnostics`): у таблицы с наследниками — строка по всей иерархии
+/// (`inherited`), если она есть. `pg_stats` показывает только колонки, которые роль может читать.
+const STATS_SQL: &str = marked_sql!(
+    "SELECT DISTINCT ON (s.attname) s.attname::text, s.null_frac::float8, s.avg_width, s.n_distinct::float8, \
+     s.correlation::float8 FROM pg_stats s WHERE s.schemaname = $1 AND s.tablename = $2 \
+     ORDER BY s.attname, s.inherited DESC"
+);
+
+/// То же со значениями (уровень `data`, P4b): частые значения, их частоты и границы гистограммы — JSON-массивы в
+/// текстовом виде PostgreSQL.
+const STATS_VALUES_SQL: &str = marked_sql!(
+    "SELECT DISTINCT ON (s.attname) s.attname::text, s.null_frac::float8, s.avg_width, s.n_distinct::float8, \
+     s.correlation::float8, array_to_json(s.most_common_vals::text::text[]), array_to_json(s.most_common_freqs), \
+     array_to_json(s.histogram_bounds::text::text[]) FROM pg_stats s WHERE s.schemaname = $1 AND s.tablename = $2 \
+     ORDER BY s.attname, s.inherited DESC"
+);
+
+/// Строки длиннее `MAX_STATS_VALUE_BYTES` в массиве значений обрезаются по границе символа с пометкой.
+pub fn cut_values(v: Value) -> Value {
+    match v {
+        Value::String(s) if s.len() > MAX_STATS_VALUE_BYTES => {
+            let mut end = MAX_STATS_VALUE_BYTES;
+            while !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            Value::String(format!("{}{TRUNCATED_MARK}", &s[..end]))
+        }
+        Value::Array(a) => Value::Array(a.into_iter().map(cut_values).collect()),
+        other => other,
+    }
+}
+
+/// Статистика колонок `pg_stats` таблицы (спец. §5.2): `with_values` — уровень `data` (частые значения и гистограмма),
+/// без него запрос значений не читает вовсе.
+pub async fn column_stats(
+    c: &Client,
+    schema: &str,
+    table: &str,
+    with_values: bool,
+) -> AppResult<Vec<ColumnStat>> {
+    let sql = if with_values {
+        STATS_VALUES_SQL
+    } else {
+        STATS_SQL
+    };
+    let rows = c
+        .query(sql, &[&schema, &table])
+        .await
+        .map_err(|e| from_pg(&e))?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let values = |i: usize| {
+                if with_values {
+                    r.get::<_, Option<Value>>(i).map(cut_values)
+                } else {
+                    None
+                }
+            };
+            ColumnStat {
+                column: r.get(0),
+                null_frac: r.get(1),
+                avg_width: r.get(2),
+                n_distinct: r.get(3),
+                correlation: r.get(4),
+                most_common_vals: values(5),
+                most_common_freqs: values(6),
+                histogram_bounds: values(7),
+            }
+        })
+        .collect())
+}
+
+/// Порядок колонок таблицы; статистика колонок, которых нет в описании, — в конце по имени.
+fn order_like(mut stats: Vec<ColumnStat>, columns: &[Column]) -> Vec<ColumnStat> {
+    let pos = |name: &str| {
+        columns
+            .iter()
+            .position(|c| c.name == name)
+            .unwrap_or(usize::MAX)
+    };
+    stats.sort_by(|a, b| {
+        pos(&a.column)
+            .cmp(&pos(&b.column))
+            .then_with(|| a.column.cmp(&b.column))
+    });
+    stats
+}
+
+/// `get_table_details`: вкладка таблицы P1 (`catalog::table::get` — DDL не маскируется: это схема, §6.1) и статистика
+/// колонок; узел каталога подключения, база запроса.
+async fn table_details(st: &AppState, p: TableDetailsParams) -> Result<PgAnswer, ToolError> {
+    let access = open_for_llm(st, &p.connection_id).await?;
+    let with_values = !masks(access);
+    let (_, profile) = st
+        .runtimes
+        .target(&p.connection_id, None)
+        .map_err(tool_error)?;
+    let (schema, table) = (p.schema.clone(), p.table.clone());
+    let (details, stats) = on_catalog_node_within(
+        catalog_limit(&profile),
+        st.client(&p.connection_id, None, Some(&p.database)),
+        move |c| {
+            Box::pin(async move {
+                let details = catalog_table::get(c, &schema, &table).await?;
+                let stats = column_stats(c, &schema, &table, with_values).await?;
+                Ok((details, stats))
+            })
+        },
+    )
+    .await
+    .map_err(tool_error)?;
+    let column_stats = order_like(stats, &details.columns);
+    let table = serde_json::to_value(&details)
+        .map_err(|e| tool_error(AppError::internal_with(e.to_string())))?;
+    Ok(answer(PgOutput::Table(TableOut {
+        table,
+        column_stats,
+    })))
+}
+
+/// Параметры сервера (спец. §5.2): `$1` — ровно эти имена (без учёта регистра: `DateStyle`, `TimeZone` в `pg_settings`
+/// — с заглавными), иначе при `$2` — изменённые: источник не `default` и не `override`, и не настройки самого
+/// соединения Glafira (`client`, `session`).
+const SETTINGS_SQL: &str = marked_sql!(
+    "SELECT name, setting, unit, source, context, pending_restart FROM pg_settings \
+     WHERE ($1::text[] IS NULL OR lower(name) = ANY($1)) \
+     AND (NOT $2 OR source NOT IN ('default', 'override', 'client', 'session')) ORDER BY name"
+);
+
+/// Строка `pg_settings` для модели; значение — без секретов (`redact_setting`), `hidden` — значение изменено.
+fn setting_out(r: &Row) -> SettingOut {
+    let name: String = r.get(0);
+    let raw = r.get::<_, Option<String>>(1).unwrap_or_default();
+    let (setting, hidden) = redact_setting(&name, &raw);
+    SettingOut {
+        name,
+        setting,
+        unit: r.get(2),
+        source: r.get::<_, Option<String>>(3).unwrap_or_default(),
+        context: r.get::<_, Option<String>>(4).unwrap_or_default(),
+        pending_restart: r.get::<_, Option<bool>>(5).unwrap_or(false),
+        hidden,
+    }
+}
+
+/// `get_settings`: `pg_settings` узла; секреты — `redact_setting` (§6.2).
+async fn settings(st: &AppState, p: SettingsParams) -> Result<PgAnswer, ToolError> {
+    open_for_llm(st, &p.connection_id).await?;
+    let member = member_or_leader(st, &p.connection_id, p.member.as_deref())?;
+    let (_, profile) = st
+        .runtimes
+        .target(&p.connection_id, Some(&member))
+        .map_err(tool_error)?;
+    let names: Option<Vec<String>> = p
+        .names
+        .map(|v| v.into_iter().map(|n| n.trim().to_lowercase()).collect());
+    let changed_only = names.is_none() && p.changed_only.unwrap_or(true);
+    let rows = on_catalog_node_within(
+        catalog_limit(&profile),
+        st.client(&p.connection_id, Some(&member), None),
+        move |c| {
+            Box::pin(async move {
+                c.query(SETTINGS_SQL, &[&names, &changed_only])
+                    .await
+                    .map_err(|e| from_pg(&e))
+            })
+        },
+    )
+    .await
+    .map_err(tool_error)?;
+    Ok(answer(PgOutput::Settings(
+        rows.iter().map(setting_out).collect(),
+    )))
 }
 
 #[cfg(test)]
@@ -1374,5 +1711,323 @@ mod tests {
         assert!(!v.contains("bastion") && v.contains("SSH_ERROR"), "{v}");
         // Без цели и текста ssh модель всё же узнаёт, что именно не так: вид ошибки остаётся.
         assert!(v.contains("\"kind\":\"authFailed\""), "{v}");
+    }
+
+    // Задача 11: топ, карточка, таблица, настройки.
+
+    #[test]
+    fn top_queries_request_maps_mode_sort_and_limit() {
+        let p = |v: serde_json::Value| -> TopQueriesParams { serde_json::from_value(v).unwrap() };
+        let (q, limit, window) = top_request(&p(json!({"connectionId": "c"}))).ok().unwrap();
+        assert_eq!(
+            (q.mode, q.sort, q.limit, limit, window),
+            (QueriesMode::SinceReset, QuerySort::TotalTime, 50, 20, false)
+        );
+        assert!(q.toplevel_only);
+        let (q, limit, window) = top_request(&p(json!({
+            "connectionId": "c", "mode": "window", "windowS": 300, "limit": 70, "sort": "calls",
+            "database": "orders", "search": "shop.orders"
+        })))
+        .ok()
+        .unwrap();
+        assert_eq!(
+            (q.mode, q.sort, q.limit, limit, window),
+            (
+                QueriesMode::Window { s: 300 },
+                QuerySort::Calls,
+                100,
+                70,
+                true
+            )
+        );
+        assert_eq!(
+            (q.database.as_deref(), q.search.as_deref()),
+            (Some("orders"), Some("shop.orders"))
+        );
+        let (q, _, _) = top_request(&p(json!({"connectionId": "c", "mode": "window"})))
+            .ok()
+            .unwrap();
+        assert_eq!(q.mode, QueriesMode::Window { s: 900 });
+        let e = top_request(&p(json!({"connectionId": "c", "sort": "fastest"})))
+            .err()
+            .unwrap();
+        assert_eq!(e.code, "invalid_argument");
+        assert!(e.message.contains("totalTime"), "{}", e.message);
+        let e = top_request(&p(json!({"connectionId": "c", "mode": "between"})))
+            .err()
+            .unwrap();
+        assert_eq!(e.code, "invalid_argument");
+    }
+
+    #[test]
+    fn column_stat_values_are_cut_and_columns_follow_the_table() {
+        let long = "x".repeat(MAX_STATS_VALUE_BYTES + 10);
+        let v = cut_values(json!([long, "short", null, ["nested"]]));
+        let first = v[0].as_str().unwrap();
+        assert!(first.ends_with("…[truncated]"), "{first}");
+        assert_eq!(first.len(), MAX_STATS_VALUE_BYTES + "…[truncated]".len());
+        assert_eq!(
+            (&v[1], &v[2], &v[3]),
+            (&json!("short"), &json!(null), &json!(["nested"]))
+        );
+        let euro = "€".repeat(MAX_STATS_VALUE_BYTES);
+        assert!(
+            cut_values(json!(euro))
+                .as_str()
+                .unwrap()
+                .ends_with("€…[truncated]"),
+            "граница символа"
+        );
+        let col = |name: &str| Column {
+            name: name.into(),
+            data_type: "text".into(),
+            not_null: false,
+            default_expr: None,
+            identity: None,
+            generated: None,
+            collation: None,
+            stat_target: None,
+            storage: "x".into(),
+            comment: None,
+        };
+        let stat = |c: &str| ColumnStat {
+            column: c.into(),
+            null_frac: 0.0,
+            avg_width: 4,
+            n_distinct: -1.0,
+            correlation: None,
+            most_common_vals: None,
+            most_common_freqs: None,
+            histogram_bounds: None,
+        };
+        let ordered = order_like(
+            vec![stat("status"), stat("zzz"), stat("id")],
+            &[col("id"), col("status")],
+        );
+        let names: Vec<&str> = ordered.iter().map(|s| s.column.as_str()).collect();
+        assert_eq!(names, ["id", "status", "zzz"]);
+    }
+
+    #[test]
+    fn catalog_sql_of_the_gateway_is_marked() {
+        for sql in [STATS_SQL, STATS_VALUES_SQL, SETTINGS_SQL] {
+            assert!(crate::product::is_marked_sql(sql), "{sql}");
+        }
+        assert!(STATS_SQL.contains("pg_stats") && !STATS_SQL.contains("most_common_vals"));
+        assert!(SETTINGS_SQL.contains("'client', 'session'"));
+        // `DateStyle`, `TimeZone`, `IntervalStyle` в `pg_settings` — с заглавными: имена сравниваются без регистра.
+        assert!(SETTINGS_SQL.contains("lower(name) = ANY($1)"));
+    }
+
+    #[test]
+    fn gateway_sorts_are_exactly_the_query_sorts() {
+        use pg_advisor::queries::QuerySort;
+        for s in glafira_pg_mcp::params::QUERY_SORTS {
+            let parsed: QuerySort = serde_json::from_value(serde_json::json!(s))
+                .unwrap_or_else(|_| panic!("sort {s} is not a QuerySort"));
+            assert_eq!(serde_json::to_value(parsed).unwrap(), serde_json::json!(s));
+        }
+        // У `QuerySort` 14 вариантов (`cpuTime` — P3b); новый вариант добавляется и в `QUERY_SORTS`.
+        assert_eq!(glafira_pg_mcp::params::QUERY_SORTS.len(), 14);
+    }
+
+    // Сверх плана: порядок топа (поиск по замаскированному тексту до предела ответа), карточка для модели и проверки
+    // до открытия подключения.
+
+    fn top_rows(a: &PgAnswer) -> Vec<String> {
+        let PgOutput::Report(r) = &a.body else {
+            panic!("не отчёт")
+        };
+        r.data["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["text"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// `get_top_queries` на уровне `diagnostics`: поиск идёт по замаскированным текстам расширенного топа, и только
+    /// потом строки режутся до `limit`; в журнал — литералы отданных строк.
+    #[test]
+    fn top_answer_searches_masked_texts_before_the_limit() {
+        let p: TopQueriesParams =
+            serde_json::from_value(json!({"connectionId": "c", "search": "select", "limit": 1}))
+                .unwrap();
+        let (mut q, limit, window) = top_request(&p).ok().unwrap();
+        let s = take_masked_search(&mut q, LlmAccess::Diagnostics).expect("поиск отложен");
+        assert_eq!(q.limit, 200);
+        let a = top_answer(
+            statements_report(),
+            LlmAccess::Diagnostics,
+            Some(&s),
+            limit,
+            window,
+        );
+        assert_eq!(top_rows(&a), ["SELECT * FROM orders WHERE note = $1"]);
+        assert_eq!(a.masked, Some(1));
+        let PgOutput::Report(r) = &a.body else {
+            unreachable!()
+        };
+        let ids: Vec<&str> = r.findings.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["query_n_plus_one", "queries_incomplete"],
+            "находка строки вне поиска ушла"
+        );
+        assert!(r.hint.is_none());
+
+        // Без поиска — первые `limit` строк, литералы только у них.
+        let a = top_answer(statements_report(), LlmAccess::Diagnostics, None, 2, false);
+        assert_eq!(
+            top_rows(&a),
+            [
+                "ALTER ROLE app PASSWORD $1",
+                "SELECT * FROM orders WHERE note = $1"
+            ]
+        );
+        assert_eq!(a.masked, Some(2));
+
+        // Окно без истории: покрытие 0 и подсказка.
+        let a = top_answer(statements_report(), LlmAccess::Diagnostics, None, 20, true);
+        let PgOutput::Report(r) = &a.body else {
+            unreachable!()
+        };
+        assert_eq!(r.data["coverageS"], 0);
+        assert!(
+            r.hint
+                .as_deref()
+                .is_some_and(|h| h.contains("observe_top_queries")),
+            "{:?}",
+            r.hint
+        );
+    }
+
+    fn running(query: String) -> crate::diag::query_detail::RunningInstance {
+        crate::diag::query_detail::RunningInstance {
+            pid: 1,
+            backend_start_us: 1,
+            state: Some("active".into()),
+            started_ms: None,
+            duration_s: Some(3.0),
+            wait_event_type: None,
+            wait_event: None,
+            usename: Some("app".into()),
+            application_name: None,
+            client_addr: None,
+            query,
+            truncated: false,
+        }
+    }
+
+    /// Карточка для модели: тексты замаскированы, тексты выполняющихся экземпляров — не длиннее 2 КБ (как у
+    /// `get_activity`), находки и причины недоступности — английским текстом, узел — в поле `member`.
+    #[test]
+    fn query_card_goes_to_the_model_masked_and_in_english() {
+        let card = || {
+            let mut d = QueryDetail::unavailable_pgss(170_000, false);
+            d.text = Some("SELECT * FROM t WHERE email = 'ann@example.com'".into());
+            d.running = vec![
+                running(format!("SELECT 'x', {}", "col, ".repeat(600))),
+                running("SELECT 7".into()),
+            ];
+            d.findings = vec![
+                Finding::new("query_n_plus_one", Severity::Warning)
+                    .member(Some("pg-1"))
+                    .param("callsSharePct", 40.0)
+                    .param("meanMs", 0.2)
+                    .param("calls", 1000),
+            ];
+            d
+        };
+        let a = query_detail_answer(card(), "pg-1", LlmAccess::Diagnostics).unwrap();
+        assert_eq!(a.masked, Some(3), "текст карточки и два экземпляра");
+        let PgOutput::QueryDetails(v) = &a.body else {
+            panic!("не карточка")
+        };
+        assert_eq!(v["member"], "pg-1");
+        assert_eq!(v["text"], "SELECT * FROM t WHERE email = $1");
+        let first = v["running"][0]["query"].as_str().unwrap();
+        assert!(
+            first.starts_with("SELECT $1, col,") && first.len() <= MAX_QUERY_BYTES,
+            "{first}"
+        );
+        assert_eq!(
+            v["running"][0]["truncated"], true,
+            "обрезанный текст помечен"
+        );
+        assert_eq!(
+            (&v["running"][1]["query"], &v["running"][1]["truncated"]),
+            (&json!("SELECT $1"), &json!(false))
+        );
+        assert_eq!(
+            v["unavailable"][0]["reason"],
+            "statements: pg_stat_statements is not installed in this database (CREATE EXTENSION pg_stat_statements)"
+        );
+        assert!(
+            v["findings"][0]["title"]
+                .as_str()
+                .is_some_and(|t| t.contains("calls")),
+            "{v}"
+        );
+        assert!(v["findings"][0].get("links").is_none());
+        // Без маскирования текст как есть, а длинный текст экземпляра всё равно режется.
+        let a = query_detail_answer(card(), "pg-1", LlmAccess::Off).unwrap();
+        let PgOutput::QueryDetails(v) = &a.body else {
+            panic!("не карточка")
+        };
+        assert_eq!(a.masked, None);
+        assert!(v["text"].as_str().unwrap().contains("ann@example.com"));
+        assert!(v["running"][0]["query"].as_str().unwrap().len() <= MAX_QUERY_BYTES);
+    }
+
+    #[tokio::test]
+    async fn new_tools_check_access_and_arguments_before_opening() {
+        let (_dir, st) = state_with(vec![member("pg-1", Role::Primary)]);
+        let op = |kind: &str, v: Value| -> PgRead {
+            match kind {
+                "top" => PgRead::TopQueries(serde_json::from_value(v).unwrap()),
+                "card" => PgRead::QueryDetails(serde_json::from_value(v).unwrap()),
+                "table" => PgRead::TableDetails(serde_json::from_value(v).unwrap()),
+                _ => PgRead::Settings(serde_json::from_value(v).unwrap()),
+            }
+        };
+        for (kind, v) in [
+            ("top", json!({"connectionId": "off", "sort": "fastest"})),
+            (
+                "card",
+                json!({"connectionId": "off", "database": "d", "queryId": "x"}),
+            ),
+            (
+                "table",
+                json!({"connectionId": "off", "database": "d", "schema": "s", "table": "t"}),
+            ),
+            ("settings", json!({"connectionId": "nope"})),
+        ] {
+            let e = err(read_op(&st, op(kind, v)).await);
+            assert_eq!(e.code, "not_allowed", "{kind}: доступ — раньше аргументов");
+        }
+        for v in [
+            json!({"connectionId": "on", "sort": "fastest"}),
+            json!({"connectionId": "on", "mode": "between"}),
+            json!({"connectionId": "on", "mode": "window", "windowS": 60}),
+        ] {
+            let e = err(read_op(&st, op("top", v.clone())).await);
+            assert_eq!(e.code, "invalid_argument", "{v}");
+        }
+        let e = err(read_op(
+            &st,
+            op(
+                "card",
+                json!({"connectionId": "on", "database": "d", "queryId": "x"}),
+            ),
+        )
+        .await);
+        assert_eq!(e.code, "invalid_argument");
+        assert_eq!(
+            st.runtimes.view("on").state,
+            ConnState::Disconnected,
+            "неверный вызов не открывает подключение"
+        );
+        assert_eq!(st.runtimes.view("off").state, ConnState::Disconnected);
     }
 }

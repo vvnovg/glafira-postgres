@@ -9,6 +9,7 @@ use pg_advisor::locktree::LockNode;
 use pg_advisor::sqltext::{MAX_PARAMS, MaskOptions, count_params, mask_literals};
 use serde_json::Value;
 
+use crate::diag::query_detail::QueryDetail;
 use crate::diag::{DiagData, DiagReport};
 
 /// Строковые выражения узлов JSON-плана (`EXPLAIN (FORMAT JSON, VERBOSE)`): в них сервер печатает литералы запроса.
@@ -225,6 +226,28 @@ pub fn mask_report(report: &mut DiagReport) -> usize {
     }
 }
 
+/// Тексты карточки запроса: текст pgss, строки статистики (с момента сброса, окна, по ролям) и выполняющиеся экземпляры
+/// из `pg_stat_activity`. Остальное в карточке — числа, имена ролей и узлов, ожидания и находки (параметры находок
+/// pgss — числа).
+pub fn mask_query_detail(d: &mut QueryDetail) -> usize {
+    let mut n = mask_opt(&mut d.text);
+    if let Some(s) = &mut d.since_reset {
+        n += mask_opt(&mut s.text);
+    }
+    for w in &mut d.windows {
+        if let Some(s) = &mut w.stat {
+            n += mask_opt(&mut s.text);
+        }
+    }
+    for b in &mut d.by_user {
+        n += mask_opt(&mut b.stat.text);
+    }
+    for r in &mut d.running {
+        n += mask_text(&mut r.query);
+    }
+    n
+}
+
 fn mask_strings(v: &mut Value) -> usize {
     match v {
         Value::String(s) => mask_text(s),
@@ -437,6 +460,66 @@ mod tests {
         assert_eq!(
             d.rows[0].text.as_deref(),
             Some("ALTER ROLE app PASSWORD $1")
+        );
+    }
+
+    #[test]
+    fn query_card_texts_are_masked_everywhere() {
+        use crate::diag::query_detail::{ByUser, QueryDetail, RunningInstance, WindowStat};
+        let qs = || {
+            let mut s = stat(
+                QueryKey {
+                    query_id: 7,
+                    dbid: 1,
+                    userid: 10,
+                    toplevel: true,
+                },
+                Some("orders".into()),
+                Some("app".into()),
+                &Counters::default(),
+                None,
+                &Totals::default(),
+            );
+            s.text = Some(SECRET.into());
+            s
+        };
+        let mut d = QueryDetail::unavailable_pgss(170_000, false);
+        d.text = Some(SECRET.into());
+        d.since_reset = Some(qs());
+        d.windows = vec![
+            WindowStat {
+                window_s: 300,
+                stat: Some(qs()),
+            },
+            WindowStat {
+                window_s: 900,
+                stat: None,
+            },
+        ];
+        d.by_user = vec![ByUser {
+            rolname: Some("app".into()),
+            toplevel: true,
+            stat: qs(),
+        }];
+        d.running = vec![RunningInstance {
+            pid: 1,
+            backend_start_us: 1,
+            state: Some("active".into()),
+            started_ms: None,
+            duration_s: None,
+            wait_event_type: None,
+            wait_event: None,
+            usename: None,
+            application_name: None,
+            client_addr: None,
+            query: SECRET.into(),
+            truncated: false,
+        }];
+        assert_eq!(mask_query_detail(&mut d), 10, "5 текстов × 2 литерала");
+        let v = serde_json::to_string(&d).unwrap();
+        assert!(
+            !v.contains("ann@example.com") && !v.contains("tenant=acme"),
+            "{v}"
         );
     }
 

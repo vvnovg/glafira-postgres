@@ -9,6 +9,7 @@ pub mod controller;
 pub mod files;
 pub mod mask;
 pub mod read;
+pub mod secrets;
 pub mod shim;
 pub mod texts;
 
