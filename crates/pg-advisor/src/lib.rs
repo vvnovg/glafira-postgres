@@ -16,3 +16,4 @@ pub mod readiness;
 pub mod rules;
 pub mod serde_util;
 pub mod sqlcheck;
+pub mod sqltext;
