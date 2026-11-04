@@ -25,9 +25,9 @@ export function newProfile(): ConnectionProfile {
   };
 }
 
-/** Копия подключения: те же настройки и папка, но новый профиль (id выдаст Rust при сохранении). Секреты не копируются. */
+/** Копия подключения: те же настройки и папка, но новый профиль (id выдаст Rust при сохранении). Секреты не копируются; доступ LLM у копии выключен (решение локальное, §4.1). */
 export function copyProfile(source: ConnectionProfile, name: string): ConnectionProfile {
-  return { ...source, id: "", name, order: 0 };
+  return { ...source, id: "", name, order: 0, llmAccess: "off" };
 }
 
 export function emptyPatroni(): PatroniSettings {

@@ -8,7 +8,7 @@ use std::time::Duration;
 use glafira_mcp_core::{CallOk, SessionCtx, SessionFactory, ToolError};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::model::{
-    Implementation, InitializeRequestParams, InitializeResult, ListToolsResult,
+    DiscoverResult, Implementation, InitializeRequestParams, InitializeResult, ListToolsResult,
     PaginatedRequestParams, ProgressNotificationParam, ServerCapabilities, ServerConfig,
 };
 use rmcp::service::RequestContext;
@@ -139,7 +139,12 @@ impl PgServer {
         let cancel = rctx.ct.child_token();
         let (tx, rx) = tokio::sync::watch::channel((0u32, 0u32));
         let progress: ProgressFn = Arc::new(move |done, total| {
-            let _ = tx.send((done, total));
+            // Прогресс по MCP строго возрастает: повтор той же пары не отправляется.
+            tx.send_if_modified(|cur| {
+                let changed = *cur != (done, total);
+                *cur = (done, total);
+                changed
+            });
         });
         let forward = rctx.meta.get_progress_token().map(|token| {
             let peer = rctx.peer.clone();
@@ -231,6 +236,20 @@ impl ServerHandler for PgServer {
         c.server_info = Implementation::new(&o.name, &o.version);
         c.instructions = Some(o.instructions.clone());
         c
+    }
+
+    /// Клиент протокола 2026-07-28 может начать с `server/discover`: опознаётся по `_meta` запроса, подтверждение
+    /// запрашивается сразу; тело ответа — как по умолчанию в rmcp.
+    async fn discover(
+        &self,
+        context: RequestContext<RoleServer>,
+    ) -> Result<DiscoverResult, ErrorData> {
+        let view = self.ctx.identify(context.client_info());
+        self.ctx.request_approval(&view);
+        Ok(DiscoverResult::from_server_info(
+            self.supported_protocol_versions().into_owned(),
+            self.get_info(),
+        ))
     }
 
     async fn initialize(

@@ -49,9 +49,15 @@ describe("модель формы", () => {
       order: 7,
     };
     const copy = copyProfile(source, "billing (копия)");
-    expect(copy).toEqual({ ...source, id: "", name: "billing (копия)", order: 0 });
+    expect(copy).toEqual({ ...source, id: "", name: "billing (копия)", order: 0, llmAccess: "off" });
     // Источник не меняется.
     expect(source.id).toBe("c1");
+  });
+
+  it("копия подключения открытого для LLM закрыта для LLM", () => {
+    const source: ConnectionProfile = { ...newProfile(), id: "c1", name: "billing", llmAccess: "diagnostics" };
+    expect(copyProfile(source, "billing (копия)").llmAccess).toBe("off");
+    expect(source.llmAccess).toBe("diagnostics");
   });
 
   it("смена вида не теряет ввод", () => {

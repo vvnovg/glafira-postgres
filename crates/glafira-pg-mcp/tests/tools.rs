@@ -33,10 +33,16 @@ struct FakePg {
     observe_limits: Mutex<Vec<Duration>>,
     /// Наблюдение увидело отмену: досрочный конец или страховочный срок крейта.
     observe_cancelled: Arc<AtomicBool>,
+    /// Имена клиентов в `Gate::access` (по порядку обращений).
+    seen_clients: Mutex<Vec<Option<String>>>,
 }
 
 impl Gate for FakePg {
-    fn access(&self, _: &SessionView) -> SessionAccess {
+    fn access(&self, view: &SessionView) -> SessionAccess {
+        self.seen_clients
+            .lock()
+            .unwrap()
+            .push(view.client.as_ref().map(|c| c.name.clone()));
         SessionAccess::Approved
     }
     fn connection_name(&self, id: &str) -> Option<String> {
@@ -298,6 +304,9 @@ impl PgBackend for FakePg {
                     _ = tokio::time::sleep(ctx.duration / steps) => {}
                 }
                 samples = i;
+                (ctx.progress)(i, steps);
+                // Повтор той же пары (как у шагов, не менявших счётчик): клиенту он не уходит.
+                tokio::time::sleep(Duration::from_millis(3)).await;
                 (ctx.progress)(i, steps);
             }
             let body = match op {
@@ -644,6 +653,33 @@ async fn parameters_are_checked_at_the_boundaries_before_the_backend() {
 }
 
 #[tokio::test]
+async fn blank_sql_and_padded_query_id_are_normalised() {
+    let e = env().await;
+    let c = &e.client;
+    let m = err(&call(
+        c,
+        "explain_query",
+        json!({"connectionId": "c1", "database": "perf", "sql": "  ", "queryId": "x"}),
+    )
+    .await);
+    assert!(m.contains("queryId must be"), "{m}");
+    ok(call(
+        c,
+        "explain_query",
+        json!({"connectionId": "c1", "database": "perf", "sql": "  ", "queryId": " 42 "}),
+    )
+    .await);
+    let reads = e.fake.reads.lock().unwrap().clone();
+    let PgRead::Explain(p) = &reads[0] else {
+        panic!("{:?}", reads[0])
+    };
+    assert_eq!(
+        (p.sql.as_deref(), p.query_id.as_deref()),
+        (None, Some("42"))
+    );
+}
+
+#[tokio::test]
 async fn defaults_are_filled_before_the_backend() {
     let e = env().await;
     let c = &e.client;
@@ -936,8 +972,50 @@ async fn observation_reports_progress_with_the_client_token() {
     );
     assert!(notes.iter().all(|n| n.total == Some(3.0)));
     assert!(
-        notes.windows(2).all(|w| w[0].progress <= w[1].progress),
-        "ход не убывает"
+        notes.windows(2).all(|w| w[0].progress < w[1].progress),
+        "ход строго возрастает, повторы не уходят: {notes:?}"
+    );
+}
+
+#[tokio::test]
+async fn discover_identifies_the_client_and_asks_for_approval() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let dir = tempfile::tempdir().unwrap();
+    let audit = Arc::new(AuditLog::new(dir.path()));
+    let fake = Arc::new(FakePg::default());
+    let (client_io, server_io) = tokio::io::duplex(1 << 16);
+    let factory = Arc::new(PgFactory::new(fake.clone()).with_time_unit(UNIT));
+    tokio::spawn(glafira_mcp_core::serve_stream(
+        Box::new(server_io),
+        fake.clone(),
+        audit,
+        GatewayOptions::new("glafira-pg", "0.6.0", INSTRUCTIONS),
+        factory,
+    ));
+    let (rd, mut wr) = tokio::io::split(client_io);
+    let mut rd = BufReader::new(rd);
+    // Протокол 2026-07-28: клиент начинает с server/discover, его имя — в _meta запроса.
+    let discover = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "server/discover",
+        "params": {"_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {"name": "qwen-code", "version": "0.26.5"},
+        }},
+    });
+    wr.write_all(format!("{discover}\n").as_bytes())
+        .await
+        .unwrap();
+    let mut line = String::new();
+    rd.read_line(&mut line).await.unwrap();
+    let r: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(r["result"]["instructions"], INSTRUCTIONS, "{r}");
+    assert_eq!(
+        fake.seen_clients.lock().unwrap().first().cloned(),
+        Some(Some("qwen-code".to_string())),
+        "подтверждение запрошено с именем клиента до tools/list"
     );
 }
 

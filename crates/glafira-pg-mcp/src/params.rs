@@ -109,10 +109,16 @@ fn sort(v: Option<String>) -> Result<String, ToolError> {
     }
 }
 
-/// Ровно один источник запроса: непустой текст или queryId из pg_stat_statements.
-fn sql_or_query_id(sql: Option<&str>, qid: Option<&str>) -> Result<(), ToolError> {
-    let has_sql = sql.is_some_and(|s| !s.trim().is_empty());
-    match (has_sql, qid) {
+/// Ровно один источник запроса: непустой текст или queryId из pg_stat_statements. Пустой `sql` считается
+/// отсутствующим (`None`), `queryId` обрезается по краям — приложение получает уже нормализованную пару.
+fn sql_or_query_id(sql: &mut Option<String>, qid: &mut Option<String>) -> Result<(), ToolError> {
+    if sql.as_deref().is_some_and(|s| s.trim().is_empty()) {
+        *sql = None;
+    }
+    if let Some(q) = qid.as_mut() {
+        *q = q.trim().to_string();
+    }
+    match (sql.is_some(), qid.as_deref()) {
         (true, None) => Ok(()),
         (false, Some(q)) => query_id(q),
         _ => Err(ToolError::invalid_argument(
@@ -410,9 +416,9 @@ pub struct ExplainParams {
 }
 
 impl ExplainParams {
-    pub fn validate(self) -> Result<Self, ToolError> {
+    pub fn validate(mut self) -> Result<Self, ToolError> {
         not_blank(&self.database, "database")?;
-        sql_or_query_id(self.sql.as_deref(), self.query_id.as_deref())?;
+        sql_or_query_id(&mut self.sql, &mut self.query_id)?;
         Ok(self)
     }
 }
@@ -441,9 +447,9 @@ pub struct HypoIndexParams {
 }
 
 impl HypoIndexParams {
-    pub fn validate(self) -> Result<Self, ToolError> {
+    pub fn validate(mut self) -> Result<Self, ToolError> {
         not_blank(&self.database, "database")?;
-        sql_or_query_id(self.sql.as_deref(), self.query_id.as_deref())?;
+        sql_or_query_id(&mut self.sql, &mut self.query_id)?;
         count_in(self.indexes.len(), HYPO_INDEXES_MAX, "indexes")?;
         for ddl in &self.indexes {
             not_blank(ddl, "indexes")?;

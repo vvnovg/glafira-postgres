@@ -254,8 +254,7 @@ impl McpController {
         };
         if let Err(e) = files::write_mcp_file(&self.data_dir, &file) {
             handle.shutdown().await;
-            tracing::warn!("mcp.json not written: {}", e.message);
-            self.set_server(McpServerState::Error, Some(e.message));
+            self.failed(e.message);
             return;
         }
         tracing::info!("mcp server started");
@@ -608,6 +607,23 @@ mod tests {
             s.error
         );
         assert_eq!(files::read_mcp_file(dir.path()), None);
+    }
+
+    #[tokio::test]
+    async fn mcp_json_write_failure_gets_the_start_failure_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = state(dir.path(), true);
+        // На месте файла — каталог: сервер поднимется, а запись mcp.json не удастся.
+        std::fs::create_dir(dir.path().join(files::FILE_NAME)).unwrap();
+        let s = st.mcp.set_enabled(st.clone(), true).await.unwrap();
+        assert_eq!(s.server, McpServerState::Error);
+        assert!(
+            s.error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("The MCP server did not start: ")),
+            "{:?}",
+            s.error
+        );
     }
 
     #[tokio::test]
