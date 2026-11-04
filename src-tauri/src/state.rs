@@ -52,6 +52,8 @@ pub struct AppState {
     pub kcache_probes: Arc<crate::diag::kcache::KcacheProbes>,
     /// Тексты запросов pgss по узлам (замечание 12 смоука P3b): свои запросы Глафиры распознаются без сэмплера pgss.
     pub query_texts: Arc<crate::diag::texts::QueryTexts>,
+    /// MCP-шлюз (P4): сервер и `mcp.json`, подтверждение клиентов, статус для интерфейса.
+    pub mcp: Arc<crate::mcp::McpController>,
 }
 
 impl AppState {
@@ -101,11 +103,20 @@ impl AppState {
         runtimes.add_close_listener(samplers.clone());
         runtimes.add_close_listener(statements.clone());
         runtimes.add_close_listener(sessions.clone());
+        let connections = Arc::new(ConnectionStore::open(data_dir)?);
+        let settings = Arc::new(SettingsStore::open(data_dir));
+        let policy = Arc::new(crate::policy::Policy::default());
+        let mcp = Arc::new(crate::mcp::McpController::new(
+            data_dir.to_path_buf(),
+            settings.clone(),
+            policy.clone(),
+            connections.clone(),
+        ));
         Ok(Self {
-            connections: Arc::new(ConnectionStore::open(data_dir)?),
+            connections,
             secrets,
-            policy: Arc::new(crate::policy::Policy::default()),
-            settings: Arc::new(SettingsStore::open(data_dir)),
+            policy,
+            settings,
             pools,
             runtimes,
             live,
@@ -120,6 +131,7 @@ impl AppState {
             wait_profiles,
             kcache_probes,
             query_texts,
+            mcp,
         })
     }
 
@@ -187,9 +199,16 @@ impl AppState {
         Ok(())
     }
 
-    /// Политика администратора (читается при запуске в lib.rs).
+    /// Политика администратора (читается при запуске в lib.rs). Контроллер MCP решает по политике, поэтому
+    /// пересоздаётся с новой: `with_policy` вызывается до первого запуска сервера.
     pub fn with_policy(mut self, policy: crate::policy::Policy) -> Self {
         self.policy = Arc::new(policy);
+        self.mcp = Arc::new(crate::mcp::McpController::new(
+            self.mcp.data_dir().to_path_buf(),
+            self.settings.clone(),
+            self.policy.clone(),
+            self.connections.clone(),
+        ));
         self
     }
 }

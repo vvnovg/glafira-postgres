@@ -270,6 +270,11 @@
       "samePair": "Choose two different snapshots",
       "exists": "A snapshot of this node was taken this second: wait a second and try again",
       "tooLarge": "The snapshot file is too large (over {{count}} MiB)"
+    },
+    "mcp": {
+      "disabledByPolicy": "MCP is disabled by your organization",
+      "noExe": "Cannot find the Glafira executable: {{error}}",
+      "auditMissing": "The MCP log is not available yet: {{error}}"
     }
   },
   "connections": {

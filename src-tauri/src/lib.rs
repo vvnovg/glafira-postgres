@@ -47,6 +47,27 @@ pub fn askpass_main() -> i32 {
     crate::net::askpass::run(&args)
 }
 
+/// Сколько ждать остановки MCP-сервера при выходе: сессии закрываются сразу, ожидание — страховка от зависшего
+/// соединения.
+const MCP_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// MCP при выходе из приложения (`RunEvent::Exit`): клиенты отключаются, `mcp.json` удаляется (шим поймёт, что
+/// Glafira закрыта). Не уложились — файл удаляется и сессии закрываются без ожидания.
+fn shutdown_mcp(st: &AppState) {
+    let mcp = st.mcp.clone();
+    let stopped = tauri::async_runtime::block_on(async move {
+        tokio::time::timeout(MCP_EXIT_GRACE, mcp.shutdown())
+            .await
+            .is_ok()
+    });
+    if !stopped {
+        tracing::warn!(
+            "mcp server did not stop within {MCP_EXIT_GRACE:?}: exiting without waiting"
+        );
+        st.mcp.exit_now();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Один провайдер TLS на процесс: плагин updater при первой проверке ставит `ring`, а reqwest
@@ -85,6 +106,17 @@ pub fn run() {
                 Arc::new(KeyringStore::default()),
             )?
             .with_policy(policy);
+            // Шим `glafira-pg mcp` ищет `mcp.json` без Tauri (`dirs::data_dir()` + идентификатор): расхождение с
+            // каталогом приложения — предупреждение в журнал (спец. P4 §3.3).
+            let shim_dir = crate::mcp::files::data_dir();
+            if shim_dir.as_deref() != Some(dir.as_path()) {
+                tracing::warn!(
+                    shim = ?shim_dir,
+                    app = %dir.display(),
+                    "mcp: the shim looks for mcp.json in another data directory"
+                );
+            }
+            st.mcp.set_app_handle(app.handle().clone());
             st.runtimes
                 .set_sink(Arc::new(crate::commands::topology::TauriSink(
                     app.handle().clone(),
@@ -95,6 +127,9 @@ pub fn run() {
             tauri::async_runtime::spawn_blocking(move || {
                 tracing::info!(reaped = tunnels.reap_orphans(), "ssh orphans");
             });
+            // MCP-сервер — если он включён в «Настройках» и политика разрешает.
+            let (mcp, for_mcp) = (st.mcp.clone(), st.clone());
+            tauri::async_runtime::spawn(async move { mcp.start_if_enabled(for_mcp).await });
             app.manage(st);
             Ok(())
         })
@@ -154,6 +189,14 @@ pub fn run() {
             commands::settings::set_language,
             commands::settings::get_ui_settings,
             commands::settings::set_ui_settings,
+            commands::mcp::get_mcp_status,
+            commands::mcp::set_mcp_enabled,
+            commands::mcp::answer_mcp_approval,
+            commands::mcp::revoke_mcp_client,
+            commands::mcp::disconnect_mcp_sessions,
+            commands::mcp::get_mcp_audit,
+            commands::mcp::get_mcp_client_configs,
+            commands::mcp::reveal_mcp_audit,
             commands::topology::connect,
             commands::topology::disconnect,
             commands::topology::reconnect,
@@ -168,6 +211,8 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event
                 && let Some(st) = app.try_state::<AppState>()
             {
+                // MCP — первым: клиенты отключаются до закрытия подключений, `mcp.json` удаляется.
+                shutdown_mcp(&st);
                 // Длительные сессии (сэмплеры), затем опросы и туннели; процессы ssh завершаются без рантайма —
                 // по PID из `tunnels.json`.
                 st.sessions.stop_all();

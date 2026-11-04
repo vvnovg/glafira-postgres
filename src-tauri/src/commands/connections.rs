@@ -225,7 +225,13 @@ pub async fn save_connection(
     input: ConnectionInput,
 ) -> AppResult<ConnectionProfile> {
     let st = state.inner().clone();
-    blocking(move || save_connection_blocking(&st, input)).await
+    blocking(move || {
+        let saved = save_connection_blocking(&st, input)?;
+        // Уровень доступа LLM мог измениться: счётчики раздела MCP и текста диалога подтверждения.
+        st.mcp.emit_state();
+        Ok(saved)
+    })
+    .await
 }
 
 /// Сохраняет профиль и секреты согласованно: если keychain не принял изменение,
@@ -277,7 +283,12 @@ pub fn parse_connection_string(text: String) -> AppResult<crate::conn::connstr::
 #[tauri::command]
 pub async fn delete_connection(state: State<'_, AppState>, id: String) -> AppResult<()> {
     let st = state.inner().clone();
-    blocking(move || st.delete_connection_full(&id)).await
+    blocking(move || {
+        st.delete_connection_full(&id)?;
+        st.mcp.emit_state();
+        Ok(())
+    })
+    .await
 }
 
 /// Какие секреты подключения сохранены (значения не возвращаются): форма показывает «оставить

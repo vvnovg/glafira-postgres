@@ -17,7 +17,7 @@ because they are compiled from source by Rust build scripts (the `-sys` crates a
 | utf8_range (in upb) | MIT | https://github.com/protocolbuffers/utf8_range | pg_query (pg-advisor) |
 | xxHash (in libpg_query) | BSD-2-Clause | https://github.com/Cyan4973/xxHash | pg_query (pg-advisor) |
 
-## Rust crates (598)
+## Rust crates (605)
 
 | Crate | Version | License | Repository |
 |---|---|---|---|
@@ -153,6 +153,7 @@ because they are compiled from source by Rust build scripts (the `-sys` crates a
 | foreign-types-shared | 0.3.1 | MIT/Apache-2.0 | https://github.com/sfackler/foreign-types |
 | form_urlencoded | 1.2.2 | MIT OR Apache-2.0 | https://github.com/servo/rust-url |
 | fs_extra | 1.3.0 | MIT | https://github.com/webdesus/fs_extra |
+| futures | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
 | futures-channel | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
 | futures-core | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
 | futures-executor | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
@@ -314,6 +315,7 @@ because they are compiled from source by Rust build scripts (the `-sys` crates a
 | parking | 2.2.1 | Apache-2.0 OR MIT | https://github.com/smol-rs/parking |
 | parking_lot | 0.12.5 | MIT OR Apache-2.0 | https://github.com/Amanieu/parking_lot |
 | parking_lot_core | 0.9.12 | MIT OR Apache-2.0 | https://github.com/Amanieu/parking_lot |
+| pastey | 0.2.3 | MIT OR Apache-2.0 | https://github.com/as1100k/pastey |
 | peeking_take_while | 0.1.2 | Apache-2.0/MIT | https://github.com/fitzgen/peeking_take_while |
 | percent-encoding | 2.3.2 | MIT OR Apache-2.0 | https://github.com/servo/rust-url/ |
 | petgraph | 0.7.1 | MIT OR Apache-2.0 | https://github.com/petgraph/petgraph |
@@ -370,6 +372,8 @@ because they are compiled from source by Rust build scripts (the `-sys` crates a
 | reqwest | 0.13.5 | MIT OR Apache-2.0 | https://github.com/seanmonstar/reqwest |
 | rfd | 0.16.0 | MIT | https://github.com/PolyMeilex/rfd |
 | ring | 0.17.14 | Apache-2.0 AND ISC | https://github.com/briansmith/ring |
+| rmcp | 3.5.1 | Apache-2.0 | https://github.com/modelcontextprotocol/rust-sdk/ |
+| rmcp-macros | 3.5.1 | Apache-2.0 | https://github.com/modelcontextprotocol/rust-sdk/ |
 | rustc-hash | 1.1.0 | Apache-2.0/MIT | https://github.com/rust-lang-nursery/rustc-hash |
 | rustc-hash | 2.1.3 | Apache-2.0 OR MIT | https://github.com/rust-lang/rustc-hash |
 | rustc_version | 0.4.1 | MIT OR Apache-2.0 | https://github.com/djc/rustc-version-rs |
@@ -388,6 +392,7 @@ because they are compiled from source by Rust build scripts (the `-sys` crates a
 | schemars | 0.9.0 | MIT | https://github.com/GREsau/schemars |
 | schemars | 1.2.3 | MIT | https://github.com/GREsau/schemars |
 | schemars_derive | 0.8.22 | MIT | https://github.com/GREsau/schemars |
+| schemars_derive | 1.2.3 | MIT | https://github.com/GREsau/schemars |
 | scopeguard | 1.2.0 | MIT OR Apache-2.0 | https://github.com/bluss/scopeguard |
 | security-framework | 2.11.1 | MIT OR Apache-2.0 | https://github.com/kornelski/rust-security-framework |
 | security-framework | 3.7.0 | MIT OR Apache-2.0 | https://github.com/kornelski/rust-security-framework |
@@ -399,6 +404,7 @@ because they are compiled from source by Rust build scripts (the `-sys` crates a
 | serde_core | 1.0.229 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde |
 | serde_derive | 1.0.229 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde |
 | serde_derive_internals | 0.29.1 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde |
+| serde_derive_internals | 0.30.0 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde |
 | serde_json | 1.0.154 | MIT OR Apache-2.0 | https://github.com/serde-rs/json |
 | serde_repr | 0.1.21 | MIT OR Apache-2.0 | https://github.com/dtolnay/serde-repr |
 | serde_spanned | 0.6.9 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
@@ -476,6 +482,7 @@ because they are compiled from source by Rust build scripts (the `-sys` crates a
 | tokio-postgres | 0.7.18 | MIT OR Apache-2.0 | https://github.com/rust-postgres/rust-postgres |
 | tokio-rustls | 0.26.6 | MIT OR Apache-2.0 | https://github.com/rustls/tokio-rustls |
 | tokio-socks | 0.5.3 | MIT | https://github.com/sticnarf/tokio-socks |
+| tokio-stream | 0.1.19 | MIT | https://github.com/tokio-rs/tokio |
 | tokio-util | 0.7.20 | MIT | https://github.com/tokio-rs/tokio |
 | toml | 0.8.2 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | toml | 1.1.8+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |

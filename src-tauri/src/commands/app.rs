@@ -157,12 +157,14 @@ fn updater(app: &AppHandle, url: Option<String>) -> AppResult<tauri_plugin_updat
         ));
     }
     // На Windows `install` запускает установщик и вызывает `process::exit(0)`,
-    // минуя `RunEvent::Exit`: без хука открытые подключения не закрылись бы штатно. Хук заменяет
-    // стандартный хук плагина, поэтому `cleanup_before_exit` вызываем сами. На macOS/Linux хук
+    // минуя `RunEvent::Exit`: без хука открытые подключения не закрылись бы штатно, а `mcp.json` остался бы.
+    // Хук заменяет стандартный хук плагина, поэтому `cleanup_before_exit` вызываем сами. На macOS/Linux хук
     // не используется: там после установки `app.restart()` проходит Exit.
     let handle = app.clone();
     let mut b = app.updater_builder().on_before_exit(move || {
-        handle.state::<AppState>().runtimes.shutdown();
+        let st = handle.state::<AppState>();
+        st.mcp.exit_now();
+        st.runtimes.shutdown();
         handle.cleanup_before_exit();
     });
     if let Some(u) = url {
