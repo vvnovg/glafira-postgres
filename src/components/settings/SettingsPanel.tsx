@@ -1,9 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
 import { LANGUAGES } from "../../i18n/languages";
 import { i18n, setLanguage } from "../../i18n";
+import { useHelpChapter } from "../../state/helpContext";
 import { tabId, useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { McpSection } from "../mcp/McpSection";
@@ -28,13 +29,19 @@ export function SettingsPanel() {
   // Индикатор LLM внизу боковой панели открывает настройки с разделом MCP (`section: "mcp"`): раздел прокручивается в
   // видимую часть, когда страница нарисована. Каждое открытие — новый объект спеки вкладки, поэтому повторный щелчок
   // прокручивает снова. jsdom не знает scrollIntoView — вызов необязательный.
+  // F1 (спец. P4 §11): в разделе MCP — глава «LLM-ассистенты (MCP)», в остальных — «Начало работы» (язык описан там).
+  // Раздел считается текущим, пока фокус в нём или пока вкладку открыл индикатор; фокус в другом разделе это снимает.
   const spec = useWorkspace((st) => st.tabs.find((x) => x.id === tabId({ kind: "settings" })));
   const showMcp = spec?.kind === "settings" && spec.section === "mcp";
   const loaded = lang.data !== undefined;
   const mcpRef = useRef<HTMLDivElement>(null);
+  const [mcpFocused, setMcpFocused] = useState(false);
   useEffect(() => {
-    if (showMcp && loaded) mcpRef.current?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+    if (!showMcp) return;
+    setMcpFocused(true);
+    if (loaded) mcpRef.current?.scrollIntoView?.({ block: "start", behavior: "smooth" });
   }, [spec, showMcp, loaded]);
+  useHelpChapter(tabId({ kind: "settings" }), mcpFocused ? "llm-mcp" : "getting-started");
 
   if (lang.error) return <ErrorBanner error={lang.error} onRetry={() => lang.refetch()} />;
   const s = lang.data;
@@ -51,7 +58,7 @@ export function SettingsPanel() {
       <div className="toolbar">
         <h2>{t("settings.title")}</h2>
       </div>
-      <section>
+      <section onFocusCapture={() => setMcpFocused(false)}>
         <h3>{t("settings.language.section")}</h3>
         <div className="field">
           <label htmlFor="settings-language">{t("settings.language.label")}</label>
@@ -75,7 +82,7 @@ export function SettingsPanel() {
         {byPolicy && <p className="hint">{t("settings.language.policy")}</p>}
         {change.error && <ErrorBanner error={change.error} />}
       </section>
-      <section>
+      <section onFocusCapture={() => setMcpFocused(false)}>
         <h3>{t("settings.display.section")}</h3>
         <label className="inline wrap">
           <input
@@ -89,7 +96,7 @@ export function SettingsPanel() {
         {ui.error && <ErrorBanner error={ui.error} onRetry={() => void ui.refetch()} />}
         {changeUi.error && <ErrorBanner error={changeUi.error} />}
       </section>
-      <div ref={mcpRef}>
+      <div ref={mcpRef} onFocusCapture={() => setMcpFocused(true)}>
         <McpSection />
       </div>
     </div>

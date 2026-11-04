@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LanguageSettings } from "../../api/types";
 import { i18n } from "../../i18n";
+import { useHelpContext } from "../../state/helpContext";
 import { useWorkspace } from "../../state/workspace";
 import { MCP_CONFIGS, mcpStatus } from "../../test/mcp";
 import { renderWithClient } from "../../test/render";
@@ -71,6 +72,24 @@ describe("SettingsPanel", () => {
     // Повторный щелчок по индикатору — новый объект спеки: прокрутка снова.
     act(() => useWorkspace.getState().open({ kind: "settings", section: "mcp" }));
     await waitFor(() => expect(scroll).toHaveBeenCalledTimes(2));
+  });
+
+  it("F1: в разделе MCP — глава «LLM-ассистенты (MCP)», в остальных — «Начало работы»", async () => {
+    vi.mocked(api.getLanguageSettings).mockResolvedValue(base);
+    renderWithClient(<SettingsPanel />);
+    const toggle = await screen.findByRole("checkbox", { name: "Разрешить MCP-сервер" });
+    expect(useHelpContext.getState().byTab.settings).toBe("getting-started");
+    act(() => toggle.focus());
+    expect(useHelpContext.getState().byTab.settings).toBe("llm-mcp");
+    act(() => screen.getByLabelText("Язык интерфейса").focus());
+    expect(useHelpContext.getState().byTab.settings).toBe("getting-started");
+  });
+
+  it("F1 после открытия раздела индикатором — глава «LLM-ассистенты (MCP)»", async () => {
+    vi.mocked(api.getLanguageSettings).mockResolvedValue(base);
+    useWorkspace.setState({ tabs: [{ kind: "settings", section: "mcp", id: "settings" }], activeId: "settings" });
+    renderWithClient(<SettingsPanel />);
+    await waitFor(() => expect(useHelpContext.getState().byTab.settings).toBe("llm-mcp"));
   });
 
   it("выбор языка; доступны все языки", async () => {
