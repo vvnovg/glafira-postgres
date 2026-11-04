@@ -154,6 +154,171 @@ pub fn normalize(sql: &str) -> String {
     s.to_string()
 }
 
+/// Метка Глафиры в тексте запроса (`marked_sql!` приложения): этот комментарий маскирование оставляет.
+const MARKER_COMMENT: &str = "/* glafira */";
+
+/// Параметры маскирования: значение `standard_conforming_strings` узла, с которого взят текст (неизвестно — `on`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaskOptions {
+    /// `off`: обратная косая в `'…'` и `N'…'` экранирует, как на сервере, — иначе граница литерала разошлась бы с
+    /// серверной и часть значения осталась бы открытой.
+    pub standard_conforming_strings: bool,
+}
+
+impl Default for MaskOptions {
+    fn default() -> Self {
+        Self {
+            standard_conforming_strings: true,
+        }
+    }
+}
+
+/// Конец `UESCAPE 'x'` после `U&'…'` / `U&"…"`, начиная с `from`; нет его — `from`.
+fn uescape_end(b: &[u8], from: usize) -> usize {
+    let skip_space = |mut j: usize| {
+        while b.get(j).is_some_and(u8::is_ascii_whitespace) {
+            j += 1;
+        }
+        j
+    };
+    let word = b"uescape";
+    let j = skip_space(from);
+    let is_word = b
+        .get(j..j + word.len())
+        .is_some_and(|w| w.eq_ignore_ascii_case(word))
+        && b.get(j + word.len()).is_none_or(|c| !ident_cont(*c));
+    if !is_word {
+        return from;
+    }
+    let k = skip_space(j + word.len());
+    if b.get(k) == Some(&b'\'') {
+        skip_quoted(b, k + 1, b'\'', false)
+    } else {
+        from
+    }
+}
+
+/// Конец числа в `at` (цифра или `.` перед цифрой): целые, десятичные, порядок `e±N`, `0x` / `0o` / `0b` и
+/// разделитель `_` (PostgreSQL 16).
+fn number_end(b: &[u8], at: usize) -> usize {
+    let digits = |mut j: usize, ok: fn(u8) -> bool| {
+        while b.get(j).is_some_and(|c| ok(*c) || *c == b'_') {
+            j += 1;
+        }
+        j
+    };
+    if b[at] == b'0' {
+        let radix: Option<fn(u8) -> bool> = match b.get(at + 1) {
+            Some(b'x' | b'X') => Some(|c: u8| c.is_ascii_hexdigit()),
+            Some(b'o' | b'O') => Some(|c: u8| (b'0'..=b'7').contains(&c)),
+            Some(b'b' | b'B') => Some(|c: u8| c == b'0' || c == b'1'),
+            _ => None,
+        };
+        if let Some(ok) = radix {
+            return digits(at + 2, ok);
+        }
+    }
+    let decimal: fn(u8) -> bool = |c| c.is_ascii_digit();
+    let mut j = digits(at, decimal);
+    if b.get(j) == Some(&b'.') && b.get(j + 1) != Some(&b'.') {
+        j = digits(j + 1, decimal);
+    }
+    if matches!(b.get(j), Some(b'e' | b'E')) {
+        let k = if matches!(b.get(j + 1), Some(b'+' | b'-')) {
+            j + 2
+        } else {
+            j + 1
+        };
+        if b.get(k).is_some_and(u8::is_ascii_digit) {
+            j = digits(k, decimal);
+        }
+    }
+    j
+}
+
+/// Литералы и тела комментариев в тексте запроса (спец. P4 §6.1). Строки `'…'`, `E'…'`, `U&'…' [UESCAPE '…']`, `B'…'`,
+/// `X'…'`, `N'…'`, долларовые кавычки и числа заменяются на `$N` с номером после наибольшего `$N` в тексте (как
+/// `pg_query normalize`); приведение остаётся (`'abc'::text` → `$3::text`). Тело блочного комментария (вложенного, как
+/// в PostgreSQL) — на `/*…*/`, строчного — на `--…`: sqlcommenter и подобные несут данные; метка `/* glafira */`
+/// остаётся. Идентификаторы (`"…"`, `U&"…"`) и `$N` не меняются. Незакрытый литерал или комментарий (текст обрезан по
+/// `track_activity_query_size`) маскируется до конца. Второе значение — число замаскированных литералов (комментарии не
+/// считаются) — уходит в журнал MCP (`masked`).
+pub fn mask_literals(text: &str, opts: MaskOptions) -> (String, usize) {
+    let b = text.as_bytes();
+    let backslash = !opts.standard_conforming_strings;
+    let mut out = String::with_capacity(text.len());
+    let mut next = count_params(text) + 1;
+    let mut masked = 0usize;
+    // `kept` — начало ещё не перенесённого в `out` куска исходного текста.
+    let (mut i, mut kept) = (0usize, 0usize);
+    while i < b.len() {
+        let c = b[i];
+        let (n1, n2) = (b.get(i + 1).copied(), b.get(i + 2).copied());
+        let literal_end = match c {
+            b'\'' => Some(skip_quoted(b, i + 1, b'\'', backslash)),
+            b'e' | b'E' if n1 == Some(b'\'') => Some(skip_quoted(b, i + 2, b'\'', true)),
+            b'n' | b'N' if n1 == Some(b'\'') => Some(skip_quoted(b, i + 2, b'\'', backslash)),
+            b'b' | b'B' | b'x' | b'X' if n1 == Some(b'\'') => {
+                Some(skip_quoted(b, i + 2, b'\'', false))
+            }
+            b'u' | b'U' if n1 == Some(b'&') && n2 == Some(b'\'') => {
+                Some(uescape_end(b, skip_quoted(b, i + 3, b'\'', false)))
+            }
+            b'$' if n1.is_some_and(|d| d.is_ascii_digit()) => None,
+            b'$' => dollar_tag(b, i).map(|end| dollar_quote_end(b, i, end)),
+            b'0'..=b'9' => Some(number_end(b, i)),
+            b'.' if n1.is_some_and(|d| d.is_ascii_digit()) => Some(number_end(b, i)),
+            _ => None,
+        };
+        if let Some(end) = literal_end {
+            out.push_str(&text[kept..i]);
+            out.push('$');
+            out.push_str(&next.to_string());
+            next += 1;
+            masked += 1;
+            (i, kept) = (end, end);
+            continue;
+        }
+        match c {
+            b'-' if n1 == Some(b'-') => {
+                out.push_str(&text[kept..i]);
+                out.push_str("--…");
+                i = line_comment_end(b, i);
+                kept = i;
+            }
+            b'/' if n1 == Some(b'*') => {
+                let (end, closed) = block_comment_end(b, i);
+                if text.get(i..end) != Some(MARKER_COMMENT) {
+                    out.push_str(&text[kept..i]);
+                    out.push_str(if closed { "/*…*/" } else { "/*…" });
+                    kept = end;
+                }
+                i = end;
+            }
+            b'"' => i = skip_quoted(b, i + 1, b'"', false),
+            b'u' | b'U' if n1 == Some(b'&') && n2 == Some(b'"') => {
+                i = uescape_end(b, skip_quoted(b, i + 3, b'"', false));
+            }
+            // `$N` (номер параметра) и одиночный `$` — не литералы.
+            b'$' => {
+                i += 1;
+                while b.get(i).is_some_and(u8::is_ascii_digit) {
+                    i += 1;
+                }
+            }
+            // Идентификатор целиком: цифры, `$` и буквы префиксов внутри него — не начало литерала.
+            _ if ident_cont(c) => {
+                while b.get(i).is_some_and(|x| ident_cont(*x)) {
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    out.push_str(&text[kept..]);
+    (out, masked)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,5 +454,191 @@ mod tests {
             "SELECT 1; SELECT 2",
             "внутренняя точка с запятой остаётся — её отвергнет сервер"
         );
+    }
+
+    fn mask(text: &str) -> (String, usize) {
+        mask_literals(text, MaskOptions::default())
+    }
+
+    fn pair(text: &str, count: usize) -> (String, usize) {
+        (text.to_string(), count)
+    }
+
+    #[test]
+    fn mask_options_default_to_standard_conforming_strings() {
+        assert!(MaskOptions::default().standard_conforming_strings);
+    }
+
+    /// Строки и числа → `$N` после наибольшего `$N` текста; приведения и `$N` остаются.
+    #[test]
+    fn masks_strings_and_numbers_numbering_after_existing_params() {
+        assert_eq!(
+            mask("SELECT * FROM t WHERE a = 'x' AND b = 42"),
+            pair("SELECT * FROM t WHERE a = $1 AND b = $2", 2)
+        );
+        assert_eq!(
+            mask("SELECT 'it''s'"),
+            pair("SELECT $1", 1),
+            "удвоенная кавычка"
+        );
+        assert_eq!(
+            mask("SELECT $2, 'a', $1"),
+            pair("SELECT $2, $3, $1", 1),
+            "номер — после наибольшего $N"
+        );
+        assert_eq!(
+            mask("SELECT 'abc'::text, 5::int"),
+            pair("SELECT $1::text, $2::int", 2),
+            "приведение остаётся"
+        );
+        assert_eq!(
+            mask("SELECT $1 + 2"),
+            pair("SELECT $1 + $2", 1),
+            "$N — не литерал"
+        );
+        assert_eq!(mask("SELECT -5"), pair("SELECT -$1", 1), "минус — оператор");
+        assert_eq!(
+            mask("SELECT date '2024-01-01', interval '1 day'"),
+            pair("SELECT date $1, interval $2", 2),
+            "типизированные литералы"
+        );
+        assert_eq!(
+            mask("ALTER ROLE app PASSWORD 'hunter2'"),
+            pair("ALTER ROLE app PASSWORD $1", 1),
+            "служебные команды pgss бывают с литералами"
+        );
+        assert_eq!(mask(""), pair("", 0));
+    }
+
+    #[test]
+    fn masks_every_kind_of_string_literal() {
+        assert_eq!(
+            mask(r"SELECT E'it\'s', e'\\'"),
+            pair("SELECT $1, $2", 2),
+            "E-строки: обратная косая экранирует"
+        );
+        assert_eq!(
+            mask("SELECT U&'d!0061t' UESCAPE '!', u&'x'"),
+            pair("SELECT $1, $2", 2),
+            "U&'…' вместе с UESCAPE — один литерал"
+        );
+        assert_eq!(
+            mask("SELECT B'1010', X'1F', N'abc', b'0'"),
+            pair("SELECT $1, $2, $3, $4", 4),
+            "битовые и национальные строки"
+        );
+        assert_eq!(
+            mask("SELECT $$a'b$$, $tag$ x $$ y $tag$, $1"),
+            pair("SELECT $2, $3, $1", 2),
+            "долларовые кавычки с метками; $$ внутри $tag$ не закрывает"
+        );
+        assert_eq!(
+            mask(r"SELECT some_e'\', 1"),
+            pair("SELECT some_e$1, $2", 2),
+            "кавычка после идентификатора на e — обычная строка"
+        );
+        assert_eq!(
+            mask("SELECT 'привет', имя FROM таблица WHERE x = 'é'"),
+            pair("SELECT $1, имя FROM таблица WHERE x = $2", 2),
+            "не-ASCII"
+        );
+    }
+
+    /// Числа: целые, десятичные, с порядком, с основанием и разделителем `_` (PostgreSQL 16); цифры в именах не трогаются.
+    #[test]
+    fn masks_numbers_but_not_digits_inside_identifiers() {
+        assert_eq!(
+            mask("SELECT 1, 1.5, .5, 1e10, 2.5E-3, 0x1F, 0o17, 0b101, 1_000_000"),
+            pair("SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9", 9)
+        );
+        assert_eq!(
+            mask("SELECT t1.c2, x$1, col_3 FROM t1"),
+            pair("SELECT t1.c2, x$1, col_3 FROM t1", 0)
+        );
+        assert_eq!(mask("SELECT a1+2"), pair("SELECT a1+$1", 1));
+        assert_eq!(
+            mask("SELECT e, x, b, n, u FROM t"),
+            pair("SELECT e, x, b, n, u FROM t", 0),
+            "буквы префиксов без кавычки — имена"
+        );
+    }
+
+    /// `standard_conforming_strings = off`: обратная косая в `'…'` экранирует, как на сервере. При `on` та же строка
+    /// кончается раньше — граница литерала совпадает с серверной в обоих случаях.
+    #[test]
+    fn follows_standard_conforming_strings_of_the_server() {
+        let off = MaskOptions {
+            standard_conforming_strings: false,
+        };
+        assert_eq!(
+            mask_literals(r"SELECT 'a\'b', 1", off),
+            pair("SELECT $1, $2", 2)
+        );
+        assert_eq!(mask_literals(r"SELECT N'a\'b'", off), pair("SELECT $1", 1));
+        // `'a\'` закрыта; дальше `b', 1` — битовая строка `b'…'` без закрытия (как в лексере сервера): $2 до конца.
+        assert_eq!(mask(r"SELECT 'a\'b', 1"), pair("SELECT $1$2", 2));
+    }
+
+    #[test]
+    fn masks_comment_bodies_but_keeps_the_marker() {
+        assert_eq!(
+            mask("SELECT 1 /* app=web user=42 */ -- secret 'x'\nFROM t"),
+            pair("SELECT $1 /*…*/ --…\nFROM t", 1),
+            "комментарии не считаются"
+        );
+        assert_eq!(
+            mask("SELECT /* a /* b */ c */ 2"),
+            pair("SELECT /*…*/ $1", 1),
+            "вложенные"
+        );
+        assert_eq!(
+            mask("SELECT 1 /*controller='users',db_driver='psycopg'*/"),
+            pair("SELECT $1 /*…*/", 1),
+            "sqlcommenter"
+        );
+        assert_eq!(
+            mask("/* glafira */ SELECT 'x'"),
+            pair("/* glafira */ SELECT $1", 1),
+            "метка Глафиры остаётся"
+        );
+    }
+
+    #[test]
+    fn keeps_identifiers_and_parameters() {
+        assert_eq!(
+            mask(r#"SELECT "it's", "a""b" FROM "t 1""#),
+            pair(r#"SELECT "it's", "a""b" FROM "t 1""#, 0)
+        );
+        assert_eq!(
+            mask(r#"SELECT U&"d!0061t" UESCAPE '!' FROM t"#),
+            pair(r#"SELECT U&"d!0061t" UESCAPE '!' FROM t"#, 0),
+            "U&\"…\" UESCAPE — идентификатор"
+        );
+    }
+
+    /// Текст обрезан по `track_activity_query_size`: незакрытый литерал или комментарий маскируется до конца.
+    #[test]
+    fn masks_unterminated_tail_to_the_end() {
+        assert_eq!(
+            mask("SELECT * FROM t WHERE a = 'secr"),
+            pair("SELECT * FROM t WHERE a = $1", 1)
+        );
+        assert_eq!(mask("SELECT 1 /* trunc"), pair("SELECT $1 /*…", 1));
+        assert_eq!(mask("SELECT 1 -- trunc"), pair("SELECT $1 --…", 1));
+        assert_eq!(mask("SELECT $q$ open"), pair("SELECT $1", 1));
+        assert_eq!(mask(r"SELECT E'abc\"), pair("SELECT $1", 1));
+    }
+
+    /// Повторное маскирование ничего не меняет: `$N`, `/*…*/` и `--…` — уже маска.
+    #[test]
+    fn masking_is_idempotent() {
+        for text in [
+            "SELECT * FROM t WHERE a = 'x' AND b = 42 /* c */ -- d\n",
+            "SELECT $$a$$, 0x1F, E'\\n' FROM t WHERE c = 'open",
+            "/* glafira */ SELECT 1 /* trunc",
+        ] {
+            let (once, _) = mask(text);
+            assert_eq!(mask(&once), (once.clone(), 0), "{text:?}");
+        }
     }
 }
