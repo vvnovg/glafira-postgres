@@ -1340,6 +1340,107 @@ pub async fn report_between(
     })
 }
 
+/// Два чтения pgss наблюдения MCP (`observe_top_queries`, спец. P4 §5.3) и что нужно отчёту о разнице.
+#[derive(Debug, Clone)]
+pub struct Observed {
+    /// Шапка второго чтения.
+    pub head: Head,
+    pub pgss: PgssInstalled,
+    pub from: Snapshot,
+    pub to: Snapshot,
+    pub duration_s: u32,
+}
+
+/// Строки наблюдения: дельты `to − from` (`compare::deltas`) без строк без изменений, имена — из `to`, после фильтра
+/// базы и верхнего уровня; колонок `pg_stat_kcache` нет (чтение без kcache). Второе значение — статистику сбросили
+/// между чтениями (строки тогда — значения `to` целиком).
+pub fn observed_entries(from: &Snapshot, to: &Snapshot, p: &QueriesParams) -> (Vec<Entry>, bool) {
+    let reset = from.info.stats_reset_ms != to.info.stats_reset_ms;
+    let names: HashMap<QueryKey, (Option<String>, Option<String>)> = to
+        .rows
+        .iter()
+        .map(|c| (c.key, (c.datname.clone(), c.rolname.clone())))
+        .collect();
+    let entries = pg_advisor::queries::compare::deltas(&from.rows, &to.rows, reset)
+        .into_iter()
+        .filter(|(_, c)| c.changed_since(&Counters::default()))
+        .map(|(key, counters)| {
+            let (datname, rolname) = names.get(&key).cloned().unwrap_or_default();
+            Entry {
+                key,
+                datname,
+                rolname,
+                counters: counters.without_kcache(),
+                minmax: None,
+            }
+        })
+        .filter(|e| keep(&e.key, e.datname.as_deref(), p))
+        .collect();
+    (entries, reset)
+}
+
+fn observed_reset() -> Unavailable {
+    Unavailable {
+        part: "window".into(),
+        member: None,
+        reason: ltext!(
+            "diag.unavailable.observedReset",
+            "{{part}}: statistics were reset during the observation",
+            part = "window"
+        ),
+    }
+}
+
+/// Отчёт `observe_top_queries` в форме топа окна (`mode: window`, покрытие — длительность наблюдения): свои запросы
+/// Глафиры и тексты — как у окна (`resolve_own`, кеш текстов узла), правила находок — `Mode::Window`.
+pub async fn report_observed(
+    st: &AppState,
+    id: &str,
+    target: &DiagTarget,
+    o: &Observed,
+    p: &QueriesParams,
+) -> AppResult<DiagReport> {
+    if !p.sort.available(&o.pgss.caps, true, false) {
+        return Err(sort_unavailable());
+    }
+    let (entries, reset) = observed_entries(&o.from, &o.to, p);
+    let node = node_of(id, target)?;
+    let own = resolve_own(st, id, target, &node, &entries, None, p).await;
+    let (mut rows, t) = build(&entries, &own, None, p);
+    attach_texts(&mut rows, |k| st.query_texts.text(&node, k));
+    let mut unavailable = Vec::new();
+    if o.to.hidden {
+        unavailable.push(hidden_rows());
+    }
+    if reset {
+        unavailable.push(observed_reset());
+    }
+    let state = PgssState {
+        track_planning: o.to.info.track_planning,
+        dealloc: o.to.info.dealloc,
+        dealloc_grew: !reset
+            && matches!((o.from.info.dealloc, o.to.info.dealloc), (Some(x), Some(y)) if y > x),
+        max: o.to.info.max,
+    };
+    let member = member_name(target)?;
+    let findings = rules::evaluate(Some(&member), &rows, &t, &state, Mode::Window);
+    Ok(make_report(
+        Tool::Queries,
+        target,
+        Some(&o.head),
+        DiagData::Queries(QueriesData {
+            mode: QueriesMode::Window { s: o.duration_s },
+            coverage_s: Some(o.duration_s),
+            ticks: None,
+            pgss: Some(PgssMeta::of(&o.pgss, &o.to.info)),
+            totals: t,
+            rows,
+        }),
+        findings,
+        unavailable,
+    ))
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryText {
@@ -1463,6 +1564,64 @@ mod tests {
             toplevel_only: true,
             search: None,
         }
+    }
+
+    #[test]
+    fn observed_entries_are_deltas_of_changed_rows() {
+        let snap = |rows: Vec<Cumulative>, reset: i64| Snapshot {
+            rows,
+            info: PgssInfo {
+                stats_reset_ms: Some(reset),
+                ..Default::default()
+            },
+            hidden: false,
+        };
+        let p = QueriesParams {
+            mode: QueriesMode::Window { s: 30 },
+            sort: QuerySort::TotalTime,
+            limit: 20,
+            database: None,
+            toplevel_only: true,
+            search: None,
+        };
+        let from = snap(
+            vec![
+                cumulative(1, true, "perf", 10, 100.0),
+                cumulative(2, true, "perf", 5, 50.0),
+            ],
+            1,
+        );
+        let to = snap(
+            vec![
+                cumulative(1, true, "perf", 14, 160.0),
+                cumulative(2, true, "perf", 5, 50.0),
+                cumulative(3, true, "perf", 2, 8.0),
+                cumulative(4, false, "perf", 9, 9.0),
+            ],
+            1,
+        );
+        let (e, reset) = observed_entries(&from, &to, &p);
+        assert!(!reset);
+        let got: Vec<(i64, i64, f64)> = e
+            .iter()
+            .map(|e| (e.key.query_id, e.counters.calls, e.counters.total_exec_ms))
+            .collect();
+        assert_eq!(
+            got,
+            [(1, 4, 60.0), (3, 2, 8.0)],
+            "без изменений — нет, новая — целиком, вложенная — отфильтрована"
+        );
+        let (e, reset) = observed_entries(
+            &from,
+            &snap(vec![cumulative(1, true, "perf", 3, 30.0)], 2),
+            &p,
+        );
+        assert!(reset);
+        assert_eq!(
+            (e[0].counters.calls, e[0].counters.total_exec_ms),
+            (3, 30.0),
+            "после сброса — значения целиком"
+        );
     }
 
     fn since_reset(rows: &[Cumulative], p: &QueriesParams) -> (Vec<QueryStat>, Totals) {

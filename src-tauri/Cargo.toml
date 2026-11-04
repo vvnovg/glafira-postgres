@@ -65,6 +65,8 @@ tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "test-util"] }
 # Клиент MCP в тестах контроллера и в интеграции `it_mcp` (версия — как у крейтов шлюза).
 rmcp = { version = "3.5.1", features = ["client", "transport-async-rw"] }
+# `CancellationToken` в тестах наблюдения MCP (крейт уже в дереве через rmcp).
+tokio-util = "0.7"
 
 [profile.release]
 codegen-units = 1

@@ -6,7 +6,7 @@ mod common;
 
 use glafira_pg_lib::error::ErrorCode;
 use glafira_pg_lib::explain::Params;
-use glafira_pg_lib::explain::hypopg::{self, HypoRequest};
+use glafira_pg_lib::explain::hypopg::{self, HypoManyRequest, HypoRequest};
 use pg_advisor::plan::relations;
 use tokio_postgres::Client;
 
@@ -147,4 +147,63 @@ async fn hypothesis_uses_the_search_path_of_the_query() {
     };
     let e = hypopg::check(&st, "it", &plain).await.unwrap_err();
     assert_eq!(e.key, "errors.explain.serverMissing", "{e:?}");
+}
+
+/// Несколько гипотез в одной сессии (`check_many`, P4): используется только полезный индекс, следов в сессии нет —
+/// и после успеха, и после отказа сервера одной из гипотез.
+#[tokio::test]
+async fn several_hypotheses_in_one_session_leave_no_trace() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st) = common::open_server_in(&perf, "perf").await;
+    let m = st.runtimes.view("it").topology.unwrap().members[0]
+        .name
+        .clone();
+    let client = glafira_pg_lib::actions::conn::open_explain(&st, "it", &m, Some("perf"))
+        .await
+        .unwrap();
+    let c = &client.client;
+    let req = HypoManyRequest {
+        member: m.clone(),
+        database: "perf".into(),
+        sql: "SELECT count(*) FROM shop.orders WHERE status = $1".into(),
+        params: Params::Values {
+            values: vec![Some("disputed".into())],
+        },
+        search_path: None,
+        index_ddls: vec![
+            "CREATE INDEX ON shop.orders (status)".into(),
+            "CREATE INDEX ON shop.orders (total);".into(),
+        ],
+        timeout_s: 5,
+    };
+    let r = hypopg::check_many(c, &req).await.unwrap();
+    assert_eq!(r.indexes.len(), 2);
+    assert!(r.indexes[0].used && !r.indexes[1].used, "{:?}", r.indexes);
+    assert_eq!(r.indexes[1].ddl, "CREATE INDEX ON shop.orders (total)");
+    assert!(
+        r.cost_after < r.cost_before,
+        "{} < {}",
+        r.cost_after,
+        r.cost_before
+    );
+    assert!(r.indexes.iter().all(|i| i.estimated_size_bytes > 0));
+    assert_eq!(r.plan.root.total_cost, r.cost_after);
+    assert!(r.raw.is_array());
+    assert_eq!(hypo_count(c).await, 0, "после успеха");
+    let bad = HypoManyRequest {
+        index_ddls: vec![
+            "CREATE INDEX ON shop.orders (status)".into(),
+            "CREATE INDEX ON shop.orders (no_such_column)".into(),
+        ],
+        ..req
+    };
+    let e = hypopg::check_many(c, &bad).await.unwrap_err();
+    assert_eq!(
+        (e.code, e.key.as_str()),
+        (ErrorCode::InvalidInput, "errors.hypo.rejected"),
+        "{e:?}"
+    );
+    assert_eq!(hypo_count(c).await, 0, "после отказа второй гипотезе");
 }

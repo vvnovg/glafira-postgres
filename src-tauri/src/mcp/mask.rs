@@ -6,6 +6,7 @@
 
 use pg_advisor::ash::text_key;
 use pg_advisor::locktree::LockNode;
+use pg_advisor::plan_rules::Recommendation;
 use pg_advisor::sqltext::{MAX_PARAMS, MaskOptions, count_params, mask_literals};
 use serde_json::Value;
 
@@ -274,6 +275,28 @@ pub fn mask_plan_value(raw: &mut Value) -> usize {
         Value::Array(a) => a.iter_mut().map(mask_plan_value).sum(),
         _ => 0,
     }
+}
+
+/// Все строки значения на любой глубине (параметры рекомендации: ключ параметра ничего не говорит о его тексте).
+fn mask_all_strings(v: &mut Value) -> usize {
+    match v {
+        Value::String(s) => mask_text(s),
+        Value::Array(a) => a.iter_mut().map(mask_all_strings).sum(),
+        Value::Object(m) => m.values_mut().map(mask_all_strings).sum(),
+        _ => 0,
+    }
+}
+
+/// Рекомендация по плану, построенному не по SQL модели (план текста pgss по `queryId`, §6.1): её строковые параметры
+/// (условие и его перепись `condition` / `rewrite`, начало периода, ключи сортировки, колонки…), готовая команда и
+/// индекс-гипотеза собраны из выражений плана. Маскируется сама рекомендация — до `texts::recommendation_out`: тексты
+/// `title` / `fix` подставляют те же параметры, а команда и гипотеза уходят модели в `params.command` и
+/// `params.hypoIndex`. Числа параметров (строки, циклы, стоимость) — числа плана, не литералы, и не меняются.
+pub fn mask_recommendation(r: &mut Recommendation) -> usize {
+    let params: usize = r.params.values_mut().map(mask_all_strings).sum();
+    params
+        + r.command.as_mut().map_or(0, mask_text)
+        + r.hypo.as_mut().map_or(0, |h| mask_text(&mut h.index_ddl))
 }
 
 #[cfg(test)]
@@ -658,6 +681,44 @@ mod tests {
         assert_eq!(p["Total Cost"], 12.5);
         assert_eq!(p["Relation Name"], "orders");
         assert_eq!(raw[0]["Settings"]["work_mem"], "1MB");
+    }
+
+    /// Рекомендация по плану текста pgss: условие, его перепись, начало периода, команда и гипотеза — без литералов;
+    /// имена и числа плана остаются.
+    #[test]
+    fn plan_recommendations_lose_literals_in_params_command_and_hypothesis() {
+        use pg_advisor::findings::Severity;
+        let mut r = Recommendation::new("plan_no_pruning", Severity::Warning, 3)
+            .param("table", "shop.events")
+            .param("condition", "(created_at)::date = '2026-01-05'::date")
+            .param(
+                "rewrite",
+                "created_at >= '2026-01-05' AND created_at < '2026-01-06'",
+            )
+            .param("periodStart", "2026-01-05")
+            .param(
+                "tables",
+                serde_json::json!(["shop.events_2026", "x = 'ann'"]),
+            )
+            .param("rowsRead", 1_000)
+            .command("CREATE INDEX CONCURRENTLY ON shop.events (created_at) WHERE kind = 'vip';")
+            .hypo("CREATE INDEX ON shop.events (created_at) WHERE kind = 'vip'");
+        assert_eq!(
+            mask_recommendation(&mut r),
+            9,
+            "1 + 2 + 3 (дата без кавычек — три числа) + 1 + 1 + 1"
+        );
+        let v = serde_json::to_string(&r).unwrap();
+        for secret in ["2026-01-05", "2026-01-06", "vip", "ann"] {
+            assert!(!v.contains(secret), "{secret}: {v}");
+        }
+        assert_eq!(r.params["table"], "shop.events");
+        assert_eq!(r.params["rowsRead"], 1_000);
+        assert_eq!(r.params["tables"][0], "shop.events_2026");
+        assert_eq!(
+            r.hypo.unwrap().index_ddl,
+            "CREATE INDEX ON shop.events (created_at) WHERE kind = $1"
+        );
     }
 
     #[test]

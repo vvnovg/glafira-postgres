@@ -393,6 +393,7 @@ mod tests {
             socks: None,
             ssh_target: None,
             options: crate::conn::pg::SESSION_OPTIONS,
+            application_name: crate::product::PG_APPLICATION_NAME,
         }
     }
 

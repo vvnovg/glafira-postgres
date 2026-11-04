@@ -1,0 +1,503 @@
+//! `AppBackend` MCP на pg-perf (`GPG_IT_PERF`): SQL модели — `explain_query` и `hypothetical_index` через `GuardTx`
+//! (своё соединение `glafira-pg-mcp`, `READ ONLY`, `standard_conforming_strings = on` на всю сессию; после вызова и при
+//! брошенном вызове сессии сервера нет — нет ни транзакции, ни виртуальных индексов), запрещённая функция за
+//! представлением — по VERBOSE-плану, план текста pgss по `queryId` — замаскирован; наблюдение — `observe_activity` и
+//! `observe_top_queries`. Запускать с `--test-threads=1`.
+
+mod common;
+
+use std::time::Duration;
+
+use glafira_pg_lib::conn::profile::LlmAccess;
+use glafira_pg_lib::mcp::guard;
+use glafira_pg_lib::mcp::read::{EXPLAIN_TIMEOUT_S, observe_op, read_op};
+use glafira_pg_lib::state::AppState;
+use glafira_pg_mcp::model::{ObserveCtx, PgAnswer, PgObserve, PgOutput, PgRead};
+use serde_json::{Value, json};
+use tokio_postgres::Client;
+
+const MCP_APP: &str = "glafira-pg-mcp";
+
+/// Подключение `it` к базе `perf`, открытое для LLM на уровне `diagnostics`; узел — единственный участник.
+async fn open_for_llm(perf: &str) -> (tempfile::TempDir, AppState, String) {
+    let (dir, st) = common::open_server_in(perf, "perf").await;
+    let mut p = st.profile("it").unwrap();
+    p.llm_access = LlmAccess::Diagnostics;
+    st.connections.upsert(p).unwrap();
+    let m = st.runtimes.view("it").topology.unwrap().members[0]
+        .name
+        .clone();
+    (dir, st, m)
+}
+
+fn explain(v: Value) -> PgRead {
+    PgRead::Explain(serde_json::from_value(v).unwrap())
+}
+
+fn hypo(v: Value) -> PgRead {
+    PgRead::HypoIndex(serde_json::from_value(v).unwrap())
+}
+
+fn ok(r: Result<PgAnswer, glafira_mcp_core::error::ToolError>) -> PgAnswer {
+    r.unwrap_or_else(|e| panic!("{}: {}", e.code, e.message))
+}
+
+/// Сессий SQL модели на сервере (`application_name = glafira-pg-mcp`).
+async fn mcp_sessions(probe: &Client) -> i64 {
+    probe
+        .query_one(
+            "SELECT count(*) FROM pg_stat_activity WHERE application_name = $1",
+            &[&MCP_APP],
+        )
+        .await
+        .unwrap()
+        .get(0)
+}
+
+async fn wait_no_mcp_sessions(probe: &Client, what: &str) {
+    common::wait_until(what, Duration::from_secs(8), async || {
+        mcp_sessions(probe).await == 0
+    })
+    .await;
+}
+
+/// Настройка сессии — вне пакета транзакции: `ROLLBACK` транзакции защиты не возвращает значение роли или базы
+/// (на том же соединении после отката идут транзакции hypopg). Сессия начинается с `off`, как у базы с таким умолчанием.
+#[tokio::test]
+async fn standard_conforming_strings_stay_on_after_the_guard_rollback() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let c = common::superuser(&perf, "perf").await;
+    c.batch_execute("SET standard_conforming_strings = off")
+        .await
+        .unwrap();
+    guard::open_session(&c, EXPLAIN_TIMEOUT_S).await.unwrap();
+    let show = async |c: &Client, name: &str| -> String {
+        c.query_one(&format!("SHOW {name}"), &[])
+            .await
+            .unwrap()
+            .get(0)
+    };
+    assert_eq!(show(&c, "transaction_read_only").await, "on");
+    assert_eq!(show(&c, "statement_timeout").await, "5s");
+    c.batch_execute("ROLLBACK").await.unwrap();
+    assert_eq!(
+        show(&c, "standard_conforming_strings").await,
+        "on",
+        "настройка сессии пережила ROLLBACK"
+    );
+}
+
+/// `GuardTx`: своё соединение `glafira-pg-mcp` в транзакции `READ ONLY`; сброс без `finish` (тело вызова брошено) закрывает
+/// соединение — сессия сервера завершается вместе с виртуальным индексом в её памяти.
+#[tokio::test]
+async fn dropped_guard_leaves_no_session_and_no_hypothesis() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st, m) = open_for_llm(&perf).await;
+    let probe = common::superuser(&perf, "perf").await;
+    let tx = guard::begin(&st, "it", Some(&m), "perf", EXPLAIN_TIMEOUT_S)
+        .await
+        .unwrap();
+    assert_eq!(tx.member(), m);
+    assert!(tx.version_num() >= 130_000);
+    let row = tx
+        .client()
+        .query_one(
+            "SELECT pg_backend_pid(), current_setting('application_name'), \
+             current_setting('transaction_read_only'), current_setting('standard_conforming_strings')",
+            &[],
+        )
+        .await
+        .unwrap();
+    let pid: i32 = row.get(0);
+    assert_eq!(
+        (
+            row.get::<_, String>(1),
+            row.get::<_, String>(2),
+            row.get::<_, String>(3)
+        ),
+        (MCP_APP.to_string(), "on".to_string(), "on".to_string())
+    );
+    // Запись в транзакции защиты сервер не примет.
+    let e = tx
+        .client()
+        .batch_execute("CREATE TEMP TABLE it_guard_write (a int)")
+        .await
+        .unwrap_err();
+    assert_eq!(e.code().map(|c| c.code()), Some("25006"), "{e:?}");
+    tx.rollback().await.unwrap();
+    // Виртуальный индекс в новой транзакции той же сессии, без сброса — и брошенный `GuardTx`.
+    tx.client()
+        .batch_execute(
+            "BEGIN READ ONLY; SELECT * FROM hypopg_create_index('CREATE INDEX ON shop.orders (status)')",
+        )
+        .await
+        .unwrap();
+    let n: i64 = tx
+        .client()
+        .query_one("SELECT count(*) FROM hypopg_list_indexes", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(n, 1);
+    drop(tx);
+    common::wait_until(
+        "сессия брошенного GuardTx завершена",
+        Duration::from_secs(8),
+        async || {
+            probe
+                .query_one(
+                    "SELECT count(*) FROM pg_stat_activity WHERE pid = $1",
+                    &[&pid],
+                )
+                .await
+                .unwrap()
+                .get::<_, i64>(0)
+                == 0
+        },
+    )
+    .await;
+}
+
+/// Брошенный на любом `await` вызов `hypothetical_index` (сессия MCP закрылась) не оставляет сессии модели: ни
+/// открытой транзакции, ни виртуальных индексов. Точки обрыва — разные сроки; где бы ни оборвалось, сессий нет.
+#[tokio::test]
+async fn dropped_hypothesis_call_leaves_no_session() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st, m) = open_for_llm(&perf).await;
+    let probe = common::superuser(&perf, "perf").await;
+    let op = || {
+        hypo(json!({
+            "connectionId": "it", "member": m, "database": "perf",
+            "sql": "SELECT count(*) FROM shop.orders WHERE status = $1", "params": ["disputed"],
+            "indexes": ["CREATE INDEX ON shop.orders (status)", "CREATE INDEX ON shop.orders (total)"]
+        }))
+    };
+    // Полный вызов — для сравнения: после него сессий тоже нет.
+    ok(read_op(&st, op()).await);
+    wait_no_mcp_sessions(&probe, "после полного вызова").await;
+    for ms in [5, 15, 30, 60, 100, 200] {
+        let cut = tokio::time::timeout(Duration::from_millis(ms), read_op(&st, op())).await;
+        wait_no_mcp_sessions(
+            &probe,
+            &format!("после обрыва через {ms} мс ({})", cut.is_ok()),
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn model_sql_is_planned_without_execution() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st, m) = open_for_llm(&perf).await;
+    let probe = common::superuser(&perf, "perf").await;
+    let a = ok(read_op(
+        &st,
+        explain(json!({
+            "connectionId": "it", "database": "perf",
+            "sql": "  SELECT count(*) FROM shop.orders WHERE status = $1;", "params": ["disputed"]
+        })),
+    )
+    .await);
+    let PgOutput::Explain(out) = &a.body else {
+        panic!("не план")
+    };
+    assert_eq!(a.masked, None, "SQL модели не маскируется");
+    assert_eq!(out.member, m);
+    assert!(out.plan_text.contains("'disputed'"), "{}", out.plan_text);
+    assert!(
+        out.tables.contains(&"shop.orders".to_string()),
+        "{:?}",
+        out.tables
+    );
+    assert!(out.summary.total_cost > 0.0);
+    // Без значений на PG 16+ — обобщённый план.
+    let a = ok(read_op(
+        &st,
+        explain(json!({
+            "connectionId": "it", "database": "perf",
+            "sql": "SELECT count(*) FROM shop.orders WHERE status = $1"
+        })),
+    )
+    .await);
+    let PgOutput::Explain(out) = &a.body else {
+        panic!("не план")
+    };
+    assert!(
+        out.warnings[0].contains("GENERIC_PLAN"),
+        "{:?}",
+        out.warnings
+    );
+    // DML доходит до пробы плана (sqlcheck его пропускает): EXPLAIN проверяет права записи и без выполнения, у роли
+    // диагностики их нет — NOT_AUTHORIZED с подсказкой про запись.
+    let e = read_op(
+        &st,
+        explain(json!({
+            "connectionId": "it", "database": "perf",
+            "sql": "DELETE FROM shop.orders WHERE status = 'disputed'"
+        })),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, "NOT_AUTHORIZED", "{}", e.message);
+    assert!(e.message.contains("write statement"), "{}", e.message);
+    // Отказ сервера при разборе — invalid_sql с его текстом и позицией в тексте модели.
+    let e = read_op(
+        &st,
+        explain(json!({
+            "connectionId": "it", "database": "perf",
+            "sql": "SELECT no_such_column FROM shop.orders"
+        })),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, "invalid_sql", "{}", e.message);
+    assert!(
+        e.message.contains("no_such_column") && e.message.contains("(position 8)"),
+        "{}",
+        e.message
+    );
+    let e = read_op(
+        &st,
+        explain(json!({
+            "connectionId": "it", "database": "perf",
+            "sql": "SELECT count(*) FROM shop.orders WHERE status = $1", "params": ["a", "b"]
+        })),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, "invalid_argument", "{}", e.message);
+    wait_no_mcp_sessions(&probe, "после EXPLAIN").await;
+}
+
+/// Запрещённая функция за представлением: `sqlcheck` её не видит (в тексте только имя представления), VERBOSE-план —
+/// видит (§7.3, шаг 3). Функция — с `EXECUTE` для всех (`set_config`): у закрытых от `PUBLIC` (`pg_read_file`) права
+/// проверяет уже `ExecutorStart` пробы, и план не строится вовсе (`NOT_AUTHORIZED`).
+#[tokio::test]
+async fn denied_function_behind_a_view_is_found_in_the_plan() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st, _m) = open_for_llm(&perf).await;
+    let su = common::superuser(&perf, "perf").await;
+    su.batch_execute(
+        "CREATE OR REPLACE VIEW public.glafira_it_mcp_denied AS \
+         SELECT set_config('glafira.it', 'x', true) AS v; \
+         GRANT SELECT ON public.glafira_it_mcp_denied TO PUBLIC",
+    )
+    .await
+    .unwrap();
+    let perf_addr = perf.clone();
+    let _drop_view = common::restore_on_drop(move || {
+        common::run_sql_blocking(
+            &perf_addr,
+            "perf",
+            "DROP VIEW IF EXISTS public.glafira_it_mcp_denied",
+        )
+    });
+    let e = read_op(
+        &st,
+        explain(json!({
+            "connectionId": "it", "database": "perf",
+            "sql": "SELECT * FROM public.glafira_it_mcp_denied"
+        })),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, "forbidden_function", "{}", e.message);
+    assert!(e.message.contains("set_config"), "{}", e.message);
+}
+
+/// План текста pgss по `queryId` (§6.1): не SQL модели — выражения узлов маскируются (значения модели для `$N` дают
+/// в плане литерал, и он тоже уходит); без значений на PG 16+ — обобщённый план.
+#[tokio::test]
+async fn plan_of_a_pgss_query_is_masked() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st, _m) = open_for_llm(&perf).await;
+    // pgss хранит текст первого запроса той же формы (псевдонимы и литералы в `queryid` не входят): id — из
+    // `EXPLAIN (VERBOSE)` того же запроса («Query Identifier», `compute_query_id`).
+    const PROBE: &str = "SELECT count(*) FROM shop.orders WHERE status = 'disputed'";
+    let su = common::superuser(&perf, "perf").await;
+    su.batch_execute(PROBE).await.unwrap();
+    let plan: Value = su
+        .query_one(&format!("EXPLAIN (VERBOSE, FORMAT JSON) {PROBE}"), &[])
+        .await
+        .unwrap()
+        .get(0);
+    let qid = plan[0]["Query Identifier"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("{plan}"));
+    let a = ok(read_op(
+        &st,
+        explain(json!({
+            "connectionId": "it", "database": "perf", "queryId": qid.to_string(), "params": ["disputed"]
+        })),
+    )
+    .await);
+    let PgOutput::Explain(out) = &a.body else {
+        panic!("не план")
+    };
+    assert!(a.masked.is_some_and(|n| n >= 1), "{:?}", a.masked);
+    let v = serde_json::to_string(out).unwrap();
+    assert!(!v.contains("disputed"), "{v}");
+    assert!(out.plan_text.contains("$1"), "{}", out.plan_text);
+    let a = ok(read_op(
+        &st,
+        explain(json!({"connectionId": "it", "database": "perf", "queryId": qid.to_string()})),
+    )
+    .await);
+    let PgOutput::Explain(out) = &a.body else {
+        panic!("не план")
+    };
+    assert!(
+        out.warnings[0].contains("GENERIC_PLAN"),
+        "{:?}",
+        out.warnings
+    );
+    let e = read_op(
+        &st,
+        explain(json!({"connectionId": "it", "database": "perf", "queryId": "1"})),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, "not_found", "{}", e.message);
+}
+
+#[tokio::test]
+async fn hypotheses_through_the_gateway() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st, _m) = open_for_llm(&perf).await;
+    let probe = common::superuser(&perf, "perf").await;
+    let a = ok(read_op(
+        &st,
+        hypo(json!({
+            "connectionId": "it", "database": "perf",
+            "sql": "SELECT count(*) FROM shop.orders WHERE status = $1", "params": ["disputed"],
+            "indexes": ["CREATE INDEX ON shop.orders (status)", "CREATE INDEX ON shop.orders (total);"]
+        })),
+    )
+    .await);
+    let PgOutput::Hypo(out) = &a.body else {
+        panic!("не гипотеза")
+    };
+    assert_eq!(a.masked, None);
+    assert!(
+        out.indexes[0].used && !out.indexes[1].used,
+        "{:?}",
+        out.indexes
+    );
+    assert!(out.cost_after < out.cost_before);
+    assert!(out.plan_text.contains("status"), "{}", out.plan_text);
+    // Отказ сервера одной из гипотез — invalid_sql; база без hypopg — FEATURE_UNAVAILABLE с подсказкой.
+    let e = read_op(
+        &st,
+        hypo(json!({
+            "connectionId": "it", "database": "perf", "sql": "SELECT 1",
+            "indexes": ["CREATE INDEX ON shop.orders (no_such_column)"]
+        })),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, "invalid_sql", "{}", e.message);
+    let e = read_op(
+        &st,
+        hypo(json!({
+            "connectionId": "it", "database": "postgres", "sql": "SELECT 1",
+            "indexes": ["CREATE INDEX ON pg_class (relname)"]
+        })),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, "FEATURE_UNAVAILABLE", "{}", e.message);
+    assert!(
+        e.message.contains("CREATE EXTENSION hypopg"),
+        "{}",
+        e.message
+    );
+    wait_no_mcp_sessions(&probe, "после гипотез").await;
+}
+
+/// Наблюдение активности: подписка на сэмплер узла на окно и снятие её после окна.
+#[tokio::test]
+async fn activity_is_observed_and_the_subscription_is_released() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st, m) = open_for_llm(&perf).await;
+    let a = ok(observe_op(
+        &st,
+        PgObserve::Activity(serde_json::from_value(json!({"connectionId": "it"})).unwrap()),
+        ObserveCtx::new(Duration::from_secs(3)),
+    )
+    .await);
+    let PgOutput::ObservedActivity(o) = &a.body else {
+        panic!("не наблюдение")
+    };
+    assert!(o.samples >= 1, "{o:?}");
+    assert!(o.duration_ms >= 2_500, "{o:?}");
+    assert_eq!(o.summary["member"], json!(m));
+    assert!(a.masked.is_some(), "diagnostics — счёт литералов есть");
+    assert!(!st.samplers.is_running("it", &m), "подписка окна снята");
+}
+
+/// Наблюдение pgss: два чтения и разница — запрос, выполненный в окне, есть в ответе, его текст — без литералов.
+#[tokio::test]
+async fn top_queries_are_observed_as_a_difference() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st, _m) = open_for_llm(&perf).await;
+    let su = common::superuser(&perf, "perf").await;
+    let load = tokio::spawn(async move {
+        for _ in 0..20 {
+            su.batch_execute("SELECT count(*) FROM shop.orders WHERE status = 'paid'")
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    });
+    let a = ok(observe_op(
+        &st,
+        PgObserve::TopQueries(
+            serde_json::from_value(json!({"connectionId": "it", "sort": "calls", "limit": 100}))
+                .unwrap(),
+        ),
+        ObserveCtx::new(Duration::from_secs(3)),
+    )
+    .await);
+    load.await.unwrap();
+    let PgOutput::ObservedQueries(r) = &a.body else {
+        panic!("не наблюдение pgss")
+    };
+    assert_eq!(r.tool, "queries");
+    assert_eq!(r.data["mode"]["kind"], "window");
+    assert!(
+        r.data["coverageS"].as_u64().is_some_and(|s| s >= 3),
+        "{}",
+        r.data
+    );
+    let rows = r.data["rows"].as_array().unwrap();
+    // pgss хранит текст первого запроса той же формы — с `$1` вместо литерала.
+    let mine = rows
+        .iter()
+        .find(|row| {
+            row["text"]
+                .as_str()
+                .is_some_and(|t| t.contains("FROM shop.orders WHERE status = $1"))
+        })
+        .unwrap_or_else(|| panic!("{}", r.data));
+    assert!(mine["calls"].as_i64().is_some_and(|c| c >= 1), "{mine}");
+    assert!(!mine["text"].as_str().unwrap().contains("'paid'"), "{mine}");
+    assert!(a.masked.is_some());
+}

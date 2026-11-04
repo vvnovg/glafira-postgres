@@ -8,6 +8,9 @@ pub const POLICY_VENDOR: &str = "Glafira";
 pub const POLICY_PRODUCT: &str = "PostgreSQL";
 /// `application_name` соединений приложения: так их видно в `pg_stat_activity`.
 pub const PG_APPLICATION_NAME: &str = "glafira-pg";
+/// `application_name` соединений SQL модели MCP (спец. P4 §7.3): их нагрузку видно в `pg_stat_activity` отдельно от
+/// Glafira, и признак «сессия Glafira» (`glafira-pg`) у них не стоит.
+pub const MCP_APPLICATION_NAME: &str = "glafira-pg-mcp";
 /// Имя MCP-сервера: имя в `initialize`, ключ в конфигах клиентов (`qwen mcp add glafira-pg …`) и основа имени
 /// сокета или named pipe (`glafira-pg-mcp…`, спец. P4 §3.3).
 pub const MCP_SERVER_NAME: &str = "glafira-pg";

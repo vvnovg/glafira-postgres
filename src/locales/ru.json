@@ -232,7 +232,8 @@
     "hypo": {
       "badDdl": "Гипотеза — одна инструкция CREATE INDEX ON … без CONCURRENTLY и UNIQUE",
       "notInstalled": "hypopg не установлен в этой базе",
-      "rejected": "Сервер отверг виртуальный индекс: {{message}}"
+      "rejected": "Сервер отверг виртуальный индекс: {{message}}",
+      "badCount": "За один раз проверяется от 1 до {{max}} виртуальных индексов"
     },
     "plan": {
       "unparsed": "План не разобран (строка {{line}}): {{message}}"
@@ -1022,6 +1023,7 @@
       "statementsHidden": "{{part}}: нужна роль pg_read_all_stats",
       "statementsStarting": "{{part}}: сэмплер запросов запускается",
       "betweenReset": "{{part}}: статистика сбрасывалась между снимками",
+      "observedReset": "{{part}}: статистику сбросили во время наблюдения",
       "waitsProfileOff": "{{part}}: pg_wait_sampling.profile_queries выключен, ожидания — по сэмплам «Сессий»",
       "parts": {
         "queryId": "Идентификатор запроса (query_id)",

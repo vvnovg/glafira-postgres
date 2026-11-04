@@ -1,25 +1,31 @@
 //! Операции чтения MCP в приложении (спец. P4 §3.2, §5.2): `AppBackend` (`backend.rs`) отдаёт сюда каждый вызов
 //! `PgBackend`. На вызов: доступ к подключению (§4.3 шаг 3), открытие закрытого подключения тем же путём, что щелчок в
-//! дереве, существующая функция приложения (`diag::run`, карточка, каталог, EXPLAIN, hypopg) на общих пулах, маскирование
-//! на уровне `diagnostics` (§6.1) и английские тексты находок. Диапазоны параметров, усечение ответа и журнал — в крейте
-//! шлюза.
+//! дереве, существующая функция приложения (`diag::run`, карточка, каталог) на общих пулах, маскирование на уровне
+//! `diagnostics` (§6.1) и английские тексты находок. SQL модели (EXPLAIN, hypopg) — не на пулах: своё соединение на
+//! вызов со слоями §7.3 (`mcp::guard`). Наблюдение — `mcp::observe`. Диапазоны параметров, усечение ответа и журнал — в
+//! крейте шлюза.
 
 use std::time::Duration;
 
 use futures_util::future::join_all;
 use glafira_mcp_core::error::ToolError;
 use glafira_pg_mcp::model::{
-    ActivityOut, ColumnStat, ConnectionInfo, FindingOut, HealthSummary, MemberInfo, ObserveCtx,
-    PatroniInfo, PgAnswer, PgObserve, PgOutput, PgRead, Report, SettingOut, TableOut, TopologyInfo,
-    UnavailableOut,
+    ActivityOut, ColumnStat, ConnectionInfo, ExplainOut, FindingOut, HealthSummary, HypoIndexOut,
+    HypoOut, MemberInfo, ObserveCtx, PatroniInfo, PgAnswer, PgObserve, PgOutput, PgRead,
+    PlanSummaryOut, Report, SettingOut, TableOut, TopologyInfo, UnavailableOut,
 };
 use glafira_pg_mcp::params::{
-    ACTIVITY_LIMIT_DEFAULT, ActivityParams, QueryDetailsParams, RunDiagnosticParams,
-    SettingsParams, TOP_LIMIT_DEFAULT, TOPOLOGY_EVENTS_MAX, TableDetailsParams, TopQueriesParams,
+    ACTIVITY_LIMIT_DEFAULT, ActivityParams, ExplainParams, HypoIndexParams, QueryDetailsParams,
+    RunDiagnosticParams, SettingsParams, TOP_LIMIT_DEFAULT, TOPOLOGY_EVENTS_MAX,
+    TableDetailsParams, TopQueriesParams,
 };
 use pg_advisor::findings::FindingTarget;
+use pg_advisor::plan::json::from_json;
+use pg_advisor::plan::relations;
+use pg_advisor::plan::text_out::to_text;
 use pg_advisor::queries::{QuerySort, QueryStat};
 use pg_advisor::rules::sessions::SessionRow;
+use pg_advisor::sqlcheck::{self, Purpose};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use tokio_postgres::{Client, Row};
@@ -28,18 +34,31 @@ use super::access::{
     check_connection, effective_access, ensure_open, err, invalid_argument, masks, model_app_error,
     open_for_llm, tool_error,
 };
-use super::mask::{MAX_QUERY_BYTES, cut_text, has_texts, mask_opt, mask_query_detail, mask_report};
+use super::guard::{self, sql_error};
+use super::mask::{
+    MAX_QUERY_BYTES, cut_text, has_texts, mask_opt, mask_plan_value, mask_query_detail,
+    mask_recommendation, mask_report,
+};
+use super::observe;
 use super::secrets::redact_setting;
-use super::texts::{diag_catalog, finding_out, tool_id};
+use super::texts::{diag_catalog, finding_out, recommendation_out, tool_id};
 use crate::catalog::ddl::quote_ident;
 use crate::catalog::table::{self as catalog_table, Column, RelationRef, TableDetails};
 use crate::commands::catalog::{catalog_limit, on_catalog_node_within};
 use crate::conn::errors::from_pg;
 use crate::conn::profile::{ConnectionKind, LlmAccess};
-use crate::diag::queries::{LIMITS, QueriesMode, QueriesParams};
+use crate::diag::caps::V16;
+use crate::diag::queries::{Detect, LIMITS, QueriesMode, QueriesParams, detect};
 use crate::diag::query_detail::{self, QueryDetail};
-use crate::diag::{self, DEFAULT_WINDOW_S, DiagData, DiagReport, DiagRequest, Tool, Unavailable};
+use crate::diag::{
+    self, DEFAULT_WINDOW_S, DiagData, DiagReport, DiagRequest, Tool, Unavailable, on_member,
+};
 use crate::error::{AppError, AppResult};
+use crate::explain::hypopg::{self, HypoManyRequest, HypoManyResult, MAX_HYPO_INDEXES};
+use crate::explain::params::{count_params, normalize};
+use crate::explain::{MAX_SQL_BYTES, Params};
+use crate::product::SQL_MARKER;
+use crate::sampler::statements::{pgss_missing, pgss_too_old};
 use crate::state::AppState;
 use crate::storage::connections::ConnectionFolder;
 use crate::topology::journal::TopologyEvent;
@@ -74,8 +93,7 @@ pub const MAX_RUNNING: usize = 20;
 /// `partitioning.partitionsTotal`.
 pub const MAX_PARTITIONS: usize = 200;
 
-/// Операция чтения. Варианты задачи 12 (`explain_query`, `hypothetical_index`) до неё отвечают
-/// `internal: not implemented yet`.
+/// Операция чтения.
 pub async fn read_op(st: &AppState, op: PgRead) -> Result<PgAnswer, ToolError> {
     match op {
         PgRead::ListConnections => Ok(answer(PgOutput::Connections(list_connections(st)))),
@@ -88,22 +106,21 @@ pub async fn read_op(st: &AppState, op: PgRead) -> Result<PgAnswer, ToolError> {
         PgRead::QueryDetails(p) => query_details(st, p).await,
         PgRead::TableDetails(p) => table_details(st, p).await,
         PgRead::Settings(p) => settings(st, p).await,
-        PgRead::Explain(_) | PgRead::HypoIndex(_) => Err(not_yet()),
+        PgRead::Explain(p) => explain(st, p).await,
+        PgRead::HypoIndex(p) => hypo(st, p).await,
     }
 }
 
-/// Наблюдение (`observe_activity`, `observe_top_queries`) — задача 12.
+/// Наблюдение (`observe_activity`, `observe_top_queries`) — `mcp::observe`.
 pub async fn observe_op(
-    _st: &AppState,
-    _op: PgObserve,
-    _ctx: ObserveCtx,
+    st: &AppState,
+    op: PgObserve,
+    ctx: ObserveCtx,
 ) -> Result<PgAnswer, ToolError> {
-    Err(not_yet())
-}
-
-/// Операция ещё не подключена (уходит в задаче 12 плана P4a).
-fn not_yet() -> ToolError {
-    err("internal", "not implemented yet")
+    match op {
+        PgObserve::Activity(p) => observe::observe_activity(st, p, ctx).await,
+        PgObserve::TopQueries(p) => observe::observe_top_queries(st, p, ctx).await,
+    }
 }
 
 fn answer(body: PgOutput) -> PgAnswer {
@@ -1014,6 +1031,349 @@ async fn settings(st: &AppState, p: SettingsParams) -> Result<PgAnswer, ToolErro
     Ok(answer(PgOutput::Settings(
         rows.iter().map(setting_out).collect(),
     )))
+}
+
+/// Срок EXPLAIN модели, секунды (спец. §10.1): `statement_timeout` транзакции защиты и шагов hypopg.
+pub const EXPLAIN_TIMEOUT_S: u32 = 5;
+const GENERIC_WARNING: &str = "The plan is generic (GENERIC_PLAN): parameter values are unknown, estimates use average selectivity";
+/// Текст pgss чужого запроса без `pg_read_all_stats`.
+const HIDDEN_PGSS_TEXT: &str = "<insufficient privilege>";
+
+/// Проверка SQL модели до соединения (§7.1): длина и `sqlcheck` с позицией в тексте (без ведущих пробелов и хвостовых
+/// `;` — так же сервер видит нормализованный текст). `pg_query` разбирает на рабочем потоке tokio (стек 2 МиБ).
+fn check_sql(sql: &str, purpose: Purpose) -> Result<(), ToolError> {
+    if sql.len() > MAX_SQL_BYTES {
+        return Err(invalid_argument(format!(
+            "The SQL is longer than {MAX_SQL_BYTES} bytes"
+        )));
+    }
+    sqlcheck::check(sql, purpose).map(|_| ()).map_err(|r| {
+        let message = match r.position {
+            Some(p) => format!("{} (position {p})", r.message),
+            None => r.message,
+        };
+        err(r.code.as_str(), message)
+    })
+}
+
+/// Строки `indexes` у `hypothetical_index` до соединения: число (1–`MAX_HYPO_INDEXES`), `sqlcheck` (`HypoIndex`) и
+/// правило P3b `validate_ddl` (без `;`, комментариев, `$` и обратной косой вне кавычек).
+fn check_index_ddls(ddls: &[String]) -> Result<(), ToolError> {
+    if ddls.is_empty() || ddls.len() > MAX_HYPO_INDEXES {
+        return Err(invalid_argument(format!(
+            "Pass from 1 to {MAX_HYPO_INDEXES} statements in indexes"
+        )));
+    }
+    for ddl in ddls {
+        check_sql(&normalize(ddl), Purpose::HypoIndex)?;
+        hypopg::validate_ddl(ddl).map_err(|e| err("invalid_sql", e.message))?;
+    }
+    Ok(())
+}
+
+/// Откуда SQL: прислала модель или текст pgss по `queryId` — план по нему не «SQL модели» и маскируется (§6.1).
+struct SqlSource {
+    text: String,
+    from_pgss: bool,
+}
+
+/// Что прислала модель: ровно одно из `sql` и `queryId`; `sql` проверен `sqlcheck`, `queryId` — число. До соединения.
+enum Asked<'a> {
+    Sql(&'a str),
+    QueryId(i64),
+}
+
+fn asked<'a>(sql: Option<&'a str>, query_id: Option<&str>) -> Result<Asked<'a>, ToolError> {
+    match (sql, query_id) {
+        (Some(s), None) => {
+            check_sql(&normalize(s), Purpose::Explain)?;
+            Ok(Asked::Sql(s))
+        }
+        (None, Some(q)) => Ok(Asked::QueryId(
+            query_detail::parse_query_id(q).map_err(tool_error)?,
+        )),
+        _ => Err(invalid_argument("Pass exactly one of sql and queryId")),
+    }
+}
+
+fn pgss_text_sql(ns: &str) -> String {
+    format!(
+        "{SQL_MARKER}SELECT s.query FROM {ns}.pg_stat_statements(true) s JOIN pg_database d ON d.oid = s.dbid \
+         WHERE s.queryid = $1 AND d.datname = $2 AND s.query IS NOT NULL LIMIT 1"
+    )
+}
+
+/// Текст pgss запроса `query_id` в базе `database` на узле `member` (пул каталога узла: только чтение).
+async fn pgss_text(
+    st: &AppState,
+    id: &str,
+    member: &str,
+    database: &str,
+    query_id: i64,
+) -> Result<String, ToolError> {
+    let target = st
+        .runtimes
+        .diag_target(id, Some(member), false)
+        .map_err(tool_error)?;
+    let db = database.to_string();
+    let text = on_member(st, id, &target, |c| {
+        Box::pin(async move {
+            let pgss = match detect(c, None).await? {
+                Detect::Installed(p) => p,
+                Detect::TooOld(v) => return Err(pgss_too_old(&v)),
+                Detect::Missing => return Err(pgss_missing()),
+            };
+            let row = c
+                .query_opt(&pgss_text_sql(&pgss.schema), &[&query_id, &db])
+                .await
+                .map_err(|e| from_pg(&e))?;
+            Ok(row.and_then(|r| r.get::<_, Option<String>>(0)))
+        })
+    })
+    .await
+    .map_err(tool_error)?;
+    match text {
+        Some(t) if t == HIDDEN_PGSS_TEXT => Err(err(
+            "NOT_AUTHORIZED",
+            format!(
+                "The text of query {query_id} is hidden from the connection role: it needs pg_read_all_stats"
+            ),
+        )),
+        Some(t) => Ok(t),
+        None => Err(err(
+            "not_found",
+            format!(
+                "Query {query_id} is not in pg_stat_statements of database {database} on {member}"
+            ),
+        )),
+    }
+}
+
+/// Текст для плана: SQL модели как есть или текст pgss (он тоже проходит `sqlcheck`: в pgss бывают и служебные
+/// команды).
+async fn sql_source(
+    st: &AppState,
+    id: &str,
+    member: &str,
+    database: &str,
+    asked: Asked<'_>,
+) -> Result<SqlSource, ToolError> {
+    match asked {
+        Asked::Sql(s) => Ok(SqlSource {
+            text: s.to_string(),
+            from_pgss: false,
+        }),
+        Asked::QueryId(q) => {
+            let text = pgss_text(st, id, member, database, q).await?;
+            check_sql(&normalize(&text), Purpose::Explain)?;
+            Ok(SqlSource {
+                text,
+                from_pgss: true,
+            })
+        }
+    }
+}
+
+/// Параметры `$N` (§5.2): значения модели; без них — `GENERIC_PLAN` (PostgreSQL 16+, на старых значения обязательны);
+/// `genericPlan` — явная просьба об обобщённом плане.
+fn plan_params(
+    sql: &str,
+    values: Option<&[Option<String>]>,
+    generic: bool,
+    version_num: i32,
+) -> Result<Params, ToolError> {
+    let expected = count_params(sql);
+    match values {
+        Some(_) if generic => Err(invalid_argument(
+            "Pass either params or genericPlan, not both",
+        )),
+        Some(v) if v.len() != expected => Err(invalid_argument(format!(
+            "The query has {expected} parameters, {} values given",
+            v.len()
+        ))),
+        Some([]) => Ok(Params::None),
+        Some(v) => Ok(Params::Values { values: v.to_vec() }),
+        None if generic || expected > 0 => {
+            if version_num < V16 {
+                Err(invalid_argument(format!(
+                    "GENERIC_PLAN needs PostgreSQL 16 or newer (server_version_num {version_num}): pass params with {expected} values"
+                )))
+            } else {
+                Ok(Params::Generic)
+            }
+        }
+        None => Ok(Params::None),
+    }
+}
+
+fn plan_tree(raw: &Value) -> Result<pg_advisor::plan::PlanTree, ToolError> {
+    from_json(raw)
+        .map_err(|e| tool_error(AppError::internal_with(format!("plan JSON: {}", e.message))))
+}
+
+/// `explain_query` (§5.2, §7): `sqlcheck` до соединения, слои `GuardTx` (`prepare` под точкой сохранения, проба
+/// VERBOSE-плана с поиском запрещённых функций), план пробы — ответ (`explain_answer`).
+async fn explain(st: &AppState, p: ExplainParams) -> Result<PgAnswer, ToolError> {
+    let (_, access) = check_connection(st, &p.connection_id)?;
+    let asked = asked(p.sql.as_deref(), p.query_id.as_deref())?;
+    ensure_open(st, &p.connection_id).await?;
+    let member = member_or_leader(st, &p.connection_id, p.member.as_deref())?;
+    let source = sql_source(st, &p.connection_id, &member, &p.database, asked).await?;
+    let sql = normalize(&source.text);
+    let tx = guard::begin(
+        st,
+        &p.connection_id,
+        Some(&member),
+        &p.database,
+        EXPLAIN_TIMEOUT_S,
+    )
+    .await?;
+    let probed = async {
+        let params = plan_params(
+            &sql,
+            p.params.as_deref(),
+            p.generic_plan.unwrap_or(false),
+            tx.version_num(),
+        )?;
+        tx.prepare_one(&sql).await?;
+        let raw = tx.probe(&sql, &params).await?;
+        Ok::<_, ToolError>((params, raw))
+    }
+    .await;
+    tx.finish().await;
+    let (params, raw) = probed?;
+    explain_answer(member, raw, &params, source.from_pgss && masks(access))
+}
+
+/// Ответ `explain_query`: текст плана в виде psql, итоги, рекомендации P3b (английские тексты), таблицы, предупреждения.
+/// `mask` — план построен не по SQL модели (текст pgss) на уровне `diagnostics` (§6.1): выражения узлов плана
+/// маскируются до разбора дерева (текст плана и рекомендации строятся уже из замаскированного), а рекомендации — ещё
+/// раз целиком (`mask_recommendation`: параметры, команда, гипотеза); SQL модели и его план не маскируются.
+fn explain_answer(
+    member: String,
+    mut raw: Value,
+    params: &Params,
+    mask: bool,
+) -> Result<PgAnswer, ToolError> {
+    let mut masked = mask.then(|| mask_plan_value(&mut raw));
+    let tree = plan_tree(&raw)?;
+    let mut report = pg_advisor::plan_rules::evaluate(&tree);
+    if let Some(n) = masked.as_mut() {
+        *n += report
+            .recommendations
+            .iter_mut()
+            .map(mask_recommendation)
+            .sum::<usize>();
+    }
+    let mut warnings = Vec::new();
+    if *params == Params::Generic {
+        warnings.push(GENERIC_WARNING.to_string());
+    }
+    if !report.skipped.is_empty() {
+        warnings.push(format!(
+            "Rules that need execution data were not checked (the gateway never executes queries): {}",
+            report.skipped.join(", ")
+        ));
+    }
+    Ok(PgAnswer {
+        body: PgOutput::Explain(ExplainOut {
+            member,
+            plan_text: to_text(&tree),
+            summary: PlanSummaryOut {
+                total_cost: tree.root.total_cost,
+                plan_rows: tree.root.plan_rows,
+                planning_ms: tree.planning_ms,
+            },
+            recommendations: report
+                .recommendations
+                .iter()
+                .map(recommendation_out)
+                .collect(),
+            tables: relations(&tree)
+                .iter()
+                .map(|r| match &r.schema {
+                    Some(s) => format!("{s}.{}", r.name),
+                    None => r.name.clone(),
+                })
+                .collect(),
+            warnings,
+        }),
+        masked: masked.map(|n| n as u64),
+        rows: None,
+    })
+}
+
+/// `hypothetical_index` (§5.2): запрос — те же проверки и слои, что у `explain_query`, строки `indexes` — `sqlcheck`
+/// (`HypoIndex`) и `validate_ddl` до соединения; затем на том же соединении (после `ROLLBACK` транзакции защиты, сессия —
+/// с `standard_conforming_strings = on`) `hypopg::check_many`: все гипотезы в одной транзакции `READ ONLY` и
+/// `hypopg_reset()`; соединение закрывается (`finish`, а при брошенном вызове — сброс `GuardTx`).
+async fn hypo(st: &AppState, p: HypoIndexParams) -> Result<PgAnswer, ToolError> {
+    let (_, access) = check_connection(st, &p.connection_id)?;
+    let asked = asked(p.sql.as_deref(), p.query_id.as_deref())?;
+    check_index_ddls(&p.indexes)?;
+    ensure_open(st, &p.connection_id).await?;
+    let member = member_or_leader(st, &p.connection_id, p.member.as_deref())?;
+    let source = sql_source(st, &p.connection_id, &member, &p.database, asked).await?;
+    let sql = normalize(&source.text);
+    let tx = guard::begin(
+        st,
+        &p.connection_id,
+        Some(&member),
+        &p.database,
+        EXPLAIN_TIMEOUT_S,
+    )
+    .await?;
+    let checked = async {
+        let params = plan_params(&sql, p.params.as_deref(), false, tx.version_num())?;
+        tx.prepare_one(&sql).await?;
+        tx.probe(&sql, &params).await?;
+        tx.rollback().await?;
+        let req = HypoManyRequest {
+            member,
+            database: p.database.clone(),
+            sql,
+            params,
+            search_path: None,
+            index_ddls: p.indexes.clone(),
+            timeout_s: EXPLAIN_TIMEOUT_S,
+        };
+        hypopg::check_many(tx.client(), &req)
+            .await
+            .map_err(sql_error)
+    }
+    .await;
+    tx.finish().await;
+    hypo_answer(checked?, source.from_pgss && masks(access))
+}
+
+/// Ответ `hypothetical_index`; `mask` — как у `explain_answer`: выражения плана «после» по тексту pgss маскируются, и
+/// его текст строится из замаскированного JSON. DDL гипотез — от модели, не маскируются.
+fn hypo_answer(mut r: HypoManyResult, mask: bool) -> Result<PgAnswer, ToolError> {
+    let masked = if mask {
+        let n = mask_plan_value(&mut r.raw);
+        r.plan = plan_tree(&r.raw)?;
+        Some(n as u64)
+    } else {
+        None
+    };
+    Ok(PgAnswer {
+        body: PgOutput::Hypo(HypoOut {
+            cost_before: r.cost_before,
+            cost_after: r.cost_after,
+            indexes: r
+                .indexes
+                .into_iter()
+                .map(|i| HypoIndexOut {
+                    ddl: i.ddl,
+                    used: i.used,
+                    estimated_size_bytes: Some(i.estimated_size_bytes),
+                })
+                .collect(),
+            plan_text: to_text(&r.plan),
+        }),
+        masked,
+        rows: None,
+    })
 }
 
 #[cfg(test)]
@@ -2141,6 +2501,273 @@ mod tests {
         assert_eq!(p["partitions"].as_array().unwrap().len(), MAX_PARTITIONS);
         assert!(p.get("partitionsTotal").is_none());
         assert_eq!(out.table["ddl"], ddl.as_str());
+    }
+
+    // Задача 12: EXPLAIN и гипотезы.
+
+    #[test]
+    fn plan_parameters_follow_the_server_version() {
+        let v = |x: &[&str]| x.iter().map(|s| Some(s.to_string())).collect::<Vec<_>>();
+        assert_eq!(
+            plan_params("SELECT 1", None, false, 130_000).ok(),
+            Some(Params::None)
+        );
+        assert_eq!(
+            plan_params("SELECT $1", Some(v(&["7"]).as_slice()), false, 130_000).ok(),
+            Some(Params::Values { values: v(&["7"]) })
+        );
+        assert_eq!(
+            plan_params("SELECT $1", None, false, 170_000).ok(),
+            Some(Params::Generic)
+        );
+        assert_eq!(
+            plan_params("SELECT 1", None, true, 160_000).ok(),
+            Some(Params::Generic)
+        );
+        let e = plan_params("SELECT $1", None, false, 150_000)
+            .err()
+            .unwrap();
+        assert!(
+            e.code == "invalid_argument" && e.message.contains("16"),
+            "{}",
+            e.message
+        );
+        let e = plan_params("SELECT $1, $2", Some(v(&["7"]).as_slice()), false, 170_000)
+            .err()
+            .unwrap();
+        assert_eq!(e.code, "invalid_argument");
+        let e = plan_params("SELECT $1", Some(v(&["7"]).as_slice()), true, 170_000)
+            .err()
+            .unwrap();
+        assert_eq!(e.code, "invalid_argument");
+    }
+
+    #[test]
+    fn model_sql_is_checked_before_the_server() {
+        assert_eq!(
+            check_sql("SELECT pg_sleep(1)", Purpose::Explain)
+                .err()
+                .unwrap()
+                .code,
+            "forbidden_function"
+        );
+        assert_eq!(
+            check_sql("SELECT 1; DELETE FROM t", Purpose::Explain)
+                .err()
+                .unwrap()
+                .code,
+            "invalid_sql"
+        );
+        assert!(check_sql("DELETE FROM t WHERE id = 1", Purpose::Explain).is_ok());
+        assert!(check_sql("CREATE INDEX ON t (a)", Purpose::HypoIndex).is_ok());
+        let long = format!("SELECT {}", "1,".repeat(MAX_SQL_BYTES));
+        assert_eq!(
+            check_sql(&long, Purpose::Explain).err().unwrap().code,
+            "invalid_argument"
+        );
+        assert!(crate::product::is_marked_sql(&pgss_text_sql("\"public\"")));
+    }
+
+    // Сверх плана: маскирование плана по тексту pgss, проверки EXPLAIN и гипотез до соединения.
+
+    /// План `Append` по 10 партициям с фильтром-выражением по дате (правило `plan_no_pruning` без ANALYZE даёт
+    /// рекомендацию с условием и его переписью) — литерал `2026-01-05` в каждом `Filter`.
+    fn partitions_plan() -> Value {
+        let child = |i: usize| {
+            json!({
+                "Node Type": "Seq Scan", "Parent Relationship": "Member", "Relation Name": format!("events_{i}"),
+                "Schema": "shop", "Alias": format!("events_{i}"), "Startup Cost": 0.0, "Total Cost": 10.0,
+                "Plan Rows": 1, "Plan Width": 8, "Output": ["id"],
+                "Filter": "((created_at)::date = '2026-01-05'::date)"
+            })
+        };
+        json!([{
+            "Plan": {
+                "Node Type": "Append", "Startup Cost": 0.0, "Total Cost": 100.0, "Plan Rows": 10, "Plan Width": 8,
+                "Plans": (0..10).map(child).collect::<Vec<_>>()
+            }
+        }])
+    }
+
+    /// План по тексту pgss на уровне `diagnostics` (§6.1): ни текст плана, ни рекомендации (условие, перепись,
+    /// заголовок и доказательство) не несут литерал; план по SQL модели — как есть.
+    #[test]
+    fn plan_of_a_pgss_text_is_masked_and_plan_of_model_sql_is_not() {
+        let a = explain_answer("pg-1".into(), partitions_plan(), &Params::None, true).unwrap();
+        let PgOutput::Explain(out) = &a.body else {
+            panic!("не план")
+        };
+        assert!(
+            !out.recommendations.is_empty(),
+            "фикстура даёт рекомендацию"
+        );
+        let v = serde_json::to_string(out).unwrap();
+        assert!(!v.contains("2026-01-05"), "{v}");
+        assert!(out.plan_text.contains("$1"), "{}", out.plan_text);
+        assert!(a.masked.is_some_and(|n| n >= 10), "{:?}", a.masked);
+        assert_eq!(out.tables.len(), 10);
+        assert!(out.tables.contains(&"shop.events_0".to_string()));
+        assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
+        assert!(
+            out.warnings[0].contains("plan_seq_scan_filter"),
+            "правила с фактом не проверялись: {:?}",
+            out.warnings
+        );
+
+        let a = explain_answer("pg-1".into(), partitions_plan(), &Params::Generic, false).unwrap();
+        let PgOutput::Explain(out) = &a.body else {
+            panic!("не план")
+        };
+        assert_eq!(a.masked, None);
+        assert!(out.plan_text.contains("2026-01-05"), "{}", out.plan_text);
+        assert_eq!(out.warnings[0], GENERIC_WARNING);
+        assert_eq!(out.member, "pg-1");
+    }
+
+    #[test]
+    fn hypothesis_plan_of_a_pgss_text_is_masked() {
+        let raw = partitions_plan();
+        let result = || HypoManyResult {
+            cost_before: 100.0,
+            cost_after: 50.0,
+            indexes: vec![hypopg::HypoIndexResult {
+                ddl: "CREATE INDEX ON shop.events_0 (created_at) WHERE kind = 'vip'".into(),
+                used: true,
+                estimated_size_bytes: 8192,
+            }],
+            plan: from_json(&raw).unwrap(),
+            raw: raw.clone(),
+        };
+        let a = hypo_answer(result(), true).unwrap();
+        let PgOutput::Hypo(out) = &a.body else {
+            panic!("не гипотеза")
+        };
+        assert!(!out.plan_text.contains("2026-01-05"), "{}", out.plan_text);
+        assert_eq!(a.masked, Some(10));
+        assert!(
+            out.indexes[0].ddl.contains("'vip'"),
+            "DDL гипотезы — от модели, не маскируется"
+        );
+        assert_eq!(
+            (
+                out.cost_before,
+                out.cost_after,
+                out.indexes[0].estimated_size_bytes
+            ),
+            (100.0, 50.0, Some(8192))
+        );
+        let a = hypo_answer(result(), false).unwrap();
+        let PgOutput::Hypo(out) = &a.body else {
+            panic!("не гипотеза")
+        };
+        assert_eq!(a.masked, None);
+        assert!(out.plan_text.contains("2026-01-05"));
+    }
+
+    #[test]
+    fn hypothesis_ddls_are_checked_before_the_server() {
+        let ddls = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(
+            check_index_ddls(&ddls(&["CREATE INDEX ON t (a)", "CREATE INDEX ON t (b);"])).is_ok()
+        );
+        assert_eq!(check_index_ddls(&[]).unwrap_err().code, "invalid_argument");
+        assert_eq!(
+            check_index_ddls(&ddls(&["CREATE INDEX ON t (a)"; 6]))
+                .unwrap_err()
+                .code,
+            "invalid_argument"
+        );
+        for (ddl, code) in [
+            ("CREATE UNIQUE INDEX ON t (a)", "invalid_sql"),
+            ("CREATE INDEX CONCURRENTLY ON t (a)", "invalid_sql"),
+            ("CREATE INDEX ON t (a); DROP TABLE t", "invalid_sql"),
+            ("CREATE INDEX ON t ((pg_sleep(1)))", "forbidden_function"),
+            // `sqlcheck` пропускает комментарий, правило P3b — нет.
+            ("CREATE INDEX ON t (a) /* x */", "invalid_sql"),
+        ] {
+            assert_eq!(
+                check_index_ddls(&ddls(&[ddl])).unwrap_err().code,
+                code,
+                "{ddl}"
+            );
+        }
+    }
+
+    #[test]
+    fn sql_or_query_id_is_checked_before_the_server() {
+        assert!(matches!(
+            asked(Some("SELECT 1"), None),
+            Ok(Asked::Sql("SELECT 1"))
+        ));
+        assert!(matches!(asked(None, Some(" 42 ")), Ok(Asked::QueryId(42))));
+        for (sql, qid, code) in [
+            (Some("SELECT 1"), Some("42"), "invalid_argument"),
+            (None, None, "invalid_argument"),
+            (None, Some("x"), "invalid_argument"),
+            (
+                Some("SELECT pg_read_file('/etc/passwd')"),
+                None,
+                "forbidden_function",
+            ),
+            (Some("EXPLAIN SELECT 1"), None, "invalid_sql"),
+            (Some("SELECT 1 INTO t"), None, "invalid_sql"),
+        ] {
+            let e = asked(sql, qid).err().unwrap();
+            assert_eq!(e.code, code, "{sql:?} {qid:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn explain_and_hypothesis_check_access_and_sql_before_opening() {
+        let (_dir, st) = state_with(vec![member("pg-1", Role::Primary)]);
+        let explain = |v: Value| PgRead::Explain(serde_json::from_value(v).unwrap());
+        let hypo = |v: Value| PgRead::HypoIndex(serde_json::from_value(v).unwrap());
+        let e = err(read_op(
+            &st,
+            explain(json!({"connectionId": "off", "database": "d", "sql": "SELECT pg_sleep(1)"})),
+        )
+        .await);
+        assert_eq!(e.code, "not_allowed", "доступ — раньше SQL");
+        for (op, code) in [
+            (
+                explain(
+                    json!({"connectionId": "on", "database": "d", "sql": "SELECT pg_sleep(1)"}),
+                ),
+                "forbidden_function",
+            ),
+            (
+                explain(
+                    json!({"connectionId": "on", "database": "d", "sql": "SELECT 1; SELECT 2"}),
+                ),
+                "invalid_sql",
+            ),
+            (
+                explain(json!({"connectionId": "on", "database": "d", "queryId": "abc"})),
+                "invalid_argument",
+            ),
+            (
+                hypo(
+                    json!({"connectionId": "on", "database": "d", "sql": "SELECT 1",
+                    "indexes": ["CREATE INDEX ON t (a); DROP TABLE t"]}),
+                ),
+                "invalid_sql",
+            ),
+            (
+                hypo(
+                    json!({"connectionId": "on", "database": "d", "sql": "SELECT dblink('x', 'y')",
+                    "indexes": ["CREATE INDEX ON t (a)"]}),
+                ),
+                "forbidden_function",
+            ),
+        ] {
+            let e = err(read_op(&st, op).await);
+            assert_eq!(e.code, code, "{}", e.message);
+        }
+        assert_eq!(
+            st.runtimes.view("on").state,
+            ConnState::Disconnected,
+            "отвергнутый SQL не открывает подключение"
+        );
     }
 
     #[tokio::test]

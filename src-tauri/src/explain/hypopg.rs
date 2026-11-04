@@ -267,6 +267,145 @@ pub async fn check_on(c: &Client, req: &HypoRequest) -> AppResult<HypoResult> {
     })
 }
 
+/// Предел гипотез в одной проверке (`hypothetical_index` MCP, «Сравнить планы» P4b).
+pub const MAX_HYPO_INDEXES: usize = 5;
+
+/// Проверка нескольких индексов-гипотез разом (P4): все виртуальные индексы — в одной транзакции «после».
+#[derive(Debug, Clone, PartialEq)]
+pub struct HypoManyRequest {
+    pub member: String,
+    pub database: String,
+    pub sql: String,
+    pub params: Params,
+    pub search_path: Option<String>,
+    /// `CREATE INDEX ON …` без `CONCURRENTLY` и `UNIQUE`, 1–`MAX_HYPO_INDEXES`.
+    pub index_ddls: Vec<String>,
+    /// `statement_timeout` шагов, секунды: 5 у MCP (спец. P4 §10.1), `PROBE_TIMEOUT_S` у интерфейса.
+    pub timeout_s: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HypoIndexResult {
+    /// DDL гипотезы без хвостовой `;`.
+    pub ddl: String,
+    /// План «после» использует этот виртуальный индекс.
+    pub used: bool,
+    pub estimated_size_bytes: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HypoManyResult {
+    pub cost_before: f64,
+    pub cost_after: f64,
+    pub indexes: Vec<HypoIndexResult>,
+    pub plan: PlanTree,
+    /// JSON плана «после» как есть: MCP маскирует в нём выражения у плана по тексту pgss.
+    pub raw: serde_json::Value,
+}
+
+/// Проверки до сервера: число гипотез, каждая DDL (`validate_ddl`), запрос — как у пробного плана; итог —
+/// нормализованный SQL.
+pub fn validate_many(req: &HypoManyRequest) -> AppResult<String> {
+    if req.index_ddls.is_empty() || req.index_ddls.len() > MAX_HYPO_INDEXES {
+        return Err(app_err!(
+            ErrorCode::InvalidInput,
+            "errors.hypo.badCount",
+            "From 1 to {{max}} hypothetical indexes can be checked at once",
+            max = MAX_HYPO_INDEXES
+        ));
+    }
+    for ddl in &req.index_ddls {
+        validate_ddl(ddl)?;
+    }
+    validate(&ExplainRequest {
+        member: req.member.clone(),
+        database: req.database.clone(),
+        sql: req.sql.clone(),
+        mode: Mode::Plan,
+        params: req.params.clone(),
+        timeout_s: req.timeout_s,
+        search_path: req.search_path.clone(),
+        confirmation: Confirmation::default(),
+        force_write: false,
+        write_confirmed: false,
+    })
+}
+
+/// Несколько гипотез на готовом соединении EXPLAIN: план «до» в `READ ONLY`, затем одна транзакция `READ ONLY` — все
+/// индексы, их размеры, план «после», `hypopg_reset()`, `ROLLBACK` (сброс — и при ошибке, как у `hypothesize`). После
+/// вызова в сессии нет виртуальных индексов (кроме истёкшего клиентского срока — тогда соединение закрывает вызывающий).
+pub async fn check_many(c: &Client, req: &HypoManyRequest) -> AppResult<HypoManyResult> {
+    let sql = validate_many(req)?;
+    let schema = schema_of(c).await?.ok_or_else(not_installed)?;
+    let ctx = probe_ctx(&req.sql, &req.params);
+    if req.params == Params::Generic {
+        let h = within(req.timeout_s, async { head(c).await.map_err(Step::App) })
+            .await
+            .map_err(|e| app(e, ctx))?;
+        if h.version_num < V16 {
+            return Err(app_err!(
+                ErrorCode::FeatureUnavailable,
+                "errors.explain.genericUnsupported",
+                "GENERIC_PLAN needs PostgreSQL 16 or newer: enter parameter values"
+            ));
+        }
+    }
+    let options = probe_options(&req.params);
+    let sp = req.search_path.as_deref();
+    let before = within(
+        req.timeout_s,
+        explain_in_tx(c, ctx, req.timeout_s, sp, &options, &sql, &req.params),
+    )
+    .await
+    .map_err(|e| app(e, ctx))?;
+    let cost_before = parse(&before)?.root.total_cost;
+    let ServiceSql {
+        create: create_sql,
+        size: size_sql,
+        reset: reset_sql,
+    } = ServiceSql::new(&schema);
+    let work = within(req.timeout_s, async {
+        begin_tx(c, ctx, req.timeout_s, sp).await?;
+        let mut created = Vec::with_capacity(req.index_ddls.len());
+        for ddl in &req.index_ddls {
+            let ddl = normalize(ddl);
+            let row = c
+                .query_one(&create_sql, &[&ddl])
+                .await
+                .map_err(|e| Step::App(ddl_error(&e)))?;
+            let (indexrelid, name): (u32, String) = (row.get(0), row.get(1));
+            let bytes: i64 = c.query_one(&size_sql, &[&indexrelid]).await?.get(0);
+            created.push((ddl, name, bytes));
+        }
+        let raw = explain_in_open_tx(c, &options, &sql, &req.params).await?;
+        Ok((created, raw))
+    })
+    .await;
+    let work = match work {
+        Err(e) if client_deadline(&e) => return Err(app(e, ctx)),
+        w => w,
+    };
+    let cleanup = cleanup(c, &reset_sql).await;
+    let (created, raw) = work.map_err(|e| app(e, ctx))?;
+    cleanup?;
+    let plan = parse(&raw)?;
+    Ok(HypoManyResult {
+        cost_before,
+        cost_after: plan.root.total_cost,
+        indexes: created
+            .into_iter()
+            .map(|(ddl, name, estimated_size_bytes)| HypoIndexResult {
+                used: uses_index(&plan, &name),
+                ddl,
+                estimated_size_bytes,
+            })
+            .collect(),
+        plan,
+        raw,
+    })
+}
+
 /// Гипотеза в одной транзакции `READ ONLY` (`schema` — схема hypopg, `sql` — нормализованный текст запроса):
 /// `begin_tx` (срок, `search_path` запроса), индекс, размер, EXPLAIN «после», `hypopg_reset()`, `ROLLBACK`.
 pub async fn hypothesize(
@@ -465,6 +604,50 @@ mod tests {
     fn schema_is_quoted() {
         assert_eq!(quote_ident("public"), "\"public\"");
         assert_eq!(quote_ident("we\"ird"), "\"we\"\"ird\"");
+    }
+
+    #[test]
+    fn many_hypotheses_are_checked_before_the_server() {
+        let req = |ddls: Vec<&str>| HypoManyRequest {
+            member: "pg-1".into(),
+            database: "perf".into(),
+            sql: "SELECT 1 FROM t WHERE a = $1;".into(),
+            params: Params::Values {
+                values: vec![Some("1".into())],
+            },
+            search_path: None,
+            index_ddls: ddls.into_iter().map(str::to_string).collect(),
+            timeout_s: 5,
+        };
+        assert_eq!(
+            validate_many(&req(vec!["CREATE INDEX ON t (a)", "CREATE INDEX ON t (b)"])).unwrap(),
+            "SELECT 1 FROM t WHERE a = $1"
+        );
+        assert_eq!(
+            validate_many(&req(vec![])).unwrap_err().key,
+            "errors.hypo.badCount"
+        );
+        assert_eq!(
+            validate_many(&req(vec!["CREATE INDEX ON t (a)"; 6]))
+                .unwrap_err()
+                .key,
+            "errors.hypo.badCount"
+        );
+        assert_eq!(
+            validate_many(&req(vec![
+                "CREATE INDEX ON t (a)",
+                "CREATE UNIQUE INDEX ON t (b)"
+            ]))
+            .unwrap_err()
+            .key,
+            "errors.hypo.badDdl"
+        );
+        let mut r = req(vec!["CREATE INDEX ON t (a)"]);
+        r.params = Params::None;
+        assert_eq!(
+            validate_many(&r).unwrap_err().key,
+            "errors.explain.paramsCount"
+        );
     }
 
     #[test]

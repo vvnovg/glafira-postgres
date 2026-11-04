@@ -230,7 +230,8 @@
     "hypo": {
       "badDdl": "The hypothesis must be a single CREATE INDEX ON … statement without CONCURRENTLY or UNIQUE",
       "notInstalled": "hypopg is not installed in this database",
-      "rejected": "The server rejected the hypothetical index: {{message}}"
+      "rejected": "The server rejected the hypothetical index: {{message}}",
+      "badCount": "From 1 to {{max}} hypothetical indexes can be checked at once"
     },
     "plan": {
       "unparsed": "The plan could not be parsed (line {{line}}): {{message}}"
@@ -998,6 +999,7 @@
       "statementsHidden": "{{part}}: needs the pg_read_all_stats role",
       "statementsStarting": "{{part}}: the statements sampler is starting",
       "betweenReset": "{{part}}: statistics were reset between the snapshots",
+      "observedReset": "{{part}}: statistics were reset during the observation",
       "waitsProfileOff": "{{part}}: pg_wait_sampling.profile_queries is off, waits come from the Sessions sampler",
       "parts": {
         "queryId": "Query ID (query_id)",

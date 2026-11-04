@@ -176,16 +176,20 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(e.code, "not_allowed");
-        // Наблюдение подключает задача 12 плана P4a.
-        let e = b
-            .observe(
-                PgObserve::Activity(
-                    serde_json::from_value(serde_json::json!({ "connectionId": "nope" })).unwrap(),
-                ),
-                ObserveCtx::new(std::time::Duration::from_secs(10)),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(e.code, "internal");
+        // Наблюдение — тоже через проверку доступа к подключению (`mcp::observe`).
+        for op in [
+            PgObserve::Activity(
+                serde_json::from_value(serde_json::json!({ "connectionId": "nope" })).unwrap(),
+            ),
+            PgObserve::TopQueries(
+                serde_json::from_value(serde_json::json!({ "connectionId": "nope" })).unwrap(),
+            ),
+        ] {
+            let e = b
+                .observe(op, ObserveCtx::new(std::time::Duration::from_secs(10)))
+                .await
+                .unwrap_err();
+            assert_eq!(e.code, "not_allowed");
+        }
     }
 }

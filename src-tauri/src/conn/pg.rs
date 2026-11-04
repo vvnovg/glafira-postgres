@@ -72,6 +72,8 @@ pub struct ConnectSpec {
     /// Параметры сессии (`-c …`): `SESSION_OPTIONS` у пулов, `ACTION_SESSION_OPTIONS` у действий,
     /// `EXPLAIN_SESSION_OPTIONS` у EXPLAIN.
     pub options: &'static str,
+    /// Имя приложения сессии (`application_name`): `glafira-pg`; у соединений SQL модели MCP — `glafira-pg-mcp`.
+    pub application_name: &'static str,
 }
 
 impl std::fmt::Debug for ConnectSpec {
@@ -135,6 +137,7 @@ impl ConnectSpec {
             socks,
             ssh_target: socks.and(profile.ssh.as_ref().map(|s| s.target.clone())),
             options: SESSION_OPTIONS,
+            application_name: crate::product::PG_APPLICATION_NAME,
         })
     }
 
@@ -150,12 +153,18 @@ impl ConnectSpec {
         self
     }
 
+    /// То же соединение с другим `application_name` (MCP: `product::MCP_APPLICATION_NAME`).
+    pub fn with_application_name(mut self, name: &'static str) -> Self {
+        self.application_name = name;
+        self
+    }
+
     pub fn pg_config(&self) -> tokio_postgres::Config {
         use tokio_postgres::config::SslMode as Wire;
         let mut c = tokio_postgres::Config::new();
         c.user(&self.user)
             .dbname(&self.database)
-            .application_name(crate::product::PG_APPLICATION_NAME)
+            .application_name(self.application_name)
             .options(self.options)
             .ssl_mode(match self.ssl_mode {
                 SslMode::Disable => Wire::Disable,
@@ -349,6 +358,18 @@ mod tests {
     }
 
     #[test]
+    fn application_name_defaults_to_glafira_and_can_be_replaced() {
+        let spec = loopback_spec(5432, "localhost", SslMode::Disable, None);
+        assert_eq!(spec.pg_config().get_application_name(), Some("glafira-pg"));
+        let mcp = spec
+            .for_explain()
+            .with_application_name(crate::product::MCP_APPLICATION_NAME);
+        let cfg = mcp.pg_config();
+        assert_eq!(cfg.get_application_name(), Some("glafira-pg-mcp"));
+        assert_eq!(cfg.get_options(), Some(EXPLAIN_SESSION_OPTIONS));
+    }
+
+    #[test]
     fn action_spec_is_read_write_with_the_same_limits() {
         let spec = loopback_spec(5432, "localhost", SslMode::Disable, None);
         assert_eq!(spec.pg_config().get_options(), Some(SESSION_OPTIONS));
@@ -387,6 +408,7 @@ mod tests {
             socks: None,
             ssh_target: None,
             options: SESSION_OPTIONS,
+            application_name: crate::product::PG_APPLICATION_NAME,
         }
     }
 
