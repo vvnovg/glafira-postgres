@@ -2,7 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
-import type { ConnectionProfile, McpAuditEntry, McpStatus } from "../../api/types";
+import type { McpAuditEntry, McpStatus } from "../../api/types";
 import { MCP_AUDIT_KEY, MCP_STATUS_KEY, useMcpStatus } from "../../lib/useMcpStatus";
 import { openExplainWithPrefill } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
@@ -33,8 +33,8 @@ function stateText(s: McpStatus, t: TFunction): string {
  * настройка включена: сервер работает, обслуживается другим окном или упал при запуске (`server` ≠ `stopped`).
  */
 /** «Открыть в консоли EXPLAIN» из журнала (спец. P4 §11): консоль подключения с SQL, базой и узлом вызова, без запуска. */
-function openInConsole(e: McpAuditEntry, connections?: ConnectionProfile[]): void {
-  const r = consoleTarget(e, connections);
+function openInConsole(e: McpAuditEntry): void {
+  const r = consoleTarget(e);
   if ("target" in r) openExplainWithPrefill(r.target.connectionId, { sql: r.target.sql, database: r.target.database, member: r.target.member });
 }
 

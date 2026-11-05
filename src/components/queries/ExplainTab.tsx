@@ -87,7 +87,7 @@ export function ExplainTab({
   useEffect(() => {
     if (!prefill) return;
     setSql(prefill.sql);
-    setDb(prefill.database);
+    setDb(prefill.database ?? null);
     setNode(prefill.member ?? null);
     setSource("sql");
   }, [prefill?.nonce]);

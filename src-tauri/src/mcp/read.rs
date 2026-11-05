@@ -60,7 +60,7 @@ use crate::explain::{MAX_SQL_BYTES, Params};
 use crate::product::SQL_MARKER;
 use crate::sampler::statements::{pgss_missing, pgss_too_old};
 use crate::state::AppState;
-use crate::storage::connections::ConnectionFolder;
+use crate::storage::connections::{ConnectionFolder, ConnectionProfile};
 use crate::topology::journal::TopologyEvent;
 use crate::topology::model::{Member, Topology};
 use crate::topology::runtime::{ConnState, not_connected};
@@ -167,10 +167,7 @@ fn folder_path(folders: &[ConnectionFolder], id: &str) -> Vec<String> {
 
 /// База вызова: заданная моделью, иначе база подключения по умолчанию (`database` в `list_connections`). Пустая строка
 /// — как «не задана» (крейт шлюза уже обнуляет её в `validate`; здесь — страховка для прямых вызовов).
-fn resolve_database(
-    profile: &crate::storage::connections::ConnectionProfile,
-    asked: Option<&str>,
-) -> String {
+fn resolve_database(profile: &ConnectionProfile, asked: Option<&str>) -> String {
     match asked.map(str::trim) {
         Some(d) if !d.is_empty() => d.to_string(),
         _ => profile.pg.database.clone(),

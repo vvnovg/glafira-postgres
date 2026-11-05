@@ -551,6 +551,8 @@ async fn omitted_or_blank_database_reaches_the_backend_as_none() {
         "журнал: как прислала модель"
     );
     assert_eq!(tail[1]["args"]["database"], " ");
+    // Опущенный `database` в журнале — null, а не подставленная база по умолчанию.
+    assert!(tail[2]["args"]["database"].is_null(), "{}", tail[2]["args"]);
 }
 
 #[tokio::test]

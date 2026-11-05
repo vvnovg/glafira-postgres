@@ -13,7 +13,8 @@ export const SQL_AUDIT_LIMIT_BYTES = 16_384;
 /** Что подставить в консоль: подключение, база, SQL и узел вызова (без узла — «за лидером»). */
 export interface ConsoleTarget {
   connectionId: string;
-  database: string;
+  /** Не задана — консоль берёт базу подключения по умолчанию (профиль). */
+  database?: string;
   sql: string;
   member?: string;
 }
@@ -23,19 +24,20 @@ export function isConsoleCall(e: McpAuditEntry): boolean {
   return e.event === "call" && e.outcome === "ok" && CONSOLE_TOOLS.has(e.tool ?? "");
 }
 
-/** Внутренний признак: базу вызова берём из списка подключений, а он ещё не загружен (`openBlocked` его не показывает). */
-const PENDING_CONNECTIONS = "pending-connections";
-
-const str = (v: unknown): string | null => (typeof v === "string" && v !== "" ? v : null);
+/** Строка без пробелов по краям; пустая и из пробелов — «не задана» (как в бэкенде, `resolve_database`). */
+const str = (v: unknown): string | null => {
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  return t === "" ? null : t;
+};
 
 /**
  * Цель «Открыть в консоли» из аргументов вызова или ключ подсказки, почему её нет: усечённые аргументы журнал помечает
  * `_truncated: true`, `sql` длиной в предел мог быть обрезан, вызов по `queryId` текста запроса в журнале не оставил.
- * Вызов без `database` (параметр необязателен) открывается с базой подключения по умолчанию (`pg.database` профиля, она же
- * `database` в `list_connections`): журнал хранит то, что прислала модель, поэтому базу берём из списка подключений;
- * пока список не загружен — `PENDING_CONNECTIONS`, нет подключения в списке — «аргументы усечены» (как раньше без базы).
+ * Вызов без `database` (параметр необязателен; пустая строка — то же) открывается без базы: консоль EXPLAIN берёт
+ * базу подключения по умолчанию (профиль, она же `database` в `list_connections`).
  */
-export function consoleTarget(e: McpAuditEntry, connections?: ConnectionProfile[]): { target: ConsoleTarget } | { blocked: string } {
+export function consoleTarget(e: McpAuditEntry): { target: ConsoleTarget } | { blocked: string } {
   const a = e.args;
   if (!a || typeof a !== "object" || Array.isArray(a)) return { blocked: "settings.mcp.audit.openArgsCut" };
   const args = a as Record<string, unknown>;
@@ -46,14 +48,9 @@ export function consoleTarget(e: McpAuditEntry, connections?: ConnectionProfile[
   if (new TextEncoder().encode(sql).length >= SQL_AUDIT_LIMIT_BYTES) return { blocked: "settings.mcp.audit.openArgsCut" };
   const connectionId = e.connection?.id ?? str(args.connectionId);
   if (connectionId === null) return { blocked: "settings.mcp.audit.openArgsCut" };
-  let database = str(args.database);
-  if (database === null) {
-    if (!connections) return { blocked: PENDING_CONNECTIONS };
-    database = str(connections.find((c) => c.id === connectionId)?.pg.database);
-    if (database === null) return { blocked: "settings.mcp.audit.openArgsCut" };
-  }
+  const database = str(args.database) ?? undefined;
   const member = str(args.member) ?? e.member ?? undefined;
-  return { target: member ? { connectionId, database, sql, member } : { connectionId, database, sql } };
+  return { target: { connectionId, ...(database ? { database } : {}), sql, ...(member ? { member } : {}) } };
 }
 
 /**
@@ -66,8 +63,8 @@ export function openBlocked(
   connections: ConnectionProfile[] | undefined,
   connectionsFailed: boolean,
 ): string | null {
-  const t = consoleTarget(e, connections);
-  if ("blocked" in t) return t.blocked === PENDING_CONNECTIONS ? (connectionsFailed ? "settings.mcp.audit.openConnectionsFailed" : "") : t.blocked;
+  const t = consoleTarget(e);
+  if ("blocked" in t) return t.blocked;
   if (!connections) return connectionsFailed ? "settings.mcp.audit.openConnectionsFailed" : "";
   const conn = connections.find((c) => c.id === t.target.connectionId);
   if (!conn) return "settings.mcp.audit.openNoConnection";

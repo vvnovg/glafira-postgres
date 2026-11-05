@@ -8,7 +8,8 @@ import type { DiagTool } from "../api/types";
  */
 export interface ExplainPrefill {
   sql: string;
-  database: string;
+  /** Нет — база подключения по умолчанию. */
+  database?: string;
   member?: string;
   nonce: number;
 }

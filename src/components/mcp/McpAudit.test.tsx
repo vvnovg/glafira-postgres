@@ -98,7 +98,7 @@ describe("McpAudit", () => {
     expect(buttons[3]).toHaveAttribute("title", "Недоступно: вызов задан queryId, текста запроса в журнале нет");
     expect(buttons[4]).toHaveAttribute("title", "Недоступно: подключения больше нет");
     await user.click(buttons[0]);
-    expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ tool: "explain_query", connection: { id: "c1", name: "perf" } }), expect.any(Array));
+    expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ tool: "explain_query", connection: { id: "c1", name: "perf" } }));
   });
 
   it("список подключений не прочитан — кнопка неактивна с причиной", async () => {

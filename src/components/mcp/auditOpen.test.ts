@@ -24,20 +24,25 @@ describe("auditOpen", () => {
     expect(consoleTarget(explainCall({ args: noMember, member: null }))).toEqual({ target: { connectionId: "c1", database: "perf", sql: "SELECT 1" } });
   });
 
-  it("вызов без database открывается с базой подключения по умолчанию (профиль), в том числе с пустой строкой", () => {
-    const withDb = [connection({ id: "c1", name: "perf", llmAccess: "diagnostics", pg: { ...conns[0].pg, database: "shop" } })];
-    const want = { target: { connectionId: "c1", database: "shop", sql: "SELECT 1" } };
-    expect(consoleTarget(explainCall({ args: { connectionId: "c1", sql: "SELECT 1" }, member: null }), withDb)).toEqual(want);
-    expect(consoleTarget(explainCall({ args: { connectionId: "c1", database: "", sql: "SELECT 1" }, member: null }), withDb)).toEqual(want);
-    // Если модель прислала базу — берётся её, а не база профиля.
-    expect(consoleTarget(explainCall({ args: { connectionId: "c1", database: "perf", sql: "SELECT 1" }, member: null }), withDb)).toEqual({
+  it("вызов без database (в том числе пустой или из пробелов) открывается без базы: консоль возьмёт базу профиля", () => {
+    const want = { target: { connectionId: "c1", sql: "SELECT 1" } };
+    for (const database of [undefined, "", "   "]) {
+      const args: Record<string, unknown> = { connectionId: "c1", sql: "SELECT 1" };
+      if (database !== undefined) args.database = database;
+      expect(consoleTarget(explainCall({ args, member: null }))).toEqual(want);
+    }
+    // Если модель прислала базу — берётся она (без пробелов по краям).
+    expect(consoleTarget(explainCall({ args: { connectionId: "c1", database: " perf ", sql: "SELECT 1" }, member: null }))).toEqual({
       target: { connectionId: "c1", database: "perf", sql: "SELECT 1" },
     });
-    const noDb = explainCall({ args: { connectionId: "c1", sql: "SELECT 1" } });
     const s = mcpStatus();
-    expect(openBlocked(noDb, s, undefined, false)).toBe("");
+    const noDb = explainCall({ args: { connectionId: "c1", sql: "SELECT 1" } });
+    expect(openBlocked(noDb, s, conns, false)).toBeNull();
     expect(openBlocked(noDb, s, undefined, true)).toBe("settings.mcp.audit.openConnectionsFailed");
-    expect(openBlocked(noDb, s, withDb, false)).toBeNull();
+    expect(openBlocked(noDb, s, undefined, false)).toBe("");
+    // Подключения больше нет — подсказка про подключение, а не про усечённые аргументы.
+    const gone = explainCall({ args: { connectionId: "c9", sql: "SELECT 1" }, connection: { id: "c9", name: "gone" } });
+    expect(openBlocked(gone, s, conns, false)).toBe("settings.mcp.audit.openNoConnection");
   });
 
   it("усечённые аргументы, SQL на пределе журнала и вызов по queryId не открываются", () => {
@@ -47,8 +52,6 @@ describe("auditOpen", () => {
     expect(consoleTarget(explainCall({ args: { connectionId: "c1", database: "perf", sql: "x".repeat(SQL_AUDIT_LIMIT_BYTES) } }))).toEqual(cut);
     // Предел считается в байтах UTF-8, как в журнале: «ж» — два байта.
     expect(consoleTarget(explainCall({ args: { connectionId: "c1", database: "perf", sql: "ж".repeat(SQL_AUDIT_LIMIT_BYTES / 2) } }))).toEqual(cut);
-    // Без database: пока нет списка подключений — не определено; подключения нет в списке — как усечённые аргументы.
-    expect(consoleTarget(explainCall({ args: { connectionId: "c1", sql: "SELECT 1" } }), [])).toEqual(cut);
     expect(consoleTarget(explainCall({ args: { connectionId: "c1", database: "perf", queryId: "-42" } }))).toEqual({ blocked: "settings.mcp.audit.openNoSql" });
   });
 

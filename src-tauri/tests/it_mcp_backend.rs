@@ -620,16 +620,31 @@ async fn omitted_database_uses_the_connection_database() {
         panic!("не таблица")
     };
     assert_eq!(serde_json::to_value(t).unwrap()["table"]["name"], "orders");
-    // Карточка несуществующего запроса: ответ из `perf` (а не ошибка аргумента) — база подставлена.
-    let e = read_op(
+    // Карточка реального запроса из pgss базы `perf` без `database`: база подставлена из профиля, карточка — этого запроса.
+    const PROBE: &str = "SELECT count(*) FROM shop.orders WHERE status = 'disputed'";
+    probe.batch_execute(PROBE).await.unwrap();
+    let row = probe
+        .query_one(
+            "SELECT queryid::text, query FROM pg_stat_statements \
+             WHERE dbid = (SELECT oid FROM pg_database WHERE datname = 'perf') \
+               AND query LIKE '%FROM shop.orders WHERE status = $1%' \
+               AND query NOT LIKE '%pg_stat_statements%' \
+             ORDER BY calls DESC LIMIT 1",
+            &[],
+        )
+        .await
+        .unwrap();
+    let (qid, pgss_text): (String, String) = (row.get(0), row.get(1));
+    let a = ok(read_op(
         &st,
         PgRead::QueryDetails(
-            serde_json::from_value(json!({"connectionId": "it", "queryId": "1"})).unwrap(),
+            serde_json::from_value(json!({"connectionId": "it", "queryId": qid})).unwrap(),
         ),
     )
-    .await;
-    if let Err(e) = e {
-        assert_ne!(e.code, "invalid_argument", "{}", e.message);
-    }
+    .await);
+    let PgOutput::QueryDetails(v) = &a.body else {
+        panic!("не карточка")
+    };
+    assert_eq!(v["text"], json!(pgss_text), "карточка запроса {qid}: {v}");
     wait_no_mcp_sessions(&probe, "после вызовов без database").await;
 }

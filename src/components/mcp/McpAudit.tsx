@@ -2,7 +2,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
-import type { ConnectionProfile, McpAuditEntry, McpStatus } from "../../api/types";
+import type { McpAuditEntry, McpStatus } from "../../api/types";
 import { formatCount, formatTimestamp } from "../../lib/format";
 import { MCP_AUDIT_KEY } from "../../lib/useMcpStatus";
 import { ErrorBanner } from "../common/ErrorBanner";
@@ -53,7 +53,7 @@ function detailsText(e: McpAuditEntry, t: TFunction): string {
  * `explain_query` (и `run_select` P4b) — «Открыть в консоли EXPLAIN», если раздел передал `onOpenInConsole`;
  * неактивная кнопка называет причину в подсказке.
  */
-export function McpAudit({ status, onOpenInConsole }: { status: McpStatus; onOpenInConsole?: (entry: McpAuditEntry, connections?: ConnectionProfile[]) => void }) {
+export function McpAudit({ status, onOpenInConsole }: { status: McpStatus; onOpenInConsole?: (entry: McpAuditEntry) => void }) {
   const { t } = useTranslation();
   const audit = useQuery({ queryKey: MCP_AUDIT_KEY, queryFn: () => api.getMcpAudit(AUDIT_LIMIT) });
   // Уровень доступа подключений нужен только кнопке «Открыть в консоли».
@@ -108,7 +108,7 @@ export function McpAudit({ status, onOpenInConsole }: { status: McpStatus; onOpe
                             className="link"
                             disabled={blocked !== null}
                             title={blocked ? t(blocked) : undefined}
-                            onClick={() => onOpenInConsole(e, connections.data)}
+                            onClick={() => onOpenInConsole(e)}
                           >
                             {t("settings.mcp.audit.openInConsole")}
                           </button>
