@@ -118,8 +118,10 @@ DATA="$HOME/Library/Application Support/io.github.vvnovg.glafira.postgres"
    ```
 3. Запустите Qwen Code в пустом каталоге:
    ```bash
-   mkdir -p ~/smoke-p4a && cd ~/smoke-p4a && qwen
+   mkdir -p ~/smoke-p4a && cd ~/smoke-p4a && qwen --allowed-mcp-server-names glafira-pg
    ```
+   Флаг оставляет Qwen Code только сервер Glafira, если у вас настроены и другие MCP-серверы. Дальше `qwen` в этом
+   сценарии запускайте так же.
 4. Glafira откроется с диалогом. **Не нажимая ничего в диалоге**, спросите в Qwen Code:
    > Какие подключения ты видишь в Glafira?
 5. В диалоге нажмите «Разрешить».
