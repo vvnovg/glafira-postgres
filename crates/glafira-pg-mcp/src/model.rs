@@ -165,6 +165,9 @@ pub struct ConnectionInfo {
     /// `server`, `hosts` или `patroni`.
     pub kind: String,
     pub folder_path: Vec<String>,
+    /// База подключения по умолчанию (`profile.pg.database`): её берут `get_query_details`, `get_table_details`,
+    /// `explain_query` и `hypothetical_index` без `database`. Хосты, порты и пользователь не отдаются (§6.2).
+    pub database: String,
     pub read_only: bool,
     /// Действующий уровень с учётом политики: `diagnostics` (P4b — ещё `data`).
     pub llm_access: String,

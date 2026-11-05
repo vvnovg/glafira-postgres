@@ -165,6 +165,18 @@ fn folder_path(folders: &[ConnectionFolder], id: &str) -> Vec<String> {
     path
 }
 
+/// База вызова: заданная моделью, иначе база подключения по умолчанию (`database` в `list_connections`). Пустая строка
+/// — как «не задана» (крейт шлюза уже обнуляет её в `validate`; здесь — страховка для прямых вызовов).
+fn resolve_database(
+    profile: &crate::storage::connections::ConnectionProfile,
+    asked: Option<&str>,
+) -> String {
+    match asked.map(str::trim) {
+        Some(d) if !d.is_empty() => d.to_string(),
+        _ => profile.pg.database.clone(),
+    }
+}
+
 /// `list_connections`: только подключения с действующим уровнем ≠ `off`; строк подключения и секретов нет (§6.2).
 fn list_connections(st: &AppState) -> Vec<ConnectionInfo> {
     let folders = st.connections.list_folders();
@@ -188,6 +200,7 @@ fn list_connections(st: &AppState) -> Vec<ConnectionInfo> {
                     .unwrap_or_default(),
                 environment: name_of(&p.environment),
                 kind: kind_name(p.kind).to_string(),
+                database: p.pg.database.clone(),
                 llm_access: access.as_str().to_string(),
                 connected,
                 role_warning: None,
@@ -761,11 +774,12 @@ fn top_answer(
 /// `get_query_details`: карточка P3 §7.2 (`query_detail_answer`); доступ и `queryId` проверяются до открытия
 /// подключения.
 async fn query_details(st: &AppState, p: QueryDetailsParams) -> Result<PgAnswer, ToolError> {
-    let (_, access) = check_connection(st, &p.connection_id)?;
+    let (profile, access) = check_connection(st, &p.connection_id)?;
+    let database = resolve_database(&profile, p.database.as_deref());
     let qid = query_detail::parse_query_id(&p.query_id).map_err(tool_error)?;
     ensure_open(st, &p.connection_id).await?;
     let member = member_or_leader(st, &p.connection_id, p.member.as_deref())?;
-    let d = query_detail::detail(st, &p.connection_id, &member, &p.database, qid)
+    let d = query_detail::detail(st, &p.connection_id, &member, &database, qid)
         .await
         .map_err(tool_error)?;
     query_detail_answer(d, &member, access)
@@ -911,10 +925,11 @@ async fn table_details(st: &AppState, p: TableDetailsParams) -> Result<PgAnswer,
         .runtimes
         .target(&p.connection_id, None)
         .map_err(tool_error)?;
+    let database = resolve_database(&profile, p.database.as_deref());
     let (schema, table) = (p.schema.clone(), p.table.clone());
     let (details, stats) = on_catalog_node_within(
         catalog_limit(&profile),
-        st.client(&p.connection_id, None, Some(&p.database)),
+        st.client(&p.connection_id, None, Some(&database)),
         move |c| {
             Box::pin(async move {
                 let details = catalog_table::get(c, &schema, &table).await?;
@@ -1226,16 +1241,17 @@ fn plan_tree(raw: &Value) -> Result<pg_advisor::plan::PlanTree, ToolError> {
 /// `explain_query` (§5.2, §7): `sqlcheck` до соединения, слои `GuardTx` (`prepare` под точкой сохранения, проба
 /// VERBOSE-плана с поиском запрещённых функций), план пробы — ответ (`explain_answer`).
 async fn explain(st: &AppState, p: ExplainParams) -> Result<PgAnswer, ToolError> {
-    let (_, access) = check_connection(st, &p.connection_id)?;
+    let (profile, access) = check_connection(st, &p.connection_id)?;
+    let database = resolve_database(&profile, p.database.as_deref());
     let asked = asked(p.sql.as_deref(), p.query_id.as_deref())?;
     ensure_open(st, &p.connection_id).await?;
     let member = member_or_leader(st, &p.connection_id, p.member.as_deref())?;
-    let source = sql_source(st, &p.connection_id, &member, &p.database, asked).await?;
+    let source = sql_source(st, &p.connection_id, &member, &database, asked).await?;
     let tx = guard::begin(
         st,
         &p.connection_id,
         Some(&member),
-        &p.database,
+        &database,
         EXPLAIN_TIMEOUT_S,
     )
     .await?;
@@ -1320,17 +1336,18 @@ fn explain_answer(
 /// с `standard_conforming_strings = on`) `hypopg::check_many`: все гипотезы в одной транзакции `READ ONLY` и
 /// `hypopg_reset()`; соединение закрывается (`finish`, а при брошенном вызове — сброс `GuardTx`).
 async fn hypo(st: &AppState, p: HypoIndexParams) -> Result<PgAnswer, ToolError> {
-    let (_, access) = check_connection(st, &p.connection_id)?;
+    let (profile, access) = check_connection(st, &p.connection_id)?;
+    let database = resolve_database(&profile, p.database.as_deref());
     let asked = asked(p.sql.as_deref(), p.query_id.as_deref())?;
     check_index_ddls(&p.indexes)?;
     ensure_open(st, &p.connection_id).await?;
     let member = member_or_leader(st, &p.connection_id, p.member.as_deref())?;
-    let source = sql_source(st, &p.connection_id, &member, &p.database, asked).await?;
+    let source = sql_source(st, &p.connection_id, &member, &database, asked).await?;
     let tx = guard::begin(
         st,
         &p.connection_id,
         Some(&member),
-        &p.database,
+        &database,
         EXPLAIN_TIMEOUT_S,
     )
     .await?;
@@ -1347,7 +1364,7 @@ async fn hypo(st: &AppState, p: HypoIndexParams) -> Result<PgAnswer, ToolError> 
         // Исходный текст: `check_many` нормализует его сам (`validate_many`), а позиции ошибок EXPLAIN считает по нему.
         let req = HypoManyRequest {
             member,
-            database: p.database.clone(),
+            database: database.clone(),
             sql: source.text.clone(),
             params,
             search_path: None,
@@ -1487,6 +1504,28 @@ mod tests {
             (&json!(false), &json!([]))
         );
         assert!(v[0].get("roleWarning").is_none());
+        assert_eq!(
+            v[0]["database"],
+            json!(sample_profile("on").pg.database),
+            "база подключения по умолчанию"
+        );
+        assert!(
+            v[0].get("host").is_none()
+                && v[0].get("username").is_none()
+                && v[0].get("hosts").is_none(),
+            "хосты и пользователь не отдаются (§6.2): {v}"
+        );
+    }
+
+    #[test]
+    fn omitted_or_blank_database_falls_back_to_the_profile_database() {
+        let mut p = sample_profile("on");
+        p.pg.database = "shop".into();
+        assert_eq!(resolve_database(&p, None), "shop");
+        assert_eq!(resolve_database(&p, Some("")), "shop");
+        assert_eq!(resolve_database(&p, Some("  ")), "shop");
+        assert_eq!(resolve_database(&p, Some("other")), "other");
+        assert_eq!(resolve_database(&p, Some(" other ")), "other");
     }
 
     #[tokio::test]
@@ -2160,7 +2199,7 @@ mod tests {
         let (q, limit, window) = top_request(&p(json!({"connectionId": "c"}))).ok().unwrap();
         assert_eq!(
             (q.mode, q.sort, q.limit, limit, window),
-            (QueriesMode::SinceReset, QuerySort::TotalTime, 50, 20, false)
+            (QueriesMode::SinceReset, QuerySort::TotalTime, 50, 10, false)
         );
         assert!(q.toplevel_only);
         let (q, limit, window) = top_request(&p(json!({

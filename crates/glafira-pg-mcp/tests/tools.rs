@@ -153,6 +153,7 @@ impl PgBackend for FakePg {
                     environment: "dev".into(),
                     kind: "patroni".into(),
                     folder_path: vec!["Team".into()],
+                    database: "shop".into(),
                     read_only: false,
                     llm_access: "diagnostics".into(),
                     connected: true,
@@ -481,6 +482,93 @@ async fn exposes_exactly_the_p4a_tools_with_annotations() {
     }
 }
 
+/// `database` необязателен: в схеме он не в `required`, а описание отсылает к `list_connections`.
+#[tokio::test]
+async fn database_is_optional_in_the_four_tool_schemas() {
+    let e = env().await;
+    let tools = e.client.list_all_tools().await.unwrap();
+    for name in [
+        "get_query_details",
+        "get_table_details",
+        "explain_query",
+        "hypothetical_index",
+    ] {
+        let t = tools.iter().find(|t| t.name == name).unwrap();
+        let schema = serde_json::to_value(&t.input_schema).unwrap();
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(!required.contains(&"database"), "{name}: {required:?}");
+        assert!(required.contains(&"connectionId"), "{name}: {required:?}");
+        let d = schema["properties"]["database"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(d.contains("list_connections"), "{name}: {d}");
+    }
+}
+
+/// Без `database` (и с пустой строкой — она считается «не задана») вызов доходит до бэкенда с `database: None`, а журнал
+/// хранит то, что прислала модель.
+#[tokio::test]
+async fn omitted_or_blank_database_reaches_the_backend_as_none() {
+    let e = env().await;
+    let c = &e.client;
+    ok(call(
+        c,
+        "get_table_details",
+        json!({"connectionId": "c1", "schema": "public", "table": "orders"}),
+    )
+    .await);
+    ok(call(
+        c,
+        "get_query_details",
+        json!({"connectionId": "c1", "database": " ", "queryId": "-42"}),
+    )
+    .await);
+    ok(call(
+        c,
+        "explain_query",
+        json!({"connectionId": "c1", "database": "", "queryId": "42"}),
+    )
+    .await);
+    let reads = e.fake.reads.lock().unwrap().clone();
+    let dbs: Vec<Option<String>> = reads
+        .iter()
+        .map(|r| match r {
+            PgRead::TableDetails(p) => p.database.clone(),
+            PgRead::QueryDetails(p) => p.database.clone(),
+            PgRead::Explain(p) => p.database.clone(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(dbs, vec![None, None, None]);
+    let tail = e.audit.tail(3);
+    assert_eq!(
+        tail[0]["args"]["database"], "",
+        "журнал: как прислала модель"
+    );
+    assert_eq!(tail[1]["args"]["database"], " ");
+}
+
+#[tokio::test]
+async fn hypothetical_index_without_database_is_accepted() {
+    let e = env().await;
+    let _ = call(
+        &e.client,
+        "hypothetical_index",
+        json!({"connectionId": "c1", "sql": "SELECT 1 FROM t WHERE a = 1", "indexes": ["CREATE INDEX ON t (a)"]}),
+    )
+    .await;
+    let reads = e.fake.reads.lock().unwrap().clone();
+    let PgRead::HypoIndex(p) = &reads[0] else {
+        panic!("{reads:?}")
+    };
+    assert_eq!(p.database, None);
+}
+
 // ---- Параметры ----
 
 #[tokio::test]
@@ -565,11 +653,6 @@ async fn parameters_are_checked_at_the_boundaries_before_the_backend() {
             "queryId must be a pg_stat_statements queryid (a 64-bit integer), got abc".into(),
         ),
         (
-            "get_query_details",
-            json!({"connectionId": "c1", "database": " ", "queryId": "1"}),
-            "database must not be empty".into(),
-        ),
-        (
             "get_table_details",
             json!({"connectionId": "c1", "database": "perf", "schema": "", "table": "t"}),
             "schema must not be empty".into(),
@@ -583,11 +666,6 @@ async fn parameters_are_checked_at_the_boundaries_before_the_backend() {
             "explain_query",
             json!({"connectionId": "c1", "database": "perf", "sql": "SELECT 1", "queryId": "1"}),
             "pass exactly one of sql and queryId".into(),
-        ),
-        (
-            "explain_query",
-            json!({"connectionId": "c1", "database": "", "sql": "SELECT 1"}),
-            "database must not be empty".into(),
         ),
         (
             "hypothetical_index",
@@ -713,7 +791,7 @@ async fn defaults_are_filled_before_the_backend() {
     };
     assert_eq!(
         (t.mode.as_deref(), t.window_s, t.sort.as_deref(), t.limit),
-        (Some("sinceReset"), None, Some("totalTime"), Some(20)),
+        (Some("sinceReset"), None, Some("totalTime"), Some(10)),
         "окно без режима window не передаётся"
     );
     let PgRead::TopQueries(w) = &reads[2] else {
@@ -759,6 +837,10 @@ async fn responses_are_objects_in_camel_case() {
     let v = ok(call(c, "list_connections", json!({})).await);
     assert_eq!(v["connections"][0]["folderPath"][0], "Team");
     assert_eq!(v["connections"][0]["llmAccess"], "diagnostics");
+    assert_eq!(
+        v["connections"][0]["database"], "shop",
+        "база подключения по умолчанию — чтобы модель знала, что подставлять"
+    );
     assert!(v["connections"][0].get("roleWarning").is_none());
     let v = ok(call(c, "list_diagnostics", json!({})).await);
     assert_eq!(v["tools"][1]["patroniOnly"], true);

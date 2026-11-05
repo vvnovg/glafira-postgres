@@ -29,7 +29,7 @@ macro_rules! expect {
 #[tool_router(vis = "pub(crate)")]
 impl PgServer {
     #[tool(
-        description = "List PostgreSQL connections that the user opened for LLM assistants in Glafira: id, name, environment (local, dev, test, stage or prod), kind (server, hosts or patroni), folder path, read-only flag, the effective llmAccess level and whether Glafira is connected now. Call it first and use the id in every other tool.",
+        description = "List PostgreSQL connections that the user opened for LLM assistants in Glafira: id, name, environment (local, dev, test, stage or prod), kind (server, hosts or patroni), folder path, read-only flag, database (the connection's default database, used when a tool's database is omitted), the effective llmAccess level and whether Glafira is connected now. Call it first and use the id in every other tool.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -242,7 +242,7 @@ impl PgServer {
     }
 
     #[tool(
-        description = "Top queries from pg_stat_statements on a member. mode sinceReset (default) gives totals since the last statistics reset; mode window gives the last windowS seconds (300, 900 or 3600, default 900) from Glafira's buffer, which fills while the Queries tab or a query card is open in Glafira; without the buffer the coverage is 0, then use observe_top_queries or sinceReset. sort: totalTime (default), meanTime, maxTime, stddevTime, calls, rowsPerCall, sharedRead, hitRatio, tempWritten, walBytes, ioTime, planTime, jitTime or cpuTime. limit 1..=100, default 20; filters database and search (a case-insensitive substring of the query text). At the diagnostics access level search matches the masked text ($N in place of literals) within the top 200 queries by the chosen sort, so an empty result may mean the query is outside that window.",
+        description = "Top queries from pg_stat_statements on a member. mode sinceReset (default) gives totals since the last statistics reset; mode window gives the last windowS seconds (300, 900 or 3600, default 900) from Glafira's buffer, which fills while the Queries tab or a query card is open in Glafira; without the buffer the coverage is 0, then use observe_top_queries or sinceReset. sort: totalTime (default), meanTime, maxTime, stddevTime, calls, rowsPerCall, sharedRead, hitRatio, tempWritten, walBytes, ioTime, planTime, jitTime or cpuTime. limit 1..=100, default 10; filters database and search (a case-insensitive substring of the query text). At the diagnostics access level search matches the masked text ($N in place of literals) within the top 200 queries by the chosen sort, so an empty result may mean the query is outside that window.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -307,7 +307,7 @@ impl PgServer {
     }
 
     #[tool(
-        description = "Card of one query by queryId from get_top_queries: text, metrics since the statistics reset and for the window, history, running instances (the 20 longest-running; runningTotal is the full count when there are more), waits, tables and findings. database is the database of the query.",
+        description = "Card of one query by queryId from get_top_queries: text, metrics since the statistics reset and for the window, history, running instances (the 20 longest-running; runningTotal is the full count when there are more), waits, tables and findings. database is the database of the query (default: the connection's database).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,

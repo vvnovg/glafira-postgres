@@ -13,7 +13,7 @@ pub const WINDOWS_S: [u32; 3] = [300, 900, 3600];
 pub const DEFAULT_WINDOW_S: u32 = 900;
 pub const ACTIVITY_LIMIT_DEFAULT: u32 = 100;
 pub const ACTIVITY_LIMIT_MAX: u32 = 500;
-pub const TOP_LIMIT_DEFAULT: u32 = 20;
+pub const TOP_LIMIT_DEFAULT: u32 = 10;
 pub const TOP_LIMIT_MAX: u32 = 100;
 pub const OBSERVE_DEFAULT_S: u32 = 30;
 pub const OBSERVE_MIN_S: u32 = 10;
@@ -77,6 +77,14 @@ fn not_blank(v: &str, name: &str) -> Result<(), ToolError> {
         )))
     } else {
         Ok(())
+    }
+}
+
+/// Необязательная база: пустая или из пробелов строка считается «не задана» (`None`) — приложение подставит базу
+/// подключения по умолчанию (`database` из `list_connections`).
+fn blank_to_none(v: &mut Option<String>) {
+    if v.as_deref().is_some_and(|s| s.trim().is_empty()) {
+        *v = None;
     }
 }
 
@@ -244,7 +252,7 @@ pub struct TopQueriesParams {
     /// Sort key: totalTime (default), meanTime, maxTime, stddevTime, calls, rowsPerCall, sharedRead, hitRatio, tempWritten, walBytes, ioTime, planTime, jitTime, cpuTime.
     #[serde(default)]
     pub sort: Option<String>,
-    /// Number of queries, 1..=100. Default: 20.
+    /// Number of queries, 1..=100. Default: 10.
     #[serde(default)]
     pub limit: Option<u32>,
     /// Only queries of this database.
@@ -295,7 +303,7 @@ pub struct ObserveQueriesParams {
     /// Sort key, as in get_top_queries. Default: totalTime.
     #[serde(default)]
     pub sort: Option<String>,
-    /// Number of queries, 1..=100. Default: 20.
+    /// Number of queries, 1..=100. Default: 10.
     #[serde(default)]
     pub limit: Option<u32>,
 }
@@ -329,15 +337,16 @@ pub struct QueryDetailsParams {
     /// Member (node) name; default: the leader (primary).
     #[serde(default)]
     pub member: Option<String>,
-    /// Database of the query (datname from get_top_queries).
-    pub database: String,
+    /// Database of the query (datname from get_top_queries); default: the connection's database (`database` in list_connections).
+    #[serde(default)]
+    pub database: Option<String>,
     /// queryid from get_top_queries, as a string.
     pub query_id: String,
 }
 
 impl QueryDetailsParams {
-    pub fn validate(self) -> Result<Self, ToolError> {
-        not_blank(&self.database, "database")?;
+    pub fn validate(mut self) -> Result<Self, ToolError> {
+        blank_to_none(&mut self.database);
         query_id(&self.query_id)?;
         Ok(self)
     }
@@ -348,8 +357,9 @@ impl QueryDetailsParams {
 pub struct TableDetailsParams {
     /// Connection id from list_connections.
     pub connection_id: String,
-    /// Database of the table.
-    pub database: String,
+    /// Database of the table; default: the connection's database (`database` in list_connections).
+    #[serde(default)]
+    pub database: Option<String>,
     /// Schema name, e.g. public.
     pub schema: String,
     /// Table name without the schema.
@@ -357,8 +367,8 @@ pub struct TableDetailsParams {
 }
 
 impl TableDetailsParams {
-    pub fn validate(self) -> Result<Self, ToolError> {
-        not_blank(&self.database, "database")?;
+    pub fn validate(mut self) -> Result<Self, ToolError> {
+        blank_to_none(&mut self.database);
         not_blank(&self.schema, "schema")?;
         not_blank(&self.table, "table")?;
         Ok(self)
@@ -399,8 +409,9 @@ pub struct ExplainParams {
     /// Member (node) name; default: the leader (primary).
     #[serde(default)]
     pub member: Option<String>,
-    /// Database to plan the query in.
-    pub database: String,
+    /// Database to plan the query in; default: the connection's database (`database` in list_connections).
+    #[serde(default)]
+    pub database: Option<String>,
     /// One SELECT, INSERT, UPDATE, DELETE or MERGE statement; it is planned, not executed. Pass sql or queryId.
     #[serde(default)]
     pub sql: Option<String>,
@@ -417,7 +428,7 @@ pub struct ExplainParams {
 
 impl ExplainParams {
     pub fn validate(mut self) -> Result<Self, ToolError> {
-        not_blank(&self.database, "database")?;
+        blank_to_none(&mut self.database);
         sql_or_query_id(&mut self.sql, &mut self.query_id)?;
         Ok(self)
     }
@@ -431,8 +442,9 @@ pub struct HypoIndexParams {
     /// Member (node) name; default: the leader (primary).
     #[serde(default)]
     pub member: Option<String>,
-    /// Database to plan the query in.
-    pub database: String,
+    /// Database to plan the query in; default: the connection's database (`database` in list_connections).
+    #[serde(default)]
+    pub database: Option<String>,
     /// The query to check, as in explain_query. Pass sql or queryId.
     #[serde(default)]
     pub sql: Option<String>,
@@ -448,7 +460,7 @@ pub struct HypoIndexParams {
 
 impl HypoIndexParams {
     pub fn validate(mut self) -> Result<Self, ToolError> {
-        not_blank(&self.database, "database")?;
+        blank_to_none(&mut self.database);
         sql_or_query_id(&mut self.sql, &mut self.query_id)?;
         count_in(self.indexes.len(), HYPO_INDEXES_MAX, "indexes")?;
         for ddl in &self.indexes {

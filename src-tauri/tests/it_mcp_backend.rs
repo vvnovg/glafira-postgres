@@ -567,3 +567,69 @@ async fn top_queries_are_observed_as_a_difference() {
     assert!(!mine["text"].as_str().unwrap().contains("'paid'"), "{mine}");
     assert!(a.masked.is_some());
 }
+
+/// Без `database` инструменты работают с базой подключения по умолчанию (`database` из `list_connections`): профиль `it`
+/// смотрит в `perf`, пустая строка — то же, что нет аргумента.
+#[tokio::test]
+async fn omitted_database_uses_the_connection_database() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st, _m) = open_for_llm(&perf).await;
+    let probe = common::superuser(&perf, "perf").await;
+    let a = ok(read_op(&st, PgRead::ListConnections).await);
+    let PgOutput::Connections(list) = a.body else {
+        panic!("не список подключений")
+    };
+    assert_eq!(list[0].database, "perf");
+    for blank in [None, Some("")] {
+        let mut v = json!({"connectionId": "it", "sql": "SELECT count(*) FROM shop.orders"});
+        if let Some(b) = blank {
+            v["database"] = json!(b);
+        }
+        let a = ok(read_op(&st, explain(v)).await);
+        let PgOutput::Explain(out) = &a.body else {
+            panic!("не план")
+        };
+        assert!(
+            out.tables.contains(&"shop.orders".to_string()),
+            "{:?}",
+            out.tables
+        );
+    }
+    let a = ok(read_op(
+        &st,
+        hypo(json!({
+            "connectionId": "it", "sql": "SELECT count(*) FROM shop.orders WHERE status = $1",
+            "params": ["disputed"], "indexes": ["CREATE INDEX ON shop.orders (status)"]
+        })),
+    )
+    .await);
+    assert!(matches!(a.body, PgOutput::Hypo(_)));
+    let a = ok(read_op(
+        &st,
+        PgRead::TableDetails(
+            serde_json::from_value(
+                json!({"connectionId": "it", "schema": "shop", "table": "orders"}),
+            )
+            .unwrap(),
+        ),
+    )
+    .await);
+    let PgOutput::Table(t) = &a.body else {
+        panic!("не таблица")
+    };
+    assert_eq!(serde_json::to_value(t).unwrap()["table"]["name"], "orders");
+    // Карточка несуществующего запроса: ответ из `perf` (а не ошибка аргумента) — база подставлена.
+    let e = read_op(
+        &st,
+        PgRead::QueryDetails(
+            serde_json::from_value(json!({"connectionId": "it", "queryId": "1"})).unwrap(),
+        ),
+    )
+    .await;
+    if let Err(e) = e {
+        assert_ne!(e.code, "invalid_argument", "{}", e.message);
+    }
+    wait_no_mcp_sessions(&probe, "после вызовов без database").await;
+}
