@@ -145,9 +145,10 @@ DATA="$HOME/Library/Application Support/io.github.vvnovg.glafira.postgres"
 
 **Должно быть**
 - [ ] Пока идёт вызов, индикатор внизу боковой панели подсвечен.
-- [ ] В журнале: `list_connections`, `get_health_summary`, затем `get_topology` или `run_diagnostic`.
+- [ ] В журнале: `list_connections`, `get_health_summary` (ассистент может добавить `get_topology` или `run_diagnostic`).
 - [ ] Ответ называет лидера и реплики.
-- [ ] В выводе инструмента (виден в Qwen Code) находки — английскими текстами.
+- [ ] Находки в выводе инструмента (виден в Qwen Code) — английскими текстами. На здоровом кластере находок нет
+      (`findings: []`) — тогда пункт проверяется в шагах 5–6.
 
 ### Шаг 5. Горизонт xmin и маскирование
 
