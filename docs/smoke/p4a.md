@@ -36,8 +36,18 @@ docker compose -f dev/docker-compose.yml up -d --no-recreate pg-perf && scripts/
 | Имя | Куда | База |
 |---|---|---|
 | `lab` | `localhost:5470` | `orders` |
-| `demo` | кластер Patroni, API `http://localhost:8011` (`patroni` / `patroni-secret`); подмена адресов `patroni1 → localhost:5441` и т. д. (README → «Стенд») | `orders` |
+| `demo` | вид «Кластер Patroni», адрес REST API `http://localhost:8011`, пользователь API `patroni` / `patroni-secret`; подмена адресов — ниже | `orders` |
 | `perf` | `localhost:5471` | `perf` |
+
+Подмена адресов узлов у `demo` (участники Patroni сообщают внутренние имена, с компьютера они недоступны):
+
+| Участник | Хост PostgreSQL | Порт PostgreSQL | Адрес API участника |
+|---|---|---|---|
+| `patroni1` | `localhost` | `5441` | `http://localhost:8011` |
+| `patroni2` | `localhost` | `5442` | `http://localhost:8012` |
+| `patroni3` | `localhost` | `5443` | `http://localhost:8013` |
+
+«Проверить» в форме `demo` должно показать три узла без ошибок.
 
 **Терминал.** Во всех командах ниже `$DATA` — каталог данных приложения. Задайте его в каждом новом окне терминала:
 
