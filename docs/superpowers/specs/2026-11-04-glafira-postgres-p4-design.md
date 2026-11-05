@@ -341,20 +341,20 @@ GRANT pg_read_all_data TO glafira_llm;` (на PG 13 — `GRANT SELECT ON ALL TAB
 
 | Инструмент | Параметры | Ответ (на чём построен) |
 |---|---|---|
-| `list_connections` | — | `{ connections [{ id, name, environment, kind ("server" / "hosts" / "patroni"), folderPath, readOnly, llmAccess (действующий), connected, roleWarning? }] }` |
+| `list_connections` | — | `{ connections [{ id, name, environment, kind ("server" / "hosts" / "patroni"), folderPath, database (база подключения по умолчанию), readOnly, llmAccess (действующий), connected, roleWarning? }] }` |
 | `get_topology` | `connectionId` | `{ kind, members [{ name, role, state, host, port, timeline?, lagBytes?, tags?, pendingRestart?, nofailover? }], patroni? { paused, scheduledSwitchover?, scheduledRestart? }, events [{ atMs, kind, … }] }` — события журнала топологии за сессию приложения, не больше 50 |
 | `get_health_summary` | `connectionId` | `{ pulse, findings [...], unavailable [...] }` — пульс плюс находки быстрых инструментов (`sessions`, `locks`, `horizon`, `replication`, `slots`; у Patroni ещё `failover`, `health`) по серьёзности; опрос параллельный, дедлайн 20 с; инструмент, не уложившийся или упавший, — в `unavailable` |
 | `list_diagnostics` | — | `{ tools [{ id, title, scope ("node" / "cluster"), patroniOnly, params }] }` — инструменты P5 появятся без изменения шлюза |
 | `run_diagnostic` | `connectionId`, `tool`, `member?`, `windowS?`, `queries?` | Конверт `DiagReport`: `tool`, `member`, `followsLeader`, `observedAtMs`, `serverVersionNum`, `inRecovery`, `data`, `findings`, `unavailable` (причины — английский текст) |
 | `get_activity` | `connectionId`, `member?`, `state?`, `database?`, `application?`, `minDurationS?`, `waitEventType?`, `limit = 100` (≤ 500) | `{ total, sessions [...] }` — строки инструмента `sessions` после фильтров, по убыванию длительности |
 | `observe_activity` | `connectionId`, `member?`, `durationSeconds = 30` (10–50) | §5.3 |
-| `get_top_queries` | `connectionId`, `member?`, `mode` (`"sinceReset"` / `"window"`), `windowS` (300 / 900 / 3600), `sort`, `limit = 20` (≤ 100), `database?`, `search?` | Отчёт инструмента `queries` (P3 §4.5). Окно строится из буфера сэмплера pgss, который копится, пока у пользователя открыта вкладка «Запросы» или карточка; без буфера — ответ с покрытием 0 и подсказкой использовать `observe_top_queries` или `sinceReset` |
-| `observe_top_queries` | `connectionId`, `member?`, `durationSeconds = 30` (10–50), `sort`, `limit = 20` (≤ 100) | §5.3 |
-| `get_query_details` | `connectionId`, `member?`, `database`, `queryId` | Карточка `QueryDetail` (P3 §7.2): текст, метрики с момента сброса и за окно, история, выполняющиеся экземпляры, ожидания, таблицы, находки |
-| `get_table_details` | `connectionId`, `database`, `schema`, `table` | `TableDetails` (колонки, индексы, ограничения, статистика, партиции, триггеры, DDL) и `columnStats [{ column, nullFrac, avgWidth, nDistinct, correlation }]` из `pg_stats`; на уровне `data` — ещё `mostCommonVals`, `mostCommonFreqs`, `histogramBounds` (значения длиннее 2 КБ обрезаются) |
+| `get_top_queries` | `connectionId`, `member?`, `mode` (`"sinceReset"` / `"window"`), `windowS` (300 / 900 / 3600), `sort`, `limit = 10` (≤ 100), `database?`, `search?` | Отчёт инструмента `queries` (P3 §4.5). Окно строится из буфера сэмплера pgss, который копится, пока у пользователя открыта вкладка «Запросы» или карточка; без буфера — ответ с покрытием 0 и подсказкой использовать `observe_top_queries` или `sinceReset` |
+| `observe_top_queries` | `connectionId`, `member?`, `durationSeconds = 30` (10–50), `sort`, `limit = 10` (≤ 100) | §5.3 |
+| `get_query_details` | `connectionId`, `member?`, `database?` (по умолчанию — база подключения), `queryId` | Карточка `QueryDetail` (P3 §7.2): текст, метрики с момента сброса и за окно, история, выполняющиеся экземпляры, ожидания, таблицы, находки |
+| `get_table_details` | `connectionId`, `database?` (по умолчанию — база подключения), `schema`, `table` | `TableDetails` (колонки, индексы, ограничения, статистика, партиции, триггеры, DDL) и `columnStats [{ column, nullFrac, avgWidth, nDistinct, correlation }]` из `pg_stats`; на уровне `data` — ещё `mostCommonVals`, `mostCommonFreqs`, `histogramBounds` (значения длиннее 2 КБ обрезаются) |
 | `get_settings` | `connectionId`, `member?`, `names?` (≤ 200), `changedOnly = true` | `{ settings [{ name, setting, unit, source, context, pendingRestart, hidden? }] }` из `pg_settings`; при `names` — ровно эти параметры; секреты — §6.2 |
-| `explain_query` | `connectionId`, `member?`, `database`, `sql` или `queryId`, `params?` (значения `$N`), `genericPlan?` | `{ member, planText, summary { totalCost, planRows, planningMs? }, recommendations [...], tables [...], warnings [...] }` — EXPLAIN без ANALYZE (`FORMAT JSON, VERBOSE, SETTINGS`); `planText` — текст в виде psql (`plan::text_out::to_text`); для `queryId` — текст pgss, `GENERIC_PLAN` на 16+, на старых — `params` обязательны |
-| `hypothetical_index` | `connectionId`, `member?`, `database`, `sql` или `queryId`, `params?`, `indexes` (1–5 строк `CREATE INDEX …`) | `{ costBefore, costAfter, indexes [{ ddl, used, estimatedSizeBytes }], planText }` — hypopg (P3b); сессия очищается `hypopg_reset()`; без hypopg — `FEATURE_UNAVAILABLE` с подсказкой |
+| `explain_query` | `connectionId`, `member?`, `database?` (по умолчанию — база подключения), `sql` или `queryId`, `params?` (значения `$N`), `genericPlan?` | `{ member, planText, summary { totalCost, planRows, planningMs? }, recommendations [...], tables [...], warnings [...] }` — EXPLAIN без ANALYZE (`FORMAT JSON, VERBOSE, SETTINGS`); `planText` — текст в виде psql (`plan::text_out::to_text`); для `queryId` — текст pgss, `GENERIC_PLAN` на 16+, на старых — `params` обязательны |
+| `hypothetical_index` | `connectionId`, `member?`, `database?` (по умолчанию — база подключения), `sql` или `queryId`, `params?`, `indexes` (1–5 строк `CREATE INDEX …`) | `{ costBefore, costAfter, indexes [{ ddl, used, estimatedSizeBytes }], planText }` — hypopg (P3b); сессия очищается `hypopg_reset()`; без hypopg — `FEATURE_UNAVAILABLE` с подсказкой |
 
 ### 5.3 Наблюдение
 
@@ -808,6 +808,12 @@ LLM: диагностика и данные».
 20. Исключение из лимитов §10.1: наблюдение (`observe_activity`, `observe_top_queries`) не занимает слоты операций с базой —
     берёт только слот длительной операции (одно наблюдение на сессию); его чтения короткие: два чтения `pg_stat_statements`
     у `observe_top_queries`, образцы общего сэмплера активности у `observe_activity`.
+21. По итогам смоука: база в `list_connections` и необязательный `database`; лимит топа 10. Элемент `list_connections` отдаёт
+    `database` (`profile.pg.database`, только имя базы); у `get_query_details`, `get_table_details`, `explain_query` и
+    `hypothetical_index` `database` необязателен — без него (и с пустой строкой) берётся база подключения; в журнал
+    пишется то, что прислала модель. «Открыть в консоли EXPLAIN» у вызова без `database` берёт базу профиля. Лимит топа по
+    умолчанию (`get_top_queries`, `observe_top_queries`) — 10 вместо 20 (ответ на 20 строк — 26 КБ, локальная модель
+    разбирала его 2+ минуты); предел 100 не менялся.
 
 ---
 
