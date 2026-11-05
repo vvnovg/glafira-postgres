@@ -249,7 +249,8 @@ docker exec gp-pg-perf psql -U postgres -d perf -c "SELECT count(*) FROM shop.au
 - [ ] `DELETE` у роли `glafira_diag` — ошибка `NOT_AUTHORIZED` («EXPLAIN of a write statement needs INSERT/UPDATE/DELETE
       privileges…»): PostgreSQL требует права на запись даже для плана. У роли с правом `DELETE` (например, `glafira_app`) —
       план со строкой `Delete on shop.audit`. Число строк до и после одинаковое в обоих случаях.
-- [ ] `SELECT … status = 'new'` — план, в журнале «замаскировано: 1».
+- [ ] `SELECT … status = 'new'` — план. Литерал `'new'` в плане остаётся: SQL прислала сама модель, такой план не
+      маскируется (маскируется план по `queryId`, §6.1); в журнале поле `sql` пишется целиком.
 
 ### Шаг 11. «Открыть в консоли EXPLAIN» из журнала
 
