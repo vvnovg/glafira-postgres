@@ -233,31 +233,29 @@ DATA="$HOME/Library/Application Support/io.github.vvnovg.glafira.postgres"
 
 ### Шаг 10. Опасный SQL не проходит
 
-**Сделать** — задайте по очереди:
-> Сделай explain_query на perf для `SELECT pg_sleep(30)`
+**Сделать** — задайте одним сообщением (локальной модели так быстрее):
+> Сделай explain_query на perf по очереди для каждого запроса и покажи, что вернул каждый вызов: 1) `SELECT pg_sleep(30)`
+> 2) `SELECT pg_stat_reset()` 3) `SELECT * FROM ts_stat('SELECT 1')` 4) `SELECT 1; SELECT 2` 5) `DELETE FROM shop.audit`
+> 6) `SELECT count(*) FROM shop.orders WHERE status = 'new'`
 
-> Сделай explain_query на perf для `SELECT pg_stat_reset()`
-
-> Сделай explain_query на perf для `SELECT * FROM ts_stat('SELECT 1')`
-
-> Сделай explain_query на perf для `SELECT 1; SELECT 2`
-
-Затем посчитайте строки, спросите про `DELETE` и посчитайте снова:
+До и после посчитайте строки `shop.audit`:
 ```bash
 docker exec gp-pg-perf psql -U postgres -d perf -c "SELECT count(*) FROM shop.audit"
 ```
-> Сделай explain_query на perf для `DELETE FROM shop.audit`
 
 **Должно быть**
 - [ ] `pg_sleep`, `pg_stat_reset`, `ts_stat` — ошибка `forbidden_function`.
 - [ ] `SELECT 1; SELECT 2` — ошибка `invalid_sql`.
-- [ ] `DELETE` — план со строкой `Delete on shop.audit`; число строк до и после одинаковое.
+- [ ] `DELETE` у роли `glafira_diag` — ошибка `NOT_AUTHORIZED` («EXPLAIN of a write statement needs INSERT/UPDATE/DELETE
+      privileges…»): PostgreSQL требует права на запись даже для плана. У роли с правом `DELETE` (например, `glafira_app`) —
+      план со строкой `Delete on shop.audit`. Число строк до и после одинаковое в обоих случаях.
+- [ ] `SELECT … status = 'new'` — план, в журнале «замаскировано: 1».
 
 ### Шаг 11. «Открыть в консоли EXPLAIN» из журнала
 
 **Сделать**
 1. «Журнал» → «Обновить».
-2. У успешного `explain_query` по SQL (шаг 10, `DELETE`) нажмите «Открыть в консоли EXPLAIN».
+2. У успешного `explain_query` по SQL (шаг 10, `SELECT … status = 'new'`) нажмите «Открыть в консоли EXPLAIN».
 3. Найдите в журнале `explain_query` по `queryId` (шаг 9) и наведите на его кнопку.
 
 **Должно быть**
