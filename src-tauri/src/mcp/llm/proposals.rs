@@ -301,6 +301,14 @@ impl ProposalStore {
         })
     }
 
+    /// Убрать предложение (откат сохранения, когда запрос отменили до прикрепления).
+    pub fn remove(&self, id: &str) -> AppResult<()> {
+        self.update(|items| {
+            items.retain(|p| p.id != id);
+            Ok(())
+        })
+    }
+
     /// Ответ пользователя: `accepted` или `rejected` с необязательной причиной до `MAX_REASON_CHARS` (видна модели).
     pub fn answer(
         &self,

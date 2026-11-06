@@ -214,7 +214,7 @@ impl PgBackend for NoData {
 /// (`propose_query_rewrite` пишет в Glafira, не в базу), повтор с теми же данными идемпотентен
 /// (`crates/glafira-pg-mcp/tests/p4b_tools.rs` проверяет то же на уровне крейта; здесь — через приложение и `serve_stream`).
 #[tokio::test(flavor = "multi_thread")]
-async fn tools_list_has_the_gateway_tools_with_read_only_annotations() {
+async fn tools_list_has_the_gateway_tools_with_their_annotations() {
     let dir = tempfile::tempdir().unwrap();
     let audit = Arc::new(AuditLog::new(dir.path()));
     let backend = Arc::new(NoData);

@@ -14,6 +14,7 @@ use glafira_pg_mcp::params::{
 use pg_advisor::sqlcheck::{Purpose, StatementKind};
 use serde_json::Value;
 
+use super::compare::params_for;
 use super::proposals::{LlmProposal, NewProposal, ProposalFilter, ProposalSource};
 use super::requests::{OptimizationRequest, RequestSource, RequestStatus};
 use super::{ProposalsEvent, off_thread, plain_text};
@@ -29,8 +30,12 @@ use crate::mcp::model_sql::{
 use crate::mcp::read::{EXPLAIN_TIMEOUT_S, member_or_leader};
 use crate::state::AppState;
 
-/// Снимок для модели укладывается в предел ответа ядра с запасом под `hint`.
-const REQUEST_FIT_BYTES: usize = HARD_LIMIT_BYTES - 512;
+/// Бюджет `params` снимка для модели (остальное — запрос, DDL таблиц, план).
+const PARAMS_BUDGET_BYTES: usize = 16 * 1024;
+/// Проходов подгонки снимка вместе с подсказкой.
+const FIT_PASSES: usize = 8;
+/// Сколько имён опущенных таблиц называет подсказка (остальные — «and N more»).
+const HINT_NAMES: usize = 3;
 /// Пометка обрезанного текста плана — как у значений `run_select`.
 const TRUNCATED_MARK: &str = "…[truncated]";
 
@@ -111,15 +116,62 @@ pub fn request_for_model(
         )
         .into(),
     );
-    let omitted = fit_snapshot(&mut v, REQUEST_FIT_BYTES);
-    if !omitted.is_empty() {
-        v["hint"] = format!(
-            "Omitted to fit the 100 KB response: {}.",
-            omitted.join("; ")
-        )
-        .into();
+    // `params` — в бюджет до подгонки остального; подсказка (`hint`) тоже в бюджете: подгонка повторяется с меньшим
+    // пределом, пока итог с подсказкой не уложится в предел ответа ядра (сходится за 2–3 прохода).
+    let notes = fit_params(&mut v);
+    let base = v;
+    let mut limit = HARD_LIMIT_BYTES;
+    for _ in 0..FIT_PASSES {
+        let mut v = base.clone();
+        let mut hints = notes.clone();
+        hints.extend(fit_snapshot(&mut v, limit));
+        if !hints.is_empty() {
+            v["hint"] = format!("Omitted to fit the 100 KB response: {}.", hints.join("; ")).into();
+        }
+        let size = json_size(&v);
+        if size <= HARD_LIMIT_BYTES {
+            return Ok(v);
+        }
+        limit = limit.saturating_sub(size - HARD_LIMIT_BYTES);
     }
-    Ok(v)
+    Err(ToolError::internal(
+        "optimization request does not fit the response limit",
+    ))
+}
+
+/// Значения `params` в бюджет `PARAMS_BUDGET_BYTES`: каждое значение режется до всё меньшей длины (с пометкой
+/// `…[truncated]`), пока список не уложится; если и пометок слишком много — значения отбрасываются (пустой список).
+/// Итог — что сделано, для `hint`.
+fn fit_params(v: &mut Value) -> Vec<String> {
+    let Some(list) = v.get("params").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    if json_size(&Value::Array(list.clone())) <= PARAMS_BUDGET_BYTES {
+        return Vec::new();
+    }
+    for cap in [2_048, 512, 128, 32, 0] {
+        let cut: Vec<Value> = list
+            .iter()
+            .map(|x| match x.as_str() {
+                Some(t) if t.len() > cap => {
+                    let mut keep = cap;
+                    while !t.is_char_boundary(keep) {
+                        keep -= 1;
+                    }
+                    format!("{}{TRUNCATED_MARK}", &t[..keep]).into()
+                }
+                _ => x.clone(),
+            })
+            .collect();
+        if json_size(&Value::Array(cut.clone())) <= PARAMS_BUDGET_BYTES {
+            v["params"] = Value::Array(cut);
+            return vec![format!(
+                "values in params cut to {cap} bytes each (the full values are in the user's console)"
+            )];
+        }
+    }
+    v["params"] = Value::Array(Vec::new());
+    vec!["params (too many values; they are in the user's console)".to_string()]
 }
 
 /// Решение владельца Q3: `bundle.text`, равный `sql`, не повторяется (всегда); пока снимок больше `limit` — DDL таблиц
@@ -162,10 +214,13 @@ fn fit_snapshot(v: &mut Value, limit: usize) -> Vec<String> {
     }
     if !dropped.is_empty() {
         dropped.reverse();
+        let mut names = dropped[..dropped.len().min(HINT_NAMES)].join(", ");
+        if dropped.len() > HINT_NAMES {
+            names.push_str(&format!(" and {} more", dropped.len() - HINT_NAMES));
+        }
         omitted.push(format!(
-            "DDL of {} tables at the end of bundle.tables, counted in bundle.tablesOmitted ({}; read them with get_table_details)",
+            "DDL of {} tables at the end of bundle.tables, counted in bundle.tablesOmitted ({names}; read them with get_table_details)",
             dropped.len(),
-            dropped.join(", ")
         ));
     }
     let plan = v
@@ -193,6 +248,20 @@ fn fit_snapshot(v: &mut Value, limit: usize) -> Vec<String> {
             "the end of bundle.planText (build the full plan with explain_query on the same connection, database and member)"
                 .to_string(),
         );
+    }
+    // Крайние меры (очень большие `sql` и `bundle.text`): сначала другой текст запроса, затем предупреждения.
+    for (key, what) in [
+        ("text", "bundle.text (a different form of the query text)"),
+        ("warnings", "bundle.warnings"),
+    ] {
+        if json_size(v) <= limit {
+            break;
+        }
+        if let Some(bundle) = v.get_mut("bundle").and_then(Value::as_object_mut)
+            && bundle.remove(key).is_some()
+        {
+            omitted.push(what.to_string());
+        }
     }
     omitted
 }
@@ -359,20 +428,26 @@ fn proposal_indexes(ddls: &[String]) -> Result<Vec<String>, ToolError> {
         .collect()
 }
 
-/// Параметры пробы плана предложенного SQL: без `$N` — без параметров; значения запроса консоли — если их столько же;
-/// иначе на 16+ — `GENERIC_PLAN`, а раньше пробы нет (без значений план не построить; разбор и типы уже проверил
-/// `prepare`, сравнение планов пользователь всё равно запускает сам).
+/// Параметры пробы плана предложенного SQL — то же правило, что у «Сравнить планов» (`compare::params_for`): без `$N` —
+/// без параметров; значения запроса консоли — если их столько же; иначе обобщённый план (16+). На старых версиях
+/// обобщённого плана нет, и пробы нет (без значений план не построить; разбор и типы уже проверил `prepare`).
 fn probe_params(n: usize, values: &[Option<String>], version_num: i32) -> Option<Params> {
-    if n == 0 {
-        Some(Params::None)
-    } else if values.len() == n {
-        Some(Params::Values {
-            values: values.to_vec(),
-        })
-    } else if version_num >= V16 {
-        Some(Params::Generic)
-    } else {
-        None
+    let params = params_for(n, values);
+    (params != Params::Generic || version_num >= V16).then_some(params)
+}
+
+/// Узел снимка запроса пропал (смена топологии): запасного «лидера» нет — предложение к запросу привязано к узлу, на
+/// котором снимали план; модели советуют прямую форму (`connectionId` и `sql`).
+fn direct_form_hint(e: ToolError, request_id: Option<&str>, member: Option<&str>) -> ToolError {
+    match (request_id, member) {
+        (Some(id), Some(m)) => err(
+            &e.code,
+            format!(
+                "{} (the node {m} of optimization request {id} is not available now: propose in the direct form with connectionId and sql instead of requestId)",
+                e.message
+            ),
+        ),
+        _ => e,
     }
 }
 
@@ -401,7 +476,8 @@ async fn propose(
         ));
     }
     ensure_open(st, &o.connection_id).await?;
-    let member = member_or_leader(st, &o.connection_id, o.member.as_deref())?;
+    let member = member_or_leader(st, &o.connection_id, o.member.as_deref())
+        .map_err(|e| direct_form_hint(e, o.request_id.as_deref(), o.member.as_deref()))?;
     let original = match o.original {
         Original::Text(text) => text,
         Original::QueryId(q) => {
@@ -477,22 +553,20 @@ async fn store_proposal(st: &AppState, new: NewProposal) -> Result<ProposedOut, 
         .await
         .map_err(store_error)?;
     if created {
-        let attached = match proposal.request_id.clone() {
-            Some(rid) => {
-                let (stores, pid, id) = (st.llm.clone(), proposal.id.clone(), rid.clone());
-                let attached = off_thread(move || stores.requests.attach_proposal(&id, &pid)).await;
-                if attached.is_ok()
-                    && let Some(r) = st.llm.requests.get(&rid)
-                {
-                    st.llm.emit(ProposalsEvent::request(&r));
-                }
-                attached
+        if let Some(rid) = proposal.request_id.clone() {
+            let (stores, pid, id) = (st.llm.clone(), proposal.id.clone(), rid.clone());
+            if let Err(e) = off_thread(move || stores.requests.attach_proposal(&id, &pid)).await {
+                // Отмена между проверкой и прикреплением: предложение не остаётся без запроса — хранилища согласованы,
+                // событий нет (интерфейс о нём не узнает), модель получает `request_closed`.
+                let (stores, pid) = (st.llm.clone(), proposal.id.clone());
+                let _ = off_thread(move || stores.proposals.remove(&pid)).await;
+                return Err(store_error(e));
             }
-            None => Ok(()),
-        };
-        // Отмена между проверкой и прикреплением: предложение уже в хранилище — интерфейс узнаёт о нём событием.
+            if let Some(r) = st.llm.requests.get(&rid) {
+                st.llm.emit(ProposalsEvent::request(&r));
+            }
+        }
         st.llm.emit(ProposalsEvent::proposal(&proposal));
-        attached.map_err(store_error)?;
     }
     Ok(ProposedOut {
         proposal_id: proposal.id,
@@ -508,14 +582,10 @@ fn list(st: &AppState, p: ListProposalsParams) -> Result<PgOutput, ToolError> {
         check_connection(st, id)?;
         filter.connection_id = Some(id.to_string());
     }
+    // Запрос могли вытеснить из последних 50, а его предложения остаются: фильтр по `request_id` напрямую, доступ —
+    // по подключению каждого предложения.
     if let Some(rid) = p.request_id.as_deref().map(str::trim) {
-        let r = st
-            .llm
-            .requests
-            .get(rid)
-            .ok_or_else(|| request_not_found(rid))?;
-        check_connection(st, &r.connection_id)?;
-        filter.request_ids = Some(vec![r.id]);
+        filter.request_ids = Some(vec![rid.to_string()]);
     }
     let items = st
         .llm
@@ -734,6 +804,109 @@ mod tests {
             hint.contains("planText") && hint.contains("explain_query"),
             "{hint}"
         );
+    }
+
+    /// Отмена между проверкой и прикреплением (здесь — запроса уже нет в хранилище): предложение не остаётся без
+    /// запроса, событий нет, модель получает ошибку.
+    #[tokio::test]
+    async fn a_failed_attach_removes_the_just_added_proposal() {
+        let (_d, st) = state();
+        let rec = Arc::new(Recorder::default());
+        st.llm.set_sink(rec.clone());
+        let e = store_proposal(
+            &st,
+            crate::mcp::llm::proposals::tests::new(Some("r0000aa"), "SELECT 1", &[]),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.code, "not_found");
+        assert!(st.llm.proposals.list(&ProposalFilter::default()).is_empty());
+        assert!(rec.0.lock().unwrap().is_empty(), "событий нет");
+    }
+
+    /// Узел снимка пропал: нет запасного «лидера», модели советуют прямую форму; без запроса текст не меняется.
+    #[test]
+    fn a_missing_snapshot_member_points_to_the_direct_form() {
+        let e = direct_form_hint(
+            invalid_argument("Unknown member pg-1"),
+            Some("r3a9f1c"),
+            Some("pg-1"),
+        );
+        assert_eq!(e.code, "invalid_argument");
+        assert!(
+            e.message.starts_with("Unknown member pg-1")
+                && e.message.contains("direct form with connectionId and sql"),
+            "{}",
+            e.message
+        );
+        let e = direct_form_hint(invalid_argument("Unknown member pg-1"), None, None);
+        assert_eq!(e.message, "Unknown member pg-1");
+    }
+
+    fn size_of(v: &Value) -> usize {
+        serde_json::to_vec(v).unwrap().len()
+    }
+
+    /// Q3, подсказка в бюджете: длинные квалифицированные имена опущенных таблиц и план чуть больше предела — итоговый
+    /// ответ (вместе с `hint`) не больше предела ядра; в подсказке имена не перечисляются целиком.
+    #[test]
+    fn snapshot_with_the_hint_stays_within_the_limit() {
+        for (tables, ddl, plan_lines) in [
+            (30, 10_000, 100),
+            (12, 9_000, 2_500),
+            (40, 4_000, 3_000),
+            (3, 40_000, 4_000),
+        ] {
+            let mut r = st_request();
+            r.bundle = json!({
+                "planText": "Index Scan using orders_pkey on orders\n".repeat(plan_lines),
+                "tables": (0..tables).map(|i| json!({
+                    "schema": "public", "name": format!("order_line_items_2024_{i:02}"), "ddl": "x".repeat(ddl)
+                })).collect::<Vec<_>>(),
+                "warnings": []
+            });
+            let v = request_for_model(&r, "prod-db").unwrap();
+            let size = size_of(&v);
+            assert!(
+                size <= HARD_LIMIT_BYTES,
+                "{tables}/{ddl}/{plan_lines}: {size}"
+            );
+            let hint = v["hint"].as_str().unwrap();
+            assert!(hint.len() < 700, "подсказка короткая: {hint}");
+        }
+        // Таблиц много — перечислены первые три и «and N more».
+        let mut r = st_request();
+        r.bundle = json!({
+            "tables": (0..30).map(|i| json!({
+                "schema": "public", "name": format!("order_line_items_2024_{i:02}"), "ddl": "x".repeat(10_000)
+            })).collect::<Vec<_>>(),
+        });
+        let v = request_for_model(&r, "c").unwrap();
+        let hint = v["hint"].as_str().unwrap();
+        assert!(hint.contains("and ") && hint.contains(" more"), "{hint}");
+    }
+
+    /// Q3: `params` тоже в бюджете — длинные значения режутся с пометкой, об этом сказано в подсказке.
+    #[test]
+    fn huge_params_are_truncated_to_fit() {
+        let mut r = st_request();
+        r.params = (0..50).map(|_| Some("v".repeat(5_000))).collect();
+        r.bundle = json!({ "planText": "Seq Scan on orders\n".repeat(5_000), "tables": [] });
+        let v = request_for_model(&r, "c").unwrap();
+        assert!(size_of(&v) <= HARD_LIMIT_BYTES, "{}", size_of(&v));
+        let params = v["params"].as_array().unwrap();
+        assert_eq!(params.len(), 50, "число значений то же");
+        assert!(
+            params[0].as_str().unwrap().ends_with("…[truncated]"),
+            "{}",
+            params[0]
+        );
+        assert!(v["hint"].as_str().unwrap().contains("params"), "{v}");
+        // Совсем много значений: итог всё равно в пределе.
+        r.params = (0..30_000).map(|_| Some("v".repeat(100))).collect();
+        let v = request_for_model(&r, "c").unwrap();
+        assert!(size_of(&v) <= HARD_LIMIT_BYTES, "{}", size_of(&v));
+        assert!(v["hint"].as_str().unwrap().contains("params"), "{v}");
     }
 
     fn st_request() -> OptimizationRequest {
@@ -1046,28 +1219,38 @@ mod tests {
             .code,
             "not_allowed"
         );
-        // Фильтр по запросу: запрос закрытого подключения — not_allowed, отсутствующий — not_found.
+        // Фильтр по запросу идёт по `request_id` предложений: запрос закрытого подключения и неизвестный запрос — пусто
+        // (доступ проверяется по подключению каждого предложения), вытесненный запрос с живыми предложениями — они.
         let hidden = st.llm.requests.create(new_request("c2")).unwrap();
-        assert_eq!(
-            list(ListProposalsParams {
-                connection_id: None,
-                request_id: Some(hidden.id.clone())
-            })
-            .await
-            .unwrap_err()
-            .code,
-            "not_allowed"
-        );
-        assert_eq!(
-            list(ListProposalsParams {
-                connection_id: None,
-                request_id: Some("r000000".into())
-            })
-            .await
-            .unwrap_err()
-            .code,
-            "not_found"
-        );
+        let mut in_hidden =
+            crate::mcp::llm::proposals::tests::new(Some(&hidden.id), "SELECT 3", &[]);
+        in_hidden.connection_id = "c2".into();
+        st.llm.proposals.add_or_existing(in_hidden).unwrap();
+        let by_request = |id: &str| {
+            let id = id.to_string();
+            async {
+                let PgOutput::Proposals(items) = list(ListProposalsParams {
+                    connection_id: None,
+                    request_id: Some(id),
+                })
+                .await
+                .unwrap()
+                .body
+                else {
+                    panic!()
+                };
+                items
+            }
+        };
+        assert!(by_request(&hidden.id).await.is_empty());
+        assert!(by_request("r000000").await.is_empty());
+        let mut evicted = crate::mcp::llm::proposals::tests::new(Some("r0e41c7"), "SELECT 4", &[]);
+        evicted.connection_id = "c1".into();
+        let (pe, _) = st.llm.proposals.add_or_existing(evicted).unwrap();
+        assert!(st.llm.requests.get("r0e41c7").is_none());
+        let items = by_request("r0e41c7").await;
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0]["proposalId"], pe.id.as_str());
         let r = st.llm.requests.create(new_request("c1")).unwrap();
         let (p2, _) = st
             .llm

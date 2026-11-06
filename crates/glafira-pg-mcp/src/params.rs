@@ -898,8 +898,9 @@ mod tests {
         .validate()
         .unwrap();
         assert_eq!((p.database, p.query_id.as_deref()), (None, Some("7")));
+        // Источник не задан (ни requestId, ни connectionId): правило источника, индексы тут ни при чём.
         let e = parse::<ProposeParams>(json!({
-            "rewrittenSql": "SELECT 1", "rationale": "x", "indexes": vec!["CREATE INDEX ON t (a)"; 6]
+            "rewrittenSql": "SELECT 1", "rationale": "x", "indexes": vec!["CREATE INDEX ON t (a)"; 2]
         }))
         .validate()
         .unwrap_err();
