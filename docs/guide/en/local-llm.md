@@ -23,14 +23,16 @@ Tested on a Mac mini with an M4 Pro and 48 GB of memory, models in Ollama quanti
 
 | Model (4-bit) | Correct answers | Generation, typically | Tasks 1–3, 5, 6 | Top over 15 minutes |
 |---|---|---|---|---|
-| Qwen3.6-35B-A3B | 18 of 18 | 50–80 tokens/s | 6–27 s | 1.3–2.1 min |
-| Gemma 4 26B | 18 of 18 | 30–50 tokens/s | 7–42 s | 1.3–1.7 min |
-| Qwen3.8-27B | 18 of 18 | 15–20 tokens/s | 23–124 s | 5–7 min |
-| Gemma 4 31B | 16 of 18 | 7–14 tokens/s | 47–134 s | 4–7.5 min |
+| Qwen3.6-35B-A3B | 17 of 18 | 50–80 tokens/s | 6–24 s | 1.2–1.4 min |
+| Gemma 4 26B | 18 of 18 | 30–50 tokens/s | 7–42 s | 1.1–1.3 min |
+| Qwen3.8-27B | 18 of 18 | 15–20 tokens/s | 23–121 s | 6.3–7.5 min |
+| Gemma 4 31B | 17 of 18 | 7–14 tokens/s | 42–119 s | 5.2–6.6 min |
 
-Generation is the number of answer tokens per second of model time, including reading the context; the first question after the model is loaded into memory is slower. Qwen3.6-35B-A3B and Gemma 4 26B answer ordinary questions in tens of seconds. The dense Qwen3.8-27B and Gemma 4 31B use all of their parameters for every token and answer in half a minute to two minutes, and up to 7 minutes on a task with several large tool answers. For everyday work on a Mac, Qwen3.6-35B-A3B and Gemma 4 26B fit: neither made a mistake, Qwen is faster.
+Generation is the number of answer tokens per second of model time, including reading the context; the first question after the model is loaded into memory is slower. Qwen3.6-35B-A3B and Gemma 4 26B answer ordinary questions in tens of seconds. The dense Qwen3.8-27B and Gemma 4 31B use all of their parameters for every token and answer in half a minute to two minutes, and up to 7.5 minutes on a task with several large tool answers. For everyday work on a Mac, Qwen3.6-35B-A3B and Gemma 4 26B fit: Gemma made no mistakes, Qwen made one in the hardest task and generates faster.
 
-Only Gemma 4 31B made mistakes, in the fourth task: once it answered "recently" without naming the period, and another time it presented statistics since the reset as the current load. In several accepted answers of the other models, a heading "over the last 15 minutes" stands next to a note about the real period, for example "from 30 seconds of observation". In a trial run without load, Qwen3.6 once used another connection's database, got an empty top and decided that the server was idle. The models fixed wrong tool arguments themselves on the next attempt (a name for a hypothetical index, an empty `queryId`, observing for longer than 50 seconds): Glafira answers with a clear error, but this costs an extra step. A script checked the answers by key signs; disputed ones were reread by hand.
+Tasks 4–6 were run twice: after the first run, Glafira was fixed where the models stumbled. A `windowS` window without a mode now means a window, not totals since the reset. An empty string in an optional parameter means "not given". If the database of the top filter does not exist on the server, Glafira answers with an error listing the databases instead of an empty top: before, Qwen3.6 once used another connection's database and decided that the server was idle. A name for a hypothetical index is dropped. A query from pg_stat_statements that cannot be planned as is (`interval $3`, `timestamptz $1`) gets a hint to pass the SQL with values. The table shows tasks 1–3 from the first run and tasks 4–6 from the second.
+
+The models made mistakes only in the fourth task, Qwen3.6 and Gemma 4 31B once each: Glafira answered that it had no 15-minute history, and the model took the statistics since the reset and presented them without saying that this was not 15 minutes. In several accepted answers, a heading "over the last 15 minutes" stands next to a note about the real period, for example "from 50 seconds of observation". The models fixed the remaining wrong tool arguments themselves on the next attempt (observing for longer than 50 seconds, another connection's database for a query plan, a parameter value for a query without parameters): Glafira answers with a clear error, but this costs an extra step. A script checked the answers by key signs; disputed ones were reread by hand.
 
 No answer revealed the original values of masked literals, and no model changed anything on the server: the gateway does not allow it. The models erred only in their conclusions — check them against the MCP journal. The hardest task is the fourth: the model has to notice that there is no 15-minute window and say honestly which period its statistics cover.
 

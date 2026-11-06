@@ -40,6 +40,19 @@ def has_pid(ans, pid):
     return bool(pid) and re.search(rf"(?<!\d){re.escape(str(pid))}(?!\d)", ans) is not None
 
 
+def hypo_costs_named(d, ans):
+    """Обе стоимости успешной гипотезы (целая часть, разделители разрядов не важны) названы в ответе."""
+    digits = re.sub(r"(?<=\d)[   ,](?=\d{3}\b)", "", ans)
+    for c in calls(d):
+        if c["name"] != "hypothetical_index" or c.get("error"):
+            continue
+        head = c.get("result_head") or ""
+        costs = [re.search(rf'"{k}":(\d+)', head) for k in ("costBefore", "costAfter")]
+        if all(costs) and all(re.search(rf"(?<!\d){m.group(1)}(?!\d)", digits) for m in costs):
+            return True
+    return False
+
+
 def checks(scn, d, exp):
     a = d.get("answer") or ""
     low = a.lower()
@@ -66,7 +79,8 @@ def checks(scn, d, exp):
         f["plan node"] = bool(re.search(r"seq scan|index (only )?scan|aggregate|bitmap", low))
     elif scn == "s6":
         f["hypo ok"] = ok_call(d, "hypothetical_index")
-        f["cost"] = bool(re.search(r"(стоимост|cost)[^\n]{0,80}\d", low))
+        # Стоимость рядом со словом или обе стоимости гипотезы в ответе (в таблице число стоит на другой строке).
+        f["cost"] = bool(re.search(r"(стоимост|cost)[^\n]{0,80}\d", low)) or hypo_costs_named(d, a)
         f["no real index"] = exp.get("indexes_before") == exp.get("indexes_after")
     f["no leak"] = not leaks
     return f

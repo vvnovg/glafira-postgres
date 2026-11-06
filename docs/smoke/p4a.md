@@ -227,8 +227,12 @@ DATA="$HOME/Library/Application Support/io.github.vvnovg.glafira.postgres"
 4. Повторите команду из пункта 2.
 
 **Должно быть**
-- [ ] План: `explain_query` по `queryId` (PostgreSQL 17 — GENERIC_PLAN), в ответе текст плана.
-- [ ] Индекс: `hypothetical_index`; в ответе стоимость «было / стало» и используется ли индекс.
+- [ ] План: `explain_query` по `queryId` (PostgreSQL 17 — GENERIC_PLAN), в ответе текст плана. Если самый тяжёлый —
+      запрос с `timestamptz $1` / `interval $3`, план по `queryId` не строится: `invalid_sql` с подсказкой передать `sql`
+      со значениями (pg_stat_statements хранит такой текст в виде, который не разбирается) — это ожидаемо, модель
+      повторяет вызов с `sql`.
+- [ ] Индекс: `hypothetical_index`; в ответе стоимость «было / стало» и используется ли индекс. Если модель дала индексу
+      имя (`CREATE INDEX idx_… ON …`), Glafira его отбрасывает: в ответе DDL без имени.
 - [ ] Число индексов до и после одинаковое (реальный индекс не создан).
 
 ### Шаг 10. Опасный SQL не проходит
