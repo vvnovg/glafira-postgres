@@ -148,7 +148,7 @@ impl PgServer {
     }
 
     #[tool(
-        description = "Run one Glafira diagnostic tool (ids from list_diagnostics) on a member or on the whole cluster and return its report: the tool data, findings with an English title and fix, and the parts that are unavailable with the reason. Without member the tool follows the leader (primary); cluster tools ignore member. windowS (300, 900 or 3600) applies to waits. A report over 100 KB is truncated: truncated is true and hint says how to narrow it.",
+        description = "Run one Glafira diagnostic tool (ids from list_diagnostics) on a member or on the whole cluster and return its report: the tool data, findings with an English title and fix, and the parts that are unavailable with the reason. Without member the tool follows the leader (primary); cluster tools ignore member. windowS (300, 900 or 3600) applies to waits; waits omits intervals without samples, and a window without any samples has no intervals and a hint. Rows of the queries tool have the form of get_top_queries rows. A report over 100 KB is truncated: truncated is true and hint says how to narrow it.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -242,7 +242,7 @@ impl PgServer {
     }
 
     #[tool(
-        description = "Top queries from pg_stat_statements on a member. mode sinceReset (the default without windowS) gives totals since the last statistics reset; mode window (the default when windowS is given) gives the last windowS seconds (300, 900 or 3600, default 900) from Glafira's buffer, which fills while the Queries tab or a query card is open in Glafira; without the buffer the coverage is 0, then use observe_top_queries or sinceReset. sort: totalTime (default), meanTime, maxTime, stddevTime, calls, rowsPerCall, sharedRead, hitRatio, tempWritten, walBytes, ioTime, planTime, jitTime or cpuTime. limit 1..=100, default 10; filters database (a database that does not exist on the member gives not_found with the list of databases) and search (a case-insensitive substring of the query text). At the diagnostics access level search matches the masked text ($N in place of literals) within the top 200 queries by the chosen sort, so an empty result may mean the query is outside that window.",
+        description = "Top queries from pg_stat_statements on a member. mode sinceReset (the default without windowS) gives totals since the last statistics reset; mode window (the default when windowS is given) gives the last windowS seconds (300, 900 or 3600, default 900) from Glafira's buffer, which fills while the Queries tab or a query card is open in Glafira; without the buffer the coverage is 0, then use observe_top_queries or sinceReset. sort: totalTime (default), meanTime, maxTime, stddevTime, calls, rowsPerCall, sharedRead, hitRatio, tempWritten, walBytes, ioTime, planTime, jitTime or cpuTime. limit 1..=100, default 10; filters database (a database that does not exist on the member gives not_found with the list of databases) and search (a case-insensitive substring of the query text). At the diagnostics access level search matches the masked text ($N in place of literals) within the top 200 queries by the chosen sort, so an empty result may mean the query is outside that window. In each row counters that are 0 are omitted (calls, totalExecMs, meanExecMs and rows are always present), own is present only when true (Glafira's own query), and the query text is cut to the first 500 characters with textTruncated true (get_query_details gives the full text).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -307,7 +307,7 @@ impl PgServer {
     }
 
     #[tool(
-        description = "Card of one query by queryId from get_top_queries: text, metrics since the statistics reset and for the window, history, running instances (the 20 longest-running; runningTotal is the full count when there are more), waits, tables and findings. database is the database of the query (default: the connection's database).",
+        description = "Card of one query by queryId from get_top_queries: the full text, metrics since the statistics reset and for the windows (counters that are 0 are omitted, as in get_top_queries), history for the last hour (at most 12 points: adjacent per-minute points are merged, calls and totalExecMs are summed and atMs is the start of the merged range), running instances (the 20 longest-running; runningTotal is the full count when there are more), waits, tables and findings. database is the database of the query (default: the connection's database).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,

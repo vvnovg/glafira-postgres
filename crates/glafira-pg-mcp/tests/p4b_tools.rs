@@ -265,6 +265,42 @@ fn proposed(id: &str) -> PgAnswer {
     }
 }
 
+/// Смоук P4b, G1, G2, G4: описания говорят модели, что убрано из ответов — нулевые счётчики, `own: false`, хвосты
+/// длинных текстов топа, интервалы ожиданий без сэмплов — и что история карточки не длиннее 12 точек.
+#[tokio::test]
+async fn descriptions_say_what_compact_answers_omit() {
+    let c = client(Arc::new(Fake::new())).await;
+    let tools = c.list_all_tools().await.unwrap();
+    let description = |name: &str| {
+        tools
+            .iter()
+            .find(|t| t.name == name)
+            .and_then(|t| t.description.as_deref())
+            .unwrap()
+            .to_string()
+    };
+    let top = description("get_top_queries");
+    for phrase in [
+        "counters that are 0 are omitted",
+        "calls, totalExecMs, meanExecMs and rows are always present",
+        "own is present only when true",
+        "first 500 characters with textTruncated true",
+    ] {
+        assert!(top.contains(phrase), "{phrase}: {top}");
+    }
+    let card = description("get_query_details");
+    for phrase in ["counters that are 0 are omitted", "at most 12 points"] {
+        assert!(card.contains(phrase), "{phrase}: {card}");
+    }
+    let diag = description("run_diagnostic");
+    for phrase in [
+        "waits omits intervals without samples",
+        "the form of get_top_queries rows",
+    ] {
+        assert!(diag.contains(phrase), "{phrase}: {diag}");
+    }
+}
+
 /// Абзац P4b в `instructions` (§5.4): сценарий оптимизации, кнопка «Send to LLM assistant» (решение владельца Q4),
 /// Glafira не выполняет предложенный SQL; база по-прежнему не меняется, предложение пишется в Glafira.
 #[tokio::test]

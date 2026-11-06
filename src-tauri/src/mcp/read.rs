@@ -19,6 +19,7 @@ use glafira_pg_mcp::params::{
     MODE_WINDOW, QueryDetailsParams, RunDiagnosticParams, SettingsParams, TOP_LIMIT_DEFAULT,
     TOPOLOGY_EVENTS_MAX, TableDetailsParams, TopQueriesParams, default_top_mode,
 };
+use pg_advisor::ash::WaitsData;
 use pg_advisor::findings::FindingTarget;
 use pg_advisor::plan::json::from_json;
 use pg_advisor::plan::relations;
@@ -57,6 +58,7 @@ use crate::error::{AppError, AppResult};
 use crate::explain::Params;
 use crate::explain::hypopg::{self, HypoManyRequest, HypoManyResult};
 use crate::explain::params::{count_params, normalize};
+use crate::sampler::statements::HistoryPoint;
 use crate::state::AppState;
 use crate::storage::connections::ConnectionFolder;
 use crate::topology::journal::TopologyEvent;
@@ -94,6 +96,43 @@ pub const MAX_RUNNING: usize = 20;
 /// Партиций в `get_table_details` (список и строка `-- partitions:` в DDL); полное число — в
 /// `partitioning.partitionsTotal`.
 pub const MAX_PARTITIONS: usize = 200;
+/// Текст запроса в строке топа для модели (смоук P4b, G2) — первые 500 символов с `textTruncated: true`; полный текст —
+/// в `get_query_details`.
+pub const TOP_TEXT_CHARS: usize = 500;
+/// Счётчики строки pgss (поля `Counters` без `calls`, `totalExecMs` и `rows`), которые модели не отдаются, если равны 0
+/// (смоук P4b, G2; описания `get_top_queries` и `get_query_details` говорят об этом).
+const ZERO_OMITTED_COUNTERS: [&str; 26] = [
+    "plans",
+    "totalPlanMs",
+    "sharedHit",
+    "sharedRead",
+    "sharedDirtied",
+    "sharedWritten",
+    "localHit",
+    "localRead",
+    "localDirtied",
+    "localWritten",
+    "tempRead",
+    "tempWritten",
+    "ioReadMs",
+    "ioWriteMs",
+    "tempIoMs",
+    "walRecords",
+    "walFpi",
+    "walBytes",
+    "jitFunctions",
+    "jitMs",
+    "parallelPlanned",
+    "parallelLaunched",
+    "cpuUserMs",
+    "cpuSysMs",
+    "diskReadBytes",
+    "diskWriteBytes",
+];
+/// Точек истории в карточке запроса для модели (смоук P4b, G4): соседние минутные точки сливаются.
+pub const MAX_HISTORY_POINTS: usize = 12;
+/// Профиль ожиданий без единого сэмпла и без тиков сэмплера в окне (смоук P4b, G1).
+const NO_WAIT_SAMPLES_HINT: &str = "The wait sampler collected no samples in this window (it runs while the wait profile or the sessions of this node are open in Glafira, or during observe_activity): call observe_activity for a live sample";
 
 /// Операция чтения.
 pub async fn read_op(st: &AppState, op: PgRead) -> Result<PgAnswer, ToolError> {
@@ -307,13 +346,22 @@ fn hide_error_details(data: &mut DiagData) {
 }
 
 /// Отчёт инструмента для модели: конверт P2, `data` — JSON-сериализация P2/P3 (та же форма, что у интерфейса, но
-/// ошибки узлов — без подробностей, `hide_error_details`), находки — с английскими текстами, причины недоступности —
-/// английским текстом.
+/// ошибки узлов — без подробностей, `hide_error_details`; короче для модели, смоук P4b: профиль ожиданий — без
+/// интервалов без сэмплов, `waits_for_model`, строки `queries` — `top_rows_for_model`), находки — с английскими текстами,
+/// причины недоступности — английским текстом.
 pub fn report_out(mut r: DiagReport) -> Report {
     hide_error_details(&mut r.data);
+    let hint = match &mut r.data {
+        DiagData::Waits(d) => waits_for_model(d),
+        _ => None,
+    };
+    let mut data = serde_json::to_value(&r.data).unwrap_or(Value::Null);
+    if matches!(r.data, DiagData::Queries(_)) {
+        top_rows_for_model(&mut data);
+    }
     Report {
         tool: tool_id(r.tool),
-        data: serde_json::to_value(&r.data).unwrap_or(Value::Null),
+        data,
         findings: r.findings.iter().map(finding_out).collect(),
         unavailable: r
             .unavailable
@@ -326,7 +374,63 @@ pub fn report_out(mut r: DiagReport) -> Report {
         server_version_num: r.server_version_num,
         in_recovery: r.in_recovery,
         truncated: false,
-        hint: None,
+        hint,
+    }
+}
+
+/// Профиль ожиданий для модели (смоук P4b, G1): интервалы без сэмплов (`sampledS` 0 и пустой `aas`) не отдаются. Без
+/// единого сэмпла в окне интервалов нет совсем, а подсказка говорит почему: сэмплер не работал (`NO_WAIT_SAMPLES_HINT`)
+/// или работал, но активных сессий не видел. Итог — подсказка.
+fn waits_for_model(d: &mut WaitsData) -> Option<String> {
+    if d.total_samples > 0 {
+        d.buckets.retain(|b| b.sampled_s > 0.0 || !b.aas.is_empty());
+        return None;
+    }
+    let sampled_s: f64 = d.buckets.iter().map(|b| b.sampled_s).sum();
+    d.buckets.clear();
+    Some(if sampled_s > 0.0 {
+        format!(
+            "The wait sampler ran for {} s of this window and saw no active sessions",
+            sampled_s.round()
+        )
+    } else {
+        NO_WAIT_SAMPLES_HINT.to_string()
+    })
+}
+
+/// Строка pgss для модели (смоук P4b, G2): счётчики `ZERO_OMITTED_COUNTERS`, равные 0, и `own: false` не отдаются
+/// (описания инструментов говорят об этом); `calls`, `totalExecMs`, `meanExecMs`, `rows`, ключ, база, роль, текст и
+/// `textTruncated` остаются всегда, доли (`sharePct`, `hitRatio`) — тоже.
+fn stat_row_for_model(row: &mut Value) {
+    let Some(row) = row.as_object_mut() else {
+        return;
+    };
+    for key in ZERO_OMITTED_COUNTERS {
+        if row.get(key).and_then(Value::as_f64) == Some(0.0) {
+            row.remove(key);
+        }
+    }
+    if row.get("own") == Some(&Value::Bool(false)) {
+        row.remove("own");
+    }
+}
+
+/// Строки топа в `data.rows` отчёта `queries` (`get_top_queries`, `observe_top_queries`, `run_diagnostic`):
+/// `stat_row_for_model`, текст — первые `TOP_TEXT_CHARS` символов с `textTruncated: true`.
+fn top_rows_for_model(data: &mut Value) {
+    let Some(rows) = data.get_mut("rows").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for row in rows {
+        stat_row_for_model(row);
+        let long = row["text"]
+            .as_str()
+            .and_then(|t| t.char_indices().nth(TOP_TEXT_CHARS))
+            .map(|(cut, _)| cut);
+        if let (Some(cut), Some(Value::String(text))) = (long, row.get_mut("text")) {
+            text.truncate(cut);
+            row["textTruncated"] = Value::Bool(true);
+        }
     }
 }
 
@@ -928,8 +1032,10 @@ fn query_detail_answer(
         .into_iter()
         .map(|u| unavailable_out(None, u))
         .collect();
+    d.history = history_for_model(std::mem::take(&mut d.history));
     let mut v =
         serde_json::to_value(&d).map_err(|e| tool_error(AppError::internal_with(e.to_string())))?;
+    card_rows_for_model(&mut v);
     v["member"] = json!(member);
     if running_total > MAX_RUNNING {
         v["runningTotal"] = json!(running_total);
@@ -941,6 +1047,45 @@ fn query_detail_answer(
         masked,
         rows: None,
     })
+}
+
+/// Строки pgss карточки (`sinceReset`, `windows[].stat`, `byUser[].stat`) — `stat_row_for_model`.
+fn card_rows_for_model(v: &mut Value) {
+    stat_row_for_model(&mut v["sinceReset"]);
+    for key in ["windows", "byUser"] {
+        if let Some(items) = v[key].as_array_mut() {
+            items
+                .iter_mut()
+                .for_each(|item| stat_row_for_model(&mut item["stat"]));
+        }
+    }
+}
+
+/// История карточки для модели (смоук P4b, G4): не больше `MAX_HISTORY_POINTS` точек. Соседние точки сливаются в
+/// почти равные группы (размеры отличаются не больше чем на 1), порядок ряда сохраняется: `calls` и `totalExecMs`
+/// суммируются, `meanExecMs = totalExecMs / calls` (без вызовов — 0), `atMs` — начало слитого диапазона.
+pub fn history_for_model(points: Vec<HistoryPoint>) -> Vec<HistoryPoint> {
+    let n = points.len();
+    if n <= MAX_HISTORY_POINTS {
+        return points;
+    }
+    (0..MAX_HISTORY_POINTS)
+        .map(|g| {
+            let part = &points[g * n / MAX_HISTORY_POINTS..(g + 1) * n / MAX_HISTORY_POINTS];
+            let calls: i64 = part.iter().map(|p| p.calls).sum();
+            let total_exec_ms: f64 = part.iter().map(|p| p.total_exec_ms).sum();
+            HistoryPoint {
+                at_ms: part[0].at_ms,
+                calls,
+                total_exec_ms,
+                mean_exec_ms: if calls > 0 {
+                    total_exec_ms / calls as f64
+                } else {
+                    0.0
+                },
+            }
+        })
+        .collect()
 }
 
 /// Статистика колонок без значений (уровень `diagnostics`): у таблицы с наследниками — строка по всей иерархии
@@ -2849,5 +2994,317 @@ mod tests {
             "неверный вызов не открывает подключение"
         );
         assert_eq!(st.runtimes.view("off").state, ConnState::Disconnected);
+    }
+
+    // Смоук P4b, G1–G4: ответы короче — интервалы ожиданий без сэмплов, нулевые счётчики и длинные тексты строк pgss,
+    // ряд истории карточки.
+
+    fn bucket(start_ms: i64, sampled_s: f64, cpu: Option<f64>) -> pg_advisor::ash::Bucket {
+        pg_advisor::ash::Bucket {
+            start_ms,
+            sampled_s,
+            aas: cpu
+                .map(|v| (pg_advisor::ash::WaitClass::Cpu, v))
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    fn waits_out(data: WaitsData) -> Report {
+        report_out(report(Tool::Waits, DiagData::Waits(data), vec![]))
+    }
+
+    fn bucket_starts(r: &Report) -> Vec<i64> {
+        r.data["buckets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["startMs"].as_i64().unwrap())
+            .collect()
+    }
+
+    /// G1: сэмплер в окне не работал — 90 пустых интервалов окна 900 с не отдаются, вместо них подсказка: где Glafira
+    /// собирает сэмплы и что вызвать.
+    #[test]
+    fn waits_without_samples_have_no_buckets_and_a_hint() {
+        let empty = pg_advisor::ash::profile(&[], &[], &[], 900, 1_000_000_000, None, false);
+        assert_eq!(empty.buckets.len(), 90);
+        let r = waits_out(empty);
+        assert!(bucket_starts(&r).is_empty(), "{}", r.data);
+        assert_eq!(
+            (&r.data["totalSamples"], &r.data["samplerRunning"]),
+            (&json!(0), &json!(false))
+        );
+        assert_eq!(r.hint.as_deref(), Some(NO_WAIT_SAMPLES_HINT));
+        assert!(NO_WAIT_SAMPLES_HINT.contains("call observe_activity"));
+    }
+
+    /// Сэмплер работал, но активных сессий не видел: интервалов тоже нет, а подсказка говорит, сколько секунд он
+    /// работал, — вызывать `observe_activity` незачем.
+    #[test]
+    fn waits_of_an_idle_node_have_no_buckets_and_say_so() {
+        let data = WaitsData {
+            window_s: 300,
+            bucket_s: 5,
+            sampler_running: true,
+            buckets: vec![
+                bucket(0, 5.0, None),
+                bucket(5_000, 3.0, None),
+                bucket(10_000, 0.0, None),
+            ],
+            ..WaitsData::default()
+        };
+        let r = waits_out(data);
+        assert!(bucket_starts(&r).is_empty(), "{}", r.data);
+        assert_eq!(
+            r.hint.as_deref(),
+            Some("The wait sampler ran for 8 s of this window and saw no active sessions")
+        );
+    }
+
+    /// Сэмплы есть: уходят только интервалы без сэмплов (`sampledS` 0 и пустой `aas`); интервал, где сэмплер работал,
+    /// а активных сессий не было, остаётся (нагрузка 0); подсказки нет.
+    #[test]
+    fn waits_drop_only_buckets_without_samples() {
+        let data = WaitsData {
+            window_s: 300,
+            bucket_s: 10,
+            total_samples: 4,
+            buckets: vec![
+                bucket(0, 0.0, None),
+                bucket(10_000, 10.0, Some(0.4)),
+                bucket(20_000, 10.0, None),
+                bucket(30_000, 0.0, None),
+            ],
+            ..WaitsData::default()
+        };
+        let r = waits_out(data);
+        assert_eq!(bucket_starts(&r), [10_000, 20_000]);
+        assert_eq!(r.data["buckets"][0]["aas"]["cpu"], 0.4);
+        assert!(r.hint.is_none(), "{:?}", r.hint);
+    }
+
+    /// Другие инструменты `run_diagnostic` интервалов не несут: отчёт отдаётся как был, без подсказки.
+    #[test]
+    fn other_reports_are_not_touched() {
+        let r = report_out(report(
+            Tool::Sessions,
+            DiagData::Sessions(SessionsData::default()),
+            vec![],
+        ));
+        assert!(r.hint.is_none());
+        assert_eq!(
+            r.data,
+            serde_json::to_value(DiagData::Sessions(SessionsData::default())).unwrap()
+        );
+    }
+
+    /// Список счётчиков, которые не отдаются нулевыми, — ровно поля `Counters` без `calls`, `totalExecMs` и `rows`: новое
+    /// поле счётчиков попадёт и сюда.
+    #[test]
+    fn zero_omitted_counters_are_the_counters_but_the_kept_ones() {
+        let counters = serde_json::to_value(pg_advisor::queries::Counters::default()).unwrap();
+        let mut names: Vec<&str> = counters
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .filter(|k| !["calls", "totalExecMs", "rows"].contains(k))
+            .collect();
+        names.sort_unstable();
+        let mut omitted = ZERO_OMITTED_COUNTERS.to_vec();
+        omitted.sort_unstable();
+        assert_eq!(names, omitted);
+    }
+
+    fn row_keys(row: &Value) -> Vec<&str> {
+        row.as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// G2: строка топа для модели — без счётчиков, равных 0, и без `own: false`; `calls`, `totalExecMs`, `meanExecMs`,
+    /// `rows`, ключ, база, роль, текст, `textTruncated` и доли — всегда; текст длиннее 500 символов обрезается с
+    /// `textTruncated: true`. Так же — у `run_diagnostic` с инструментом `queries` (тот же `report_out`).
+    #[test]
+    fn top_rows_omit_zero_counters_and_cut_long_texts() {
+        let mut r = statements_report();
+        let DiagData::Queries(d) = &mut r.data else {
+            unreachable!()
+        };
+        d.rows[0].shared_hit = 7;
+        d.rows[0].io_read_ms = 1.5;
+        d.rows[1].text = Some(format!("SELECT {}", "ж".repeat(600)));
+        d.rows[2].own = true;
+        let a = top_answer(r.clone(), LlmAccess::Off, None, 10, false, false);
+        let PgOutput::Report(out) = &a.body else {
+            unreachable!()
+        };
+        let rows = out.data["rows"].as_array().unwrap();
+        let keys = row_keys(&rows[0]);
+        for key in [
+            "key",
+            "datname",
+            "rolname",
+            "calls",
+            "totalExecMs",
+            "meanExecMs",
+            "rows",
+            "text",
+            "textTruncated",
+            "sharePct",
+            "sharedHit",
+            "ioReadMs",
+        ] {
+            assert!(keys.contains(&key), "{key}: {keys:?}");
+        }
+        for key in [
+            "localHit",
+            "localRead",
+            "localDirtied",
+            "localWritten",
+            "walBytes",
+            "walFpi",
+            "walRecords",
+            "ioWriteMs",
+            "plans",
+            "totalPlanMs",
+            "sharedRead",
+            "tempWritten",
+            "own",
+        ] {
+            assert!(!keys.contains(&key), "{key}: {keys:?}");
+        }
+        assert_eq!(
+            (&rows[0]["totalExecMs"], &rows[0]["rows"], &rows[0]["calls"]),
+            (&json!(0.0), &json!(0), &json!(1))
+        );
+        let text = rows[1]["text"].as_str().unwrap();
+        assert_eq!(text.chars().count(), TOP_TEXT_CHARS);
+        assert!(text.starts_with("SELECT жж"), "{text}");
+        assert_eq!(
+            (&rows[0]["textTruncated"], &rows[1]["textTruncated"]),
+            (&json!(false), &json!(true))
+        );
+        assert_eq!(rows[2]["own"], true, "своя строка Glafira помечена");
+        // `run_diagnostic` (`queries`) — тот же вид строк.
+        let v = report_out(r);
+        assert_eq!(v.data["rows"], out.data["rows"]);
+    }
+
+    fn point(minute: i64, calls: i64, total_exec_ms: f64) -> HistoryPoint {
+        HistoryPoint {
+            at_ms: minute * 60_000,
+            calls,
+            total_exec_ms,
+            mean_exec_ms: if calls > 0 {
+                total_exec_ms / calls as f64
+            } else {
+                0.0
+            },
+        }
+    }
+
+    /// G4: 60 минутных точек — 12 точек по 5 минут: вызовы и время суммируются, среднее — по сумме, `atMs` — начало.
+    #[test]
+    fn history_of_sixty_points_is_merged_into_twelve() {
+        let h = history_for_model((0..60).map(|m| point(m, m, m as f64 * 2.0)).collect());
+        assert_eq!(h.len(), MAX_HISTORY_POINTS);
+        for (g, p) in (0i64..).zip(&h) {
+            let calls = 25 * g + 10;
+            assert_eq!(
+                (p.at_ms, p.calls, p.total_exec_ms, p.mean_exec_ms),
+                (5 * g * 60_000, calls, 2.0 * calls as f64, 2.0),
+                "группа {g}"
+            );
+        }
+    }
+
+    /// Ряд не длиннее 12 точек — как есть; 13 точек — 12, порядок сохраняется, вызовы не теряются.
+    #[test]
+    fn short_history_stays_as_it_is() {
+        let seven: Vec<HistoryPoint> = (0..7).map(|m| point(m, 3, 1.5)).collect();
+        assert_eq!(history_for_model(seven.clone()), seven);
+        assert!(history_for_model(vec![]).is_empty());
+        let h = history_for_model((0..13).map(|m| point(m, 1, 1.0)).collect());
+        assert_eq!(h.len(), MAX_HISTORY_POINTS);
+        assert!(h.windows(2).all(|w| w[0].at_ms < w[1].at_ms));
+        assert_eq!(h.iter().map(|p| p.calls).sum::<i64>(), 13);
+        assert_eq!(h[0].at_ms, 0);
+    }
+
+    /// Слитая точка без вызовов — среднее 0, а не NaN.
+    #[test]
+    fn merged_points_without_calls_have_a_zero_mean() {
+        let mut points: Vec<HistoryPoint> = (0..24).map(|m| point(m, 0, 0.0)).collect();
+        points[2] = point(2, 4, 10.0);
+        let h = history_for_model(points);
+        assert_eq!(h.len(), MAX_HISTORY_POINTS);
+        assert_eq!((h[0].calls, h[0].mean_exec_ms), (0, 0.0));
+        assert_eq!(
+            (
+                h[1].at_ms,
+                h[1].calls,
+                h[1].total_exec_ms,
+                h[1].mean_exec_ms
+            ),
+            (2 * 60_000, 4, 10.0, 2.5)
+        );
+        assert!(h.iter().all(|p| p.mean_exec_ms.is_finite()));
+    }
+
+    /// G2, G4: в карточке строки pgss (с момента сброса, за окна, по ролям) — без счётчиков, равных 0, история — не
+    /// больше 12 точек.
+    #[test]
+    fn query_card_rows_omit_zero_counters_and_history_is_short() {
+        use crate::diag::query_detail::{ByUser, WindowStat};
+        let mut row = statement(5, "SELECT 1", 60);
+        row.text = None;
+        row.shared_hit = 3;
+        let mut d = QueryDetail::unavailable_pgss(170_000, false);
+        d.since_reset = Some(row.clone());
+        d.windows = vec![
+            WindowStat {
+                window_s: 300,
+                stat: Some(row.clone()),
+            },
+            WindowStat {
+                window_s: 900,
+                stat: None,
+            },
+        ];
+        d.by_user = vec![ByUser {
+            rolname: Some("app".into()),
+            toplevel: true,
+            stat: row,
+        }];
+        d.history = (0..60).map(|m| point(m, 1, 2.0)).collect();
+        let a = query_detail_answer(d, "pg-1", LlmAccess::Off).unwrap();
+        let PgOutput::QueryDetails(v) = &a.body else {
+            panic!("не карточка")
+        };
+        for row in [
+            &v["sinceReset"],
+            &v["windows"][0]["stat"],
+            &v["byUser"][0]["stat"],
+        ] {
+            let keys = row_keys(row);
+            assert!(
+                !keys.contains(&"localHit") && !keys.contains(&"walBytes"),
+                "{keys:?}"
+            );
+            assert_eq!((&row["sharedHit"], &row["calls"]), (&json!(3), &json!(60)));
+            assert!(
+                keys.contains(&"rows") && keys.contains(&"totalExecMs"),
+                "{keys:?}"
+            );
+        }
+        assert_eq!(v["windows"][1]["stat"], Value::Null);
+        assert_eq!(v["byUser"][0]["rolname"], "app");
+        let history = v["history"].as_array().unwrap();
+        assert_eq!(history.len(), MAX_HISTORY_POINTS);
+        assert_eq!(history[1]["calls"], 5);
     }
 }
