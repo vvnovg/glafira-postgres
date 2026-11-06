@@ -209,9 +209,10 @@ impl PgBackend for NoData {
     }
 }
 
-/// Без стенда (§17 P4a, критерий 2): по протоколу сервер отдаёт ровно инструменты `TOOL_NAMES` (14 P4a и `run_select`
-/// P4b), у каждого все четыре подсказки (`crates/glafira-pg-mcp/tests/p4b_tools.rs` проверяет то же на уровне крейта;
-/// здесь — через приложение и `serve_stream`).
+/// Без стенда (§17 P4a, критерий 2): по протоколу сервер отдаёт ровно инструменты `TOOL_NAMES` (14 P4a, `run_select` и
+/// три инструмента предложений P4b), у каждого все четыре подсказки; единственный не «только чтение» — предложение
+/// (`propose_query_rewrite` пишет в Glafira, не в базу), повтор с теми же данными идемпотентен
+/// (`crates/glafira-pg-mcp/tests/p4b_tools.rs` проверяет то же на уровне крейта; здесь — через приложение и `serve_stream`).
 #[tokio::test(flavor = "multi_thread")]
 async fn tools_list_has_the_gateway_tools_with_read_only_annotations() {
     let dir = tempfile::tempdir().unwrap();
@@ -232,12 +233,21 @@ async fn tools_list_has_the_gateway_tools_with_read_only_annotations() {
     let mut expected = TOOL_NAMES.to_vec();
     expected.sort_unstable();
     assert_eq!(names, expected);
-    assert!(names.contains(&"run_select"), "{names:?}");
+    assert_eq!(names.len(), 18, "{names:?}");
+    for name in [
+        "run_select",
+        "get_optimization_request",
+        "propose_query_rewrite",
+        "list_proposals",
+    ] {
+        assert!(names.contains(&name), "{name}: {names:?}");
+    }
     for t in &tools {
         let a = t
             .annotations
             .as_ref()
             .unwrap_or_else(|| panic!("{}: нет подсказок", t.name));
+        let read_only = t.name != "propose_query_rewrite";
         assert_eq!(
             (
                 a.read_only_hint,
@@ -245,7 +255,7 @@ async fn tools_list_has_the_gateway_tools_with_read_only_annotations() {
                 a.idempotent_hint,
                 a.open_world_hint
             ),
-            (Some(true), Some(false), Some(true), Some(false)),
+            (Some(read_only), Some(false), Some(true), Some(false)),
             "{}",
             t.name
         );

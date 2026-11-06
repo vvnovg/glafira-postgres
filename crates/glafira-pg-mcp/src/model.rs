@@ -12,9 +12,10 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::params::{
-    ActivityParams, ConnectionParams, ExplainParams, HypoIndexParams, OBSERVE_GRACE_S,
-    ObserveActivityParams, ObserveQueriesParams, QueryDetailsParams, RunDiagnosticParams,
-    RunSelectParams, SettingsParams, TableDetailsParams, TopQueriesParams,
+    ActivityParams, ConnectionParams, ExplainParams, GetRequestParams, HypoIndexParams,
+    ListProposalsParams, OBSERVE_GRACE_S, ObserveActivityParams, ObserveQueriesParams,
+    ProposeParams, QueryDetailsParams, RunDiagnosticParams, RunSelectParams, SettingsParams,
+    TableDetailsParams, TopQueriesParams,
 };
 
 /// Подсказка `more` после подсказки `first` (поле `hint` отчёта): у каждой части — точка в конце, если её нет, между
@@ -52,6 +53,16 @@ pub trait PgBackend: Gate {
             Err(ToolError::new(
                 "not_supported",
                 "run_select is not supported by this Glafira build",
+            ))
+        })
+    }
+    /// P4b: запросы на оптимизацию и предложения (§8.2). Параметры уже проверены (`validate`); базу операции не
+    /// меняют — предложение пишется в Glafira.
+    fn llm(&self, _op: LlmOp) -> BoxFuture<'_, Result<PgAnswer, ToolError>> {
+        Box::pin(async {
+            Err(ToolError::new(
+                "not_supported",
+                "Optimization requests and proposals are not supported by this Glafira build",
             ))
         })
     }
@@ -108,6 +119,27 @@ impl PgObserve {
 /// Операция `run_select` (P4b): параметры уже проверены крейтом (`RunSelectParams::validate`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SelectOp(pub RunSelectParams);
+
+/// Операции предложений (P4b, спец. §8.2). `client` — имя клиента MCP сессии (из `initialize`), для панели
+/// «Предложения LLM».
+#[derive(Debug, Clone, PartialEq)]
+pub enum LlmOp {
+    GetRequest(GetRequestParams),
+    Propose {
+        params: ProposeParams,
+        client: Option<String>,
+    },
+    ListProposals(ListProposalsParams),
+}
+
+/// Ответ `propose_query_rewrite`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProposedOut {
+    pub proposal_id: String,
+    /// `new`; у повтора — текущий статус уже сохранённого предложения.
+    pub status: String,
+}
 
 /// Ход наблюдения: собрано образцов и всего (`notifications/progress`, если клиент передал `progressToken`).
 pub type ProgressFn = Arc<dyn Fn(u32, u32) + Send + Sync>;
@@ -187,6 +219,11 @@ pub enum PgOutput {
     ObservedActivity(ObservedActivity),
     ObservedQueries(Report),
     Select(SelectOut),
+    /// Снимок запроса на оптимизацию (§8.1) — JSON приложения как есть (объект).
+    Request(Value),
+    Proposed(ProposedOut),
+    /// Элементы `list_proposals`; крейт оборачивает их в `{ proposals: [...] }`.
+    Proposals(Vec<Value>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

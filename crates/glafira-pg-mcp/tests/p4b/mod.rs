@@ -1,5 +1,5 @@
-//! Обвязка тестов P4b: фальшивый `PgBackend` (подтверждает любого клиента, запоминает операции) и клиент rmcp поверх
-//! `tokio::io::duplex` (сервер одной сессии — `serve_stream` ядра).
+//! Обвязка тестов P4b: фальшивый `PgBackend` (подтверждает любого клиента, запоминает операции) и клиент rmcp с именем
+//! поверх `tokio::io::duplex` (сервер одной сессии — `serve_stream` ядра).
 #![allow(dead_code)]
 
 use std::sync::{Arc, Mutex};
@@ -9,11 +9,13 @@ use glafira_mcp_core::audit::AuditLog;
 use glafira_mcp_core::error::{BoxFuture, ToolError};
 use glafira_mcp_core::gate::{Gate, SessionAccess, SessionView};
 use glafira_mcp_core::server::{GatewayOptions, serve_stream};
-use glafira_pg_mcp::model::{ObserveCtx, PgAnswer, PgBackend, PgObserve, PgRead, SelectOp};
+use glafira_pg_mcp::model::{LlmOp, ObserveCtx, PgAnswer, PgBackend, PgObserve, PgRead, SelectOp};
 use glafira_pg_mcp::server::{INSTRUCTIONS, PgFactory};
-use rmcp::model::{CallToolRequestParams, CallToolResult};
+use rmcp::model::{
+    CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig, Implementation,
+};
 use rmcp::service::RunningService;
-use rmcp::{RoleClient, ServiceExt};
+use rmcp::{ClientHandler, RoleClient, ServiceExt};
 use serde_json::Value;
 
 type Reply<Op> = Box<dyn Fn(&Op) -> Result<PgAnswer, ToolError> + Send + Sync>;
@@ -21,14 +23,19 @@ type Reply<Op> = Box<dyn Fn(&Op) -> Result<PgAnswer, ToolError> + Send + Sync>;
 pub struct Fake {
     /// Операции `select` и срок, переданный в `ObserveCtx`.
     pub selects: Mutex<Vec<(SelectOp, Duration)>>,
+    /// Операции предложений (`get_optimization_request`, `propose_query_rewrite`, `list_proposals`).
+    pub llm_ops: Mutex<Vec<LlmOp>>,
     pub select_reply: Reply<SelectOp>,
+    pub llm_reply: Reply<LlmOp>,
 }
 
 impl Fake {
     pub fn new() -> Self {
         Self {
             selects: Mutex::default(),
+            llm_ops: Mutex::default(),
             select_reply: Box::new(|_| Err(ToolError::internal("no select reply in this test"))),
+            llm_reply: Box::new(|_| Err(ToolError::internal("no llm reply in this test"))),
         }
     }
 
@@ -37,6 +44,14 @@ impl Fake {
         f: impl Fn(&SelectOp) -> Result<PgAnswer, ToolError> + Send + Sync + 'static,
     ) -> Self {
         self.select_reply = Box::new(f);
+        self
+    }
+
+    pub fn on_llm(
+        mut self,
+        f: impl Fn(&LlmOp) -> Result<PgAnswer, ToolError> + Send + Sync + 'static,
+    ) -> Self {
+        self.llm_reply = Box::new(f);
         self
     }
 }
@@ -68,11 +83,19 @@ impl PgBackend for Fake {
         self.selects.lock().unwrap().push((op, ctx.duration));
         Box::pin(async move { reply })
     }
+    fn llm(&self, op: LlmOp) -> BoxFuture<'_, Result<PgAnswer, ToolError>> {
+        let reply = (self.llm_reply)(&op);
+        self.llm_ops.lock().unwrap().push(op);
+        Box::pin(async move { reply })
+    }
 }
 
-/// Клиент rmcp, подключённый к серверу одной сессии с бэкендом `fake`. Каталог журнала живёт, пока работает сервер
-/// сессии (он внутри его задачи), и удаляется вместе с ней в конце теста.
-pub async fn client(fake: Arc<Fake>) -> RunningService<RoleClient, ()> {
+/// Клиент rmcp, который представляется именем (`initialize`): `propose_query_rewrite` передаёт имя в `LlmOp`.
+pub type Client = RunningService<RoleClient, ClientConfig>;
+
+/// Клиент с именем `name`, подключённый к серверу одной сессии с бэкендом `fake`. Каталог журнала живёт, пока работает
+/// сервер сессии (он внутри его задачи), и удаляется вместе с ней в конце теста.
+pub async fn client_named(fake: Arc<Fake>, name: &str) -> Client {
     let dir = tempfile::tempdir().unwrap();
     let audit = Arc::new(AuditLog::new(dir.path()));
     let (server_io, client_io) = tokio::io::duplex(1 << 20);
@@ -88,10 +111,24 @@ pub async fn client(fake: Arc<Fake>) -> RunningService<RoleClient, ()> {
         let _dir = dir;
         server.await;
     });
-    ().serve(client_io).await.unwrap()
+    ClientConfig::new(
+        ClientCapabilities::default(),
+        Implementation::new(name, "1.0"),
+    )
+    .serve(client_io)
+    .await
+    .unwrap()
 }
 
-pub async fn call(c: &RunningService<RoleClient, ()>, tool: &str, args: Value) -> CallToolResult {
+pub async fn client(fake: Arc<Fake>) -> Client {
+    client_named(fake, "p4b-test").await
+}
+
+pub async fn call<H: ClientHandler>(
+    c: &RunningService<RoleClient, H>,
+    tool: &str,
+    args: Value,
+) -> CallToolResult {
     let mut p = CallToolRequestParams::new(tool.to_string());
     if let Value::Object(m) = args {
         p = p.with_arguments(m);

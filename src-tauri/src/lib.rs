@@ -177,6 +177,7 @@ pub fn run() {
             commands::llm::list_optimization_requests,
             commands::llm::list_llm_proposals,
             commands::llm::answer_llm_proposal,
+            commands::llm::compare_llm_proposal,
             commands::actions::list_actions,
             commands::actions::preview_session_action,
             commands::actions::execute_session_action,

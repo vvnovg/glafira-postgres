@@ -1,9 +1,12 @@
 //! Запросы на оптимизацию и предложения LLM (спец. P4 §8): хранилища `llm-requests.json` / `llm-proposals.json`,
-//! событие `mcp://proposals`, записи журнала MCP `requestCreated` и `proposalAnswered`.
+//! событие `mcp://proposals`, записи журнала MCP `requestCreated` и `proposalAnswered`; инструменты модели — `tools`,
+//! «Сравнить планы» — `compare` (`compare_proposal`).
 
+pub mod compare;
 mod list_file;
 pub mod proposals;
 pub mod requests;
+pub mod tools;
 
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
@@ -296,6 +299,20 @@ pub async fn answer_proposal(
         kind: "proposalAnswered".into(),
         fields,
     });
+    st.llm.emit(ProposalsEvent::proposal(&p));
+    Ok(p)
+}
+
+/// «Сравнить планы» (спец. §8.4): итог — в предложение (виден модели в `list_proposals`) и событие для панели.
+pub async fn compare_proposal(st: &AppState, id: &str) -> AppResult<LlmProposal> {
+    let p = st
+        .llm
+        .proposals
+        .get(id)
+        .ok_or_else(|| proposals::proposal_not_found(id))?;
+    let c = compare::compare(st, &p).await?;
+    let (stores, pid) = (st.llm.clone(), id.to_string());
+    let p = off_thread(move || stores.proposals.set_comparison(&pid, c)).await?;
     st.llm.emit(ProposalsEvent::proposal(&p));
     Ok(p)
 }

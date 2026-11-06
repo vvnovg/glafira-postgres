@@ -53,3 +53,13 @@ pub async fn answer_llm_proposal(
 ) -> AppResult<LlmProposal> {
     llm::answer_proposal(&state, &id, &status, reason).await
 }
+
+/// «Сравнить планы» в панели предложений: EXPLAIN без выполнения обоих запросов на одном узле, индексы — через hypopg;
+/// итог сохраняется в предложении (его видит модель в `list_proposals`).
+#[tauri::command]
+pub async fn compare_llm_proposal(
+    state: State<'_, AppState>,
+    id: String,
+) -> AppResult<LlmProposal> {
+    llm::compare_proposal(&state, &id).await
+}

@@ -29,6 +29,11 @@ pub const SELECT_DEFAULT_ROWS: u32 = 100;
 pub const SELECT_MAX_ROWS: u32 = 500;
 /// Событий топологии в ответе `get_topology`.
 pub const TOPOLOGY_EVENTS_MAX: usize = 50;
+/// Пределы `propose_query_rewrite` (спец. §8.2); индексов — `HYPO_INDEXES_MAX`, как у `hypothetical_index`.
+pub const MAX_RATIONALE_BYTES: usize = 4_096;
+pub const MAX_EFFECT_BYTES: usize = 1_024;
+/// Предел `rewrittenSql` до бэкенда — тот же, что у SQL модели в приложении (`explain::MAX_SQL_BYTES`).
+pub const MAX_REWRITE_BYTES: usize = 262_144;
 pub const MODE_SINCE_RESET: &str = "sinceReset";
 pub const MODE_WINDOW: &str = "window";
 pub const DEFAULT_SORT: &str = "totalTime";
@@ -554,6 +559,140 @@ impl RunSelectParams {
     }
 }
 
+/// Parameters of get_optimization_request.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GetRequestParams {
+    /// Request id from Glafira (r and 6 hex digits, e.g. r3a9f1c), as the user gave it. Omit to get the latest waiting request.
+    #[serde(default)]
+    pub request_id: Option<String>,
+}
+
+impl GetRequestParams {
+    /// Пустой `requestId` — «не задан» (E2): последний ожидающий запрос.
+    pub fn validate(mut self) -> Result<Self, ToolError> {
+        blank_to_none(&mut self.request_id);
+        Ok(self)
+    }
+}
+
+/// Parameters of propose_query_rewrite.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProposeParams {
+    /// Request id from get_optimization_request. Pass either it or connectionId with sql or queryId.
+    #[serde(default)]
+    pub request_id: Option<String>,
+    /// Connection id from list_connections, for a query you found yourself (without requestId).
+    #[serde(default)]
+    pub connection_id: Option<String>,
+    /// Database of the original query, for a query you found yourself; default: the connection's database (`database` in list_connections).
+    #[serde(default)]
+    pub database: Option<String>,
+    /// Text of the original query, for a query you found yourself. Pass sql or queryId.
+    #[serde(default)]
+    pub sql: Option<String>,
+    /// queryid of the original query from get_top_queries, as a string, for a query you found yourself. Pass sql or queryId.
+    #[serde(default)]
+    pub query_id: Option<String>,
+    /// The rewritten statement: one statement of the same kind as the original (SELECT stays SELECT) that returns the same rows.
+    pub rewritten_sql: String,
+    /// Up to 5 CREATE INDEX ON <table> ... statements the rewrite relies on (no CONCURRENTLY, no UNIQUE; an index name, if given, is ignored). They are never created: the user compares plans with them as hypothetical hypopg indexes.
+    #[serde(default)]
+    pub indexes: Option<Vec<String>>,
+    /// Why the rewrite is faster, plain text up to 4 KB; the user reads it in Glafira.
+    pub rationale: String,
+    /// Expected effect, plain text up to 1 KB, e.g. "cost 120000 → 800, no Seq Scan on orders".
+    #[serde(default)]
+    pub expected_effect: Option<String>,
+}
+
+impl ProposeParams {
+    /// Пустые необязательные строки — «не заданы» (E2), до остальных проверок: пустой `connectionId` рядом с
+    /// `requestId` — не второй источник. Источник исходного запроса: `requestId` или `connectionId` и ровно одно из
+    /// `sql` / `queryId` (`database` необязателен — решение владельца Q2: приложение возьмёт базу подключения).
+    /// Пределы текстов и индексов — `invalid_argument`. Тексты не обрезаются: журнал и приложение видят присланное.
+    pub fn validate(mut self) -> Result<Self, ToolError> {
+        blanks_to_none([
+            &mut self.request_id,
+            &mut self.connection_id,
+            &mut self.database,
+            &mut self.sql,
+            &mut self.query_id,
+            &mut self.expected_effect,
+        ]);
+        let bad = |m: &str| Err(ToolError::invalid_argument(m));
+        let direct = self.connection_id.is_some()
+            || self.database.is_some()
+            || self.sql.is_some()
+            || self.query_id.is_some();
+        match (&self.request_id, direct) {
+            (Some(_), true) => {
+                return bad("pass either requestId or connectionId with sql or queryId, not both");
+            }
+            (None, false) => {
+                return bad(
+                    "pass requestId from get_optimization_request, or connectionId with sql or queryId for a query you found yourself",
+                );
+            }
+            (None, true) => {
+                if self.connection_id.is_none() {
+                    return bad("connectionId is required without requestId");
+                }
+                sql_or_query_id(&mut self.sql, &mut self.query_id)?;
+            }
+            (Some(_), false) => {}
+        }
+        not_blank(&self.rewritten_sql, "rewrittenSql")?;
+        if self.rewritten_sql.len() > MAX_REWRITE_BYTES {
+            return bad("rewrittenSql is longer than 256 KB");
+        }
+        not_blank(&self.rationale, "rationale")?;
+        if self.rationale.len() > MAX_RATIONALE_BYTES {
+            return bad("rationale is longer than 4 KB");
+        }
+        if self
+            .expected_effect
+            .as_ref()
+            .is_some_and(|e| e.len() > MAX_EFFECT_BYTES)
+        {
+            return bad("expectedEffect is longer than 1 KB");
+        }
+        if let Some(list) = &self.indexes {
+            if list.len() > HYPO_INDEXES_MAX {
+                return Err(ToolError::invalid_argument(format!(
+                    "pass at most {HYPO_INDEXES_MAX} indexes, got {}",
+                    list.len()
+                )));
+            }
+            for ddl in list {
+                not_blank(ddl, "indexes")?;
+            }
+        }
+        Ok(self)
+    }
+}
+
+/// Parameters of list_proposals.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ListProposalsParams {
+    /// Only proposals for this connection (id from list_connections).
+    #[serde(default)]
+    pub connection_id: Option<String>,
+    /// Only proposals for this optimization request.
+    #[serde(default)]
+    pub request_id: Option<String>,
+}
+
+impl ListProposalsParams {
+    /// Пустые фильтры — «не заданы» (E2).
+    pub fn validate(mut self) -> Result<Self, ToolError> {
+        blanks_to_none([&mut self.connection_id, &mut self.request_id]);
+        Ok(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -719,6 +858,52 @@ mod tests {
             (None, None, " SELECT 1 ", Some(SELECT_DEFAULT_ROWS)),
             "текст SQL — как прислала модель"
         );
+    }
+
+    /// Параметры предложений (P4b): пустые строки — «не заданы» (E2) до правила источника; `database` в прямой форме
+    /// необязателен (Q2); `queryId` обрезается по краям, как у `explain_query`; тексты — как прислала модель.
+    #[test]
+    fn proposal_params_take_blanks_as_not_given() {
+        let g = parse::<GetRequestParams>(json!({"requestId": " "}))
+            .validate()
+            .unwrap();
+        assert_eq!(g.request_id, None);
+        let l = parse::<ListProposalsParams>(json!({"connectionId": "", "requestId": "r1"}))
+            .validate()
+            .unwrap();
+        assert_eq!(
+            (l.connection_id, l.request_id.as_deref()),
+            (None, Some("r1"))
+        );
+        let p = parse::<ProposeParams>(json!({
+            "requestId": "r1", "connectionId": " ", "database": "", "sql": "", "queryId": " ",
+            "rewrittenSql": " SELECT 1 ", "rationale": "x", "expectedEffect": ""
+        }))
+        .validate()
+        .unwrap();
+        assert_eq!(
+            (
+                p.connection_id,
+                p.database,
+                p.sql,
+                p.query_id,
+                p.expected_effect,
+                p.rewritten_sql.as_str()
+            ),
+            (None, None, None, None, None, " SELECT 1 ")
+        );
+        let p = parse::<ProposeParams>(json!({
+            "connectionId": "c1", "queryId": " 7 ", "rewrittenSql": "SELECT 1", "rationale": "x"
+        }))
+        .validate()
+        .unwrap();
+        assert_eq!((p.database, p.query_id.as_deref()), (None, Some("7")));
+        let e = parse::<ProposeParams>(json!({
+            "rewrittenSql": "SELECT 1", "rationale": "x", "indexes": vec!["CREATE INDEX ON t (a)"; 6]
+        }))
+        .validate()
+        .unwrap_err();
+        assert!(e.message.starts_with("pass requestId"), "{}", e.message);
     }
 
     /// `run_select`: `maxRows` 1..=500 (по умолчанию 100), `sql` не пуст.

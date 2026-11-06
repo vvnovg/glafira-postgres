@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use glafira_mcp_core::error::{BoxFuture, ToolError};
 use glafira_mcp_core::gate::{Gate, SessionAccess, SessionView};
-use glafira_pg_mcp::model::{ObserveCtx, PgAnswer, PgBackend, PgObserve, PgRead, SelectOp};
+use glafira_pg_mcp::model::{LlmOp, ObserveCtx, PgAnswer, PgBackend, PgObserve, PgRead, SelectOp};
 
 use super::approvals::Approvals;
 use crate::state::AppState;
@@ -71,6 +71,11 @@ impl PgBackend for AppBackend {
     /// `run_select` (P4b, §7.4) — `mcp::select`.
     fn select(&self, op: SelectOp, ctx: ObserveCtx) -> BoxFuture<'_, Result<PgAnswer, ToolError>> {
         Box::pin(super::select::run_select(&self.st, op.0, ctx))
+    }
+
+    /// Запросы на оптимизацию и предложения (P4b, §8.2) — `mcp::llm::tools`.
+    fn llm(&self, op: LlmOp) -> BoxFuture<'_, Result<PgAnswer, ToolError>> {
+        Box::pin(super::llm::tools::handle(&self.st, op))
     }
 }
 
