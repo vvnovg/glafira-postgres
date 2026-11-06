@@ -348,13 +348,19 @@ GRANT pg_read_all_data TO glafira_llm;` (на PG 13 — `GRANT SELECT ON ALL TAB
 | `run_diagnostic` | `connectionId`, `tool`, `member?`, `windowS?`, `queries?` | Конверт `DiagReport`: `tool`, `member`, `followsLeader`, `observedAtMs`, `serverVersionNum`, `inRecovery`, `data`, `findings`, `unavailable` (причины — английский текст) |
 | `get_activity` | `connectionId`, `member?`, `state?`, `database?`, `application?`, `minDurationS?`, `waitEventType?`, `limit = 100` (≤ 500) | `{ total, sessions [...] }` — строки инструмента `sessions` после фильтров, по убыванию длительности |
 | `observe_activity` | `connectionId`, `member?`, `durationSeconds = 30` (10–50) | §5.3 |
-| `get_top_queries` | `connectionId`, `member?`, `mode` (`"sinceReset"` / `"window"`), `windowS` (300 / 900 / 3600), `sort`, `limit = 10` (≤ 100), `database?`, `search?` | Отчёт инструмента `queries` (P3 §4.5). Окно строится из буфера сэмплера pgss, который копится, пока у пользователя открыта вкладка «Запросы» или карточка; без буфера — ответ с покрытием 0 и подсказкой использовать `observe_top_queries` или `sinceReset` |
+| `get_top_queries` | `connectionId`, `member?`, `mode` (`"sinceReset"` / `"window"`), `windowS` (300 / 900 / 3600), `sort`, `limit = 10` (≤ 100), `database?`, `search?` | Отчёт инструмента `queries` (P3 §4.5). Окно строится из буфера сэмплера pgss, который копится, пока у пользователя открыта вкладка «Запросы» или карточка; без буфера — ответ с покрытием 0 и подсказкой использовать `observe_top_queries` или `sinceReset`. Без `mode` режим — `window`, если задан `windowS`, иначе `sinceReset`; явный `sinceReset` с `windowS` — итоги с момента сброса и подсказка в `hint`, что `windowS` не применён (подсказки склеиваются, в том числе с подсказкой усечения). `database`, которой нет на узле (отчёт без строк — проверка `pg_database` на том же узле), — `not_found`: «Database X does not exist on <узел>; databases: …» — базы узла без шаблонов и с `datallowconn`, по алфавиту, не больше 50 имён (дальше «…and N more»), и база подключения; база есть — пустой ответ |
 | `observe_top_queries` | `connectionId`, `member?`, `durationSeconds = 30` (10–50), `sort`, `limit = 10` (≤ 100) | §5.3 |
 | `get_query_details` | `connectionId`, `member?`, `database?` (по умолчанию — база подключения), `queryId` | Карточка `QueryDetail` (P3 §7.2): текст, метрики с момента сброса и за окно, история, выполняющиеся экземпляры, ожидания, таблицы, находки |
 | `get_table_details` | `connectionId`, `database?` (по умолчанию — база подключения), `schema`, `table` | `TableDetails` (колонки, индексы, ограничения, статистика, партиции, триггеры, DDL) и `columnStats [{ column, nullFrac, avgWidth, nDistinct, correlation }]` из `pg_stats`; на уровне `data` — ещё `mostCommonVals`, `mostCommonFreqs`, `histogramBounds` (значения длиннее 2 КБ обрезаются) |
 | `get_settings` | `connectionId`, `member?`, `names?` (≤ 200), `changedOnly = true` | `{ settings [{ name, setting, unit, source, context, pendingRestart, hidden? }] }` из `pg_settings`; при `names` — ровно эти параметры; секреты — §6.2 |
-| `explain_query` | `connectionId`, `member?`, `database?` (по умолчанию — база подключения), `sql` или `queryId`, `params?` (значения `$N`), `genericPlan?` | `{ member, planText, summary { totalCost, planRows, planningMs? }, recommendations [...], tables [...], warnings [...] }` — EXPLAIN без ANALYZE (`FORMAT JSON, VERBOSE, SETTINGS`); `planText` — текст в виде psql (`plan::text_out::to_text`); для `queryId` — текст pgss, `GENERIC_PLAN` на 16+, на старых — `params` обязательны |
-| `hypothetical_index` | `connectionId`, `member?`, `database?` (по умолчанию — база подключения), `sql` или `queryId`, `params?`, `indexes` (1–5 строк `CREATE INDEX …`) | `{ costBefore, costAfter, indexes [{ ddl, used, estimatedSizeBytes }], planText }` — hypopg (P3b); сессия очищается `hypopg_reset()`; без hypopg — `FEATURE_UNAVAILABLE` с подсказкой |
+| `explain_query` | `connectionId`, `member?`, `database?` (по умолчанию — база подключения), `sql` или `queryId`, `params?` (значения `$N`), `genericPlan?` | `{ member, planText, summary { totalCost, planRows, planningMs? }, recommendations [...], tables [...], warnings [...] }` — EXPLAIN без ANALYZE (`FORMAT JSON, VERBOSE, SETTINGS`); `planText` — текст в виде psql (`plan::text_out::to_text`); для `queryId` — текст pgss, `GENERIC_PLAN` на 16+, на старых — `params` обязательны. Синтаксическая ошибка текста pgss (разбор шлюза или SQLSTATE `42601` сервера при `prepare`) — `invalid_sql` с прежними текстом и позицией и подсказкой после них: pgss хранит нормализованный текст (константы типизированных литералов вроде `interval '1 day'` стали `$N`), передайте `sql` со значениями; у `sql` модели и у прочих ошибок подсказки нет |
+| `hypothetical_index` | `connectionId`, `member?`, `database?` (по умолчанию — база подключения), `sql` или `queryId`, `params?`, `indexes` (1–5 строк `CREATE INDEX …`) | `{ costBefore, costAfter, indexes [{ ddl, used, estimatedSizeBytes }], planText }` — hypopg (P3b); сессия очищается `hypopg_reset()`; без hypopg — `FEATURE_UNAVAILABLE` с подсказкой. Имя индекса (`CREATE INDEX [IF NOT EXISTS] имя ON …`) отбрасывается до проверок — по дереву разбора и токенам `pg_query`, не по тексту (hypopg даёт своё имя); имя со схемой, `CONCURRENTLY`, `UNIQUE`, несколько выражений, комментарии и `$` — отказ, как раньше; `indexes[].ddl` — проверенный текст без имени. Запрос по `queryId` — подсказка к синтаксической ошибке, как у `explain_query`. Диалог P3b в приложении имя по-прежнему не принимает |
+
+Необязательный строковый параметр (`member`, `state`, `database`, `application`, `waitEventType`, `mode`, `sort`, `search`, `sql`,
+`queryId` у `explain_query` и `hypothetical_index`), переданный пустой строкой или одними пробелами, считается не заданным —
+как опущенный; обязательные строки (`connectionId`, `tool`, `schema`, `table`, `queryId` у `get_query_details`) пустыми быть не
+могут. Журнал MCP хранит аргументы, как их прислала модель. `sql` и `queryId` — ровно одно из двух; отказ называет случай:
+`pass exactly one of sql and queryId: both were given` / `…: neither was given`.
 
 ### 5.3 Наблюдение
 
@@ -814,6 +820,15 @@ LLM: диагностика и данные».
     пишется то, что прислала модель. «Открыть в консоли EXPLAIN» у вызова без `database` берёт базу профиля. Лимит топа по
     умолчанию (`get_top_queries`, `observe_top_queries`) — 10 вместо 20 (ответ на 20 строк — 26 КБ, локальная модель
     разбирала его 2+ минуты); предел 100 не менялся.
+22. По итогам прогона локальных моделей (dev/llm-eval): (E1) у `get_top_queries` `windowS` без `mode` выбирает окно, явный
+    `sinceReset` с `windowS` отвечает итогами с момента сброса и подсказкой в `hint` (подсказки склеиваются, усечение ответа
+    свою подсказку добавляет, а не заменяет); (E2) пустая строка необязательного параметра — «не задан» во всех инструментах
+    (`validate` крейта, до остальных проверок; журнал — как прислала модель), отказ правила `sql` / `queryId` называет случай;
+    (E3) база фильтра `get_top_queries`, которой нет на узле, — `not_found` со списком баз узла и базой подключения
+    (служебный запрос к `pg_database` — только когда отчёт пуст); (E4) имя гипотетического индекса снимается в шлюзе
+    (`pg_advisor::sqlcheck::without_index_name`, затем прежние `sqlcheck` и `validate_ddl`), `sqlcheck` и диалог P3b имя
+    по-прежнему отвергают; (E5) синтаксическая ошибка нормализованного текста pgss по `queryId` у `explain_query` и
+    `hypothetical_index` — `invalid_sql` с подсказкой передать `sql` со значениями.
 
 ---
 
