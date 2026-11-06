@@ -5,6 +5,7 @@
 
 pub mod audit;
 pub mod call;
+pub mod compact;
 pub mod endpoint;
 pub mod error;
 pub mod gate;

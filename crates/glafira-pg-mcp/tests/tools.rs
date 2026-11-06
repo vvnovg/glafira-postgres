@@ -380,9 +380,12 @@ fn text(r: &CallToolResult) -> String {
         .collect()
 }
 
+/// Успешный ответ: один текстовый блок с JSON-объектом, без `structuredContent` (смоук P4b, G3).
 fn ok(r: CallToolResult) -> Value {
     assert_eq!(r.is_error, Some(false), "{}", text(&r));
-    r.structured_content.unwrap()
+    assert_eq!(r.structured_content, None, "{}", text(&r));
+    assert_eq!(r.content.len(), 1, "{}", text(&r));
+    serde_json::from_str(&text(&r)).unwrap()
 }
 
 fn err(r: &CallToolResult) -> String {

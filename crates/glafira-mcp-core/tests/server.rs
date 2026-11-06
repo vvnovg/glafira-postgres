@@ -122,6 +122,9 @@ struct WorkParams {
     /// Answer with a JSON array instead of an object.
     #[serde(default)]
     array: Option<bool>,
+    /// Answer with nulls and long fractions (compaction check).
+    #[serde(default)]
+    loose: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -173,6 +176,15 @@ impl ToyServer {
                 }
                 if p.array == Some(true) {
                     return Ok(CallOk::new(json!([1, 2])));
+                }
+                if p.loose == Some(true) {
+                    return Ok(CallOk::new(json!({
+                        "ok": true,
+                        "none": null,
+                        "ms": 12.345_678,
+                        "rows": [null, 0, false, ""],
+                        "nested": {"gone": null, "id": "-6302332885333924942"}
+                    })));
                 }
                 let filler = "x".repeat(p.size.unwrap_or(0));
                 Ok(CallOk::new(json!({ "ok": true, "filler": filler })).with_extra("masked", 3))
@@ -383,9 +395,12 @@ fn text(r: &CallToolResult) -> String {
         .collect()
 }
 
+/// Успешный ответ: один текстовый блок с JSON-объектом, без `structuredContent` (смоук P4b, G3).
 fn ok(r: CallToolResult) -> Value {
     assert_eq!(r.is_error, Some(false), "{}", text(&r));
-    r.structured_content.unwrap()
+    assert_eq!(r.structured_content, None, "{}", text(&r));
+    assert_eq!(r.content.len(), 1, "{}", text(&r));
+    serde_json::from_str(&text(&r)).unwrap()
 }
 
 fn err(r: &CallToolResult) -> String {
@@ -767,6 +782,32 @@ async fn too_large_response_is_refused() {
         (last["code"].as_str(), last["bytes"].as_u64()),
         (Some("response_too_large"), Some(0))
     );
+}
+
+/// Смоук P4b, G3: модель получает JSON ответа один раз — одним компактным текстовым блоком без `structuredContent`:
+/// ключи со значением `null` убраны (в массивах `null` остаётся), дробные округлены; в журнале `bytes` — длина текста.
+#[tokio::test]
+async fn success_is_one_compact_text_block() {
+    let e = env(SessionAccess::Approved).await;
+    let c = client(&e.ep).await;
+    let r = call(&c, "work", json!({"connectionId": "c1", "loose": true})).await;
+    assert_eq!(
+        (r.is_error, r.structured_content.as_ref(), r.content.len()),
+        (Some(false), None, 1)
+    );
+    let body = text(&r);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap(),
+        json!({
+            "ok": true,
+            "ms": 12.346,
+            "rows": [null, 0, false, ""],
+            "nested": {"id": "-6302332885333924942"}
+        })
+    );
+    assert!(!body.contains(": ") && !body.contains("\n"), "{body}");
+    let last = e.audit.tail(1).remove(0);
+    assert_eq!(last["bytes"].as_u64(), Some(body.len() as u64));
 }
 
 #[tokio::test]

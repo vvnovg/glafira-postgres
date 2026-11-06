@@ -1,7 +1,8 @@
 //! Обвязка вызова инструмента (спец. P4 §4.3, §10): перенос `GatewayServer::{identify, admit, begin_long, slots, call}`
 //! и тела `list_tools` из `server/mod.rs` Glafira for Kafka в [`SessionCtx`] — его получает сервер сессии крейта
 //! приложения. Порядок вызова: опознание клиента → право (`Gate::access`) → лимит частоты → отметка «идёт вызов» →
-//! тело → JSON-объект не больше 100 КБ → ответ или ошибка → запись в журнал.
+//! тело → JSON-объект, сжатый (`compact`) и не больше 100 КБ, одним текстовым блоком → ответ или ошибка → запись в
+//! журнал.
 //!
 //! Тело вызова и ожидание слотов живут не дольше сессии: rmcp выполняет обработчик запроса в отдельной задаче и при
 //! закрытии сессии её не обрывает, поэтому `call` и `db_slots` сами ждут отмены сессии (отключение, отклонение
@@ -23,6 +24,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::{AuditConnection, AuditEvent, CallRecord, Outcome, truncate_args};
+use crate::compact::compact;
 use crate::error::ToolError;
 use crate::gate::{ClientIdent, SessionAccess, SessionView};
 use crate::limits::{CALLS_PER_MINUTE, HARD_LIMIT_BYTES, SESSION_CONCURRENCY};
@@ -42,7 +44,8 @@ pub struct CallMeta<'a> {
     pub member: Option<&'a str>,
 }
 
-/// Успешный ответ: JSON-объект для `structuredContent` и счётчики приложения для журнала (`masked`, `rows`).
+/// Успешный ответ: JSON-объект (модель получает его компактным текстом, `success`) и счётчики приложения для журнала
+/// (`masked`, `rows`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CallOk {
     pub value: Value,
@@ -147,6 +150,27 @@ fn tool_error(e: &ToolError) -> CallToolResult {
         "{}: {}",
         e.code, e.message
     ))])
+}
+
+/// Успешный ответ (смоук P4b, G3): JSON-объект идёт модели один раз — одним текстовым блоком, без
+/// `structuredContent`. `CallToolResult::structured` rmcp кладёт тот же JSON и в текст, и в `structuredContent`, а Qwen
+/// Code отдаёт модели оба; `outputSchema` нет ни у одного инструмента, поэтому по MCP достаточно текста. Значение
+/// сначала сжимается (`compact`: без `null`, дробные округлены), предел 100 КБ проверяется по сжатому тексту.
+fn success(mut value: Value) -> Result<CallToolResult, ToolError> {
+    if !value.is_object() {
+        return Err(ToolError::internal(
+            "The tool response is not a JSON object",
+        ));
+    }
+    compact(&mut value);
+    let text = value.to_string();
+    if text.len() > HARD_LIMIT_BYTES {
+        return Err(ToolError::new(
+            "response_too_large",
+            "The response is larger than 100 KB; narrow the request: a member, filters or a smaller limit",
+        ));
+    }
+    Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
 }
 
 impl SessionCtx {
@@ -318,21 +342,9 @@ impl SessionCtx {
             },
             Err(e) => Err(e),
         };
-        let result = result.and_then(|ok| {
-            if !ok.value.is_object() {
-                return Err(ToolError::internal("The tool response is not a JSON object"));
-            }
-            if serde_json::to_vec(&ok.value).map_or(usize::MAX, |b| b.len()) > HARD_LIMIT_BYTES {
-                return Err(ToolError::new(
-                    "response_too_large",
-                    "The response is larger than 100 KB; narrow the request: a member, filters or a smaller limit",
-                ));
-            }
-            Ok(ok)
-        });
+        let result = result.and_then(|CallOk { value, extra }| Ok((success(value)?, extra)));
         let (out, outcome, code, bytes, extra) = match result {
-            Ok(CallOk { value, extra }) => {
-                let r = CallToolResult::structured(value);
+            Ok((r, extra)) => {
                 let bytes = r
                     .content
                     .iter()
@@ -404,5 +416,55 @@ impl SessionCtx {
             ttl_ms: cache_hints.then_some(0),
             cache_scope: cache_hints.then_some(CacheScope::Public),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn only_text(r: &CallToolResult) -> &str {
+        assert_eq!(r.content.len(), 1, "{r:?}");
+        &r.content[0].as_text().expect("a text block").text
+    }
+
+    /// Смоук P4b G3: JSON ответа идёт модели один раз — одним текстовым блоком, без `structuredContent`; текст —
+    /// компактный JSON (без пробелов, без `null`, дробные округлены).
+    #[test]
+    fn success_is_one_compact_text_block_without_structured_content() {
+        let value = json!({"a": 1.23456, "b": null, "c": "x", "list": [null, {"d": null}]});
+        let r = success(value).unwrap();
+        assert_eq!(r.is_error, Some(false));
+        assert_eq!(r.structured_content, None);
+        let text = only_text(&r);
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed, json!({"a": 1.235, "c": "x", "list": [null, {}]}));
+        assert_eq!(text, parsed.to_string());
+        assert!(!text.contains(' ') && !text.contains('\n'), "{text}");
+    }
+
+    #[test]
+    fn success_needs_an_object() {
+        let e = success(json!([1, 2])).unwrap_err();
+        assert_eq!(e.code, "internal");
+    }
+
+    /// Предел 100 КБ — по компактному тексту: ответ, который не помещался только из-за `null` и длинных дробей,
+    /// проходит; больше предела и после сжатия — `response_too_large`.
+    #[test]
+    fn hard_limit_applies_to_the_compacted_text() {
+        let nulls: Map<String, Value> = (0..HARD_LIMIT_BYTES / 8)
+            .map(|i| (format!("k{i:06}"), Value::Null))
+            .collect();
+        let mut value = Value::Object(nulls);
+        assert!(value.to_string().len() > HARD_LIMIT_BYTES);
+        value["kept"] = json!(1);
+        let r = success(value).unwrap();
+        assert_eq!(only_text(&r), r#"{"kept":1}"#);
+        let big = json!({"s": "x".repeat(HARD_LIMIT_BYTES)});
+        assert_eq!(success(big).unwrap_err().code, "response_too_large");
+        let fits = json!({"s": "x".repeat(HARD_LIMIT_BYTES - 8)});
+        assert_eq!(only_text(&success(fits).unwrap()).len(), HARD_LIMIT_BYTES);
     }
 }

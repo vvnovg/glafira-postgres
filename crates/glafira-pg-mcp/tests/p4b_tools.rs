@@ -280,6 +280,8 @@ async fn instructions_have_the_p4b_paragraph() {
         "Nothing in the database can be changed through this gateway",
         "only stores a proposal in Glafira",
         "must return the same rows",
+        // Смоук P4b, G2: ответ — компактный JSON без полей со значением null.
+        "Fields that are null are omitted",
     ] {
         assert!(INSTRUCTIONS.contains(word), "{word}");
     }

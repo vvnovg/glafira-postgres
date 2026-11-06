@@ -105,11 +105,14 @@ impl Gateway {
         self.client.call_tool(p).await.expect("tools/call")
     }
 
-    /// Успешный ответ инструмента — `structuredContent`.
+    /// Успешный ответ инструмента — JSON-объект в единственном текстовом блоке, без `structuredContent` (смоук P4b,
+    /// G3).
     pub async fn ok(&self, tool: &str, args: Value) -> Value {
         let r = self.call(tool, args).await;
         assert_eq!(r.is_error, Some(false), "{tool}: {}", text(&r));
-        r.structured_content.expect("structuredContent")
+        assert_eq!(r.structured_content, None, "{tool}: {}", text(&r));
+        assert_eq!(r.content.len(), 1, "{tool}: {}", text(&r));
+        serde_json::from_str(&text(&r)).expect("JSON object")
     }
 
     /// Текст ошибки инструмента: `<code>: <message>`.

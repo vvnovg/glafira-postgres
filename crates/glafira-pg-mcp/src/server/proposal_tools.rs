@@ -105,7 +105,7 @@ impl PgServer {
     }
 }
 
-/// Ответ бэкенда → результат инструмента; список — объектом (`structuredContent` всегда объект).
+/// Ответ бэкенда → результат инструмента; список — объектом (ответ инструмента всегда JSON-объект).
 fn llm_ok(answer: PgAnswer) -> Result<CallOk, ToolError> {
     let value = match answer.body {
         PgOutput::Request(v) => v,
