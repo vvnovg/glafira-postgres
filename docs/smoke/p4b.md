@@ -370,7 +370,7 @@ grep '"tool":"run_select"' "$DATA/mcp-audit.jsonl" | tail -n 3 | python3 -c 'imp
 ```bash
 docker exec gp-pg-lab psql -U postgres -Atc "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'glafira-pg-mcp'"
 ```
-- [ ] Печатает `0`: сессий SQL модели не осталось.
+- [ ] Печатает `0`: сессий SQL модели не осталось (если не `0` — повторите команду через несколько секунд: сервер закрывает сессию отменённого или прерванного по времени запроса не мгновенно).
 
 **Должно быть**
 - [ ] 1) — 500 строк, `truncated: true`. 2) — 100 строк, `truncated: true`.
@@ -475,9 +475,17 @@ docker exec -d gp-pg-lab psql -U postgres -d orders -c "SELECT pg_sleep(60), 'p4
 **Терминал**
 ```bash
 rm -f /tmp/policy.plist && plutil -create xml1 /tmp/policy.plist
+```
+```bash
 plutil -insert mcpMaxAccess -string diagnostics /tmp/policy.plist
+```
+```bash
 sudo mkdir -p "/Library/Managed Preferences"
+```
+```bash
 sudo cp /tmp/policy.plist "/Library/Managed Preferences/io.github.vvnovg.glafira.postgres.plist"
+```
+```bash
 sudo chmod 644 "/Library/Managed Preferences/io.github.vvnovg.glafira.postgres.plist"
 ```
 ```bash
@@ -577,6 +585,12 @@ docker exec gp-pg-lab psql -U postgres -Atc "SELECT count(*) FROM pg_stat_activi
 
 ```bash
 docker exec gp-pg-perf psql -U postgres -d perf -Atc "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'glafira-pg-mcp'" -c "SELECT count(*) FROM pg_indexes WHERE schemaname = 'shop'"
+```
+
+Удалите временный файл политики:
+
+```bash
+rm -f /tmp/policy.plist
 ```
 
 Удалите подключения `lab-app` и `lab-admin` (или переведите их на «Нет»); у `demo` должен остаться уровень «Диагностика»
