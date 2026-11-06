@@ -11,6 +11,12 @@ use serde_json::Value;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use crate::params::{
+    ActivityParams, ConnectionParams, ExplainParams, HypoIndexParams, OBSERVE_GRACE_S,
+    ObserveActivityParams, ObserveQueriesParams, QueryDetailsParams, RunDiagnosticParams,
+    RunSelectParams, SettingsParams, TableDetailsParams, TopQueriesParams,
+};
+
 /// Подсказка `more` после подсказки `first` (поле `hint` отчёта): у каждой части — точка в конце, если её нет, между
 /// ними — пробел, чтобы модель видела границу предложений. Тексты подсказок пишутся без точки; одна подсказка идёт как
 /// есть.
@@ -26,12 +32,6 @@ pub fn join_hints(first: &str, more: &str) -> String {
     format!("{} {}", sentence(first), sentence(more))
 }
 
-use crate::params::{
-    ActivityParams, ConnectionParams, ExplainParams, HypoIndexParams, OBSERVE_GRACE_S,
-    ObserveActivityParams, ObserveQueriesParams, QueryDetailsParams, RunDiagnosticParams,
-    SettingsParams, TableDetailsParams, TopQueriesParams,
-};
-
 /// Источник данных шлюза. Реализация приложения на каждый вызов проверяет доступ к подключению (§4.3), открывает его
 /// при необходимости, маскирует литералы на уровне `diagnostics` и ставит английские тексты находок.
 pub trait PgBackend: Gate {
@@ -41,6 +41,20 @@ pub trait PgBackend: Gate {
     /// уже собранным.
     fn observe(&self, op: PgObserve, ctx: ObserveCtx)
     -> BoxFuture<'_, Result<PgAnswer, ToolError>>;
+    /// P4b: `run_select` на уровне `data` (§7.4). Крейт держит слот базы на весь вызов; `ctx.duration` — срок выборки
+    /// (`statement_timeout` 10 с), `ctx.cancel` — отмена клиентом: приложение отдаёт уже собранные строки.
+    fn select(
+        &self,
+        _op: SelectOp,
+        _ctx: ObserveCtx,
+    ) -> BoxFuture<'_, Result<PgAnswer, ToolError>> {
+        Box::pin(async {
+            Err(ToolError::new(
+                "not_supported",
+                "run_select is not supported by this Glafira build",
+            ))
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -90,6 +104,10 @@ impl PgObserve {
         }
     }
 }
+
+/// Операция `run_select` (P4b): параметры уже проверены крейтом (`RunSelectParams::validate`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectOp(pub RunSelectParams);
 
 /// Ход наблюдения: собрано образцов и всего (`notifications/progress`, если клиент передал `progressToken`).
 pub type ProgressFn = Arc<dyn Fn(u32, u32) + Send + Sync>;
@@ -168,6 +186,7 @@ pub enum PgOutput {
     Hypo(HypoOut),
     ObservedActivity(ObservedActivity),
     ObservedQueries(Report),
+    Select(SelectOut),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -181,7 +200,7 @@ pub struct ConnectionInfo {
     pub kind: String,
     pub folder_path: Vec<String>,
     /// База подключения по умолчанию (`profile.pg.database`): её берут `get_query_details`, `get_table_details`,
-    /// `explain_query` и `hypothetical_index` без `database`. Хосты, порты и пользователь не отдаются (§6.2).
+    /// `explain_query`, `hypothetical_index` и `run_select` без `database`. Хосты, порты и пользователь не отдаются (§6.2).
     pub database: String,
     pub read_only: bool,
     /// Действующий уровень с учётом политики: `diagnostics` или `data`.
@@ -404,6 +423,30 @@ pub struct ObservedActivity {
     pub peak_sessions: u32,
     pub peak_lock_waits: u32,
     pub summary: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectColumn {
+    pub name: String,
+    /// Имя типа PostgreSQL (`int4`, `text`, `timestamptz`…).
+    #[serde(rename = "type")]
+    pub type_name: String,
+}
+
+/// Ответ `run_select` (спец. §7.4): значения — текст PostgreSQL или `null`; длиннее 2 КБ — с пометкой `…[truncated]`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectOut {
+    pub member: String,
+    pub columns: Vec<SelectColumn>,
+    pub rows: Vec<Vec<Option<String>>>,
+    pub row_count: u64,
+    /// Строк было больше, чем отдано: предел строк, байт, времени или отмена.
+    pub truncated: bool,
+    /// Значений, обрезанных до 2 КБ.
+    pub truncated_values: u64,
+    pub ms: u64,
 }
 
 #[cfg(test)]

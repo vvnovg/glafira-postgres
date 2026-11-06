@@ -104,12 +104,31 @@ pub const DENIED_FUNCTIONS: &[&str] = admin_functions!(
     "table_to_xml*",
     "schema_to_xml*",
     "database_to_xml*",
+    // SQL из строки в расширениях (P4b, решение владельца): pg_background (выполняет SQL в отдельном процессе — вне
+    // `READ ONLY` вызова), tablefunc (`crosstab*`, `connectby*`), xml2 (`xpath_table`), pgRouting (`pgr_*`: аргументы —
+    // тексты запросов). Функции расширений `run_select` разрешает, поэтому эти — по имени.
+    "pg_background*",
+    "crosstab*",
+    "connectby*",
+    "xpath_table",
+    "pgr_*",
 );
 
 /// Функции, которые выполняют SQL из строки-аргумента (шаблоны с `*` — префиксы). После переноса поиска вызовов в
 /// `calls_in_text` литерал с SQL не виден, поэтому ярус EXPLAIN ANALYZE (`explain::tier`) считает вызов такой функции
-/// записью: внутри строки может быть `pg_terminate_backend(…)`. Подмножество `DENIED_FUNCTIONS`.
-pub const SQL_FROM_STRING: &[&str] = &["query_to_xml*", "cursor_to_xml*", "ts_stat", "ts_rewrite"];
+/// записью: внутри строки может быть `pg_terminate_backend(…)`. Подмножество `DENIED_FUNCTIONS`; функции расширений
+/// (`pg_background*`, `crosstab*`, `connectby*`, `xpath_table`, `pgr_*`) — с P4b.
+pub const SQL_FROM_STRING: &[&str] = &[
+    "query_to_xml*",
+    "cursor_to_xml*",
+    "ts_stat",
+    "ts_rewrite",
+    "pg_background*",
+    "crosstab*",
+    "connectby*",
+    "xpath_table",
+    "pgr_*",
+];
 
 /// Схемы, все функции которых запрещены: pg_net (`net.http_get`, `net._http_collect_response`…).
 pub const DENIED_SCHEMAS: &[&str] = &["net"];
@@ -343,6 +362,11 @@ mod tests {
                 "table_to_xml*",
                 "schema_to_xml*",
                 "database_to_xml*",
+                "pg_background*",
+                "crosstab*",
+                "connectby*",
+                "xpath_table",
+                "pgr_*",
             ]
         );
         let mut unique = DENIED_FUNCTIONS.to_vec();
@@ -357,6 +381,21 @@ mod tests {
         for p in SQL_FROM_STRING {
             assert!(DENIED_FUNCTIONS.contains(p), "{p}");
         }
+        // Решение владельца (P4b, Q1): исполнители SQL из строки расширений — и в ярусе записи EXPLAIN ANALYZE P3.
+        assert_eq!(
+            SQL_FROM_STRING,
+            [
+                "query_to_xml*",
+                "cursor_to_xml*",
+                "ts_stat",
+                "ts_rewrite",
+                "pg_background*",
+                "crosstab*",
+                "connectby*",
+                "xpath_table",
+                "pgr_*",
+            ]
+        );
     }
 
     #[test]
@@ -389,6 +428,16 @@ mod tests {
             "pg_stat_reset_anything_future",
             "pg_sync_replication_slots",
             "pg_log_standby_snapshot",
+            // Расширения, выполняющие SQL из строки-аргумента (P4b, решение владельца Q1).
+            "pg_background_launch",
+            "pg_background_result",
+            "crosstab",
+            "crosstab2",
+            "crosstab_hash",
+            "connectby",
+            "xpath_table",
+            "pgr_dijkstra",
+            "PGR_DRIVINGDISTANCE",
         ] {
             assert!(is_denied(name), "{name}");
         }
@@ -410,6 +459,11 @@ mod tests {
             "ts_rank",
             "ts_headline",
             "ts_stats",
+            "xpath",
+            "xpath_exists",
+            "xpath_table_x",
+            "pgr",
+            "cross",
         ] {
             assert!(!is_denied(name), "{name}");
         }

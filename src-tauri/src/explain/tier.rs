@@ -118,6 +118,16 @@ mod tests {
                 "cursor_to_xml_x",
             ),
             ("ts_rewrite('a'::tsquery, 'SELECT 1'::text)", "ts_rewrite"),
+            // Расширения (P4b): tablefunc, pg_background, pgRouting.
+            ("public.crosstab('SELECT a, b, c FROM t'::text)", "crosstab"),
+            (
+                "pg_background_launch('DELETE FROM t'::text, 65536)",
+                "pg_background_launch",
+            ),
+            (
+                "pgr_dijkstra('SELECT id, source, target, cost FROM e'::text, 1, 2)",
+                "pgr_dijkstra",
+            ),
         ] {
             let raw = json!([{"Plan": {"Node Type": "Function Scan", "Function Call": expr}}]);
             assert_eq!(admin_calls(&raw), vec![name], "{expr}");

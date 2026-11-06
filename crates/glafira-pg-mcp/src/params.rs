@@ -1,4 +1,4 @@
-//! Параметры инструментов P4a (спец. P4 §5.2). Doc-комментарии полей уходят в JSON Schema для LLM — только
+//! Параметры инструментов P4a (спец. P4 §5.2) и `run_select` P4b (§7.4). Doc-комментарии полей уходят в JSON Schema для LLM — только
 //! по-английски (у структур их нет намеренно). `validate` сначала обнуляет пустые (или из пробелов) строки
 //! необязательных строковых полей — они «не заданы», как опущенные; затем проверяет диапазоны (`invalid_argument`) и
 //! заполняет значения по умолчанию: бэкенд получает `limit`, `durationSeconds`, `changedOnly`, `mode`, `sort` и
@@ -24,6 +24,9 @@ pub const OBSERVE_MAX_S: u32 = 50;
 pub const OBSERVE_GRACE_S: u32 = 6;
 pub const SETTINGS_NAMES_MAX: usize = 200;
 pub const HYPO_INDEXES_MAX: usize = 5;
+/// Строк в ответе `run_select` по умолчанию и не больше (спец. §7.4).
+pub const SELECT_DEFAULT_ROWS: u32 = 100;
+pub const SELECT_MAX_ROWS: u32 = 500;
 /// Событий топологии в ответе `get_topology`.
 pub const TOPOLOGY_EVENTS_MAX: usize = 50;
 pub const MODE_SINCE_RESET: &str = "sinceReset";
@@ -515,6 +518,42 @@ impl HypoIndexParams {
     }
 }
 
+/// Parameters of run_select.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunSelectParams {
+    /// Connection id from list_connections; its llmAccess must be "data".
+    pub connection_id: String,
+    /// Member (node) name; default: the replica with the smallest lag, otherwise the leader (primary).
+    #[serde(default)]
+    pub member: Option<String>,
+    /// Database to run the query in; default: the connection's database (`database` in list_connections).
+    #[serde(default)]
+    pub database: Option<String>,
+    /// One SELECT (WITH … SELECT, VALUES and TABLE too) without $N parameters, INTO or FOR UPDATE/SHARE. Add WHERE and LIMIT.
+    pub sql: String,
+    /// Rows to return, 1..=500. Default: 100.
+    #[serde(default)]
+    pub max_rows: Option<u32>,
+}
+
+impl RunSelectParams {
+    /// Пустые `member` и `database` — «не заданы» (E2; базу подставит приложение, решение владельца Q2), `sql` не пуст,
+    /// `maxRows` в границах (`invalid_argument`) и заполнен значением по умолчанию.
+    pub fn validate(mut self) -> Result<Self, ToolError> {
+        blanks_to_none([&mut self.member, &mut self.database]);
+        not_blank(&self.sql, "sql")?;
+        self.max_rows = Some(in_range(
+            self.max_rows,
+            SELECT_DEFAULT_ROWS,
+            1,
+            SELECT_MAX_ROWS,
+            "maxRows",
+        )?);
+        Ok(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,6 +708,41 @@ mod tests {
             (h.member, h.database, h.sql, h.query_id.as_deref()),
             (None, None, None, Some("7"))
         );
+
+        let s = parse::<RunSelectParams>(
+            json!({"connectionId": "c", "member": " ", "database": "", "sql": " SELECT 1 "}),
+        )
+        .validate()
+        .unwrap();
+        assert_eq!(
+            (s.member, s.database, s.sql.as_str(), s.max_rows),
+            (None, None, " SELECT 1 ", Some(SELECT_DEFAULT_ROWS)),
+            "текст SQL — как прислала модель"
+        );
+    }
+
+    /// `run_select`: `maxRows` 1..=500 (по умолчанию 100), `sql` не пуст.
+    #[test]
+    fn run_select_rows_are_bounded() {
+        let select = |v: Value| parse::<RunSelectParams>(v).validate();
+        for rows in [1, 500] {
+            let p =
+                select(json!({"connectionId": "c", "sql": "SELECT 1", "maxRows": rows})).unwrap();
+            assert_eq!(p.max_rows, Some(rows));
+        }
+        for rows in [0, 501] {
+            let e = select(json!({"connectionId": "c", "sql": "SELECT 1", "maxRows": rows}))
+                .unwrap_err();
+            assert_eq!(
+                (e.code.as_str(), e.message),
+                (
+                    "invalid_argument",
+                    format!("maxRows must be between 1 and 500, got {rows}")
+                )
+            );
+        }
+        let e = select(json!({"connectionId": "c", "sql": "\n "})).unwrap_err();
+        assert_eq!(e.message, "sql must not be empty");
     }
 
     /// Правило режима топа без `mode` — одно на крейт и приложение (`mcp::read::top_request`).

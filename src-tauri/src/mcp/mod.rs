@@ -9,9 +9,11 @@ pub mod controller;
 pub mod files;
 pub mod guard;
 pub mod mask;
+pub mod model_sql;
 pub mod observe;
 pub mod read;
 pub mod secrets;
+pub mod select;
 pub mod shim;
 pub mod texts;
 

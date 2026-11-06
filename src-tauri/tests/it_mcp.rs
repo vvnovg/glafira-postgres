@@ -21,7 +21,7 @@ use glafira_pg_lib::conn::profile::LlmAccess;
 use glafira_pg_lib::mcp::read::{observe_op, read_op};
 use glafira_pg_lib::state::AppState;
 use glafira_pg_mcp::model::{ObserveCtx, PgAnswer, PgBackend, PgObserve, PgRead};
-use glafira_pg_mcp::server::{INSTRUCTIONS, PgFactory};
+use glafira_pg_mcp::server::{INSTRUCTIONS, PgFactory, TOOL_NAMES};
 use rmcp::model::{CallToolRequestParams, CallToolResult, ProgressNotificationParam};
 use rmcp::service::{NotificationContext, RunningService};
 use rmcp::{ClientHandler, RoleClient, ServiceExt};
@@ -209,10 +209,11 @@ impl PgBackend for NoData {
     }
 }
 
-/// Без стенда (§17 P4a, критерий 2): по протоколу сервер отдаёт ровно 14 инструментов, у каждого все четыре подсказки
-/// (`crates/glafira-pg-mcp/tests/tools.rs` проверяет то же на уровне крейта; здесь — через приложение и `serve_stream`).
+/// Без стенда (§17 P4a, критерий 2): по протоколу сервер отдаёт ровно инструменты `TOOL_NAMES` (14 P4a и `run_select`
+/// P4b), у каждого все четыре подсказки (`crates/glafira-pg-mcp/tests/p4b_tools.rs` проверяет то же на уровне крейта;
+/// здесь — через приложение и `serve_stream`).
 #[tokio::test(flavor = "multi_thread")]
-async fn tools_list_has_the_fourteen_tools_with_read_only_annotations() {
+async fn tools_list_has_the_gateway_tools_with_read_only_annotations() {
     let dir = tempfile::tempdir().unwrap();
     let audit = Arc::new(AuditLog::new(dir.path()));
     let backend = Arc::new(NoData);
@@ -228,25 +229,10 @@ async fn tools_list_has_the_fourteen_tools_with_read_only_annotations() {
     let mut tools = client.list_all_tools().await.unwrap();
     tools.sort_by(|a, b| a.name.cmp(&b.name));
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
-    assert_eq!(
-        names,
-        [
-            "explain_query",
-            "get_activity",
-            "get_health_summary",
-            "get_query_details",
-            "get_settings",
-            "get_table_details",
-            "get_top_queries",
-            "get_topology",
-            "hypothetical_index",
-            "list_connections",
-            "list_diagnostics",
-            "observe_activity",
-            "observe_top_queries",
-            "run_diagnostic",
-        ]
-    );
+    let mut expected = TOOL_NAMES.to_vec();
+    expected.sort_unstable();
+    assert_eq!(names, expected);
+    assert!(names.contains(&"run_select"), "{names:?}");
     for t in &tools {
         let a = t
             .annotations
@@ -291,7 +277,7 @@ async fn lab_sessions_locks_and_horizon_are_read_with_masked_texts() {
     let (_dir, st) = common::open_server_in(&lab, "orders").await;
     let g = gateway(st).await;
     let c = &g.client;
-    assert_eq!(c.list_all_tools().await.unwrap().len(), 14);
+    assert_eq!(c.list_all_tools().await.unwrap().len(), TOOL_NAMES.len());
     let su = common::superuser(&lab, "orders").await;
     let writes_before = shop_writes(&su).await;
     let conns = ok(call(c, "list_connections", json!({})).await);

@@ -510,4 +510,16 @@ mod p4b_tests {
         assert!(w.contains("pg_signal_backend, pg_write_all_data"), "{w}");
         assert!(w.contains("terminate sessions and write data"), "{w}");
     }
+
+    /// Обработчики P4a маскируют литералы и читают `pg_stats` без значений только при `masks(access)`
+    /// (`get_table_details`: `with_values = !masks(access)`): уровень `data` идёт без маскирования и со значениями.
+    #[test]
+    fn data_level_masks_nothing_and_reads_pg_stats_values() {
+        assert!(masks(LlmAccess::Diagnostics));
+        assert!(
+            !masks(LlmAccess::Data),
+            "на data литералы не маскируются (спец. §6.1)"
+        );
+        assert!(!masks(LlmAccess::Off));
+    }
 }

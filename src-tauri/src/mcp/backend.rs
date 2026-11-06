@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use glafira_mcp_core::error::{BoxFuture, ToolError};
 use glafira_mcp_core::gate::{Gate, SessionAccess, SessionView};
-use glafira_pg_mcp::model::{ObserveCtx, PgAnswer, PgBackend, PgObserve, PgRead};
+use glafira_pg_mcp::model::{ObserveCtx, PgAnswer, PgBackend, PgObserve, PgRead, SelectOp};
 
 use super::approvals::Approvals;
 use crate::state::AppState;
@@ -66,6 +66,11 @@ impl PgBackend for AppBackend {
         ctx: ObserveCtx,
     ) -> BoxFuture<'_, Result<PgAnswer, ToolError>> {
         Box::pin(super::read::observe_op(&self.st, op, ctx))
+    }
+
+    /// `run_select` (P4b, §7.4) — `mcp::select`.
+    fn select(&self, op: SelectOp, ctx: ObserveCtx) -> BoxFuture<'_, Result<PgAnswer, ToolError>> {
+        Box::pin(super::select::run_select(&self.st, op.0, ctx))
     }
 }
 
@@ -191,5 +196,17 @@ mod tests {
                 .unwrap_err();
             assert_eq!(e.code, "not_allowed");
         }
+        // `run_select` — через `mcp::select`: та же проверка доступа.
+        let op = SelectOp(
+            serde_json::from_value(
+                serde_json::json!({ "connectionId": "nope", "sql": "SELECT 1" }),
+            )
+            .unwrap(),
+        );
+        let e = b
+            .select(op, ObserveCtx::new(std::time::Duration::from_secs(10)))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, "not_allowed");
     }
 }
