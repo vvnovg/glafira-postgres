@@ -5,6 +5,7 @@ pub mod connections;
 pub mod diag;
 pub mod explain;
 pub mod folders;
+pub mod llm;
 pub mod mcp;
 pub mod queries;
 pub mod settings;

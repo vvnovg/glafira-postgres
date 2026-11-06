@@ -272,6 +272,17 @@
       "exists": "A snapshot of this node was taken this second: wait a second and try again",
       "tooLarge": "The snapshot file is too large (over {{count}} MiB)"
     },
+    "llm": {
+      "accessOff": "LLM access is off for this connection: turn it on in the connection settings",
+      "mcpOff": "The MCP server is off: turn it on in Settings → LLM assistants (MCP)",
+      "sqlTooLong": "The query is longer than {{max}} bytes: it is too long to use “Send to LLM assistant”",
+      "requestNotFound": "Optimization request {{id}} not found",
+      "requestClosed": "Optimization request {{id}} is cancelled",
+      "proposalNotFound": "LLM proposal {{id}} not found",
+      "tooManyProposals": "Optimization request {{id}} already has {{max}} proposals",
+      "badStatus": "The answer must be accepted or rejected",
+      "reasonTooLong": "The reason is longer than {{max}} characters"
+    },
     "mcp": {
       "disabledByPolicy": "MCP is disabled by your organization",
       "noExe": "Cannot find the Glafira executable: {{error}}",

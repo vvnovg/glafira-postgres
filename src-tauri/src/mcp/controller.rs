@@ -359,6 +359,12 @@ impl McpController {
         }
     }
 
+    /// Запись приложения в журнал MCP (P4b: `requestCreated`, `proposalAnswered`); журнал ведётся и при выключенном
+    /// сервере, как у записей P4a.
+    pub fn record_audit(&self, event: glafira_mcp_core::audit::AuditEvent) {
+        self.audit.record(event);
+    }
+
     pub fn audit_tail(&self, limit: usize) -> Vec<Value> {
         self.audit.tail(limit)
     }

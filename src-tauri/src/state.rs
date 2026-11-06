@@ -54,6 +54,8 @@ pub struct AppState {
     pub query_texts: Arc<crate::diag::texts::QueryTexts>,
     /// Последнее предупреждение о роли подключений с уровнем LLM `data` (P4 §4.5): `list_connections.roleWarning`.
     pub role_warnings: Arc<crate::mcp::access::RoleWarnings>,
+    /// Запросы на оптимизацию и предложения LLM (P4b): `llm-requests.json`, `llm-proposals.json`.
+    pub llm: Arc<crate::mcp::llm::LlmStores>,
     /// MCP-шлюз (P4): сервер и `mcp.json`, подтверждение клиентов, статус для интерфейса.
     pub mcp: Arc<crate::mcp::McpController>,
 }
@@ -134,6 +136,7 @@ impl AppState {
             kcache_probes,
             query_texts,
             role_warnings: Arc::default(),
+            llm: Arc::new(crate::mcp::llm::LlmStores::open(data_dir)),
             mcp,
         })
     }

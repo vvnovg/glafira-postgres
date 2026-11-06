@@ -8,6 +8,7 @@ pub mod backend;
 pub mod controller;
 pub mod files;
 pub mod guard;
+pub mod llm;
 pub mod mask;
 pub mod model_sql;
 pub mod observe;

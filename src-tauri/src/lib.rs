@@ -123,6 +123,7 @@ pub fn run() {
                 );
             }
             st.mcp.set_app_handle(app.handle().clone());
+            st.llm.set_app_handle(app.handle().clone());
             st.runtimes
                 .set_sink(Arc::new(crate::commands::topology::TauriSink(
                     app.handle().clone(),
@@ -171,6 +172,11 @@ pub fn run() {
             commands::explain::explain,
             commands::explain::parse_plan,
             commands::explain::hypo_check,
+            commands::llm::create_optimization_request,
+            commands::llm::cancel_optimization_request,
+            commands::llm::list_optimization_requests,
+            commands::llm::list_llm_proposals,
+            commands::llm::answer_llm_proposal,
             commands::actions::list_actions,
             commands::actions::preview_session_action,
             commands::actions::execute_session_action,
