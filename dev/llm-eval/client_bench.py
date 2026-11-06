@@ -31,24 +31,28 @@ def audit_calls(since_ms, client_prefix):
     if not AUDIT.exists():
         return calls
     for line in AUDIT.read_text().splitlines():
-        r = json.loads(line)
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue
         if r.get("event") == "call" and r["ts"] >= since_ms and (r.get("client") or "").startswith(client_prefix):
             calls.append({"name": r["tool"], "args": r.get("args"), "error": r.get("code"),
                           "result_chars": r.get("bytes"), "result_head": ""})
     return calls
 
 
-def run_qwen(prompt, model, base_url, workdir):
+def run_qwen(prompt, model, base_url, workdir, timeout):
     cfg = {"mcpServers": {SERVER: {"command": SHIM, "args": ["mcp"], "env": {"HOME": bench.EVAL_HOME},
                                    "timeout": 120000, "trust": True}}}
     cmd = ["qwen", prompt, "--auth-type", "openai", "--openai-base-url", f"{base_url}/v1", "--openai-api-key", "ollama",
            "-m", model, "--mcp-config", json.dumps(cfg), "--allowed-mcp-server-names", SERVER,
            "--exclude-tools", "run_shell_command", "edit", "write_file", "web_fetch", "web_search", "agent",
+           "read_file", "glob", "grep_search", "list_directory", "notebook_edit",
            "--approval-mode", "yolo", "--chat-recording", "false", "-o", "text"]
-    return subprocess.run(cmd, cwd=workdir, capture_output=True, text=True, timeout=1500)
+    return subprocess.run(cmd, cwd=workdir, capture_output=True, text=True, timeout=timeout)
 
 
-def run_claude(prompt, model, base_url, workdir):
+def run_claude(prompt, model, base_url, workdir, timeout):
     cfg = {"mcpServers": {SERVER: {"command": SHIM, "args": ["mcp"], "env": {"HOME": bench.EVAL_HOME}}}}
     env = {**os.environ, "ANTHROPIC_BASE_URL": base_url, "ANTHROPIC_AUTH_TOKEN": "ollama",
            "ANTHROPIC_MODEL": model, "ANTHROPIC_DEFAULT_OPUS_MODEL": model, "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
@@ -56,9 +60,10 @@ def run_claude(prompt, model, base_url, workdir):
            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
     env.pop("ANTHROPIC_API_KEY", None)
     cmd = ["claude", "-p", prompt, "--mcp-config", json.dumps(cfg), "--strict-mcp-config",
-           "--allowedTools", f"mcp__{SERVER}", "--disallowedTools", "Bash Edit Write WebFetch WebSearch Task",
+           "--allowedTools", f"mcp__{SERVER}",
+           "--disallowedTools", "Bash Edit Write WebFetch WebSearch Task Read Glob Grep NotebookEdit",
            "--output-format", "text"]
-    return subprocess.run(cmd, cwd=workdir, capture_output=True, text=True, timeout=1500, env=env)
+    return subprocess.run(cmd, cwd=workdir, capture_output=True, text=True, timeout=timeout, env=env)
 
 
 def main():
@@ -68,6 +73,7 @@ def main():
     p.add_argument("--reps", type=int, default=3)
     p.add_argument("--scenarios", default="s1,s2,s5")
     p.add_argument("--base-url", default="http://127.0.0.1:11434")
+    p.add_argument("--timeout", type=int, default=1500, help="предел одного прогона клиента, с")
     args = p.parse_args()
     OUT.mkdir(exist_ok=True)
     runner = run_qwen if args.client == "qwen" else run_claude
@@ -83,12 +89,15 @@ def main():
         for r in range(1, args.reps + 1):
             for scn in args.scenarios.split(","):
                 name = f"{args.client}-{scn}-r{r}"
-                exp = bench.setup(scn)
+                exp = {}
                 since = int(time.time() * 1000)
                 t0 = time.time()
                 answer, stopped = None, None
                 try:
-                    res = runner(bench.PROMPTS[scn], args.model, args.base_url, workdir)
+                    exp = bench.setup(scn)
+                    since = int(time.time() * 1000)
+                    t0 = time.time()
+                    res = runner(bench.PROMPTS[scn], args.model, args.base_url, workdir, args.timeout)
                     answer = res.stdout.strip()
                     if res.returncode != 0:
                         stopped = f"exit {res.returncode}: {res.stderr.strip()[-300:]}"
@@ -107,8 +116,12 @@ def main():
                 print(f"{name} done {time.strftime('%H:%M:%S')} {total}s", flush=True)
     finally:
         if started_load:
-            subprocess.run(["docker", "exec", "gp-pg-perf", "sh", "-c", "kill $(pgrep -f 'pgbench -n') 2>/dev/null"])
+            subprocess.run(["docker", "exec", "gp-pg-perf", "sh", "-c", "kill $(pgrep -x pgbench) 2>/dev/null || true"])
         host.terminate()
+        try:
+            host.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            host.kill()
         shutil.rmtree(workdir, ignore_errors=True)
     subprocess.run([sys.executable, "-I", str(bench.HERE / "grade.py"), args.client])
 

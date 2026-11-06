@@ -21,18 +21,18 @@ Tested on a Mac mini with an M4 Pro and 48 GB of memory, models in Ollama quanti
 5. The plan of a query when no database is named.
 6. Would an index help — a hypothesis check with hypopg without creating the index.
 
-| Model (4-bit) | Correct answers | Generation | Tasks 1–3, 5, 6 | Top over 15 minutes |
+| Model (4-bit) | Correct answers | Generation, typically | Tasks 1–3, 5, 6 | Top over 15 minutes |
 |---|---|---|---|---|
-| Qwen3.6-35B-A3B | 16 of 18 | 60–80 tokens/s | 6–30 s | 46–86 s |
-| Gemma 4 26B | 18 of 18 | 40–50 tokens/s | 7–42 s | 60–79 s |
-| Qwen3.8-27B | 18 of 18 | 15–20 tokens/s | 23–100 s | 6–7 min |
-| Gemma 4 31B | 17 of 18 | 7–15 tokens/s | 47–119 s | 4–7.5 min |
+| Qwen3.6-35B-A3B | 17 of 18 | 60–80 tokens/s | 6–30 s | 1.5–2 min |
+| Gemma 4 26B | 18 of 18 | 35–50 tokens/s | 7–42 s | 1.5 min |
+| Qwen3.8-27B | 18 of 18 | 15–20 tokens/s | 23–100 s | 5–7 min |
+| Gemma 4 31B | 16 of 18 | 7–15 tokens/s | 47–119 s | 4–7.5 min |
 
-Generation is the number of answer tokens per second of model time, including reading the context. Qwen3.6-35B-A3B and Gemma 4 26B answer ordinary questions in tens of seconds. The dense Qwen3.8-27B and Gemma 4 31B use all of their parameters for every token and answer in minutes, and up to 7 minutes on a task with several large tool answers. For everyday work on a Mac, Qwen3.6-35B-A3B and Gemma 4 26B fit: Gemma made no mistakes in these tasks, Qwen is faster.
+Generation is the number of answer tokens per second of model time, including reading the context; the first question after the model is loaded into memory is slower. Qwen3.6-35B-A3B and Gemma 4 26B answer ordinary questions in tens of seconds. The dense Qwen3.8-27B and Gemma 4 31B use all of their parameters for every token and answer in minutes, and up to 7 minutes on a task with several large tool answers. For everyday work on a Mac, Qwen3.6-35B-A3B and Gemma 4 26B fit: Gemma made no mistakes in these tasks, Qwen is faster.
 
-All mistakes were in the fourth task. Once Qwen3.6 presented statistics since the reset as "the last 15 minutes", and another time it used another connection's database, got an empty top and decided that the server was idle. Once Gemma 4 31B answered "recently" without saying that there was no 15-minute window. The models fixed wrong tool arguments themselves on the next attempt (a name for a hypothetical index, an empty `queryId`, observing for longer than 50 seconds): Glafira answers with a clear error, but this costs an extra step.
+All mistakes were in the fourth task. Once Qwen3.6 titled its answer "over the last 15 minutes" although it mixed 30 seconds of observation with statistics since the reset. Once Gemma 4 31B answered "recently" without naming the period, and another time it presented statistics since the reset as the current load. In a trial run without load, Qwen3.6 once used another connection's database, got an empty top and decided that the server was idle. The models fixed wrong tool arguments themselves on the next attempt (a name for a hypothetical index, an empty `queryId`, observing for longer than 50 seconds): Glafira answers with a clear error, but this costs an extra step. A script checked the answers by key signs; disputed ones were reread by hand.
 
-No answer contained masked literals, and no model changed anything on the server: the gateway does not allow it. The models erred only in their conclusions — check them against the MCP journal. The hardest task is the fourth: the model has to notice that there is no 15-minute window and say honestly which period its statistics cover.
+No answer revealed the original values of masked literals, and no model changed anything on the server: the gateway does not allow it. The models erred only in their conclusions — check them against the MCP journal. The hardest task is the fourth: the model has to notice that there is no 15-minute window and say honestly which period its statistics cover.
 
 ## Hardware and models {#hardware}
 
@@ -64,7 +64,7 @@ After 5 minutes of idling Ollama unloads the model from memory, and the next que
 
 ## Clients {#clients}
 
-Two command-line clients were tested. In both, turn off the built-in shell, file-editing and web tools: otherwise the model can bypass Glafira and reach the database or the internet by itself. Glafira shows a new client in the approval dialog under its name.
+Two command-line clients were tested. In both, turn off the built-in shell, file-editing, file-reading and web tools: otherwise the model can bypass Glafira and reach the database or the internet by itself, or even wander off searching files instead of answering. Glafira shows a new client in the approval dialog under its name.
 
 **Qwen Code** (open source, Apache 2.0). Its settings are in `~/.qwen/settings.json`:
 
@@ -83,7 +83,8 @@ Two command-line clients were tested. In both, turn off the built-in shell, file
   "general": { "enableAutoUpdate": false },
   "telemetry": { "enabled": false },
   "tools": { "approvalMode": "default",
-    "disabled": ["run_shell_command", "edit", "write_file", "web_fetch", "web_search", "agent"] },
+    "disabled": ["run_shell_command", "edit", "write_file", "web_fetch", "web_search", "agent",
+      "read_file", "glob", "grep_search", "list_directory", "notebook_edit"] },
   "mcpServers": { "glafira-pg": {
     "command": "/Applications/Glafira for PostgreSQL.app/Contents/MacOS/glafira-pg",
     "args": ["mcp"], "timeout": 120000, "trust": true, "alwaysLoadTools": true } }
@@ -103,19 +104,19 @@ export ANTHROPIC_DEFAULT_SONNET_MODEL=qwen3.6-64k:35b-a3b
 export ANTHROPIC_DEFAULT_HAIKU_MODEL=qwen3.6-64k:35b-a3b
 export CLAUDE_CODE_SUBAGENT_MODEL=qwen3.6-64k:35b-a3b
 export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
-claude --disallowedTools "Bash Edit Write WebFetch WebSearch Task"
+claude --disallowedTools "Bash Edit Write WebFetch WebSearch Task Read Glob Grep NotebookEdit"
 ```
 
 `ANTHROPIC_BASE_URL` goes without `/v1`. `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` turns off updates, telemetry and error reports. No Anthropic account sign-in is needed. In Glafira the client is called `claude-code`.
 
-Both clients were tested on three tasks from the [table above](local-llm.md#capabilities) — the cluster, the xmin horizon and the query plan — with the `qwen3.6-64k:35b-a3b` model in Ollama, three runs each:
+Both clients were tested on three tasks from the [table above](local-llm.md#capabilities) — the cluster, the xmin horizon and the query plan — with the `qwen3.6-64k:35b-a3b` model in Ollama, three runs each. The clients ran without a window and with the same built-in tools turned off: Qwen Code with calls approved automatically (`--approval-mode yolo`), Claude Code with Glafira's tools allowed (`--allowedTools`):
 
 | Client | Correct answers | Cluster | xmin horizon | Query plan |
 |---|---|---|---|---|
-| Qwen Code 0.26.5 | 9 of 9 | 28–49 s | 38–76 s | 23–39 s |
-| Claude Code 2.1.318 | 8 of 9 | 25–57 s | 80–114 s | 23–47 s |
+| Qwen Code 0.26.5 | 9 of 9 | 35–62 s | 28–47 s | 23–28 s |
+| Claude Code 2.1.318 | 9 of 9 | 20–48 s | 27–72 s | 18–32 s |
 
-Both clients called only Glafira's tools. One Claude Code run hung without calling a single tool and was stopped after 25 minutes; two repeated runs of the same task took 42–46 seconds. If the client stays silent for a long time, stop the question and ask it again.
+In all runs Claude Code called only Glafira's tools and its own tool search. In the first check its file reading and search were not turned off, and in one run out of nine the model spent 25 minutes searching its own conversation log for earlier answers instead of calling Glafira, until the run was stopped. If the client stays silent for a long time, stop the question and ask it again.
 
 ## How to ask {#tips}
 

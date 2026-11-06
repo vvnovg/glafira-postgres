@@ -32,9 +32,9 @@ PROMPTS = {
 }
 
 
-def psql(container, db, sql):
+def psql(container, db, sql, check=True):
     r = subprocess.run(["docker", "exec", container, "psql", "-U", "postgres", "-d", db, "-XAtc", sql],
-                       capture_output=True, text=True, check=True)
+                       capture_output=True, text=True, check=check)
     return r.stdout.strip()
 
 
@@ -88,12 +88,18 @@ def setup(scn):
     return {}
 
 
+# Сессии, которые создают сценарии s2–s3 (по тексту запроса: снимаются и тогда, когда подготовка оборвалась).
+SEEDED = ("query LIKE '%secret-literal-42%' OR query LIKE 'LOCK TABLE shop.orders%' "
+          "OR query LIKE '%WHERE id = 777%'")
+
+
 def cleanup(scn, exp):
     if scn in ("s2", "s3"):
-        pids = [exp[k] for k in ("pid", "root", "waiter") if k in exp]
-        psql("gp-pg-lab", "postgres", f"SELECT pg_terminate_backend(pid) FROM unnest(ARRAY[{','.join(pids)}]) pid")
+        psql("gp-pg-lab", "postgres", "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity "
+             f"WHERE pid <> pg_backend_pid() AND usename = 'postgres' AND ({SEEDED})", check=False)
     if scn == "s6":
-        exp["indexes_after"] = psql("gp-pg-perf", "perf", "SELECT count(*) FROM pg_indexes WHERE schemaname = 'shop'")
+        exp["indexes_after"] = psql("gp-pg-perf", "perf", "SELECT count(*) FROM pg_indexes WHERE schemaname = 'shop'",
+                                    check=False)
 
 
 def start_host():
@@ -110,7 +116,7 @@ def start_host():
 
 
 def perf_load_running():
-    r = subprocess.run(["docker", "exec", "gp-pg-perf", "sh", "-c", "pgrep -f 'pgbench -n' || true"],
+    r = subprocess.run(["docker", "exec", "gp-pg-perf", "pgrep", "-x", "pgbench"],
                        capture_output=True, text=True)
     return bool(r.stdout.strip())
 
@@ -133,12 +139,14 @@ def main():
         docker_bg("gp-pg-perf", "pgbench", "-n", "-U", "postgres", "-d", "perf", "-f", "/perf/heavy.sql",
                   "-c", "1", "-T", "14400")
         started_load = True
+        time.sleep(30)  # нагрузка должна успеть попасть в активность до первого вопроса
     try:
         for r in range(1, args.reps + 1):
             for scn in scenarios:
                 name = f"{args.tag}-{scn}-r{r}"
-                exp = setup(scn)
+                exp = {}
                 try:
+                    exp = setup(scn)
                     subprocess.run([sys.executable, "-I", str(HERE / "agent.py"), "--model", args.model,
                                     "--base-url", args.base_url, "--max-tokens", str(args.max_tokens),
                                     "--out", str(OUT / f"{name}.json"), "--prompt", PROMPTS[scn]],
@@ -152,8 +160,12 @@ def main():
                 print(f"{name} done {time.strftime('%H:%M:%S')}", flush=True)
     finally:
         if started_load:
-            subprocess.run(["docker", "exec", "gp-pg-perf", "sh", "-c", "kill $(pgrep -f 'pgbench -n') 2>/dev/null"])
+            subprocess.run(["docker", "exec", "gp-pg-perf", "sh", "-c", "kill $(pgrep -x pgbench) 2>/dev/null || true"])
         host.terminate()
+        try:
+            host.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            host.kill()
         # Выгрузить модель: следующей модели нужна память.
         base = args.base_url.rsplit("/v1", 1)[0]
         try:
