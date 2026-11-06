@@ -9,7 +9,7 @@ use glafira_mcp_core::error::ToolError;
 use glafira_mcp_core::limits::HARD_LIMIT_BYTES;
 use glafira_pg_mcp::model::{LlmOp, PgAnswer, PgOutput, ProposedOut};
 use glafira_pg_mcp::params::{
-    GetRequestParams, HYPO_INDEXES_MAX, ListProposalsParams, ProposeParams,
+    GetRequestParams, HYPO_INDEXES_MAX, ListProposalsParams, ProposeParams, WITH_REQUEST_ONLY,
 };
 use pg_advisor::sqlcheck::{Purpose, StatementKind};
 use serde_json::Value;
@@ -334,6 +334,50 @@ struct Origin {
     values: Vec<Option<String>>,
 }
 
+/// Поля прямой формы рядом с `requestId` (смоук P4b, M6): совпадающие с запросом принимаются и ничего не меняют —
+/// подключение и база (база — после снятия краевых пробелов), SQL после `normalize` (краевые пробелы и хвостовые `;`),
+/// `queryId` запроса карточки (как число). Первое несовпадение — `invalid_argument` с полем и подсказкой
+/// `WITH_REQUEST_ONLY`. `member` в параметрах нет: лишнее поле модели разбор пропускает.
+fn request_conflict(
+    r: &OptimizationRequest,
+    query_id: Option<&str>,
+    p: &ProposeParams,
+) -> Result<(), ToolError> {
+    let same_id = |a: &str, b: &str| match (a.trim().parse::<i64>(), b.trim().parse::<i64>()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a.trim() == b.trim(),
+    };
+    let conflict = if let Some(c) = p.connection_id.as_deref().map(str::trim)
+        && c != r.connection_id
+    {
+        Some(format!("connectionId {c} is not the connection of"))
+    } else if let Some(d) = p.database.as_deref().map(str::trim)
+        && d != r.database
+    {
+        Some(format!(
+            "database {d} is not the database ({}) of",
+            r.database
+        ))
+    } else if let Some(sql) = p.sql.as_deref()
+        && normalize(sql) != normalize(&r.sql)
+    {
+        Some("sql differs from the query of".to_string())
+    } else if let Some(q) = p.query_id.as_deref()
+        && !query_id.is_some_and(|known| same_id(q, known))
+    {
+        Some(format!("queryId {} is not the query of", q.trim()))
+    } else {
+        None
+    };
+    match conflict {
+        Some(c) => Err(invalid_argument(format!(
+            "{c} optimization request {}: {WITH_REQUEST_ONLY}",
+            r.id
+        ))),
+        None => Ok(()),
+    }
+}
+
 fn origin(st: &AppState, p: &ProposeParams) -> Result<Origin, ToolError> {
     if let Some(id) = p.request_id.as_deref().map(str::trim) {
         let r = open_request(st, id)?;
@@ -341,6 +385,7 @@ fn origin(st: &AppState, p: &ProposeParams) -> Result<Origin, ToolError> {
             RequestSource::Query { query_id } => Some(query_id.clone()),
             RequestSource::Console => None,
         };
+        request_conflict(&r, query_id.as_deref(), p)?;
         return Ok(Origin {
             request_id: Some(r.id),
             connection_id: r.connection_id,
@@ -988,7 +1033,8 @@ mod tests {
             .unwrap_err();
         assert_eq!(e.code, "invalid_sql");
         assert!(e.message.contains("delete"), "{}", e.message);
-        // Параметры проверяются и без шлюза (`validate`).
+        // Параметры проверяются и без шлюза (`validate`): с requestId поле прямой формы, которое не совпадает с запросом,
+        // — `invalid_argument` (M6).
         let mut p = direct_params("c1", "SELECT 1", "SELECT 1");
         p.request_id = Some(r.id.clone());
         assert_eq!(propose(p).await.unwrap_err().code, "invalid_argument");
@@ -1007,6 +1053,81 @@ mod tests {
                 .code,
             "request_closed"
         );
+        assert!(st.llm.proposals.list(&ProposalFilter::default()).is_empty());
+    }
+
+    /// Смоук P4b, M6: рядом с requestId модели присылают поля прямой формы. Совпадающие с запросом (подключение, база,
+    /// тот же SQL после снятия краевых пробелов и `;`, queryId запроса карточки) принимаются и ничего не меняют; не
+    /// совпадающие — `invalid_argument` с названием поля и подсказкой «only rewrittenSql…».
+    #[tokio::test]
+    async fn propose_with_a_request_accepts_matching_fields_and_names_conflicts() {
+        let (_d, st) = state();
+        let r = st.llm.requests.create(new_request("c1")).unwrap();
+        let mut q = new_request("c1");
+        q.source = RequestSource::Query {
+            query_id: "-42".into(),
+        };
+        let card = st.llm.requests.create(q).unwrap();
+        let propose = |p: ProposeParams| {
+            handle(
+                &st,
+                LlmOp::Propose {
+                    params: p,
+                    client: None,
+                },
+            )
+        };
+        let with = |id: &str, f: &dyn Fn(&mut ProposeParams)| {
+            // UPDATE — не тот вид, что у SELECT запроса: отказ после сверки с запросом, до сервера.
+            let mut p = propose_params(id, "UPDATE orders SET status = 'x'");
+            f(&mut p);
+            p
+        };
+        for p in [
+            with(&r.id, &|p| {
+                p.connection_id = Some("c1".into());
+                p.database = Some("shop".into());
+                p.sql = Some("  SELECT * FROM orders WHERE status = $1 ;".into());
+            }),
+            with(&card.id, &|p| p.query_id = Some(" -42 ".into())),
+            with(&r.id, &|p| p.query_id = Some(r.id.clone())),
+        ] {
+            let e = propose(p).await.unwrap_err();
+            assert_eq!(
+                (e.code.as_str(), e.message.contains("same kind")),
+                ("invalid_sql", true),
+                "совпадающие поля приняты: {}",
+                e.message
+            );
+        }
+        for (p, field) in [
+            (
+                with(&r.id, &|p| p.connection_id = Some("c2".into())),
+                "connectionId c2",
+            ),
+            (
+                with(&r.id, &|p| p.database = Some("other".into())),
+                "database other",
+            ),
+            (with(&r.id, &|p| p.sql = Some("SELECT 1".into())), "sql"),
+            (
+                with(&r.id, &|p| p.query_id = Some("-42".into())),
+                "queryId -42",
+            ),
+            (
+                with(&card.id, &|p| p.query_id = Some("7".into())),
+                "queryId 7",
+            ),
+        ] {
+            let e = propose(p).await.unwrap_err();
+            assert_eq!(e.code, "invalid_argument", "{}", e.message);
+            assert!(
+                e.message.starts_with(&format!("{field} "))
+                    && e.message.ends_with(WITH_REQUEST_ONLY),
+                "{}",
+                e.message
+            );
+        }
         assert!(st.llm.proposals.list(&ProposalFilter::default()).is_empty());
     }
 

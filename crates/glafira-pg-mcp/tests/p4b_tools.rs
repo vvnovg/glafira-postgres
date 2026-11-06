@@ -439,8 +439,16 @@ async fn propose_checks_its_arguments_before_the_backend() {
         v
     };
     for (args, words) in [
-        (with(json!({ "connectionId": "c1" })), "not both"),
-        (with(json!({ "sql": "SELECT 2" })), "not both"),
+        // M6: поля прямой формы рядом с requestId сверяет приложение; queryId — только число.
+        (
+            with(json!({ "queryId": "x7" })),
+            "with requestId pass only rewrittenSql, indexes, rationale and expectedEffect",
+        ),
+        // M5: id запроса на оптимизацию вместо queryId.
+        (
+            with(json!({ "requestId": null, "connectionId": "c1", "queryId": "rb61c47" })),
+            "rb61c47 is an optimization request id, not a queryId; pass it as requestId",
+        ),
         (with(json!({ "requestId": null })), "pass requestId"),
         (with(json!({ "requestId": " " })), "pass requestId"),
         (
@@ -493,6 +501,38 @@ async fn propose_checks_its_arguments_before_the_backend() {
         );
     }
     assert!(fake.llm_ops.lock().unwrap().is_empty());
+}
+
+/// Смоук P4b, M6: модели присылают рядом с requestId поля прямой формы (connectionId, database, member, sql, queryId)
+/// и раньше получали «not both» по 2–3 раза за прогон. Теперь они доходят до приложения, которое принимает совпадающие с
+/// запросом; queryId, равный requestId, снимается; member не входит в параметры и не мешает.
+#[tokio::test]
+async fn propose_with_request_id_passes_the_direct_fields_to_the_app() {
+    let fake = Arc::new(Fake::new().on_llm(|_| Ok(proposed("p0b12de"))));
+    let c = client(fake.clone()).await;
+    ok(call(
+        &c,
+        "propose_query_rewrite",
+        json!({
+            "requestId": "rb61c47", "connectionId": "perf", "database": "perf", "member": "pg-1",
+            "sql": "SELECT 1", "queryId": "rb61c47", "rewrittenSql": "SELECT 2", "rationale": "faster"
+        }),
+    )
+    .await);
+    let ops = fake.llm_ops.lock().unwrap();
+    let LlmOp::Propose { params, .. } = &ops[0] else {
+        panic!("{ops:?}")
+    };
+    assert_eq!(params.request_id.as_deref(), Some("rb61c47"));
+    assert_eq!(
+        (
+            params.connection_id.as_deref(),
+            params.database.as_deref(),
+            params.sql.as_deref(),
+            params.query_id.as_deref()
+        ),
+        (Some("perf"), Some("perf"), Some("SELECT 1"), None)
+    );
 }
 
 /// E2 и решение владельца Q2: пустые необязательные строки — «не заданы» (пустой `connectionId` рядом с `requestId` — не

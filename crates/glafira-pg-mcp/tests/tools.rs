@@ -491,6 +491,12 @@ async fn database_is_optional_in_the_four_tool_schemas() {
             .as_str()
             .unwrap();
         assert!(d.contains("list_connections"), "{name}: {d}");
+        // Смоук P4b, M5: queryId — не id запроса на оптимизацию.
+        if let Some(q) = schema["properties"]["queryId"]["description"].as_str() {
+            assert!(q.contains("not an optimization request id"), "{name}: {q}");
+        } else {
+            assert_eq!(name, "get_table_details");
+        }
     }
 }
 
@@ -637,6 +643,22 @@ async fn parameters_are_checked_at_the_boundaries_before_the_backend() {
             "get_query_details",
             json!({"connectionId": "c1", "database": "perf", "queryId": "abc"}),
             "queryId must be a pg_stat_statements queryid (a 64-bit integer), got abc".into(),
+        ),
+        // Смоук P4b, M5: id запроса на оптимизацию вместо queryId — подсказка, что с ним делать.
+        (
+            "get_query_details",
+            json!({"connectionId": "c1", "queryId": "r3a9f1c"}),
+            "queryId must be a pg_stat_statements queryid (a 64-bit integer), got r3a9f1c: r3a9f1c is an optimization request id, not a queryId; call get_optimization_request with requestId r3a9f1c: it returns the query text, the plan and the statistics".into(),
+        ),
+        (
+            "explain_query",
+            json!({"connectionId": "c1", "queryId": " rb61c47 "}),
+            "queryId must be a pg_stat_statements queryid (a 64-bit integer), got rb61c47: rb61c47 is an optimization request id, not a queryId; call get_optimization_request with requestId rb61c47 and pass its sql in sql (and its parameter values in params)".into(),
+        ),
+        (
+            "hypothetical_index",
+            json!({"connectionId": "c1", "queryId": "r8c22a6", "indexes": ["CREATE INDEX ON t (a)"]}),
+            "queryId must be a pg_stat_statements queryid (a 64-bit integer), got r8c22a6: r8c22a6 is an optimization request id, not a queryId; call get_optimization_request with requestId r8c22a6 and pass its sql in sql (and its parameter values in params)".into(),
         ),
         (
             "get_table_details",

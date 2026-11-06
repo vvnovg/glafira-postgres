@@ -130,11 +130,56 @@ fn count_in(len: usize, max: usize, name: &str) -> Result<(), ToolError> {
     }
 }
 
-fn query_id(v: &str) -> Result<(), ToolError> {
+/// Что делать модели, приславшей в `queryId` не число (смоук P4b, M5: модели путают id запроса на оптимизацию
+/// `rb61c47` с queryid и повторяют вызов по 2–4 раза).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum QueryIdUse {
+    /// `get_query_details`: снимок запроса уже несёт текст, план и статистику.
+    Details,
+    /// `explain_query`, `hypothetical_index`: текст снимка — в `sql`.
+    Plan,
+    /// `propose_query_rewrite` в прямой форме: id запроса — это `requestId`.
+    Propose,
+    /// `propose_query_rewrite` с `requestId` (M6): прочие поля источника не нужны.
+    WithRequest,
+}
+
+/// Подсказка, которой кончаются ответы `invalid_argument` у `propose_query_rewrite` с `requestId` (смоук P4b, M6).
+pub const WITH_REQUEST_ONLY: &str =
+    "with requestId pass only rewrittenSql, indexes, rationale and expectedEffect";
+
+/// id запроса на оптимизацию Glafira: `r` и 6 шестнадцатеричных цифр в нижнем регистре.
+pub fn is_request_id(v: &str) -> bool {
+    let v = v.trim();
+    v.len() == 7
+        && v.starts_with('r')
+        && v[1..]
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn query_id(v: &str, used: QueryIdUse) -> Result<(), ToolError> {
     v.trim().parse::<i64>().map(|_| ()).map_err(|_| {
-        ToolError::invalid_argument(format!(
-            "queryId must be a pg_stat_statements queryid (a 64-bit integer), got {v}"
-        ))
+        let mut message =
+            format!("queryId must be a pg_stat_statements queryid (a 64-bit integer), got {v}");
+        if used == QueryIdUse::WithRequest {
+            message.push_str(&format!("; {WITH_REQUEST_ONLY}"));
+        } else if is_request_id(v) {
+            let id = v.trim();
+            let what = match used {
+                QueryIdUse::Details => format!(
+                    "call get_optimization_request with requestId {id}: it returns the query text, the plan and the statistics"
+                ),
+                QueryIdUse::Plan => format!(
+                    "call get_optimization_request with requestId {id} and pass its sql in sql (and its parameter values in params)"
+                ),
+                QueryIdUse::Propose | QueryIdUse::WithRequest => "pass it as requestId".to_string(),
+            };
+            message.push_str(&format!(
+                ": {id} is an optimization request id, not a queryId; {what}"
+            ));
+        }
+        ToolError::invalid_argument(message)
     })
 }
 
@@ -152,14 +197,18 @@ fn sort(v: Option<String>) -> Result<String, ToolError> {
 /// Ровно один источник запроса: непустой текст или queryId из pg_stat_statements. Пустые `sql` и `queryId` считаются
 /// отсутствующими (`None`), `queryId` обрезается по краям — приложение получает уже нормализованную пару; отказ
 /// называет случай (оба заданы или ни одного).
-fn sql_or_query_id(sql: &mut Option<String>, qid: &mut Option<String>) -> Result<(), ToolError> {
+fn sql_or_query_id(
+    sql: &mut Option<String>,
+    qid: &mut Option<String>,
+    used: QueryIdUse,
+) -> Result<(), ToolError> {
     blanks_to_none([&mut *sql, &mut *qid]);
     if let Some(q) = qid.as_mut() {
         *q = q.trim().to_string();
     }
     match (sql.is_some(), qid.as_deref()) {
         (true, None) => Ok(()),
-        (false, Some(q)) => query_id(q),
+        (false, Some(q)) => query_id(q, used),
         (true, Some(_)) => Err(ToolError::invalid_argument(SQL_AND_QUERY_ID_BOTH)),
         (false, None) => Err(ToolError::invalid_argument(SQL_AND_QUERY_ID_NEITHER)),
     }
@@ -392,14 +441,14 @@ pub struct QueryDetailsParams {
     /// Database of the query (datname from get_top_queries); default: the connection's database (`database` in list_connections).
     #[serde(default)]
     pub database: Option<String>,
-    /// queryid from get_top_queries, as a string.
+    /// queryid from get_top_queries, as a string (a 64-bit integer, not an optimization request id such as r3a9f1c).
     pub query_id: String,
 }
 
 impl QueryDetailsParams {
     pub fn validate(mut self) -> Result<Self, ToolError> {
         blanks_to_none([&mut self.member, &mut self.database]);
-        query_id(&self.query_id)?;
+        query_id(&self.query_id, QueryIdUse::Details)?;
         Ok(self)
     }
 }
@@ -468,7 +517,7 @@ pub struct ExplainParams {
     /// One SELECT, INSERT, UPDATE, DELETE or MERGE statement; it is planned, not executed. Pass sql or queryId.
     #[serde(default)]
     pub sql: Option<String>,
-    /// queryid from get_top_queries: its normalized text from pg_stat_statements is planned. Pass sql or queryId.
+    /// queryid from get_top_queries (a 64-bit integer, not an optimization request id such as r3a9f1c): its normalized text from pg_stat_statements is planned. Pass sql or queryId.
     #[serde(default)]
     pub query_id: Option<String>,
     /// Values for $1, $2… in order, as text; null is SQL NULL.
@@ -482,7 +531,7 @@ pub struct ExplainParams {
 impl ExplainParams {
     pub fn validate(mut self) -> Result<Self, ToolError> {
         blanks_to_none([&mut self.member, &mut self.database]);
-        sql_or_query_id(&mut self.sql, &mut self.query_id)?;
+        sql_or_query_id(&mut self.sql, &mut self.query_id, QueryIdUse::Plan)?;
         Ok(self)
     }
 }
@@ -501,7 +550,7 @@ pub struct HypoIndexParams {
     /// The query to check, as in explain_query. Pass sql or queryId.
     #[serde(default)]
     pub sql: Option<String>,
-    /// queryid from get_top_queries. Pass sql or queryId.
+    /// queryid from get_top_queries (a 64-bit integer, not an optimization request id such as r3a9f1c). Pass sql or queryId.
     #[serde(default)]
     pub query_id: Option<String>,
     /// Values for $1, $2… in order, as text; null is SQL NULL.
@@ -514,7 +563,7 @@ pub struct HypoIndexParams {
 impl HypoIndexParams {
     pub fn validate(mut self) -> Result<Self, ToolError> {
         blanks_to_none([&mut self.member, &mut self.database]);
-        sql_or_query_id(&mut self.sql, &mut self.query_id)?;
+        sql_or_query_id(&mut self.sql, &mut self.query_id, QueryIdUse::Plan)?;
         count_in(self.indexes.len(), HYPO_INDEXES_MAX, "indexes")?;
         for ddl in &self.indexes {
             not_blank(ddl, "indexes")?;
@@ -580,7 +629,7 @@ impl GetRequestParams {
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ProposeParams {
-    /// Request id from get_optimization_request. Pass either it or connectionId with sql or queryId.
+    /// Request id from get_optimization_request. With it pass only rewrittenSql, indexes, rationale and expectedEffect (connectionId, database, sql or queryId of the same request are accepted and ignored); without it pass connectionId with sql or queryId.
     #[serde(default)]
     pub request_id: Option<String>,
     /// Connection id from list_connections, for a query you found yourself (without requestId).
@@ -592,7 +641,7 @@ pub struct ProposeParams {
     /// Text of the original query, for a query you found yourself. Pass sql or queryId.
     #[serde(default)]
     pub sql: Option<String>,
-    /// queryid of the original query from get_top_queries, as a string, for a query you found yourself. Pass sql or queryId.
+    /// queryid of the original query from get_top_queries, as a string (a 64-bit integer, not an optimization request id such as r3a9f1c: pass that as requestId), for a query you found yourself. Pass sql or queryId.
     #[serde(default)]
     pub query_id: Option<String>,
     /// The rewritten statement: one statement of the same kind as the original (SELECT stays SELECT) that returns the same rows.
@@ -627,8 +676,18 @@ impl ProposeParams {
             || self.sql.is_some()
             || self.query_id.is_some();
         match (&self.request_id, direct) {
-            (Some(_), true) => {
-                return bad("pass either requestId or connectionId with sql or queryId, not both");
+            (Some(request), true) => {
+                // Смоук P4b, M6: поля прямой формы рядом с `requestId` сверяет с запросом приложение (совпадающие
+                // принимаются); `queryId`, равный самому `requestId`, — не поле источника.
+                if let Some(q) = self.query_id.as_mut() {
+                    *q = q.trim().to_string();
+                }
+                if self.query_id.as_deref() == Some(request.trim()) {
+                    self.query_id = None;
+                }
+                if let Some(q) = &self.query_id {
+                    query_id(q, QueryIdUse::WithRequest)?;
+                }
             }
             (None, false) => {
                 return bad(
@@ -639,7 +698,7 @@ impl ProposeParams {
                 if self.connection_id.is_none() {
                     return bad("connectionId is required without requestId");
                 }
-                sql_or_query_id(&mut self.sql, &mut self.query_id)?;
+                sql_or_query_id(&mut self.sql, &mut self.query_id, QueryIdUse::Propose)?;
             }
             (Some(_), false) => {}
         }
@@ -936,6 +995,25 @@ mod tests {
     fn default_top_mode_follows_the_window() {
         assert_eq!(default_top_mode(Some(300)), MODE_WINDOW);
         assert_eq!(default_top_mode(None), MODE_SINCE_RESET);
+    }
+
+    /// Смоук P4b, M5: id запроса на оптимизацию — `r` и ровно 6 шестнадцатеричных цифр в нижнем регистре.
+    #[test]
+    fn request_ids_are_told_apart_from_query_ids() {
+        for v in ["rb61c47", " r3a9f1c ", "r000000"] {
+            assert!(is_request_id(v), "{v}");
+        }
+        for v in [
+            "r3a9f1", "r3a9f1c0", "R3A9F1C", "rb61g47", "-42", "p14bd43", "",
+        ] {
+            assert!(!is_request_id(v), "{v}");
+        }
+        let e = query_id("p14bd43", QueryIdUse::Plan).unwrap_err();
+        assert_eq!(
+            e.message,
+            "queryId must be a pg_stat_statements queryid (a 64-bit integer), got p14bd43",
+            "без подсказки — только у id запроса"
+        );
     }
 
     /// E2: ровно один из `sql` и `queryId` после обнуления пустых; сообщение называет случай.
