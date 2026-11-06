@@ -340,3 +340,54 @@ async fn wrong_password_fails_node_step() {
         glafira_pg_lib::error::ErrorCode::AuthFailed
     );
 }
+
+/// P4 §4.5: у подключения с уровнем `data` чек-лист говорит о правах роли. glafira_diag на pg-single — член
+/// pg_signal_backend (пункт signalRole выше — Ok); glafira_plain без опасных прав.
+#[tokio::test]
+async fn llm_role_item_for_the_data_level() {
+    let Some(addr) = common::env("GPG_IT_SINGLE") else {
+        return;
+    };
+    let mut profile = common::server_profile("t", &addr);
+    profile.llm_access = glafira_pg_lib::conn::profile::LlmAccess::Data;
+    let report = run(
+        profile,
+        common::secrets_with_password("t"),
+        no_tunnels(),
+        &|_| {},
+    )
+    .await
+    .unwrap();
+    let item = report.readiness.iter().find(|i| i.id == "llmRole").unwrap();
+    assert_eq!(item.status, Status::Warn, "{item:?}");
+    assert_eq!(item.params["role"], "glafira_diag");
+    assert!(
+        item.params["memberships"].contains("pg_signal_backend"),
+        "{item:?}"
+    );
+    assert!(item.fix.as_deref().unwrap().contains("glafira_llm"));
+
+    ensure_plain_role(&addr).await;
+    let mut profile = common::server_profile("plain", &addr);
+    profile.pg.username = PLAIN_USER.into();
+    profile.llm_access = glafira_pg_lib::conn::profile::LlmAccess::Data;
+    let secrets = MemoryStore::default();
+    secrets
+        .set(&secret_key("plain", PG_PASSWORD), PLAIN_PASSWORD)
+        .unwrap();
+    let report = run(profile, Arc::new(secrets), no_tunnels(), &|_| {})
+        .await
+        .unwrap();
+    assert_eq!(status_of(&report, "llmRole"), Status::Ok);
+
+    // Уровень не data — пункта нет.
+    let report = run(
+        common::server_profile("t", &addr),
+        common::secrets_with_password("t"),
+        no_tunnels(),
+        &|_| {},
+    )
+    .await
+    .unwrap();
+    assert!(report.readiness.iter().all(|i| i.id != "llmRole"));
+}

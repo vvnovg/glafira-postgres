@@ -176,22 +176,25 @@ pub struct SshSettings {
 /// Доступ LLM-ассистентов к подключению через MCP (спец. P4 §4.1). Локальное поле, как папка и порядок: экспорт
 /// его не пишет, импорт не переносит, на соединение оно не влияет (`same_connection_settings`). Неизвестное значение
 /// из более новой версии читается как `Off`: откат версии доступ только сужает. Варианты — по возрастанию доступа
-/// (`Ord`): действующий уровень — минимум с потолком политики `mcpMaxAccess`. P4b добавит `Data` последним.
+/// (`Ord`): действующий уровень — минимум с потолком политики `mcpMaxAccess`. `Data` (P4b) стоит последним.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum LlmAccess {
     #[default]
     Off,
     Diagnostics,
+    /// P4b: всё уровня `diagnostics` без маскирования, `pg_stats` со значениями, `run_select` (спец. §4.1, §7.4).
+    Data,
 }
 
-// `#[serde(other)]` обязан стоять на последнем варианте, а варианты идут по возрастанию доступа (P4b добавит `Data`
-// в конец), поэтому «неизвестное значение — Off» реализовано вручную.
+// `#[serde(other)]` обязан стоять на последнем варианте, а варианты идут по возрастанию доступа (`Data` — последний),
+// поэтому «неизвестное значение — Off» реализовано вручную. Новые уровни добавлять здесь (add new levels here).
 impl<'de> Deserialize<'de> for LlmAccess {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let v = serde_json::Value::deserialize(d)?;
         Ok(match v.as_str() {
             Some("diagnostics") => LlmAccess::Diagnostics,
+            Some("data") => LlmAccess::Data,
             _ => LlmAccess::Off,
         })
     }
@@ -207,6 +210,7 @@ impl LlmAccess {
         match self {
             LlmAccess::Off => "off",
             LlmAccess::Diagnostics => "diagnostics",
+            LlmAccess::Data => "data",
         }
     }
 }
@@ -1644,8 +1648,8 @@ mod tests {
             serde_json::to_value(&p).unwrap()["llmAccess"],
             "diagnostics"
         );
-        // Значение более новой версии (уровень `data` из P4b) читается как off: откат версии доступ только сужает.
-        v["llmAccess"] = "data".into();
+        // Значение более новой версии читается как off: откат версии доступ только сужает.
+        v["llmAccess"] = "everything".into();
         let p: ConnectionProfile = serde_json::from_value(v).unwrap();
         assert_eq!(p.llm_access, LlmAccess::Off);
         assert!(p.llm_access.is_off());
@@ -1656,9 +1660,29 @@ mod tests {
     }
 
     #[test]
+    fn llm_access_data_round_trips_and_unknown_is_off() {
+        assert_eq!(serde_json::to_value(LlmAccess::Data).unwrap(), "data");
+        assert_eq!(
+            serde_json::from_value::<LlmAccess>(serde_json::json!("data")).unwrap(),
+            LlmAccess::Data
+        );
+        // Значение из более новой версии сужает доступ до «нет».
+        assert_eq!(
+            serde_json::from_value::<LlmAccess>(serde_json::json!("everything")).unwrap(),
+            LlmAccess::Off
+        );
+        assert!(!LlmAccess::Data.is_off());
+        assert_eq!(LlmAccess::Data.as_str(), "data");
+        assert!(
+            LlmAccess::Diagnostics < LlmAccess::Data,
+            "варианты — по возрастанию доступа"
+        );
+    }
+
+    #[test]
     fn llm_access_as_str_matches_serde() {
         // `as_str` уходит модели в `list_connections`, serde — в файл подключений и интерфейс: строки обязаны совпадать.
-        for v in [LlmAccess::Off, LlmAccess::Diagnostics] {
+        for v in [LlmAccess::Off, LlmAccess::Diagnostics, LlmAccess::Data] {
             assert_eq!(
                 serde_json::to_value(v).unwrap(),
                 serde_json::Value::from(v.as_str())

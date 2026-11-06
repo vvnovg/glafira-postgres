@@ -359,11 +359,19 @@ pub async fn test_connection(
         mut profile,
         secrets,
     } = input;
+    // Кэш предупреждения о роли (P4 §4.5) — только для сохранённого подключения, проверенного с той же ролью.
+    let (id, user) = (profile.id.clone(), profile.pg.username.trim().to_string());
     let overlay = test_secrets(state.secrets.clone(), &mut profile, &secrets);
-    crate::readiness::check::run(profile, overlay, state.tunnels.clone(), &|e| {
+    let report = crate::readiness::check::run(profile, overlay, state.tunnels.clone(), &|e| {
         let _ = channel.send(e);
     })
-    .await
+    .await?;
+    if let Some(warning) = crate::mcp::access::role_warning_of(&report.readiness)
+        && state.profile(&id).is_ok_and(|p| p.pg.username == user)
+    {
+        crate::mcp::access::remember_role_warning(&state, &id, warning);
+    }
+    Ok(report)
 }
 
 /// Пользователь подтвердил ключ хоста ssh (`errors.ssh.hostKeyUnknown`): следующий запуск туннеля к этой

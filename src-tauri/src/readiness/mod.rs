@@ -77,7 +77,8 @@ pub async fn collect_facts(
     let member_of: Vec<String> = c
         .query(
             marked_sql!("SELECT b.rolname::text FROM pg_roles b \
-             WHERE b.rolname IN ('pg_monitor', 'pg_signal_backend', 'pg_maintain', 'pg_read_all_stats', 'pg_read_all_data') \
+             WHERE b.rolname IN ('pg_monitor', 'pg_signal_backend', 'pg_maintain', 'pg_read_all_stats', 'pg_read_all_data', \
+             'pg_write_all_data', 'pg_read_server_files', 'pg_execute_server_program') \
              AND pg_has_role(current_user, b.oid, 'USAGE')"),
             &[],
         )
@@ -88,6 +89,8 @@ pub async fn collect_facts(
         .collect();
     // На PostgreSQL 13 роли нет — `false`: EXPLAIN запросов приложения зависит от прав на их таблицы.
     let read_all_data = member_of.iter().any(|r| r == "pg_read_all_data");
+    // Права, опасные для `run_select` (P4 §4.5); пункт `llmRole` появится, если `llm_data` выставит проверка.
+    let role_dangerous = pg_advisor::readiness::dangerous_rights(is_superuser, &member_of);
     // Версия расширения (не сервера) определяет колонки топа запросов (P3); `None` — расширения нет.
     let pgss_version: Option<String> = c
         .query_opt(
@@ -159,6 +162,8 @@ pub async fn collect_facts(
         pgss_version,
         pgss_track_planning,
         read_all_data,
+        role_dangerous,
+        llm_data: false,
         compute_query_id,
         track_io_timing,
         track_activity_query_size,

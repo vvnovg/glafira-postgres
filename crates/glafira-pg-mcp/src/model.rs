@@ -184,7 +184,7 @@ pub struct ConnectionInfo {
     /// `explain_query` и `hypothetical_index` без `database`. Хосты, порты и пользователь не отдаются (§6.2).
     pub database: String,
     pub read_only: bool,
-    /// Действующий уровень с учётом политики: `diagnostics` (P4b — ещё `data`).
+    /// Действующий уровень с учётом политики: `diagnostics` или `data`.
     pub llm_access: String,
     pub connected: bool,
     /// Предупреждение о роли (P4b, §4.5), английский текст.

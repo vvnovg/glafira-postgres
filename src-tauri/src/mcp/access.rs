@@ -2,13 +2,18 @@
 //! открытие закрытого подключения тем же путём, что щелчок в дереве, и перевод ошибок приложения в ошибки
 //! инструментов (§10.2). Шаги 1–2 (MCP включён, клиент подтверждён) проверяет ядро шлюза через `Gate`.
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use glafira_mcp_core::error::ToolError;
+use pg_advisor::readiness::{ReadinessItem, Status};
 
 use crate::actions::journal::code_name;
 use crate::conn::profile::{ConnectionProfile, LlmAccess};
 use crate::error::{AppError, ErrorCode};
 use crate::policy::{McpMaxAccess, PolicyStatus};
 use crate::state::AppState;
+use crate::sync::MutexExt;
 use crate::topology::runtime::ConnState;
 
 /// Текст внутренней ошибки для модели: подробности (пути, паники) остаются в логе приложения.
@@ -24,14 +29,77 @@ const FILE_ERROR_KEYS: [&str; 2] = ["errors.io", "errors.json"];
 /// Параметры ошибки, которых модель не получает ни у одной ошибки: пути файлов и цель ssh.
 const HIDDEN_PARAMS: [&str; 3] = ["path", "file", "target"];
 
-/// Действующий уровень: меньшее из уровня подключения и потолка политики `mcpMaxAccess` (§4.2). Потолок `data` выше
-/// любого уровня P4a (`off`, `diagnostics`) и ничего не сужает; P4b сопоставит его с `LlmAccess::Data`.
+/// Потолок политики `mcpMaxAccess` (спец. §4.2): действующий уровень = min(уровень подключения, потолок).
+pub fn cap_access(level: LlmAccess, max: McpMaxAccess) -> LlmAccess {
+    match (level, max) {
+        (LlmAccess::Data, McpMaxAccess::Diagnostics) => LlmAccess::Diagnostics,
+        (level, _) => level,
+    }
+}
+
+/// Действующий уровень подключения: уровень профиля под потолком политики.
 pub fn effective_access(profile: &ConnectionProfile, policy: &PolicyStatus) -> LlmAccess {
-    let ceiling = match policy.mcp_max_access {
-        McpMaxAccess::Diagnostics => LlmAccess::Diagnostics,
-        McpMaxAccess::Data => LlmAccess::Diagnostics,
+    cap_access(profile.llm_access, policy.mcp_max_access)
+}
+
+/// «Открыто для LLM: N, из них с данными: M» (`McpStatus.open_connections`, `data_connections`) — по действующему уровню.
+pub fn open_counts(profiles: &[ConnectionProfile], policy: &PolicyStatus) -> (u32, u32) {
+    profiles
+        .iter()
+        .map(|p| effective_access(p, policy))
+        .fold((0, 0), |(open, data), level| match level {
+            LlmAccess::Off => (open, data),
+            LlmAccess::Diagnostics => (open + 1, data),
+            LlmAccess::Data => (open + 1, data + 1),
+        })
+}
+
+/// Последнее предупреждение о роли по подключениям (спец. §4.5) — для `list_connections.roleWarning`. Запись помнит имя
+/// роли, с которой проверяли: после смены `pg.username` в профиле она не действует до новой проверки.
+#[derive(Default)]
+pub struct RoleWarnings(Mutex<HashMap<String, (String, Option<String>)>>);
+
+/// Запоминает итог проверки роли сохранённого подключения (чек-лист готовности, `run_select`); `None` — опасных прав нет.
+pub fn remember_role_warning(st: &AppState, connection_id: &str, warning: Option<String>) {
+    let Ok(profile) = st.profile(connection_id) else {
+        return;
     };
-    profile.llm_access.min(ceiling)
+    st.role_warnings
+        .0
+        .lock_safe()
+        .insert(connection_id.to_string(), (profile.pg.username, warning));
+}
+
+/// Предупреждение о роли подключения для модели (английский текст) или `None`.
+pub fn role_warning(st: &AppState, connection_id: &str) -> Option<String> {
+    let profile = st.profile(connection_id).ok()?;
+    let map = st.role_warnings.0.lock_safe();
+    let (user, warning) = map.get(connection_id)?;
+    if *user == profile.pg.username {
+        warning.clone()
+    } else {
+        None
+    }
+}
+
+/// Предупреждение из пункта `llmRole` чек-листа: `None` — пункта нет (уровень не `data` или готовность не проверялась),
+/// `Some(None)` — роль без опасных прав.
+pub fn role_warning_of(items: &[ReadinessItem]) -> Option<Option<String>> {
+    let item = items.iter().find(|i| i.id == "llmRole")?;
+    if item.status == Status::Ok {
+        return Some(None);
+    }
+    let rights: Vec<String> = item
+        .params
+        .get("memberships")
+        .map(|m| m.split(", ").map(String::from).collect())
+        .unwrap_or_default();
+    let role = item
+        .params
+        .get("role")
+        .map(String::as_str)
+        .unwrap_or_default();
+    Some(Some(crate::mcp::texts::role_warning_text(role, &rights)))
 }
 
 /// Уровень `diagnostics`: литералы маскируются, статистика колонок — без значений (§4.1).
@@ -325,5 +393,121 @@ mod tests {
             !m.contains("src/x.rs") && m.contains(INTERNAL_MESSAGE),
             "{m}"
         );
+    }
+}
+
+#[cfg(test)]
+mod p4b_tests {
+    use std::sync::Arc;
+
+    use pg_advisor::readiness::{ReadinessItem, Status};
+
+    use super::*;
+    use crate::conn::profile::sample_profile;
+    use crate::secrets::MemoryStore;
+
+    fn with_level(id: &str, level: LlmAccess) -> ConnectionProfile {
+        let mut p = sample_profile(id);
+        p.llm_access = level;
+        p
+    }
+
+    #[test]
+    fn policy_ceiling_caps_data_to_diagnostics() {
+        let capped = PolicyStatus {
+            mcp_max_access: McpMaxAccess::Diagnostics,
+            ..PolicyStatus::default()
+        };
+        let open = PolicyStatus::default();
+        assert_eq!(
+            effective_access(&with_level("a", LlmAccess::Data), &open),
+            LlmAccess::Data
+        );
+        assert_eq!(
+            effective_access(&with_level("a", LlmAccess::Data), &capped),
+            LlmAccess::Diagnostics
+        );
+        assert_eq!(
+            effective_access(&with_level("a", LlmAccess::Diagnostics), &capped),
+            LlmAccess::Diagnostics
+        );
+        assert_eq!(
+            effective_access(&with_level("a", LlmAccess::Off), &open),
+            LlmAccess::Off
+        );
+    }
+
+    #[test]
+    fn open_counts_follow_the_effective_level() {
+        let profiles = vec![
+            with_level("a", LlmAccess::Off),
+            with_level("b", LlmAccess::Diagnostics),
+            with_level("c", LlmAccess::Data),
+        ];
+        assert_eq!(open_counts(&profiles, &PolicyStatus::default()), (2, 1));
+        let capped = PolicyStatus {
+            mcp_max_access: McpMaxAccess::Diagnostics,
+            ..PolicyStatus::default()
+        };
+        assert_eq!(open_counts(&profiles, &capped), (2, 0));
+    }
+
+    #[test]
+    fn role_warning_is_remembered_for_the_same_role_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = AppState::new(dir.path(), Arc::new(MemoryStore::default())).unwrap();
+        st.connections
+            .upsert(with_level("a", LlmAccess::Data))
+            .unwrap();
+        assert_eq!(role_warning(&st, "a"), None);
+        remember_role_warning(
+            &st,
+            "a",
+            Some("Role \"glafira_diag\" is a superuser".into()),
+        );
+        assert_eq!(
+            role_warning(&st, "a").as_deref(),
+            Some("Role \"glafira_diag\" is a superuser")
+        );
+        // Другая роль в профиле — предупреждение прошлой роли не действует до новой проверки.
+        let mut p = st.profile("a").unwrap();
+        p.pg.username = "glafira_llm".into();
+        st.connections.upsert(p).unwrap();
+        assert_eq!(role_warning(&st, "a"), None);
+        remember_role_warning(&st, "a", None);
+        assert_eq!(role_warning(&st, "a"), None);
+        // Неизвестное подключение не запоминается.
+        remember_role_warning(&st, "nope", Some("x".into()));
+        assert_eq!(role_warning(&st, "nope"), None);
+    }
+
+    #[test]
+    fn role_warning_of_readiness_items() {
+        let item = |status, params: &[(&str, &str)]| ReadinessItem {
+            id: "llmRole",
+            status,
+            params: params
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            fix: None,
+        };
+        assert_eq!(role_warning_of(&[]), None, "пункта нет — кэш не трогается");
+        assert_eq!(
+            role_warning_of(&[item(Status::Ok, &[("role", "r")])]),
+            Some(None)
+        );
+        let w = role_warning_of(&[item(
+            Status::Warn,
+            &[
+                ("role", "app"),
+                ("memberships", "pg_signal_backend, pg_write_all_data"),
+                ("reason", "member"),
+            ],
+        )])
+        .unwrap()
+        .unwrap();
+        assert!(w.contains("pg_signal_backend, pg_write_all_data"), "{w}");
+        assert!(w.contains("terminate sessions and write data"), "{w}");
     }
 }

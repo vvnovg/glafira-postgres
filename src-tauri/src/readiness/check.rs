@@ -13,7 +13,7 @@ use tokio_postgres::Client;
 
 use crate::conn::pg::ConnectSpec;
 use crate::conn::profile::{
-    ConnectionKind, ConnectionProfile, SshAuth, normalize_profile, validate_profile,
+    ConnectionKind, ConnectionProfile, LlmAccess, SshAuth, normalize_profile, validate_profile,
 };
 use crate::conn::run_blocking;
 use crate::error::{AppError, AppResult};
@@ -218,7 +218,9 @@ async fn readiness_queries(
     let Some(c) = target_client else {
         return Err(AppError::internal_with("readiness target is not reachable"));
     };
-    let facts = bounded(limit, collect_facts(&c, preload, &profile.pg.database)).await?;
+    let mut facts = bounded(limit, collect_facts(&c, preload, &profile.pg.database)).await?;
+    // Пункт `llmRole` — только у подключений с уровнем `data` (спец. P4 §4.5); уровень — из проверяемой формы.
+    facts.llm_data = profile.llm_access == LlmAccess::Data;
     Ok(evaluate(&facts))
 }
 

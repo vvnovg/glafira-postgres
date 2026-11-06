@@ -45,9 +45,9 @@ pub struct McpStatus {
     pub sessions: Vec<SessionSnapshot>,
     pub pending: Vec<PendingApproval>,
     pub approved_clients: Vec<ApprovedClient>,
-    /// Подключений с уровнем доступа LLM, отличным от off (раздел MCP, текст диалога подтверждения).
+    /// Подключений с действующим уровнем доступа LLM, отличным от off (раздел MCP, текст диалога подтверждения).
     pub open_connections: u32,
-    /// Из них — с действующим уровнем `data` (P4b); в P4a уровня `data` нет.
+    /// Из них — с действующим уровнем `data`.
     pub data_connections: u32,
     /// Политика разрешает MCP (`mcpEnabled`).
     pub policy_enabled: bool,
@@ -172,6 +172,8 @@ impl McpController {
             )
         };
         let policy = &self.policy.status;
+        let (open_connections, data_connections) =
+            crate::mcp::access::open_counts(&profiles, policy);
         McpStatus {
             server,
             error,
@@ -179,9 +181,8 @@ impl McpController {
             sessions,
             pending: self.approvals.pending(),
             approved_clients: mcp.approved_clients,
-            open_connections: profiles.iter().filter(|p| !p.llm_access.is_off()).count() as u32,
-            // Уровень `data` появляется в P4b; в P4a подключений с ним нет.
-            data_connections: 0,
+            open_connections,
+            data_connections,
             policy_enabled: policy.mcp_allowed(),
             max_access: policy.mcp_max_access,
         }

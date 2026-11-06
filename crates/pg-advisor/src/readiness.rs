@@ -50,6 +50,13 @@ pub struct ReadinessFacts {
     /// Член `pg_read_all_data` (14+): EXPLAIN запросов приложения читает его таблицы.
     #[serde(default)]
     pub read_all_data: bool,
+    /// Права роли, опасные для `run_select` (спец. P4 §4.5): `"superuser"` или членства из `DANGEROUS_ROLES`
+    /// (`dangerous_rights`); пусто — роль только читает.
+    #[serde(default)]
+    pub role_dangerous: Vec<String>,
+    /// У проверяемого подключения уровень доступа LLM `data`: только тогда в чек-листе есть пункт `llmRole`.
+    #[serde(default)]
+    pub llm_data: bool,
     pub compute_query_id: Option<String>,
     pub track_io_timing: String,
     pub track_activity_query_size: i64,
@@ -141,6 +148,41 @@ fn not_loaded_on(f: &ReadinessFacts, name: &str) -> Vec<String> {
 }
 
 const PRELOAD_FIX: &str = "shared_preload_libraries = 'pg_stat_statements'";
+
+/// Встроенные роли, права которых модель могла бы использовать через `run_select`, если обойдёт список запрещённых
+/// функций (спец. P4 §4.5): сигналы сессиям, запись, чтение файлов сервера, запуск программ.
+pub const DANGEROUS_ROLES: [&str; 4] = [
+    "pg_signal_backend",
+    "pg_write_all_data",
+    "pg_read_server_files",
+    "pg_execute_server_program",
+];
+
+/// Опасные права роли. Суперпользователю — только `"superuser"`: ему `pg_has_role` отвечает «да» для любой роли, поэтому
+/// членства не перечисляются. Иначе — членства из `DANGEROUS_ROLES` в их порядке.
+pub fn dangerous_rights(is_superuser: bool, member_of: &[String]) -> Vec<String> {
+    if is_superuser {
+        return vec!["superuser".to_string()];
+    }
+    DANGEROUS_ROLES
+        .iter()
+        .filter(|r| member_of.iter().any(|m| m == *r))
+        .map(|r| r.to_string())
+        .collect()
+}
+
+/// Рецепт для стенда (`fix` пункта `llmRole`): отдельная роль, которая только читает, для отдельного подключения с уровнем
+/// `data`. На PostgreSQL 13 `pg_read_all_data` нет — права на таблицы схемы.
+fn llm_role_fix(server_version_num: i32) -> String {
+    let read = if server_version_num >= 140_000 {
+        "GRANT pg_read_all_data TO glafira_llm;"
+    } else {
+        "-- PostgreSQL 13: in every database, for every schema the model may read\n\
+         GRANT USAGE ON SCHEMA public TO glafira_llm;\n\
+         GRANT SELECT ON ALL TABLES IN SCHEMA public TO glafira_llm;"
+    };
+    format!("CREATE ROLE glafira_llm LOGIN PASSWORD '…';\nGRANT pg_monitor TO glafira_llm;\n{read}")
+}
 
 pub fn evaluate(f: &ReadinessFacts) -> Vec<ReadinessItem> {
     let has = |role: &str| f.is_superuser || f.member_of.iter().any(|r| r == role);
@@ -301,6 +343,32 @@ pub fn evaluate(f: &ReadinessFacts) -> Vec<ReadinessItem> {
         )
     });
 
+    // Уровень `data` (P4 §4.5): права роли, которыми модель могла бы воспользоваться через `run_select`. Только
+    // предупреждение — уровень оно не выключает.
+    if f.llm_data {
+        out.push(match f.role_dangerous.first() {
+            None => item("llmRole", Status::Ok, &[("role", f.user.clone())], None),
+            Some(first) => item(
+                "llmRole",
+                Status::Warn,
+                &[
+                    ("role", f.user.clone()),
+                    ("memberships", f.role_dangerous.join(", ")),
+                    (
+                        "reason",
+                        if first == "superuser" {
+                            "superuser"
+                        } else {
+                            "member"
+                        }
+                        .into(),
+                    ),
+                ],
+                Some(llm_role_fix(f.server_version_num)),
+            ),
+        });
+    }
+
     const HINTED: [&str; 3] = ["hypopg", "pg_stat_kcache", "pg_wait_sampling"];
     for name in OPTIONAL_EXTENSIONS {
         let fact = f.extensions.iter().find(|e| e.name == name);
@@ -371,6 +439,8 @@ mod tests {
             pgss_version: Some("1.11".into()),
             pgss_track_planning: Some("on".into()),
             read_all_data: true,
+            role_dangerous: vec![],
+            llm_data: false,
             compute_query_id: Some("auto".into()),
             track_io_timing: "on".into(),
             track_activity_query_size: 4096,
@@ -773,5 +843,100 @@ mod tests {
             v,
             serde_json::json!({"id": "monitorRole", "status": "ok", "params": {}, "fix": null})
         );
+    }
+
+    #[test]
+    fn dangerous_rights_list_superuser_first_and_only_risky_roles() {
+        assert_eq!(dangerous_rights(true, &[]), ["superuser"]);
+        assert_eq!(
+            dangerous_rights(true, &["pg_signal_backend".to_string()]),
+            ["superuser"],
+            "суперпользователю pg_has_role отвечает «да» для любой роли — членства не перечисляются"
+        );
+        let member_of: Vec<String> = [
+            "pg_monitor",
+            "pg_execute_server_program",
+            "pg_signal_backend",
+            "pg_read_all_data",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(
+            dangerous_rights(false, &member_of),
+            ["pg_signal_backend", "pg_execute_server_program"],
+            "порядок — как в DANGEROUS_ROLES"
+        );
+        assert!(
+            dangerous_rights(false, &["pg_monitor".into(), "pg_read_all_data".into()]).is_empty()
+        );
+    }
+
+    #[test]
+    fn llm_role_item_only_for_the_data_level() {
+        let mut f = facts();
+        f.role_dangerous = vec!["pg_signal_backend".into()];
+        assert!(
+            evaluate(&f).iter().all(|i| i.id != "llmRole"),
+            "уровень не data — пункта нет"
+        );
+        f.llm_data = true;
+        let items = evaluate(&f);
+        let i = get(&items, "llmRole");
+        assert_eq!(i.status, Status::Warn);
+        assert_eq!(i.params["role"], "glafira_diag");
+        assert_eq!(i.params["memberships"], "pg_signal_backend");
+        assert_eq!(i.params["reason"], "member");
+        let fix = i.fix.as_deref().unwrap();
+        assert!(
+            fix.starts_with("CREATE ROLE glafira_llm LOGIN PASSWORD '…';"),
+            "{fix}"
+        );
+        assert!(
+            fix.contains("GRANT pg_read_all_data TO glafira_llm;"),
+            "{fix}"
+        );
+        let pos = |id: &str| items.iter().position(|x| x.id == id).unwrap();
+        assert_eq!(
+            pos("llmRole"),
+            pos("readAllData") + 1,
+            "сразу после readAllData, до расширений"
+        );
+    }
+
+    #[test]
+    fn llm_role_for_a_superuser_and_for_a_reading_role() {
+        let mut f = facts();
+        f.llm_data = true;
+        f.is_superuser = true;
+        f.role_dangerous = vec!["superuser".into()];
+        let i = get(&evaluate(&f), "llmRole").clone();
+        assert_eq!(
+            (
+                i.status,
+                i.params["reason"].as_str(),
+                i.params["memberships"].as_str()
+            ),
+            (Status::Warn, "superuser", "superuser")
+        );
+        f.is_superuser = false;
+        f.role_dangerous.clear();
+        let i = get(&evaluate(&f), "llmRole").clone();
+        assert_eq!((i.status, i.fix), (Status::Ok, None));
+        assert_eq!(i.params["role"], "glafira_diag");
+        assert!(!i.params.contains_key("reason"));
+    }
+
+    #[test]
+    fn llm_role_recipe_on_postgres_13_grants_select_on_tables() {
+        let mut f = facts();
+        f.llm_data = true;
+        f.server_version_num = 130_015;
+        f.role_dangerous = vec!["pg_write_all_data".into()];
+        let fix = get(&evaluate(&f), "llmRole").fix.clone().unwrap();
+        assert!(
+            fix.contains("GRANT SELECT ON ALL TABLES IN SCHEMA public TO glafira_llm;"),
+            "{fix}"
+        );
+        assert!(!fix.contains("pg_read_all_data"), "{fix}");
     }
 }

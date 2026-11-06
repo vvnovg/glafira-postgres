@@ -636,3 +636,69 @@ mod tests {
         assert_eq!(millis(90_000.0), "1 min 30 s");
     }
 }
+
+/// Английский текст предупреждения о роли (спец. §4.5) для `list_connections.roleWarning`; `dangerous` — из
+/// `pg_advisor::readiness::dangerous_rights` (`"superuser"` первым).
+pub fn role_warning_text(role: &str, dangerous: &[String]) -> String {
+    let superuser = dangerous.first().is_some_and(|r| r == "superuser");
+    let abilities: Vec<&str> = if superuser {
+        vec![
+            "terminate sessions",
+            "write data",
+            "read server files",
+            "run programs on the server",
+        ]
+    } else {
+        dangerous
+            .iter()
+            .filter_map(|r| match r.as_str() {
+                "pg_signal_backend" => Some("terminate sessions"),
+                "pg_write_all_data" => Some("write data"),
+                "pg_read_server_files" => Some("read server files"),
+                "pg_execute_server_program" => Some("run programs on the server"),
+                _ => None,
+            })
+            .collect()
+    };
+    let who = if superuser {
+        format!("Role \"{role}\" is a superuser")
+    } else {
+        format!("Role \"{role}\" is a member of {}", dangerous.join(", "))
+    };
+    format!(
+        "{who}: through run_select a model that gets past the denied function list could {}. Glafira only warns; for a \
+         test stand connect with a role that only reads (pg_read_all_data).",
+        join_and(&abilities)
+    )
+}
+
+/// «a», «a and b», «a, b and c».
+fn join_and(items: &[&str]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => (*one).to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+#[cfg(test)]
+mod p4b_tests {
+    use super::role_warning_text;
+
+    #[test]
+    fn role_warning_names_the_rights_and_what_they_allow() {
+        let su = role_warning_text("postgres", &["superuser".into()]);
+        assert_eq!(
+            su,
+            "Role \"postgres\" is a superuser: through run_select a model that gets past the denied function list could \
+             terminate sessions, write data, read server files and run programs on the server. Glafira only warns; for a \
+             test stand connect with a role that only reads (pg_read_all_data)."
+        );
+        let m = role_warning_text("app", &["pg_read_server_files".into()]);
+        assert!(
+            m.starts_with("Role \"app\" is a member of pg_read_server_files: "),
+            "{m}"
+        );
+        assert!(m.contains("could read server files."), "{m}");
+    }
+}

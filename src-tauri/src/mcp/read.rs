@@ -206,7 +206,9 @@ fn list_connections(st: &AppState) -> Vec<ConnectionInfo> {
                 database: p.pg.database.clone(),
                 llm_access: access.as_str().to_string(),
                 connected,
-                role_warning: None,
+                role_warning: (access == LlmAccess::Data)
+                    .then(|| crate::mcp::access::role_warning(st, &p.id))
+                    .flatten(),
                 id: p.id,
                 name: p.name,
                 read_only: p.read_only,

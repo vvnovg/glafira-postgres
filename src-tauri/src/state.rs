@@ -52,6 +52,8 @@ pub struct AppState {
     pub kcache_probes: Arc<crate::diag::kcache::KcacheProbes>,
     /// Тексты запросов pgss по узлам (замечание 12 смоука P3b): свои запросы Глафиры распознаются без сэмплера pgss.
     pub query_texts: Arc<crate::diag::texts::QueryTexts>,
+    /// Последнее предупреждение о роли подключений с уровнем LLM `data` (P4 §4.5): `list_connections.roleWarning`.
+    pub role_warnings: Arc<crate::mcp::access::RoleWarnings>,
     /// MCP-шлюз (P4): сервер и `mcp.json`, подтверждение клиентов, статус для интерфейса.
     pub mcp: Arc<crate::mcp::McpController>,
 }
@@ -131,6 +133,7 @@ impl AppState {
             wait_profiles,
             kcache_probes,
             query_texts,
+            role_warnings: Arc::default(),
             mcp,
         })
     }
