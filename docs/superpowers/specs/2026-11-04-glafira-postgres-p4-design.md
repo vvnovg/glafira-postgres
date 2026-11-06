@@ -175,7 +175,9 @@ diag::run_diagnostic · explain · hypopg · query_detail · catalog::table · t
 - `mask.rs` — маскирование на типизированных данных каждого инструмента (§6); `texts.rs` — английские тексты находок и
   рекомендаций из `en.json` (встраивается `include_str!`);
 - `shim.rs` — режим `glafira-pg mcp` (§3.3);
-- P4b: `llm/requests.rs`, `llm/proposals.rs` (§8), `select.rs` (§7.4).
+- P4b: `llm/requests.rs`, `llm/proposals.rs` (§8), `select.rs` (§7.4). Уточнено при реализации: `llm/` — ещё `tools.rs`
+  (инструменты §8.2), `compare.rs` («Сравнить планы»), `list_file.rs` (общий файл-список); `select/mod.rs` и
+  `select/functions.rs` (сверка с `pg_proc`); общие проверки SQL модели — `model_sql.rs` (перенос из `read.rs`).
 - Команды — `commands/mcp.rs` (P4a), `commands/llm.rs` (P4b).
 
 **Фронтенд:** `src/components/mcp/` — `McpSection` («Настройки»), `ClientSnippets`, `ApprovedClients`, `McpSessions`,
@@ -187,17 +189,19 @@ diag::run_diagnostic · explain · hypopg · query_detail · catalog::table · t
 
 ```rust
 pub trait PgBackend: Gate {
-    fn read(&self, op: PgRead) -> BoxFuture<'_, Result<PgOutput, ToolError>>;
-    fn observe(&self, op: PgObserve, ctx: ObserveCtx) -> BoxFuture<'_, Result<ObserveOutput, ToolError>>;
-    // P4b
-    fn llm(&self, op: LlmOp) -> BoxFuture<'_, Result<LlmOutput, ToolError>>;
-    fn select(&self, op: SelectOp, ctx: ObserveCtx) -> BoxFuture<'_, Result<SelectOutput, ToolError>>;
+    fn read(&self, op: PgRead) -> BoxFuture<'_, Result<PgAnswer, ToolError>>;
+    fn observe(&self, op: PgObserve, ctx: ObserveCtx) -> BoxFuture<'_, Result<PgAnswer, ToolError>>;
+    // P4b; реализация по умолчанию — ошибка `not_supported`
+    fn select(&self, op: SelectOp, ctx: ObserveCtx) -> BoxFuture<'_, Result<PgAnswer, ToolError>>;
+    fn llm(&self, op: LlmOp) -> BoxFuture<'_, Result<PgAnswer, ToolError>>;
 }
 ```
 
-`PgRead` — по варианту на инструмент чтения (`ListConnections`, `Topology`, `HealthSummary`, `RunDiagnostic`, `Activity`,
-`TopQueries`, `QueryDetails`, `TableDetails`, `Settings`, `Explain`, `HypoIndex`); `ObserveCtx` — дедлайн, отмена, обратный
-вызов прогресса. Реализация приложения на каждый вызов:
+`PgAnswer { body: PgOutput, masked, rows }` — ответ и счётчики для журнала; `PgOutput` — по варианту на вид ответа (P4b:
+`Select`, `Request`, `Proposed`, `Proposals`). `PgRead` — по варианту на инструмент чтения (`ListConnections`, `Topology`,
+`HealthSummary`, `ListDiagnostics`, `RunDiagnostic`, `Activity`, `TopQueries`, `QueryDetails`, `TableDetails`, `Settings`,
+`Explain`, `HypoIndex`); `LlmOp` — `GetRequest`, `Propose { params, client }`, `ListProposals`; `ObserveCtx` — дедлайн, отмена,
+обратный вызов прогресса (у `select` — срок выборки и отмена клиентом). Реализация приложения на каждый вызов:
 1. проверяет доступ к подключению (§4.3) и определяет действующий уровень;
 2. открывает подключение, если оно закрыто, — тем же путём, что щелчок в дереве (возможны запрос keychain и подъём SSH-туннеля);
 3. вызывает существующую функцию (`run_diagnostic`, `query_detail`, `table::get`, `explain::run`…) на общих пулах интерфейса;
@@ -475,11 +479,18 @@ macos-15, macos-15-intel, windows-2022); при необходимости — �
 - внешние вызовы: `http*` (pgsql-http), `net.*` (pg_net);
 - (решение владельца 2026-11-04, добавлено после ревью задачи 3) выполняющие SQL из строки полнотекстового поиска `ts_stat`,
   `ts_rewrite`; `pg_start_backup`, `pg_stop_backup` (PG 13–14); `pg_stat_reset*` (по префиксу); `pg_sync_replication_slots`;
-  `pg_log_standby_snapshot`.
+  `pg_log_standby_snapshot`;
+- (решение владельца 2026-11-06, P4b) выполняющие SQL из строки в расширениях: `pg_background*` (pg_background — SQL в
+  отдельном процессе, вне `READ ONLY` вызова), `crosstab*`, `connectby*` (tablefunc), `xpath_table` (xml2), `pgr_*`
+  (pgRouting: аргументы — тексты запросов); функции расширений `run_select` разрешает, поэтому эти запрещены по имени;
+- (решение владельца 2026-11-06, P4b) схемы внешних вызовов запрещены целиком (`functions::DENIED_SCHEMAS`): `net` (pg_net),
+  `aws_s3` (Amazon RDS / Aurora: выгрузка результата запроса из строки в S3, импорт из S3), `aws_lambda` (вызов Lambda);
+  правило — то же, что у `net.*`: имя со схемой без учёта регистра. `aws_commons` (только собирает значения) не запрещена.
 
 Поиск в выражениях VERBOSE-плана (`functions::calls_in_plan`, перенос из `tier.rs`) — по тому же списку. Ярус записи EXPLAIN
 ANALYZE P3 (`explain::tier`) от пропуска строковых литералов при поиске вызовов защищён отдельно (решение владельца): вызовы
-`query_to_xml*`, `cursor_to_xml*`, `ts_stat`, `ts_rewrite` (`functions::SQL_FROM_STRING`) переводят инструкцию в ярус записи.
+`query_to_xml*`, `cursor_to_xml*`, `ts_stat`, `ts_rewrite` (`functions::SQL_FROM_STRING`) переводят инструкцию в ярус записи;
+с P4b в `SQL_FROM_STRING` входят и `pg_background*`, `crosstab*`, `connectby*`, `xpath_table`, `pgr_*`.
 
 ### 7.3 Слои на сервере
 
@@ -492,26 +503,46 @@ ANALYZE P3 (`explain::tier`) от пропуска строковых литер
 2. `prepare` под точкой сохранения: сервер подтверждает, что выражение одно (механизм P3).
 3. Проба `EXPLAIN (VERBOSE, FORMAT JSON)` и поиск запрещённых функций в выражениях плана: ловит расхождения нашего разбора и
    разбора сервера. Найдено → `forbidden_function`.
-4. Только `run_select`: имена из `Checked.functions` сверяются с `pg_proc`. Функция вне `pg_catalog`, не принадлежащая расширению
-   (`pg_depend.deptype = 'e'`), — пользовательская: её тело наш разбор не видит → `user_function` («User-defined function <name>
-   is not allowed in run_select: its body cannot be checked»). Функции расширений (PostGIS и др.) разрешены, если их нет в
-   `DENIED_FUNCTIONS`. Для `explain_query` пользовательские функции разрешены: без ANALYZE запрос не выполняется.
+4. Только `run_select` (решение владельца 2026-11-06 — сверка ужесточена): функции сверяются с `pg_proc` дважды. Имена из
+   `Checked.functions` — до пробы плана (шаг 3), в своей схеме или, без схемы, в схемах `search_path`
+   (`current_schemas(false)`): планировщик вычисляет функции с постоянными аргументами уже при пробе. После пробы — все имена
+   вызовов VERBOSE-плана в любой схеме: так видны вызовы из представлений и запись через атрибут (`t.f` = `f(t)`). Функция вне
+   `pg_catalog` и `information_schema`, не принадлежащая расширению (`pg_depend.deptype = 'e'`), — пользовательская: её тело
+   наш разбор не видит → `user_function` («User-defined function <schema.name> is not allowed in run_select: its body cannot
+   be checked», для имени из плана — с «(the query calls it, possibly inside a view)»). Сверка осторожная: одноимённая
+   пользовательская перегрузка тоже даёт отказ. Функция из схемы `DENIED_SCHEMAS` — `forbidden_function` («functions of schema
+   X call outside the database»), кто бы ею ни владел. Функции расширений (PostGIS, `pg_stat_statements`, `hypopg` и др.)
+   разрешены, если их нет в `DENIED_FUNCTIONS`. `LANGUAGE sql`-функцию, которую планировщик встраивает, план по имени не
+   показывает: вызовы её тела проверяются как часть плана, а сама она `user_function` не даёт. Для `explain_query`
+   пользовательские функции разрешены: без ANALYZE запрос не выполняется. Остаток, который сверка по именам не закрывает, —
+   §15 (операторы, приведения и типы на пользовательских функциях, тела функций расширений, `IMMUTABLE`-функции внутри
+   представления, вычисленные при пробе).
 
 ### 7.4 `run_select` (P4b)
 
 | Параметр | Значение |
 |---|---|
-| `connectionId`, `database`, `sql` | Обязательны |
-| `member?` | По умолчанию — реплика с наименьшим лагом, если она есть и доступна; иначе лидер / primary / сервер |
+| `connectionId`, `sql` | Обязательны |
+| `database?` | По умолчанию — база подключения (решение владельца 2026-11-06, как §16.21); пустая строка — то же |
+| `member?` | По умолчанию — реплика с наименьшим лагом, если она есть и доступна (неизвестный лаг — последней, при равенстве — по имени); иначе лидер / primary / сервер |
 | `maxRows` | По умолчанию 100, не больше 500 |
 
-- Проверки: §4.3 (уровень `data`), `sqlcheck` с назначением `Select`, слои §7.3.
-- Выполнение: `DECLARE glafira_c NO SCROLL CURSOR FOR <sql>` и `FETCH 100 FROM glafira_c` в текстовом формате, пока не набрано
-  `maxRows` строк или 100 КБ значений; затем `ROLLBACK`.
+- Проверки: §4.3 (уровень `data`), `sqlcheck` с назначением `Select`, параметры `$N` не принимаются (`invalid_argument`:
+  значения пишутся в текст), слои §7.3.
+- Выполнение (решение владельца 2026-11-06 — обрезка на сервере): `prepare`, проба и сверка функций идут по исходному тексту
+  модели, число, имена и типы колонок — по его описанию; курсор открывается над обёрткой, которая обрезает каждое значение
+  на сервере: `DECLARE glafira_c NO SCROLL CURSOR FOR SELECT <cK…> FROM (SELECT * FROM (<sql>) q OFFSET 0) s(c1, …, cN)`, где
+  `cK` = `CASE WHEN pg_catalog.num_nulls(s.cK) OPERATOR(pg_catalog.=) 0 THEN pg_catalog.left(pg_catalog.format('%s', s.cK),
+  2049) END` (`format` — тот же текст функции вывода типа, что без обёртки; NULL остаётся NULL; `OFFSET 0` не даёт
+  планировщику вычислять выражение дважды; функции обёртки — с `pg_catalog.`). Хвост за выражением (`;`, комментарии)
+  отбрасывается; выражение без колонок идёт без обёртки. `FETCH` в текстовом формате пачками до 100 строк и не больше 1600
+  значений, пока не набрано `maxRows` строк или ответ не дошёл до 100 КБ (размер строк в JSON ответа, §16 «Уточнения
+  по реализации P4b»); затем `ROLLBACK`.
 - Значения — строки в текстовом представлении PostgreSQL или `null`; длиннее 2 КБ обрезаются с пометкой `…[truncated]`.
 - Ответ: `{ member, columns [{ name, type }], rows [[…]], rowCount, truncated, truncatedValues, ms }`.
-- Длительность — не больше `statement_timeout` (10 с); слот параллельности операций с базой занимается на весь вызов; отмена
-  клиентом прерывает запрос (`cancel_query`).
+- Срок — 10 с на подготовку курсора и выборку (перед каждым `FETCH` — `SET LOCAL statement_timeout` на оставшееся время);
+  истёк — уже собранные строки с `truncated: true`, без строк — `TIMEOUT`. Слот параллельности операций с базой занимается
+  на весь вызов; отмена клиентом прерывает инструкцию (`pg_cancel_backend` того же сеанса) и отдаёт собранные строки.
 - В журнал — SQL (до 16 КБ) и `rows`; значения не пишутся.
 
 ---
@@ -530,14 +561,18 @@ ANALYZE P3 (`explain::tier`) от пропуска строковых литер
 - Консоль и карточка показывают «Ждёт ответа LLM» с кнопкой «Отменить» (`cancel_optimization_request`, статус `cancelled`).
 - Снимок уходит модели без маскирования даже на уровне `diagnostics`: подсказка у кнопки говорит об этом.
 - Хранение — `llm-requests.json` (0600, атомарная запись), последние 50; запись `requestCreated` в журнал MCP.
+- Размер (решение владельца 2026-11-06, отступление от «снимка как есть»): текст запроса снимка — до 64 КБ, длиннее —
+  ошибка при создании (`errors.llm.sqlTooLong`); `get_optimization_request` укладывает снимок в ответ 100 КБ — опускает
+  повтор текста, укорачивает значения параметров, убирает DDL таблиц с конца и конец текста плана и говорит модели в `hint`,
+  что опущено (подробно — §16 «Уточнения по реализации P4b»).
 
 ### 8.2 Инструменты
 
 | Инструмент | Параметры | Что делает |
 |---|---|---|
-| `get_optimization_request` | `requestId?` | Снимок запроса. Без `requestId` — последний `waiting` среди подключений, открытых для модели. Запрос подключения, закрытого для модели, — `not_allowed`; `cancelled` — `request_closed` |
-| `propose_query_rewrite` | `requestId?` или `connectionId` + `database` + (`sql` \| `queryId`); `rewrittenSql`; `indexes?` (до 5 `CREATE INDEX …`); `rationale` (до 4 КБ); `expectedEffect?` (до 1 КБ) | Проверки: доступ (§4.3), `sqlcheck` (`Explain`; вид выражения тот же, что у исходного), индексы — `HypoIndex`, `prepare` предложенного SQL на сервере в слоях §7.3. Ошибки разбора и планирования — `invalid_sql` с текстом сервера, чтобы модель исправила. Сохраняет предложение; повтор с тем же запросом, SQL и индексами возвращает существующее. Ответ: `{ proposalId, status }`. У запроса статус становится `answered` |
-| `list_proposals` | `connectionId?`, `requestId?` | `{ proposals [{ proposalId, requestId?, connectionId, database, status ("new" / "accepted" / "rejected"), reason?, comparison?, createdAtMs, answeredAtMs? }] }` — сначала новые; `comparison` — итог «Сравнить планы», если пользователь его запускал |
+| `get_optimization_request` | `requestId?` | Снимок запроса, уложенный в 100 КБ (§8.1), с `connectionName` и подсказкой `next`. Без `requestId` — последний `waiting` среди подключений, открытых для модели. Запрос подключения, закрытого для модели, — `not_allowed`; `cancelled` — `request_closed` |
+| `propose_query_rewrite` | `requestId?` или `connectionId` + `database?` (по умолчанию — база подключения, решение владельца 2026-11-06) + (`sql` \| `queryId`); `rewrittenSql`; `indexes?` (до 5 `CREATE INDEX …`); `rationale` (до 4 КБ); `expectedEffect?` (до 1 КБ) | Проверки: доступ (§4.3), `sqlcheck` (`Explain`; вид выражения тот же, что у исходного), индексы — `HypoIndex`, `prepare` предложенного SQL на сервере в слоях §7.3. Ошибки разбора и планирования — `invalid_sql` с текстом сервера, чтобы модель исправила. Сохраняет предложение; повтор с тем же запросом, SQL и индексами возвращает существующее. Ответ: `{ proposalId, status }`. У запроса статус становится `answered` |
+| `list_proposals` | `connectionId?`, `requestId?` | `{ proposals [{ proposalId, requestId?, connectionId, database, status ("new" / "accepted" / "rejected"), reason?, comparison?, createdAtMs, answeredAtMs? }] }` — сначала новые; `comparison` — итог «Сравнить планы», если пользователь его запускал (без планов: `costBefore`, `costAfter`, `indexesUsed`, `member`, `atMs`, `withoutHypopg`); с неизвестным или закрытым для модели `requestId` — пустой список |
 
 ### 8.3 Предложение и хранение
 
@@ -558,10 +593,12 @@ ANALYZE P3 (`explain::tier`) от пропуска строковых литер
   для предложенного — с индексами через hypopg; показывает стоимость «была / стала», горячие узлы обоих планов, рекомендации P3b,
   использован ли каждый индекс; итог записывается в предложение (виден модели в `list_proposals`); без hypopg сравнение идёт без
   индексов с пометкой;
-- «Открыть в консоли» — предложенный SQL заменяет текст консоли (прежний остаётся в истории запусков); дальше обычные правила
-  консоли, включая ярусы EXPLAIN ANALYZE P3;
-- «Принять» (статус `accepted`), «Отклонить» (статус `rejected`, необязательная причина до 500 символов — видна модели),
-  «Копировать»;
+- «Открыть в консоли» — предложенный SQL заменяет текст консоли; прежний текст остаётся в списке «Заменённые тексты» под
+  панелью (до 10 текстов, кнопка «Вернуть»), результаты прежних запусков — в истории запусков, пока не сменились узел и база
+  (уточнено при реализации: история запусков хранит планы, а не текст редактора); дальше обычные правила консоли, включая ярусы
+  EXPLAIN ANALYZE P3;
+- «Принять» (статус `accepted`), «Отклонить» (статус `rejected`, необязательная причина до 500 символов — видна модели;
+  решение можно поменять), «Копировать»;
 - под текстом постоянная пометка: «Glafira не проверяет, что переписанный запрос возвращает те же строки».
 
 В карточке запроса — значок «Предложения LLM: N» (по `originalQueryId` и запросам из карточки); щелчок открывает консоль
@@ -618,7 +655,8 @@ ANALYZE P3 (`explain::tier`) от пропуска строковых литер
 - `call`: `ts`, `session`, `client`, `tool`, `connection { id, name }?`, `member?`, `args` (усечены до 1 КБ; поле `sql` /
   `rewrittenSql` — целиком до 16 КБ), `outcome` (`ok` / `error`), `code?`, `bytes`, `ms`, `masked?`, `rows?`;
 - `sessionStarted`, `approved`, `rejected`, `revoked`, `sessionEnded`, `serverStarted`, `serverStopped`;
-- P4b: `requestCreated { requestId, connection }`, `proposalAnswered { proposalId, status }`.
+- P4b: `requestCreated { requestId, connection }`, `proposalAnswered { proposalId, status, connection }` (без текста запроса и
+  причины отклонения).
 
 Результаты вызовов не пишутся. Запись — в ядре (`AuditLog`), чтение последних записей для интерфейса — функцией ядра.
 
@@ -665,8 +703,9 @@ LLM: диагностика и данные».
   смена статуса запроса);
 - команды P4a: `get_mcp_status`, `set_mcp_enabled`, `answer_mcp_approval(sessionId, approve)`, `revoke_mcp_client(name)`,
   `disconnect_mcp_sessions(sessionId?)`, `get_mcp_audit(limit)`, `get_mcp_client_configs`, `reveal_mcp_audit`;
-- команды P4b: `create_optimization_request`, `cancel_optimization_request`, `list_llm_proposals(filter)`,
-  `answer_llm_proposal(id, status, reason?)`, `compare_llm_proposal(id)`.
+- команды P4b: `create_optimization_request`, `cancel_optimization_request`, `list_optimization_requests(connectionId)`
+  (добавлена при реализации), `list_llm_proposals(filter)`, `answer_llm_proposal(id, status, reason?)`,
+  `compare_llm_proposal(id)`.
 
 ---
 
@@ -744,7 +783,7 @@ LLM: диагностика и данные».
 | Qwen Code ждёт рукопожатие stdio только 30 с | Шим ждёт запуска 25 с; в главе — сначала открыть Glafira |
 | Prompt injection через тексты запросов, комментарии, имена объектов | Изменяющих инструментов нет; предложение ничего не выполняет; предупреждение в `instructions` |
 | Утечка данных провайдеру LLM | Уровень на каждом подключении, по умолчанию `off`; маскирование на `diagnostics`; потолок политики; поле не переносится импортом |
-| Обход запрещённого списка в `run_select` (функции в операторах, приведениях, типах; тела функций расширений) | `READ ONLY`, проба плана, сверка с `pg_proc`, предупреждение о роли; остаток принят: `data` — для стендов нагрузочного тестирования |
+| Обход запрещённого списка в `run_select` (функции в операторах, приведениях, типах; тела функций расширений, в том числе внешние вызовы вне схем `DENIED_SCHEMAS`; `IMMUTABLE`-функции с постоянными аргументами внутри представления, которые планировщик вычисляет при пробе до сверки имён плана) | `READ ONLY`, проба плана, сверка с `pg_proc` по дереву разбора (до пробы) и по VERBOSE-плану (после), запрет схем внешних вызовов и исполнителей SQL из строки (решения владельца 2026-11-06), предупреждение о роли; остаток принят: `data` — для стендов нагрузочного тестирования |
 | Нагрузка на базу | Лимиты §10.1, общий сэмплер, таймауты, реплика по умолчанию у `run_select` |
 | Модель сама открывает подключение (запрос keychain, SSH-туннель) | Принято, как в Kafka; видно в журнале |
 | Меняется API rmcp | Версия закреплена в `Cargo.lock`; rmcp используется только в двух крейтах шлюза |
@@ -830,6 +869,170 @@ LLM: диагностика и данные».
     (`pg_advisor::sqlcheck::without_index_name`, затем прежние `sqlcheck` и `validate_ddl`), `sqlcheck` и диалог P3b имя
     по-прежнему отвергают; (E5) синтаксическая ошибка нормализованного текста pgss по `queryId` у `explain_query` и
     `hypothetical_index` — `invalid_sql` с подсказкой передать `sql` со значениями.
+
+### Уточнения по реализации P4b
+
+Решения владельца при исполнении (2026-11-06):
+
+1. Сверка функций `run_select` ужесточена (§7.2, §7.3 шаг 4 обновлены): имена дерева разбора сверяются с `pg_proc` до пробы
+   плана, все имена вызовов VERBOSE-плана — после неё в любой схеме (`mcp::select::functions::{plan_functions, Lookups,
+   user_functions, function_rejection}`, один запрос `USER_FUNCTIONS_SQL`); непринадлежащая расширению функция вне
+   `pg_catalog` и `information_schema` — `user_function` и в представлении, и в записи через атрибут; схемы `DENIED_SCHEMAS` —
+   `forbidden_function`. В `DENIED_FUNCTIONS` и `SQL_FROM_STRING` добавлены `pg_background*`, `crosstab*`, `connectby*`,
+   `xpath_table`, `pgr_*`. Встраиваемую `LANGUAGE sql`-функцию план по имени не показывает: проверяются вызовы её тела
+   (`it_mcp_data`). Пункт бэклога T3 закрыт, кроме позиции синтаксической ошибки.
+2. Схемы `aws_s3` и `aws_lambda` запрещены целиком рядом с `net` (`pg_advisor::functions::DENIED_SCHEMAS`, §7.2): в дереве
+   разбора, в плане пробы и в сверке `run_select` с `pg_proc`; `aws_commons` разрешена. Ярус записи EXPLAIN ANALYZE P3 вызовы
+   `net.*`, `aws_s3.*`, `aws_lambda.*` записью не считает (как в P4a; бэклог).
+3. `database` необязателен у `run_select` и у прямой формы `propose_query_rewrite` (§7.4, §8.2): без него и с пустой строкой —
+   база подключения (`mcp::model_sql::resolve_database`); правило §16.21 действует теперь для шести инструментов. Журнал пишет
+   то, что прислала модель; ключ дедупликации прямой формы — подключение, база после подстановки и исходный SQL.
+4. `run_select` обрезает значения на сервере (§7.4 обновлён; `mcp::select::{cursor_query, cut_column, batch_rows}`):
+   `format('%s', …)` вместо `::text` даёт тот же текст функции вывода, что курсор без обёртки (`t`/`f`, `inet` без `/32`,
+   `char(n)` с хвостовыми пробелами); `num_nulls(x) = 0` сохраняет NULL (у составного `ROW(NULL, NULL) IS NULL` истинно, а
+   значение есть — `(,)`); `left(…, 2049)` (`SERVER_CUT_CHARS`) — на символ больше 2 КБ, чтобы приложение увидело «длиннее» и
+   поставило пометку (байтовая обрезка `cap_value`); `OFFSET 0` не даёт подставить выражение дважды; хвост за выражением
+   (`;`, комментарии) снимает `pg_advisor::sqlcheck::statement_text`. Пачка `FETCH` — до 100 строк и не больше 1600 значений:
+   в памяти приложения не больше ≈ 3,3 млн символов при любом числе колонок. Порядок строк подзапроса с `ORDER BY`
+   сохраняется (практика PostgreSQL, не гарантия). Курсор с текстом модели метки `/* glafira */` не несёт, как текст консоли.
+   Ограничения: в базе `SQL_ASCII` с текстом в UTF-8 обрезка может разрезать многобайтный символ — вызов отвечает
+   `invalid_sql` («…is not valid UTF-8 text…» с советом `encode(convert_to(…), 'hex')`); константы, которые планировщик
+   вычисляет при пробе (`repeat('x', 1e8)` с литералами), приходят в приложение в VERBOSE-плане целиком (так же у
+   `explain_query` P4a).
+5. `get_optimization_request` укладывает снимок в 100 КБ (отступление от «снимка как есть», §8.1;
+   `mcp::llm::tools::request_for_model`): `bundle.text`, равный `sql`, не повторяется; `params` — до 16 КБ (значения
+   укорачиваются с `…[truncated]`, число сохраняется; иначе `[]`); DDL таблиц уходят с конца `bundle.tables`
+   (`bundle.tablesOmitted` растёт), затем режется конец `bundle.planText` с `…[truncated]`, в крайнем случае — `bundle.text` и
+   `bundle.warnings`; снимок подгоняется вместе с `hint` (до 8 проходов), а `hint` называет опущенное (первые три таблицы и
+   «and N more», `get_table_details`, `explain_query`); `sql` не режется; не поместилось — `internal`. SQL снимка — до 64 КБ
+   при создании (`mcp::llm::MAX_SNAPSHOT_SQL_BYTES`, `errors.llm.sqlTooLong`). `proposalIds` — только существующие
+   предложения (вытесненные пропускаются).
+6. Английская подпись кнопки — «Send to LLM assistant» (интерфейс en, описание `get_optimization_request`, его ошибки,
+   `instructions`, prompt `optimize_query`).
+
+Решения плана и исполнителей:
+
+7. Бюджет строк `run_select` — размер строк в JSON ответа внутри предела шлюза (`HARD_LIMIT_BYTES` минус остальной ответ,
+   `mcp::select::rows_budget`), а не «сырые» 100 КБ значений: иначе ответ превысил бы 100 КБ. Страховка в крейте —
+   `server::select_tool::fit_rows` (строки отбрасываются вдвое).
+8. Срок и отмена `run_select`: 10 с отсчитываются после открытия соединения (`guard::begin`), подготовка курсора (`prepare`,
+   проба, сверка функций, описание колонок, факт роли, `DECLARE`) и выборка идут под этим сроком и отменой клиентом
+   (`guarded`: клиентский срок — 10 с + 5 с запаса); перед каждым `FETCH` — `SET LOCAL statement_timeout` на оставшееся время.
+   Истёкший срок или отмена отдают собранные строки с `truncated: true`; срок без строк — `TIMEOUT`, отмена без строк — пустой
+   ответ с `truncated: true`; срок блокировки (`55P03`) — тоже `TIMEOUT`. Инструкция прерывается `pg_cancel_backend` из
+   соединения пула узла той же роли и только для того же сеанса (`pg_stat_activity`: pid, `backend_start`,
+   `application_name = glafira-pg-mcp`; pid переиспользуются), соединение вызова закрывается: у `ConnectSpec` нет пути, чтобы
+   отправить `CancelRequest` через SOCKS-туннель с TLS. Весь вызов может длиться дольше 10 с (соединение, проверки до
+   соединения). Закрытие сессии MCP посреди выборки инструкцию не отменяет: она кончается по своему `statement_timeout`
+   (≤ 10 с; бэклог, как T5 P4a).
+9. `run_select`: `$N` отвергаются до соединения (`invalid_argument`); ошибки сервера — нет прав (`42501`) → `NOT_AUTHORIZED`,
+   запись в `READ ONLY` (`25006`) → `invalid_sql` «The query tries to write, run_select only reads…», прочие ошибки запроса —
+   `invalid_sql` с текстом сервера, соединение, ресурсы, срок, конфликт с восстановлением — коды приложения (`from_pg`).
+   Узел по умолчанию — `mcp::select::pick_member`; описание инструмента: «no user-defined functions (also inside views)».
+10. Факт роли (§4.5) читается на каждом `run_select`, прошедшем проверки (перед `DECLARE`, под точкой сохранения
+    `glafira_role`: ошибка — только в лог, выборка продолжается), а не на первом вызове сессии: бэкенд не знает id сессии, цена
+    — одна строка каталога. Предупреждение для модели хранится в памяти приложения (`AppState.role_warnings`,
+    `mcp::access::RoleWarnings`): его пишут проверка готовности сохранённого подключения с уровнем `data` и `run_select`;
+    запись помнит имя роли и после смены `pg.username` не действует; после запуска приложения `roleWarning` нет, пока
+    подключение не проверено.
+11. Пункт `llmRole` (§4.5): у пунктов готовности нет `Severity`, поэтому предупреждение — `Status::Warn`, без опасных прав —
+    пункт со статусом `Ok`; параметры `role`, `memberships`, `reason` (`superuser` | `member`). Пункт есть, только когда
+    уровень в форме — `data` (факт `ReadinessFacts.llm_data`, уровень формы без потолка политики). Рецепт для стенда
+    (`pg_advisor::readiness::llm_role_fix`) добавляет `GRANT pg_monitor TO glafira_llm` (статистика для диагностики); на
+    PostgreSQL 13 — `GRANT USAGE` и `GRANT SELECT ON ALL TABLES` по схемам. Опасные роли —
+    `pg_advisor::readiness::DANGEROUS_ROLES`. Предупреждение в форме — из пункта последней проверки в этой форме (в кэше Rust —
+    английский текст для модели).
+12. `LlmAccess` читается своим десериализатором (`"data"` → `Data`, неизвестное — `off`); `McpStatus.dataConnections` считает
+    подключения с действующим уровнем `data`. Маскирование и значения `pg_stats` на `data` отдельного кода не получили:
+    P4a маскирует только при `access::masks(access)` (уровень `diagnostics`), на `data` поиск `search` идёт по исходным
+    текстам, как в P3.
+13. Хранилища — общий `mcp::llm::list_file::ListFile<T>` (файл `{schemaVersion, requests | proposals: [...]}`, новые элементы
+    — в конец; более новая схема — отказ, повреждённый файл — в карантин; запись — копия с атомарной заменой, 0600).
+    События `mcp://proposals` идут через `ProposalsSink`. Логика команд — `mcp::llm::{create_request, cancel_request,
+    answer_proposal, compare_proposal}`, команды — тонкие обёртки. Новая команда `list_optimization_requests(connectionId)`
+    (§11): кнопке и панели нужны запросы подключения без предложений. Запись приложения в журнал MCP —
+    `McpController::record_audit`; `proposalAnswered` содержит ещё `connection` (§10.3). Создание запроса проверяет в Rust
+    уровень ≠ `off` (`errors.llm.accessOff`) и что MCP включён и разрешён политикой (`errors.llm.mcpOff`); без плана
+    `explain::llm::bundle` строит пробный.
+14. «Отменить запрос» меняет только ожидающий запрос: у отвеченного и отменённого ничего не меняется, события нет. Повторный
+    ответ на предложение разрешён (принято ↔ отклонено, в панели видна противоположная кнопка); каждый ответ — запись
+    `proposalAnswered` и событие; причина в журнал не пишется.
+15. Пока запрос на оптимизацию одного источника ждёт ответа, второй из того же источника не создаётся: кнопка неактивна,
+    рядом «Отменить запрос» (иначе модель без `requestId` взяла бы «последний ожидающий», а в консоли висели бы два статуса).
+    Источник — консоль подключения или карточка (тот же `queryid` в той же базе). Между созданием и перечитыванием списка
+    кнопка тоже неактивна: второй быстрый щелчок дубля не создаёт.
+16. Кнопка «Передать LLM-ассистенту» читает только запросы подключения (`useOptimizationRequests`), не предложения. Статус
+    учитывается строго: политика, затем сервер (`stopped`, `otherInstance` — «передайте запрос из того окна», `error`), затем
+    действующий уровень (`effectiveLlmAccess`); пока статус MCP, профиль или список запросов читаются — неактивна без
+    пояснения, не прочитались — неактивна с пояснением и «Повторить» (неудачное чтение не значит «ничего не ждёт»). В
+    карточке кнопка есть, только когда текст запроса известен и не обрезан. Уведомление о скопированной строке в консоли
+    держит `ExplainTab`: кнопка перемонтируется с первым результатом плана.
+17. `PlanRunner.onResult` получает третий аргумент — запрос (`ExplainRequest`): значения `$N` последнего плана консоли уходят
+    в снимок, пока текст, узел и база не менялись.
+18. Интерфейс читает запросы и предложения подключения целиком (`useLlmProposals(connectionId, { connectionId })`,
+    предложений не больше 100) и сам отбирает свои (`src/lib/useLlmProposals.ts`): консоль — на запросы консоли в любой базе
+    и без запроса по базе консоли (`consoleProposals`), карточка — по `originalQueryId` и запросам карточки в той же базе
+    (`queryProposals`). `ProposalFilter` команды `list_llm_proposals` — объединение: `connectionId` сужает, `requestIds`,
+    `database`, `queryId` объединяются через «или».
+19. Значок «Предложения LLM: N» открывает консоль через `openExplainWithPrefill` с исходным SQL предложения и новым
+    необязательным полем `ExplainPrefill.proposalId`: предложение выбирается в панели и закрепляется в её списке, даже если
+    оно на запрос карточки; выбирается самое свежее, сначала без ответа.
+20. §8.4 «прежний остаётся в истории запусков» буквально невыполнимо: история запусков — результаты планов `PlanRunner` в
+    памяти, без текста редактора, и при смене узла или базы она сбрасывается. Консоль хранит до 10 заменённых текстов в списке
+    «Заменённые тексты» с кнопками «Вернуть: …» — при подстановке из панели, значка карточки и «Открыть в консоли EXPLAIN»
+    журнала P4a (§8.4 обновлён).
+21. Панель «Предложения LLM» свёрнута, пока предложений нет (если пользователь не раскрыл её сам); выбирает первое
+    предложение сама и держит выбор по id. Точка у вкладки консоли (`src/state/tabMarks.ts`) — только для предложений,
+    пришедших, пока консоль в фоне: всё, что консоль показала активной, и первый прочитанный список считаются увиденными;
+    пометка снимается при размонтировании панели. Обоснование и эффект — `white-space: pre-wrap`, без markdown; во время
+    сравнения — «Сравнение планов…»; «Копировать» — «Копировать предложенный SQL».
+22. Построчное сравнение — `src/lib/lineDiff.ts` (LCS по строкам без зависимостей; середина больше 2 млн клеток таблицы
+    сравнивается целиком).
+23. Проверка предложения (`mcp::llm::tools`): до сервера — `check_model_sql(rewrittenSql, Explain)` с позицией в тексте
+    модели; индексы — `check_index_ddls` (имя снимается, E4; отказ с префиксом `indexes[i]: `; хранится проверенный текст без
+    имени, краевых пробелов и хвостовой `;` — он же идёт в hypopg при сравнении); вид инструкции сверяется с исходной
+    (`invalid_sql`: «rewrittenSql must be the same kind of statement as the original (select), got update»); снимок, который
+    не проходит `sqlcheck` шлюза (консоль принимает больше, нормализованный текст pgss карточки может не разбираться), —
+    `invalid_argument` с советом прислать прямую форму. На сервере — `GuardTx` на узле снимка (прямая форма — «за лидером»),
+    `prepare` и проба плана (`statement_timeout` 5 с); значения `$N` пробы — значения консоли, если их столько же, иначе
+    `GENERIC_PLAN` на 16+; на PostgreSQL < 16 с `$N` без значений пробы нет (разбор и типы проверяет `prepare`), и «Сравнить
+    планы» такого предложения отвечает ошибкой GENERIC_PLAN — сравнивать в консоли. Узла снимка нет в топологии —
+    `invalid_argument` с советом прямой формы. Дедупликация — тот же исходный запрос, `rewrittenSql` без краевых пробелов и тот
+    же набор индексов. Шестое предложение на запрос — `invalid_argument` («…: ask the user to review them in Glafira»), а не
+    вытеснение. Предложение сохраняется, только если запрос не отменён к моменту записи; не удалось привязать к запросу —
+    только что добавленное удаляется. `rationale` из одних управляющих символов — `invalid_argument`; `originalQueryId` прямой
+    формы с `queryId` — каноническое число; `rewrittenSql` — до 256 КБ.
+24. `list_proposals` с неизвестным или скрытым `requestId` — пустой список, а не `not_found` / `not_allowed`: доступ
+    проверяется у каждого предложения (`check_connection`). Модели уходят только `costBefore`, `costAfter`, `indexesUsed`,
+    `member`, `atMs`, `withoutHypopg` итога сравнения (`Comparison::for_model`); в файле `Comparison` хранит и планы
+    (`PlanTree`), и рекомендации (`Recommendation`) обоих запросов для панели.
+25. «Сравнить планы» (`compare_llm_proposal`, `mcp::llm::compare_proposal`) — действие пользователя: запросы идут
+    соединением консоли EXPLAIN P3 (`ConnectSpec::for_explain`, `application_name` Glafira; пробный план в `READ ONLY`,
+    `hypopg::check_many` — в `READ ONLY` с `hypopg_reset()`, срок шагов hypopg — `PROBE_TIMEOUT_S` 15 с), а не сессией SQL
+    модели; ничего не выполняется. Узел — узел предложения, иначе лидер; значения `$N` — из запроса, если он ещё хранится и
+    значений столько же, иначе `GENERIC_PLAN`.
+26. `instructions` (§5.4): абзац P4a — «Nothing in the database can be changed through this gateway: SQL runs only in
+    read-only transactions (run_select reads data with one SELECT), plans are built without executing queries, and
+    propose_query_rewrite only stores a proposal in Glafira for the user to review»; абзац P4b — кнопка «Send to LLM
+    assistant», база по умолчанию, «Glafira does not run the rewritten SQL or create indexes», те же строки; `run_select` —
+    только для `llmAccess: "data"`, сначала `get_table_details` и `explain_query`, всегда `WHERE` и `LIMIT`.
+27. Prompts (§9): `list_prompts` и `get_prompt` написаны вручную по телу `#[prompt_handler]` rmcp 3.5.1 (нужно ещё опознать
+    клиента; при обновлении rmcp — сверить); `SessionCtx::list_prompts_result` — в ядре, рядом с `list_tools_result`.
+    Аргументы проверяются: id и имя узла — одна строка до 128 символов без управляющих, `windowS` — 300, 900 или 3600 (по
+    умолчанию 900), `symptom` — до 1000 символов (управляющие, кроме перевода строки, убираются); ошибка — `invalid_params`.
+28. Крейт: `PgBackend::select` и `PgBackend::llm` — методы с реализацией по умолчанию (`not_supported`), ответ — `PgAnswer`
+    (§3.2 обновлён). `run_select` и `propose_query_rewrite` берут слот базы на весь вызов, `propose_query_rewrite` — ещё имя
+    клиента из `SessionCtx::identify`; `get_optimization_request` и `list_proposals` слотов не берут. Пустые необязательные
+    строки инструментов P4b — «не заданы» (`validate`, E2). Сторожок — `tests/p4b_tools.rs` (`TOOL_NAMES: [&str; 18]`),
+    `it_mcp.rs` сверяет список инструментов с `TOOL_NAMES`; общие проверки SQL модели вынесены из `read.rs` в
+    `mcp/model_sql.rs`.
+29. Тесты P4b: крейт — `tests/{p4b_tools,prompts}.rs` (обвязка `tests/p4b/mod.rs`: фальшивый бэкенд и клиент поверх
+    `duplex`); интеграционные `it_mcp_data` (pg-lab, `GPG_IT_LAB`, ci.yml) и `it_mcp_proposals` (pg-perf, `GPG_IT_PERF`,
+    perf.yml; список инструментов и prompts — без стенда) поднимают сервер в процессе (`tests/mcp_harness`: `serve_stream`
+    поверх `tokio::io::duplex`, `AppBackend` за подтверждающим `Gate`) и зовут функции команд (`create_request`,
+    `compare_proposal`, `answer_proposal`, `cancel_request`); обрезка значений на сервере —
+    `it_mcp_backend::run_select_cuts_long_values_on_the_server`. Стендом не покрыты выбор реплики по умолчанию у
+    `run_select`, события интерфейса и подтверждение клиента — их проверяют смоук (`docs/smoke/p4b.md`) и unit-тесты.
 
 ---
 
