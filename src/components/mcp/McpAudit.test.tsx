@@ -30,7 +30,7 @@ const activity: McpAuditEntry = {
 };
 const refused = explainCall({ ts: 1_700_000_000_200, outcome: "error", code: "forbidden_function", ms: 5 });
 const approved: McpAuditEntry = { ts: 1_700_000_000_300, event: "approved", session: "s1", client: "qwen-code" };
-const later: McpAuditEntry = { ts: 1_700_000_000_400, event: "requestCreated" };
+const later: McpAuditEntry = { ts: 1_700_000_000_400, event: "futureEvent" };
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -57,10 +57,24 @@ describe("McpAudit", () => {
     expect(rows[1]).toHaveTextContent("forbidden_function");
     expect(rows[2]).toHaveTextContent("Клиент подтверждён");
     // Событие, которого эта версия не знает, — как в файле.
-    expect(rows[3]).toHaveTextContent("requestCreated");
+    expect(rows[3]).toHaveTextContent("futureEvent");
     // Без обработчика раздела кнопки «Открыть в консоли» нет, и список подключений не нужен.
     expect(screen.queryByRole("button", { name: "Открыть в консоли EXPLAIN" })).not.toBeInTheDocument();
     expect(api.listConnections).not.toHaveBeenCalled();
+  });
+
+  it("события P4b: запрос передан LLM и ответ на предложение — подписями, а не именами из файла", async () => {
+    vi.mocked(api.getMcpAudit).mockResolvedValue([
+      { ts: 1_700_000_000_500, event: "requestCreated", connection: { id: "c1", name: "perf" } },
+      { ts: 1_700_000_000_600, event: "proposalAnswered", connection: { id: "c1", name: "perf" } },
+    ]);
+    renderWithClient(<McpAudit status={mcpStatus()} />);
+    const table = await screen.findByRole("table", { name: "Журнал" });
+    const rows = within(table).getAllByRole("row").slice(1);
+    expect(rows[0]).toHaveTextContent("Запрос передан LLM");
+    expect(rows[1]).toHaveTextContent("Ответ на предложение");
+    expect(table).not.toHaveTextContent("requestCreated");
+    expect(table).not.toHaveTextContent("proposalAnswered");
   });
 
   it("пустой журнал, «Обновить» и «Показать файл»", async () => {

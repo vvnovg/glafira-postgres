@@ -80,4 +80,23 @@ describe("api client", () => {
   it("toAppError понимает Error", () => {
     expect(toAppError(new Error("x"))).toEqual({ code: "INTERNAL", message: "x", retryable: false });
   });
+
+  it("команды запросов на оптимизацию и предложений LLM", async () => {
+    invoke.mockResolvedValue({});
+    const req = { member: "pg-1", database: "perf", source: { kind: "console" } as const, sql: "SELECT $1", params: [null], plan: null };
+    await api.createOptimizationRequest("c", req);
+    expect(invoke).toHaveBeenLastCalledWith("create_optimization_request", { id: "c", req });
+    await api.cancelOptimizationRequest("r1");
+    expect(invoke).toHaveBeenLastCalledWith("cancel_optimization_request", { requestId: "r1" });
+    invoke.mockResolvedValue([]);
+    await api.listOptimizationRequests("c");
+    expect(invoke).toHaveBeenLastCalledWith("list_optimization_requests", { connectionId: "c" });
+    await api.listLlmProposals({ connectionId: "c" });
+    expect(invoke).toHaveBeenLastCalledWith("list_llm_proposals", { filter: { connectionId: "c" } });
+    invoke.mockResolvedValue({});
+    await api.answerLlmProposal("p1", "rejected", "same rows");
+    expect(invoke).toHaveBeenLastCalledWith("answer_llm_proposal", { id: "p1", status: "rejected", reason: "same rows" });
+    await api.compareLlmProposal("p1");
+    expect(invoke).toHaveBeenLastCalledWith("compare_llm_proposal", { id: "p1" });
+  });
 });

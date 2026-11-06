@@ -1,0 +1,155 @@
+import { useState } from "react";
+import { useTranslation } from "react-i18next";
+import { api, toAppError } from "../../../api/client";
+import type { AppError, McpStatus, PlanTree, RequestSource } from "../../../api/types";
+import { tr } from "../../../i18n/text";
+import { effectiveLlmAccess } from "../../../lib/llmAccess";
+import { useConnectionProfile } from "../../../lib/useConnectionProfile";
+import { useOptimizationRequests, waitingRequest } from "../../../lib/useLlmProposals";
+import { useMcpStatus } from "../../../lib/useMcpStatus";
+import { Hint } from "../../common/Hint";
+
+/** Почему запрос не отправить. Ключи подсказок — литералами (правило словарей и проверка подсказок `i18n:check`). */
+type Off = "policy" | "server" | "otherInstance" | "error" | "access" | "status" | "requests";
+const OFF_HINTS: Record<Off, string> = {
+  policy: "hints.llmAssist.askPolicy",
+  server: "hints.llmAssist.askServer",
+  otherInstance: "hints.llmAssist.askOtherInstance",
+  error: "hints.llmAssist.askError",
+  access: "hints.llmAssist.askAccess",
+  status: "hints.llmAssist.askStatus",
+  requests: "hints.llmAssist.askRequests",
+};
+
+/** Политика → состояние сервера (спец. P4 §11: активна, если MCP включён); `null` — сервер работает и политика разрешает. */
+function serverOff(status: McpStatus): Off | null {
+  if (!status.policyEnabled) return "policy";
+  switch (status.server) {
+    case "running":
+      return null;
+    case "otherInstance":
+      return "otherInstance";
+    case "error":
+      return "error";
+    default:
+      return "server";
+  }
+}
+
+export interface AskLlmProps {
+  connectionId: string;
+  member: string;
+  database: string;
+  source: RequestSource;
+  sql: string;
+  /** Значения `$N` последнего плана (пустое поле — null); нет плана — пустой список. */
+  params: (string | null)[];
+  /** Последний план вкладки, пока SQL, узел и база не менялись (как у «Скопировать для LLM»); иначе Rust строит пробный. */
+  plan: PlanTree | null;
+}
+
+/**
+ * «Передать LLM-ассистенту» (спец. P4 §8.1): сохраняет снимок запроса на оптимизацию (`create_optimization_request`) и
+ * кладёт в буфер строку для чата ассистента на языке интерфейса; уведомление повторяет строку и говорит, куда её вставить.
+ * Активна, когда политика разрешает MCP, MCP-сервер этого окна работает и действующий уровень подключения не `off`
+ * (`effectiveLlmAccess`). Строго: пока статус MCP, профиль или список запросов читаются — неактивна без пояснения; если
+ * статус или список не прочитались — неактивна с пояснением и «Повторить» (неудачное чтение не значит «ничего не ждёт»:
+ * иначе кнопка позволила бы дубль запроса). Значок «?» объясняет причину, а у активной кнопки — что снимок уходит модели
+ * без маскирования. Пока запрос этого источника ждёт ответа, рядом «Ждёт ответа LLM» и «Отменить запрос», второй запрос
+ * не создаётся. Читает только запросы подключения (`useOptimizationRequests`), предложения кнопке не нужны.
+ * Уведомление о скопированной строке живёт в кнопке: при её перемонтировании (в консоли — когда появляется результат
+ * плана) оно исчезает, а статус ожидания остаётся — он выводится из списка запросов.
+ */
+export function AskLlmButton({ connectionId, member, database, source, sql, params, plan }: AskLlmProps) {
+  const { t } = useTranslation();
+  const { status, loading: statusLoading, error: statusError, refetch: refetchStatus } = useMcpStatus();
+  const profile = useConnectionProfile(connectionId);
+  const { requests, state: requestsState, refresh, retry: retryRequests } = useOptimizationRequests(connectionId);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<AppError | null>(null);
+  /** Строка для чата последнего созданного запроса и удалось ли её скопировать. */
+  const [sent, setSent] = useState<{ id: string; line: string; copied: boolean } | null>(null);
+  const waiting = waitingRequest(requests, source, database);
+
+  // Что мешает отправить. `null` вместе с `ready === false` — ещё читается, без пояснения.
+  let off: Off | null = null;
+  let ready = true;
+  if (status === undefined) {
+    ready = false;
+    if (!statusLoading && statusError) off = "status";
+  } else {
+    off = serverOff(status);
+    if (off === null && profile === undefined) ready = false;
+    else if (off === null && profile && effectiveLlmAccess(profile, status) === "off") off = "access";
+  }
+  if (off === null && ready) {
+    if (requestsState === "failed") off = "requests";
+    else if (requestsState === "loading") ready = false;
+  }
+  const can = ready && off === null && sql.trim() !== "" && !busy && waiting === null;
+
+  const ask = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api.createOptimizationRequest(connectionId, { member, database, source, sql, params, plan });
+      const line = t("llmAssist.ask.chatLine", { id: r.id });
+      let copied = true;
+      try {
+        if (!navigator.clipboard) throw new Error("clipboard unavailable");
+        await navigator.clipboard.writeText(line);
+      } catch {
+        copied = false;
+      }
+      setSent({ id: r.id, line, copied });
+      refresh();
+    } catch (e) {
+      setError(toAppError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const cancel = async (id: string) => {
+    setError(null);
+    try {
+      await api.cancelOptimizationRequest(id);
+      setSent(null);
+      refresh();
+    } catch (e) {
+      setError(toAppError(e));
+    }
+  };
+
+  // Строка для чата видна, пока её запрос ждёт ответа (или список ещё не перечитан после создания).
+  const fresh = sent !== null && (waiting?.id === sent.id || !requests.some((r) => r.id === sent.id));
+  const notice = sent === null || !fresh ? "" : sent.copied ? t("llmAssist.ask.copied", { line: sent.line }) : t("llmAssist.ask.copyFailed", { line: sent.line });
+  const unreadable = off === "status" ? t("llmAssist.ask.statusUnavailable") : off === "requests" ? t("llmAssist.ask.requestsFailed") : "";
+  return (
+    <>
+      <button type="button" disabled={!can} onClick={() => void ask()}>
+        {t("llmAssist.ask.button")}
+      </button>
+      <Hint k={off ? OFF_HINTS[off] : "hints.llmAssist.ask"} label={t("llmAssist.ask.button")} />
+      {waiting && (
+        <span className="llm-waiting">
+          <span>{t("llmAssist.ask.waiting", { id: waiting.id })}</span>
+          <button type="button" className="link" onClick={() => void cancel(waiting.id)}>
+            {t("llmAssist.ask.cancel")}
+          </button>
+        </span>
+      )}
+      {unreadable && (
+        <span className="llm-waiting muted">
+          <span>{unreadable}</span>
+          <button type="button" className="link" onClick={off === "status" ? refetchStatus : retryRequests}>
+            {t("common.retry")}
+          </button>
+        </span>
+      )}
+      <span role="status" className="muted">
+        {error ? tr(error) : notice}
+      </span>
+    </>
+  );
+}

@@ -1043,6 +1043,99 @@ export interface LlmBundle {
   /** Ключи: `paramsNeeded`, `queryGone`, `planFailed`, `ddlFailed`. */
   warnings: string[];
 }
+// Запросы на оптимизацию и предложения LLM (спец. P4 §8).
+/** Откуда запрос: консоль EXPLAIN (одна на подключение) или карточка запроса pgss. */
+export type RequestSource = { kind: "console" } | { kind: "query"; queryId: string };
+export type RequestStatus = "waiting" | "answered" | "cancelled";
+/** Снимок запроса на оптимизацию (`llm-requests.json`): модель забирает его инструментом `get_optimization_request`. */
+export interface OptimizationRequest {
+  /** `r` + 6 hex. */
+  id: string;
+  connectionId: string;
+  member: string;
+  database: string;
+  source: RequestSource;
+  sql: string;
+  /** Значения `$N` последнего плана консоли; пустое поле — null. */
+  params: (string | null)[];
+  /** Снимок `LlmBundle` (P3): уходит модели как есть, без маскирования. */
+  bundle: LlmBundle;
+  createdAtMs: number;
+  status: RequestStatus;
+  proposalIds: string[];
+}
+/** Аргументы `create_optimization_request`: `plan` — последний план вкладки (как у «Скопировать для LLM»), без него Rust строит пробный. */
+export interface CreateRequestArgs {
+  member: string;
+  database: string;
+  source: RequestSource;
+  sql: string;
+  params: (string | null)[];
+  plan: PlanTree | null;
+}
+export type ProposalStatus = "new" | "accepted" | "rejected";
+export interface ProposalIndexUse {
+  ddl: string;
+  used: boolean;
+}
+/** Итог «Сравнить планы»: EXPLAIN без выполнения обоих запросов на одном узле, предложенный — с индексами через hypopg. */
+export interface ProposalComparison {
+  costBefore: number;
+  costAfter: number;
+  indexesUsed: ProposalIndexUse[];
+  member: string;
+  atMs: number;
+  planBefore: PlanTree;
+  planAfter: PlanTree;
+  recommendationsBefore: Recommendation[];
+  recommendationsAfter: Recommendation[];
+  /** В базе нет hypopg: предложенный запрос спланирован без своих индексов. */
+  withoutHypopg: boolean;
+}
+/** Предложение LLM (`llm-proposals.json`). Необязательные поля Rust может не прислать: отсутствие и null равнозначны. */
+export interface LlmProposal {
+  /** `p` + 6 hex. */
+  id: string;
+  source: "mcp" | "app";
+  /** Имя MCP-клиента, приславшего предложение. */
+  client?: string | null;
+  requestId?: string | null;
+  connectionId: string;
+  database: string;
+  member?: string | null;
+  originalSql: string;
+  originalQueryId?: string | null;
+  rewrittenSql: string;
+  indexes: string[];
+  rationale: string;
+  expectedEffect?: string | null;
+  status: ProposalStatus;
+  /** Причина отклонения (до 500 символов), видна модели. */
+  reason?: string | null;
+  comparison?: ProposalComparison | null;
+  createdAtMs: number;
+  answeredAtMs?: number | null;
+}
+/**
+ * Фильтр `list_llm_proposals`. `connectionId` сужает всегда; `requestIds`, `database` и `queryId` объединяются (ИЛИ):
+ * подходит предложение, совпавшее хотя бы с одним из заданных (`database` — только предложения без запроса). Если ни одного
+ * из трёх нет, подходят все предложения подключения.
+ */
+export interface ProposalFilter {
+  connectionId?: string | null;
+  database?: string | null;
+  requestIds?: string[] | null;
+  queryId?: string | null;
+}
+/**
+ * Событие `mcp://proposals`: новое предложение или смена статуса запроса подключения.
+ */
+export interface ProposalsEvent {
+  kind: "request" | "proposal";
+  connectionId: string;
+  requestId?: string | null;
+  proposalId?: string | null;
+}
 /** Запись журнала для EXPLAIN ANALYZE яруса записи (`ActionRecord.explain`). */
 export interface ExplainRecord {
   database: string;

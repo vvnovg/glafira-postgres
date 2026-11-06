@@ -6,8 +6,12 @@ import { CopyButton } from "../common/CopyButton";
 import { FindingsPanel } from "../diag/FindingsPanel";
 import { unavailableText } from "../diag/unavailable";
 import { CopyLlmButton } from "./CopyLlmButton";
+import { AskLlmButton } from "./llm/AskLlmButton";
 import { Sparkline } from "./Sparkline";
 import { BLOCK_BYTES, cpuMs } from "./queriesText";
+
+/** Значений параметров у нормализованного текста карточки нет: снимок уходит без них. */
+const NO_PARAMS: (string | null)[] = [];
 
 /** Строки метрик: ключ подписи — литералом (правило словарей), значение — из строки pgss. */
 const METRICS: { id: string; labelKey: string; of: (s: QueryStat, trackPlanning: boolean) => string; kcache?: true }[] = [
@@ -36,7 +40,7 @@ const METRICS: { id: string; labelKey: string; of: (s: QueryStat, trackPlanning:
  * Обзор карточки (спец. P3 §7.3): текст (с копированием), метрики (с момента сброса и за час), история (промежутки
  * сэмплера рвут линию), находки, разбивка, экземпляры, ожидания, таблицы (из последнего плана вкладки; `null` — плана ещё
  * не было). Ряд кнопок под текстом: «Получить план» (`onGetPlan` — открывает подвкладку «План» и запускает пробный план),
- * «Открыть в консоли», «Копировать запрос», «Скопировать для LLM» (`llmPlan` — последний план вкладки на её узле). Без выполняющихся
+ * «Открыть в консоли», «Копировать запрос», «Скопировать для LLM» (`llmPlan` — последний план вкладки на её узле), «Передать LLM-ассистенту» (запрос на оптимизацию, спец. P4 §8.1). Без выполняющихся
  * экземпляров на сервере < 14 блок «Выполняющиеся экземпляры» скрыт целиком, пометка о причине остаётся вверху.
  */
 /**
@@ -101,6 +105,10 @@ export function QueryOverview({
           </button>
           {detail.text !== null && <CopyButton text={detail.text} caption={t("diag.query.copyQuery")} />}
           <CopyLlmButton connectionId={connectionId} member={member} database={database} source={{ kind: "query", queryId }} plan={llmPlan} />
+          {/* Обрезанный текст модель не спланирует, а исчезнувший запрос передавать нечего. */}
+          {detail.text !== null && !detail.textTruncated && (
+            <AskLlmButton connectionId={connectionId} member={member} database={database} source={{ kind: "query", queryId }} sql={detail.text} params={NO_PARAMS} plan={llmPlan} />
+          )}
         </div>
       </section>
       <FindingsPanel connectionId={connectionId} findings={findings} member={member} />

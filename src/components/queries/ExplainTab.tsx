@@ -2,13 +2,14 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../api/client";
-import type { AppError, ParsedPlan, PlanTree } from "../../api/types";
+import type { AppError, ExplainParams, ParsedPlan, PlanTree, RequestSource } from "../../api/types";
 import { useConnectionProfile } from "../../lib/useConnectionProfile";
 import { useTopology } from "../../lib/useConnectionEvents";
 import { type ExplainPrefill, tabId, useWorkspace } from "../../state/workspace";
 import { SubTabs } from "../catalog/SubTabs";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { CopyLlmButton } from "./CopyLlmButton";
+import { AskLlmButton } from "./llm/AskLlmButton";
 import { PlanRunner } from "./plan/PlanRunner";
 import { PlanView } from "./plan/PlanView";
 import { Recommendations } from "./plan/Recommendations";
@@ -24,7 +25,13 @@ interface LastRun {
   sql: string;
   node: string;
   db: string;
+  /** Параметры запуска: значения `$N` уходят в снимок запроса на оптимизацию. */
+  params: ExplainParams;
 }
+
+/** Источник запросов на оптимизацию консоли — одна константа: кнопка сравнивает его с запросами подключения. */
+const CONSOLE_SOURCE: RequestSource = { kind: "console" };
+const NO_PARAMS: (string | null)[] = [];
 
 /**
  * Номер версии для `PlanRunner` из `Member.serverVersion` ("16.4", "17beta1"): мажорная × 10 000 + минорная. Нужна одна
@@ -42,7 +49,8 @@ function versionNum(text: string | null | undefined): number {
  * active — вкладка сейчас видна: скрытая список баз не читает, а при возвращении читает заново. Список нужен только режиму
  * «Запрос» и только пока база не известна (спека или выбор): «Вставить план» от него не зависит.
  * prefill — подстановка «Открыть в консоли EXPLAIN» из журнала MCP: применяется один раз на nonce.
- * «Скопировать для LLM» получает план последнего запуска, пока SQL, узел и база не менялись, иначе Rust строит пробный план сам.
+ * «Скопировать для LLM» получает план последнего запуска, пока SQL, узел и база не менялись, иначе Rust строит пробный план сам;
+ * «Передать LLM-ассистенту» — тот же план и значения параметров последнего запуска (спец. P4 §8.1).
  */
 export function ExplainTab({
   connectionId,
@@ -117,8 +125,11 @@ export function ExplainTab({
   // Смена узла или базы забывает прошлый запуск совсем (его история ушла вместе с запуском прежнего узла и базы), и
   // возврат к ним план не воскрешает: сброс при отрисовке, без эффекта.
   if (last && (last.node !== nodeName || last.db !== dbName)) setLast(null);
-  // Для «Скопировать для LLM» план идёт только пока консоль ещё в том состоянии, для которого он построен.
-  const lastPlan = last && last.sql === sql && last.node === nodeName && last.db === dbName ? last.plan : null;
+  // «Скопировать для LLM» и запрос на оптимизацию получают план и значения параметров только пока консоль ещё в том
+  // состоянии, для которого они получены.
+  const lastFresh = last && last.sql === sql && last.node === nodeName && last.db === dbName ? last : null;
+  const lastPlan = lastFresh?.plan ?? null;
+  const lastParams = lastFresh && lastFresh.params.kind === "values" ? lastFresh.params.values : NO_PARAMS;
 
   const parse = async () => {
     setParseError(null);
@@ -184,8 +195,13 @@ export function ExplainTab({
                     sql={sql}
                     serverVersionNum={serverVersionNum}
                     inRecovery={inRecovery}
-                    onResult={(r, on) => setLast({ plan: r.plan, sql, node: on, db: dbName })}
-                    extraActions={sql.trim() ? <CopyLlmButton connectionId={connectionId} member={nodeName} database={dbName} source={{ kind: "sql", sql }} plan={lastPlan} /> : undefined}
+                    onResult={(r, on, req) => setLast({ plan: r.plan, sql, node: on, db: dbName, params: req.params })}
+                    extraActions={
+                      <>
+                        {sql.trim() !== "" && <CopyLlmButton connectionId={connectionId} member={nodeName} database={dbName} source={{ kind: "sql", sql }} plan={lastPlan} />}
+                        <AskLlmButton connectionId={connectionId} member={nodeName} database={dbName} source={CONSOLE_SOURCE} sql={sql} params={lastParams} plan={lastPlan} />
+                      </>
+                    }
                   />
                 </>
               ) : (

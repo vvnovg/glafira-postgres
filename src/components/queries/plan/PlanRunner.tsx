@@ -106,7 +106,7 @@ function errorPlace(sql: string, error: AppError | null): ErrorPlace | null {
  * на реплике (спец. §8.3 п. 3; по умолчанию — первая доступная реплика, можно вернуть лидера). `autoRun` — один пробный
  * план, как только запуск доступен
  * («Получить план» карточки); `onAutoRun` сообщает, что запрос принят (если «План» без значений невозможен — принят без
- * запуска). `onResult` получает результат и узел, где он получен.
+ * запуска). `onResult` получает результат, узел, где он получен, и запрос (значения параметров — для снимка запроса на оптимизацию).
  * Значения параметров: свыше `PARAM_FIELDS_LIMIT` полей нет, и запуски, которым нужны значения, закрыты; GENERIC_PLAN
  * влияет только на «План», поля значений для «Плана с выполнением» видны и при нём.
  * Ярус записи пишет журнал действий — после него список журнала перечитывается, как после диалогов P2.
@@ -131,7 +131,7 @@ export function PlanRunner({
   serverVersionNum: number;
   inRecovery: boolean;
   members?: Member[] | null;
-  onResult?: (r: ExplainResult, member: string) => void;
+  onResult?: (r: ExplainResult, member: string, request: ExplainRequest) => void;
   autoRun?: boolean;
   onAutoRun?: () => void;
   /** Кнопки в ряду копирования результата (рядом с «JSON» и «Как текст»); без результата — отдельным рядом. */
@@ -239,7 +239,7 @@ export function PlanRunner({
     setRuns((r) => [run, ...r].slice(0, HISTORY));
     setShown(run.id);
     setResultHidden(false);
-    onResult?.(result, on);
+    onResult?.(result, on, req);
   };
 
   /** Запуск входа `from`: прошлые ошибка и подсказка снимаются, новая ошибка — баннером (после размонтирования — никуда). */

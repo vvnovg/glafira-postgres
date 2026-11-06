@@ -513,3 +513,6 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .tree-conn .llm-badge { cursor: default; }
 .llm-levels { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; }
 .llm-levels [role="radiogroup"] { display: inline-flex; gap: 12px; }
+
+/* Запрос на оптимизацию (P4b): статус ожидания рядом с кнопкой. */
+.llm-waiting { display: inline-flex; align-items: center; gap: 6px; }

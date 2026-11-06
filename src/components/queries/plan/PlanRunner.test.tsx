@@ -283,11 +283,11 @@ describe("PlanRunner: вход пробы, реплика, загрузка пр
     await user.click(await screen.findByRole("button", { name: "План с выполнением" }));
     await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("c", expect.objectContaining({ mode: "analyze", member: "pg-2" })));
     expect(await screen.findByText("Узел: pg-2")).toBeInTheDocument();
-    expect(onResult).toHaveBeenLastCalledWith(expect.objectContaining({ mode: "analyze" }), "pg-2");
+    expect(onResult).toHaveBeenLastCalledWith(expect.objectContaining({ mode: "analyze" }), "pg-2", expect.objectContaining({ mode: "analyze", member: "pg-2" }));
     // «План» — на узле вкладки: сводка без узла; в истории узел назван только у запуска на реплике.
     vi.mocked(api.explain).mockResolvedValueOnce(result());
     await user.click(screen.getByRole("button", { name: "План" }));
-    await waitFor(() => expect(onResult).toHaveBeenLastCalledWith(expect.objectContaining({ mode: "plan" }), "pg-1"));
+    await waitFor(() => expect(onResult).toHaveBeenLastCalledWith(expect.objectContaining({ mode: "plan" }), "pg-1", expect.objectContaining({ mode: "plan", member: "pg-1" })));
     expect(screen.queryByText("Узел: pg-2")).toBeNull();
     expect(screen.getByRole("button", { name: /^#1 с выполнением, чтение, на pg-2, / })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^#2 план, чтение, \d/ })).toBeInTheDocument();

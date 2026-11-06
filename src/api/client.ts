@@ -8,6 +8,7 @@ import type {
   ConnectionFolder,
   Comparison,
   ConnectionProfile,
+  CreateRequestArgs,
   DatabaseInfo,
   DiagReport,
   DiagRequest,
@@ -21,6 +22,7 @@ import type {
   ImportPreview,
   LanguageSettings,
   LlmBundle,
+  LlmProposal,
   LlmSource,
   McpAuditEntry,
   McpClientConfigs,
@@ -28,6 +30,7 @@ import type {
   MemberFacts,
   ObjectKind,
   ObjectPage,
+  OptimizationRequest,
   ParsedConnection,
   PatroniAction,
   PatroniActionPreview,
@@ -35,6 +38,7 @@ import type {
   ParsedPlan,
   PlanTree,
   PolicyStatus,
+  ProposalFilter,
   QueryDetail,
   QueryKey,
   QueryText,
@@ -184,6 +188,19 @@ export const api = {
   parsePlan: (text: string) => call<ParsedPlan>("parse_plan", { text }),
   queryLlmBundle: (id: string, member: string, database: string, source: LlmSource, plan: PlanTree | null) =>
     call<LlmBundle>("query_llm_bundle", { id, member, database, source, plan }),
+  /** Запрос на оптимизацию (спец. P4 §8.1): снимок для LLM-ассистента; модель забирает его через MCP. */
+  createOptimizationRequest: (id: string, req: CreateRequestArgs) => call<OptimizationRequest>("create_optimization_request", { id, req }),
+  /** Отменяет только ждущий запрос; закрытый — ошибка. */
+  cancelOptimizationRequest: (requestId: string) => call<OptimizationRequest>("cancel_optimization_request", { requestId }),
+  /** Запросы подключения, новые первыми (последние 50 в приложении). */
+  listOptimizationRequests: (connectionId: string) => call<OptimizationRequest[]>("list_optimization_requests", { connectionId }),
+  /** Предложения по фильтру (подключение сужает всегда, остальные поля — ИЛИ), новые первыми. */
+  listLlmProposals: (filter: ProposalFilter) => call<LlmProposal[]>("list_llm_proposals", { filter }),
+  /** Ответ пользователя на предложение; причина отклонения — до 500 символов, её видит модель. */
+  answerLlmProposal: (id: string, status: "accepted" | "rejected", reason: string | null) =>
+    call<LlmProposal>("answer_llm_proposal", { id, status, reason }),
+  /** «Сравнить планы»: итог записывается в предложение и возвращается в нём. */
+  compareLlmProposal: (id: string) => call<LlmProposal>("compare_llm_proposal", { id }),
 
   /** Снимок pgss узла на диск пользователя; второй снимок узла в ту же секунду — `errors.snapshots.exists`. */
   snapshotTake: (id: string, member: string) => call<SnapshotInfo>("snapshot_take", { id, member }),

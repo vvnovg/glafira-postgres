@@ -592,7 +592,9 @@
           "rejected": "Client rejected",
           "revoked": "Client revoked",
           "serverStarted": "Server started",
-          "serverStopped": "Server stopped"
+          "serverStopped": "Server stopped",
+          "requestCreated": "Request sent to the LLM",
+          "proposalAnswered": "Proposal answered"
         },
         "openInConsole": "Open in EXPLAIN console",
         "openArgsCut": "Unavailable: the call arguments are truncated in the journal",
@@ -2095,6 +2097,18 @@
       "disk": "Disk read / written (OS level)"
     }
   },
+  "llmAssist": {
+    "ask": {
+      "button": "Send to LLM assistant",
+      "chatLine": "Optimize query {{id}} from Glafira (or /optimize_query {{id}})",
+      "copied": "Copied: “{{line}}”. Paste it into the chat of your LLM assistant (Qwen Code, Claude Code…)",
+      "copyFailed": "Could not copy. Type in the chat of your LLM assistant: {{line}}",
+      "waiting": "Waiting for the LLM: request {{id}}",
+      "cancel": "Cancel request",
+      "statusUnavailable": "MCP status is unavailable",
+      "requestsFailed": "Could not read the requests of this connection"
+    }
+  },
   "mcp": {
     "unknownClient": "Unknown MCP client",
     "approval": {
@@ -2149,6 +2163,16 @@
     },
     "settings": {
       "mcpEnable": "Glafira listens on a local socket (a named pipe on Windows) available only to your user. A client runs <code>glafira-pg mcp</code>, which connects to it. Off by default."
+    },
+    "llmAssist": {
+      "ask": "Saves a snapshot for the LLM assistant (query, statistics, plan, table DDL) and copies a line for its chat. The snapshot goes to the model without masking, even at the Diagnostics level.",
+      "askServer": "The MCP server is off: turn it on in Settings → LLM assistants (MCP) and connect the assistant.",
+      "askOtherInstance": "The MCP server runs in another Glafira window: send the request from that window.",
+      "askError": "The MCP server failed to start: see Settings → LLM assistants (MCP).",
+      "askStatus": "The MCP status could not be read, so it is unknown whether the server is on. Retry or check Settings → LLM assistants (MCP).",
+      "askRequests": "The requests of this connection could not be read, so a duplicate cannot be ruled out. Retry.",
+      "askPolicy": "MCP is disabled by your organization's policy.",
+      "askAccess": "The connection is closed to LLM assistants: open it in the connection settings, LLM access → Diagnostics."
     }
   },
   "recommend": {

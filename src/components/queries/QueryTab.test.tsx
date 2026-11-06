@@ -3,14 +3,20 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { QueryDetail } from "../../api/types";
 import { useWorkspace } from "../../state/workspace";
+import { resetEventBus } from "../../test/events";
 import { connection, member, topology, topologyView } from "../../test/fixtures";
+import { optimizationRequest } from "../../test/llm";
+import { mcpStatus } from "../../test/mcp";
 import { renderWithClient } from "../../test/render";
 import en from "../../locales/en.json";
 import ru from "../../locales/ru.json";
 
+const mcp = vi.hoisted(() => ({ value: { status: undefined as unknown, loading: false, error: null as unknown, refetch: () => {} } }));
+vi.mock("../../lib/useMcpStatus", () => ({ useMcpStatus: () => mcp.value }));
+vi.mock("@tauri-apps/api/event", async () => (await import("../../test/events")).tauriEventMock());
 vi.mock("../../api/client", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../../api/client")>();
-  return { ...orig, api: { queryDetail: vi.fn(), explain: vi.fn(), queryLlmBundle: vi.fn(), startStatementsSampler: vi.fn(), stopSession: vi.fn(), getTopology: vi.fn(), listConnections: vi.fn() } };
+  return { ...orig, api: { queryDetail: vi.fn(), explain: vi.fn(), queryLlmBundle: vi.fn(), startStatementsSampler: vi.fn(), stopSession: vi.fn(), getTopology: vi.fn(), listConnections: vi.fn(), listOptimizationRequests: vi.fn(), listLlmProposals: vi.fn(), createOptimizationRequest: vi.fn(), cancelOptimizationRequest: vi.fn() } };
 });
 
 import { api } from "../../api/client";
@@ -33,6 +39,10 @@ describe("QueryTab", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     useWorkspace.setState({ tabs: [], activeId: null });
+    mcp.value = { status: mcpStatus(), loading: false, error: null, refetch: vi.fn() };
+    resetEventBus();
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([]);
+    vi.mocked(api.listLlmProposals).mockResolvedValue([]);
     vi.mocked(api.getTopology).mockResolvedValue(topologyView({ topology: topology({ members: [member("pg-1", { role: "primary" }), member("pg-2", { role: "replica" })] }) }));
     vi.mocked(api.listConnections).mockResolvedValue([connection({ id: "c" })]);
     vi.mocked(api.startStatementsSampler).mockResolvedValue("s-1");
@@ -210,13 +220,13 @@ describe("QueryTab", () => {
     expect(api.explain).not.toHaveBeenCalled();
   });
 
-  it("ряд кнопок под текстом: Получить план, Открыть в консоли, Копировать запрос, Скопировать для LLM; в шапке LLM нет", async () => {
+  it("ряд кнопок под текстом: Получить план, Открыть в консоли, Копировать запрос, Скопировать для LLM, Передать LLM-ассистенту; в шапке LLM нет", async () => {
     vi.mocked(api.queryDetail).mockResolvedValue(detail());
     renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
     await screen.findByText("SELECT * FROM shop.customers WHERE id = $1");
     const text = screen.getByRole("group", { name: "Текст запроса" });
     const row = text.nextElementSibling as HTMLElement;
-    expect(within(row).getAllByRole("button").map((b) => b.textContent)).toEqual(["Получить план", "Открыть в консоли", "Копировать запрос", "Скопировать для LLM"]);
+    expect(within(row).getAllByRole("button").map((b) => b.textContent)).toEqual(["Получить план", "Открыть в консоли", "Копировать запрос", "Скопировать для LLM", "Передать LLM-ассистенту", "?"]);
     expect(within(text.closest(".query-tab")!.querySelector(".toolbar") as HTMLElement).queryByRole("button", { name: "Скопировать для LLM" })).toBeNull();
     // Старой кнопки «План» под текстом нет: «План» — только подвкладка.
     expect(screen.queryByRole("button", { name: "План" })).toBeNull();
@@ -345,5 +355,24 @@ describe("QueryTab", () => {
     expect(await screen.findByText("Подключение закрыто")).toBeInTheDocument();
     expect(api.queryDetail).not.toHaveBeenCalled();
     expect(api.startStatementsSampler).not.toHaveBeenCalled();
+  });
+
+  it("«Передать LLM-ассистенту» в обзоре: запрос карточки с её текстом; обрезанный текст — без кнопки", async () => {
+    vi.mocked(api.queryDetail).mockResolvedValue(detail());
+    vi.mocked(api.listConnections).mockResolvedValue([connection({ id: "c", llmAccess: "diagnostics" })]);
+    vi.mocked(api.createOptimizationRequest).mockResolvedValue(optimizationRequest({ id: "r7", source: { kind: "query", queryId: "7" } }));
+    const user = userEvent.setup();
+    const view = renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
+    await screen.findByText("SELECT * FROM shop.customers WHERE id = $1");
+    const ask = screen.getByRole("button", { name: "Передать LLM-ассистенту" });
+    await waitFor(() => expect(ask).toBeEnabled());
+    await user.click(ask);
+    expect(api.createOptimizationRequest).toHaveBeenCalledWith("c", { member: "pg-1", database: "perf", source: { kind: "query", queryId: "7" }, sql: "SELECT * FROM shop.customers WHERE id = $1", params: [], plan: null });
+    expect(await navigator.clipboard.readText()).toBe("Оптимизируй запрос r7 из Glafira (или /optimize_query r7)");
+    view.unmount();
+    vi.mocked(api.queryDetail).mockResolvedValue(detail({ textTruncated: true }));
+    renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
+    await screen.findByText("SELECT * FROM shop.customers WHERE id = $1");
+    expect(screen.queryByRole("button", { name: "Передать LLM-ассистенту" })).toBeNull();
   });
 });

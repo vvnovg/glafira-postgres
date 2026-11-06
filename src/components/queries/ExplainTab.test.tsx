@@ -2,13 +2,19 @@ import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useWorkspace } from "../../state/workspace";
+import { resetEventBus } from "../../test/events";
 import { connection, member, topology, topologyView } from "../../test/fixtures";
+import { optimizationRequest } from "../../test/llm";
+import { mcpStatus } from "../../test/mcp";
 import { planNode, planTree } from "../../test/plans";
 import { renderWithClient } from "../../test/render";
 
+const mcp = vi.hoisted(() => ({ value: { status: undefined as unknown, loading: false, error: null as unknown, refetch: () => {} } }));
+vi.mock("../../lib/useMcpStatus", () => ({ useMcpStatus: () => mcp.value }));
+vi.mock("@tauri-apps/api/event", async () => (await import("../../test/events")).tauriEventMock());
 vi.mock("../../api/client", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../../api/client")>();
-  return { ...orig, api: { explain: vi.fn(), parsePlan: vi.fn(), listDatabases: vi.fn(), getTopology: vi.fn(), listConnections: vi.fn(), queryLlmBundle: vi.fn() } };
+  return { ...orig, api: { explain: vi.fn(), parsePlan: vi.fn(), listDatabases: vi.fn(), getTopology: vi.fn(), listConnections: vi.fn(), queryLlmBundle: vi.fn(), listOptimizationRequests: vi.fn(), listLlmProposals: vi.fn(), createOptimizationRequest: vi.fn(), cancelOptimizationRequest: vi.fn() } };
 });
 
 import { api } from "../../api/client";
@@ -21,6 +27,10 @@ describe("ExplainTab", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     useWorkspace.setState({ tabs: [], activeId: null });
+    mcp.value = { status: mcpStatus(), loading: false, error: null, refetch: vi.fn() };
+    resetEventBus();
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([]);
+    vi.mocked(api.listLlmProposals).mockResolvedValue([]);
     vi.mocked(api.getTopology).mockResolvedValue(topologyView({ topology: topology({ members: [member("pg-1", { role: "primary" }), member("pg-2", { role: "replica" })] }) }));
     vi.mocked(api.listConnections).mockResolvedValue([connection({ id: "c" })]);
     vi.mocked(api.listDatabases).mockResolvedValue([{ name: "postgres", sizeBytes: 1 }, { name: "perf", sizeBytes: 1 }]);
@@ -364,5 +374,29 @@ describe("ExplainTab", () => {
     rerender(<ExplainTab connectionId="c" member={undefined} database={undefined} sql={undefined} prefill={{ sql: "SELECT 3", database: "postgres", nonce: 5 }} active />);
     expect(await screen.findByRole("textbox", { name: "SQL" })).toHaveValue("SELECT 3");
     expect(screen.getByRole("combobox", { name: "Узел" })).toHaveValue("pg-1");
+  });
+
+  it("«Передать LLM-ассистенту»: план и значения параметров последнего запуска; после правки текста — без них", async () => {
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView({ topology: topology({ members: [member("pg-1", { role: "primary", serverVersion: "15.4" })] }) }));
+    vi.mocked(api.listConnections).mockResolvedValue([connection({ id: "c", llmAccess: "diagnostics" })]);
+    const plan = planTree();
+    vi.mocked(api.explain).mockResolvedValue({ mode: "plan", tier: "read", plan, raw: [], relations: [], elapsedMs: 3, warnings: [], recommendations: [], recommendationsSkipped: [] });
+    vi.mocked(api.createOptimizationRequest).mockResolvedValue(optimizationRequest({ status: "answered" }));
+    const sql = "SELECT * FROM shop.orders WHERE status = $1";
+    const user = userEvent.setup();
+    renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql={sql} active />);
+    // Кнопка есть в консоли и до первого запуска.
+    expect(await screen.findByRole("button", { name: "Передать LLM-ассистенту" })).toBeInTheDocument();
+    await user.type(await screen.findByRole("textbox", { name: "$1" }), "disputed");
+    await user.click(screen.getByRole("button", { name: "План" }));
+    await screen.findByRole("treegrid", { name: "Дерево плана" });
+    const ask = screen.getByRole("button", { name: "Передать LLM-ассистенту" });
+    await waitFor(() => expect(ask).toBeEnabled());
+    await user.click(ask);
+    expect(api.createOptimizationRequest).toHaveBeenLastCalledWith("c", { member: "pg-1", database: "perf", source: { kind: "console" }, sql, params: ["disputed"], plan });
+    // Текст правили — план и значения прежнего запуска к нему не относятся.
+    await user.type(screen.getByRole("textbox", { name: "SQL" }), " ");
+    await user.click(screen.getByRole("button", { name: "Передать LLM-ассистенту" }));
+    expect(api.createOptimizationRequest).toHaveBeenLastCalledWith("c", { member: "pg-1", database: "perf", source: { kind: "console" }, sql: `${sql} `, params: [], plan: null });
   });
 });
