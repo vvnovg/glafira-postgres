@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../../api/client";
 import type { AppError, McpStatus, PlanTree, RequestSource } from "../../../api/types";
@@ -59,22 +59,27 @@ export interface AskLlmProps {
    */
   sent?: SentNotice | null;
   onSent?: (sent: SentNotice | null) => void;
+  /** Элементы того же ряда (в карточке — «Предложения LLM: N»): после кнопки и подсказки, до строк уведомлений. */
+  extra?: ReactNode;
 }
 
 /**
  * «Передать LLM-ассистенту» (спец. P4 §8.1): сохраняет снимок запроса на оптимизацию (`create_optimization_request`) и
- * кладёт в буфер строку для чата ассистента на языке интерфейса; уведомление повторяет строку и говорит, куда её вставить.
+ * кладёт в буфер строку для чата ассистента на языке интерфейса; уведомление начинается с того, что делать: сказать
+ * ассистенту «оптимизируй запрос из Glafira» — без id `get_optimization_request` берёт последний ожидающий запрос, — а
+ * строка с id в буфере — запасной путь.
  * Активна, когда политика разрешает MCP, MCP-сервер этого окна работает и действующий уровень подключения не `off`
  * (`effectiveLlmAccess`). Строго: пока статус MCP, профиль или список запросов читаются — неактивна без пояснения; если
  * статус или список не прочитались — неактивна с пояснением и «Повторить» (неудачное чтение не значит «ничего не ждёт»:
  * иначе кнопка позволила бы дубль запроса). Значок «?» объясняет причину, а у активной кнопки — что снимок уходит модели
- * без маскирования. Пока запрос этого источника ждёт ответа, рядом «Ждёт ответа LLM» и «Отменить запрос», второй запрос
- * не создаётся. Читает только запросы подключения (`useOptimizationRequests`), предложения кнопке не нужны.
+ * без маскирования. Пока запрос этого источника ждёт ответа, под кнопкой строка «Ждёт ответа LLM» с «Отменить запрос»,
+ * второй запрос не создаётся. Строки ожидания и уведомления — отдельные, каждая в своей живой области (кнопки — вне их);
+ * блок строк занимает свой ряд, только когда в нём что-то есть. Читает только запросы подключения (`useOptimizationRequests`), предложения кнопке не нужны.
  * Уведомление о скопированной строке по умолчанию живёт в кнопке; в консоли его держит `ExplainTab` (`sent`/`onSent`),
  * потому что кнопка перемонтируется, когда появляется результат плана. Статус ожидания выводится из списка запросов.
  * Между созданием и перечитыванием списка кнопка тоже неактивна: второй быстрый клик дубля не создаёт.
  */
-export function AskLlmButton({ connectionId, member, database, source, sql, params, plan, sent: sentProp, onSent }: AskLlmProps) {
+export function AskLlmButton({ connectionId, member, database, source, sql, params, plan, sent: sentProp, onSent, extra }: AskLlmProps) {
   const { t } = useTranslation();
   const { status, loading: statusLoading, error: statusError, refetch: refetchStatus } = useMcpStatus();
   const profile = useConnectionProfile(connectionId);
@@ -141,29 +146,39 @@ export function AskLlmButton({ connectionId, member, database, source, sql, para
 
   // Строка для чата видна, пока её запрос ждёт ответа (или список ещё не перечитан после создания).
   const fresh = sent !== null && (waiting?.id === sent.id || !requests.some((r) => r.id === sent.id));
-  const notice = sent === null || !fresh ? "" : sent.copied ? t("llmAssist.ask.copied", { line: sent.line }) : t("llmAssist.ask.copyFailed", { line: sent.line });
+  const notice = sent === null || !fresh ? "" : sent.copied ? t("llmAssist.ask.copied", { id: sent.id }) : t("llmAssist.ask.copyFailed", { id: sent.id, line: sent.line });
   const unreadable = off === "status" ? t("llmAssist.ask.statusUnavailable") : off === "requests" ? t("llmAssist.ask.requestsFailed") : "";
+  const message = error ? tr(error) : notice;
+  const shown = waiting !== null || unreadable !== "" || message !== "";
   return (
     <>
       <button type="button" disabled={!can} onClick={() => void ask()}>
         {t("llmAssist.ask.button")}
       </button>
       <Hint k={off ? OFF_HINTS[off] : "hints.llmAssist.ask"} label={t("llmAssist.ask.button")} />
-      <span role="status" className="muted">
-        {waiting && <span>{t("llmAssist.ask.waiting", { id: waiting.id })} </span>}
-        {unreadable && <span>{unreadable} </span>}
-        {error ? tr(error) : notice}
-      </span>
-      {waiting && (
-        <button type="button" className="link" onClick={() => void cancel(waiting.id)}>
-          {t("llmAssist.ask.cancel")}
-        </button>
-      )}
-      {unreadable && (
-        <button type="button" className="link" onClick={off === "status" ? refetchStatus : retryRequests}>
-          {t("common.retry")}
-        </button>
-      )}
+      {extra}
+      <div className={shown ? "llm-ask-notes shown" : "llm-ask-notes"}>
+        <div className="llm-ask-line">
+          <span role="status" className="muted">
+            {waiting && <span>{t("llmAssist.ask.waiting", { id: waiting.id })}</span>}
+            {waiting && unreadable && " "}
+            {unreadable && <span>{unreadable}</span>}
+          </span>
+          {waiting && (
+            <button type="button" className="link" onClick={() => void cancel(waiting.id)}>
+              {t("llmAssist.ask.cancel")}
+            </button>
+          )}
+          {unreadable && (
+            <button type="button" className="link" onClick={off === "status" ? refetchStatus : retryRequests}>
+              {t("common.retry")}
+            </button>
+          )}
+        </div>
+        <p role="status" className="muted llm-ask-notice">
+          {message}
+        </p>
+      </div>
     </>
   );
 }

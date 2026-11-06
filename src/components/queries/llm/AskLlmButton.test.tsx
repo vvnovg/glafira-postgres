@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -26,7 +26,8 @@ import { AskLlmButton, type SentNotice } from "./AskLlmButton";
 
 const SQL = "SELECT count(*) FROM shop.orders WHERE status = $1";
 const props = { connectionId: "c", member: "pg-1", database: "perf", source: { kind: "console" } as const, sql: SQL, params: ["disputed"], plan: null };
-const LINE = "Оптимизируй запрос r3a9f1c из Glafira (или /optimize_query r3a9f1c)";
+const LINE = "Оптимизируй запрос r3a9f1c из Glafira";
+const NOTICE = "Запрос r3a9f1c передан. Скажите ассистенту «оптимизируй запрос из Glafira» — он заберёт его сам (строка с id уже в буфере обмена).";
 const LABEL = "Передать LLM-ассистенту";
 const refetch = vi.fn();
 
@@ -96,6 +97,9 @@ describe("AskLlmButton", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: LABEL })).toBeEnabled());
     await user.click(screen.getByRole("button", { name: `Подсказка: ${LABEL}` }));
     expect(screen.getByRole("tooltip")).toHaveTextContent(/без маскирования даже на уровне «Диагностика»/);
+    // Z5: в отличие от «Скопировать для LLM» — запрос, который ассистент с MCP забирает сам и отвечает в панель.
+    expect(screen.getByRole("tooltip")).toHaveTextContent(/ассистент с MCP заберёт его сам/);
+    expect(screen.getByRole("tooltip")).toHaveTextContent(/«Предложения LLM»/);
   });
 
   it("читает только запросы подключения, предложения не запрашивает", async () => {
@@ -134,10 +138,53 @@ describe("AskLlmButton", () => {
     await user.click(button);
     expect(api.createOptimizationRequest).toHaveBeenCalledWith("c", { member: "pg-1", database: "perf", source: { kind: "console" }, sql: SQL, params: ["disputed"], plan });
     expect(await navigator.clipboard.readText()).toBe(LINE);
-    expect(await screen.findByText(`Скопировано: «${LINE}». Вставьте строку в чат LLM-ассистента (Qwen Code, Claude Code…)`)).toBeInTheDocument();
+    expect(await screen.findByText(NOTICE)).toBeInTheDocument();
     expect(await screen.findByText("Ждёт ответа LLM: запрос r3a9f1c")).toBeInTheDocument();
     // Пока запрос ждёт, второй не создаётся.
     expect(button).toBeDisabled();
+  });
+
+  it("Z1: ожидание (с «Отменить запрос») и уведомление о переданном запросе — отдельные строки, не одна фраза", async () => {
+    vi.mocked(api.createOptimizationRequest).mockResolvedValue(optimizationRequest());
+    const user = userEvent.setup();
+    renderWithClient(<AskLlmButton {...props} />);
+    const button = screen.getByRole("button", { name: LABEL });
+    await waitFor(() => expect(button).toBeEnabled());
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest()]);
+    await user.click(button);
+    const waiting = await screen.findByText("Ждёт ответа LLM: запрос r3a9f1c");
+    const notice = screen.getByText(NOTICE);
+    const waitingLine = waiting.closest(".llm-ask-line") as HTMLElement;
+    expect(waitingLine).not.toBeNull();
+    expect(waitingLine).toContainElement(screen.getByRole("button", { name: "Отменить запрос" }));
+    expect(waitingLine).not.toContainElement(notice);
+    expect(notice).not.toContainElement(waiting);
+    expect(notice.textContent).toBe(NOTICE);
+    // Обе строки — в одном блоке под кнопками.
+    expect(waitingLine.parentElement).toContainElement(notice);
+    expect(waitingLine.parentElement).toHaveClass("llm-ask-notes", "shown");
+  });
+
+  it("Z8: элементы ряда (`extra`) — сразу после кнопки и подсказки, до строк уведомлений", async () => {
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest()]);
+    renderWithClient(
+      <div className="toolbar" data-testid="row">
+        <AskLlmButton {...props} extra={<button type="button">extra</button>} />
+      </div>,
+    );
+    const waiting = await screen.findByText("Ждёт ответа LLM: запрос r3a9f1c");
+    const extra = screen.getByRole("button", { name: "extra" });
+    expect(screen.getByRole("button", { name: `Подсказка: ${LABEL}` }).compareDocumentPosition(extra) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(extra.compareDocumentPosition(waiting) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(waiting.closest(".llm-ask-notes")).not.toContainElement(extra);
+  });
+
+  it("без уведомлений блок строк не занимает ряд", async () => {
+    const { container } = renderWithClient(<AskLlmButton {...props} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: LABEL })).toBeEnabled());
+    const notes = container.querySelector(".llm-ask-notes")!;
+    expect(notes).not.toHaveClass("shown");
+    expect(notes).toHaveTextContent("");
   });
 
   it("буфер недоступен — уведомление просит набрать строку руками", async () => {
@@ -148,7 +195,7 @@ describe("AskLlmButton", () => {
     await waitFor(() => expect(button).toBeEnabled());
     vi.spyOn(navigator.clipboard, "writeText").mockRejectedValue(new Error("denied"));
     await user.click(button);
-    expect(await screen.findByText(`Не удалось скопировать. Напишите в чате LLM-ассистента: ${LINE}`)).toBeInTheDocument();
+    expect(await screen.findByText(`Запрос r3a9f1c передан. Скажите ассистенту «оптимизируй запрос из Glafira» — он заберёт его сам (скопировать строку с id не удалось: «${LINE}»).`)).toBeInTheDocument();
   });
 
   it("ожидающий запрос своего источника: «Отменить запрос»; запрос карточки консоль не показывает", async () => {
@@ -172,8 +219,8 @@ describe("AskLlmButton", () => {
     const button = screen.getByRole("button", { name: LABEL });
     await waitFor(() => expect(button).toBeEnabled());
     await user.click(button);
-    expect(await screen.findByText(/Не хватает прав на таблицы запроса/)).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent(/Не хватает прав на таблицы запроса/);
+    const failure = await screen.findByText(/Не хватает прав на таблицы запроса/);
+    expect(failure).toHaveAttribute("role", "status");
     // Снимок длиннее 64 КБ: Rust отказывает ключом errors.llm.sqlTooLong.
     vi.mocked(api.createOptimizationRequest).mockRejectedValue({ code: "INVALID_INPUT", key: "errors.llm.sqlTooLong", params: { max: "65536" }, message: "too long", retryable: false });
     await user.click(screen.getByRole("button", { name: LABEL }));
@@ -185,19 +232,27 @@ describe("AskLlmButton", () => {
   it("статус ожидания и пояснения о нечитаемом состоянии лежат внутри живой области, кнопки — снаружи", async () => {
     vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest()]);
     const { unmount } = renderWithClient(<AskLlmButton {...props} />);
+    // Регион, где лежит текст; ни одна кнопка не внутри живой области.
+    const region = (el: HTMLElement) => el.closest('[role="status"]');
+    const noButtonInRegions = () => {
+      for (const r of screen.getAllByRole("status")) expect(within(r).queryAllByRole("button")).toHaveLength(0);
+    };
     const waitingText = await screen.findByText("Ждёт ответа LLM: запрос r3a9f1c");
-    expect(screen.getByRole("status")).toContainElement(waitingText);
-    expect(screen.getByRole("status")).not.toContainElement(screen.getByRole("button", { name: "Отменить запрос" }));
+    expect(region(waitingText)).not.toBeNull();
+    expect(region(waitingText)).not.toContainElement(screen.getByRole("button", { name: "Отменить запрос" }));
+    noButtonInRegions();
     unmount();
     setStatus(undefined, { error: { code: "INTERNAL", message: "boom", retryable: true } });
     const second = renderWithClient(<AskLlmButton {...props} />);
-    expect(screen.getByRole("status")).toContainElement(await screen.findByText("Статус MCP недоступен"));
-    expect(screen.getByRole("status")).not.toContainElement(screen.getByRole("button", { name: "Повторить" }));
+    const unavailable = await screen.findByText("Статус MCP недоступен");
+    expect(region(unavailable)).not.toBeNull();
+    expect(region(unavailable)).not.toContainElement(screen.getByRole("button", { name: "Повторить" }));
+    noButtonInRegions();
     second.unmount();
     setStatus(mcpStatus());
     vi.mocked(api.listOptimizationRequests).mockRejectedValue({ code: "INTERNAL", message: "disk", retryable: true });
     renderWithClient(<AskLlmButton {...props} />);
-    expect(screen.getByRole("status")).toContainElement(await screen.findByText("Не удалось прочитать запросы этого подключения"));
+    expect(region(await screen.findByText("Не удалось прочитать запросы этого подключения"))).not.toBeNull();
   });
 
   it("быстрый второй клик между созданием и перечитыванием списка не создаёт дубль", async () => {
@@ -208,7 +263,7 @@ describe("AskLlmButton", () => {
     await waitFor(() => expect(button).toBeEnabled());
     // Список ещё не знает о новом запросе (остаётся пустым).
     await user.click(button);
-    await screen.findByText(/Скопировано/);
+    await screen.findByText(/^Запрос r3a9f1c передан\./);
     expect(button).toBeDisabled();
     await user.click(button);
     expect(api.createOptimizationRequest).toHaveBeenCalledTimes(1);
@@ -225,13 +280,13 @@ describe("AskLlmButton", () => {
     const button = screen.getByRole("button", { name: LABEL });
     await waitFor(() => expect(button).toBeEnabled());
     await user.click(button);
-    await screen.findByText(/Скопировано/);
+    await screen.findByText(/^Запрос r3a9f1c передан\./);
     rerender(<Host shown={false} />);
-    expect(screen.getByText(/Скопировано/)).toBeInTheDocument();
+    expect(screen.getByText(/^Запрос r3a9f1c передан\./)).toBeInTheDocument();
   });
 
-  it("область уведомлений присутствует всегда (живая область)", () => {
+  it("области уведомлений присутствуют всегда (живые области): строка ожидания и строка о переданном запросе", () => {
     renderWithClient(<AskLlmButton {...props} />);
-    expect(screen.getByRole("status")).toBeInTheDocument();
+    expect(screen.getAllByRole("status")).toHaveLength(2);
   });
 });

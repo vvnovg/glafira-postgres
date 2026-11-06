@@ -41,7 +41,9 @@ const METRICS: { id: string; labelKey: string; of: (s: QueryStat, trackPlanning:
  * сэмплера рвут линию), находки, разбивка, экземпляры, ожидания, таблицы (из последнего плана вкладки; `null` — плана ещё
  * не было). Ряд кнопок под текстом: «Получить план» (`onGetPlan` — открывает подвкладку «План» и запускает пробный план),
  * «Открыть в консоли», «Копировать запрос», «Скопировать для LLM» (`llmPlan` — последний план вкладки на её узле), «Передать LLM-ассистенту» (запрос на оптимизацию, спец. P4 §8.1). Без выполняющихся
- * экземпляров на сервере < 14 блок «Выполняющиеся экземпляры» скрыт целиком, пометка о причине остаётся вверху.
+ * экземпляров на сервере < 14 блок «Выполняющиеся экземпляры» скрыт целиком, пометка о причине остаётся вверху. Есть
+ * предложения LLM к запросу (`proposals` > 0) — в том же ряду после «Передать LLM-ассистенту» ссылка «Предложения LLM: N —
+ * открыть в консоли» (`onProposals`): отправка, ожидание и ответ — в одном месте.
  */
 /**
  * Почему у запроса нет ожиданий: сэмплера активности на узле нет — подсказка открыть «Профиль ожиданий»; буфер есть, но
@@ -64,6 +66,8 @@ export function QueryOverview({
   llmPlan,
   onGetPlan,
   onConsole,
+  proposals = 0,
+  onProposals,
 }: {
   connectionId: string;
   member: string;
@@ -74,6 +78,9 @@ export function QueryOverview({
   llmPlan: PlanTree | null;
   onGetPlan: () => void;
   onConsole: () => void;
+  /** Сколько предложений LLM к запросу (P4b). */
+  proposals?: number;
+  onProposals?: () => void;
 }) {
   const { t } = useTranslation();
   const open = useWorkspace((s) => s.open);
@@ -82,6 +89,11 @@ export function QueryOverview({
   const findings = detail.findings.map((f) => ({ ...f, links: f.links.filter((l) => l.kind !== "openQuery") }));
   const runningUnavailable = detail.unavailable.some((u) => u.part === "running");
   const sinceReset = detail.sinceReset;
+  const proposalsLink = proposals > 0 && (
+    <button type="button" className="link" onClick={onProposals}>
+      {t("llmAssist.badge", { count: proposals })}
+    </button>
+  );
   return (
     <div className="query-overview">
       <section>
@@ -105,9 +117,11 @@ export function QueryOverview({
           </button>
           {detail.text !== null && <CopyButton text={detail.text} caption={t("diag.query.copyQuery")} />}
           <CopyLlmButton connectionId={connectionId} member={member} database={database} source={{ kind: "query", queryId }} plan={llmPlan} />
-          {/* Обрезанный текст модель не спланирует, а исчезнувший запрос передавать нечего. */}
-          {detail.text !== null && !detail.textTruncated && (
-            <AskLlmButton connectionId={connectionId} member={member} database={database} source={{ kind: "query", queryId }} sql={detail.text} params={NO_PARAMS} plan={llmPlan} />
+          {/* Обрезанный текст модель не спланирует, а исчезнувший запрос передавать нечего; ссылка на предложения остаётся. */}
+          {detail.text !== null && !detail.textTruncated ? (
+            <AskLlmButton connectionId={connectionId} member={member} database={database} source={{ kind: "query", queryId }} sql={detail.text} params={NO_PARAMS} plan={llmPlan} extra={proposalsLink} />
+          ) : (
+            proposalsLink
           )}
         </div>
       </section>

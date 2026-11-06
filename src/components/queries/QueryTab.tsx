@@ -23,7 +23,8 @@ type Section = "overview" | "plan";
  * (скрытой на «Обзоре»): значения параметров, история и показанный план живут, пока открыта вкладка. Заголовок вкладки,
  * открытой без текста (из находки), становится началом текста, когда тот прочитан. Узла больше нет в топологии —
  * заглушка с выбором другого узла (открывает запрос там, как и переключатель узла), карточка и сэмплер не опрашиваются.
- * В шапке — значок «Предложения LLM: N» (P4b): открывает консоль с панелью и последним предложением.
+ * «Предложения LLM: N — открыть в консоли» (P4b) — в ряду под текстом обзора, рядом с «Передать LLM-ассистенту»: открывает
+ * консоль с панелью и последним предложением.
  */
 export function QueryTab({ connectionId, member, database, queryId, active }: { connectionId: string; member: string; database: string; queryId: string; active: boolean }) {
   const { t } = useTranslation();
@@ -43,7 +44,7 @@ export function QueryTab({ connectionId, member, database, queryId, active }: { 
   // Предложения LLM к этому запросу (спец. P4 §8.4): по queryid и по запросам из карточки.
   const llm = useLlmProposals(connectionId, { connectionId });
   const proposals = queryProposals(llm.proposals, llm.requests, database, queryId);
-  // Значок открывает консоль подключения с исходным текстом предложения и выбирает его в панели.
+  // Ссылка открывает консоль подключения с исходным текстом предложения и выбирает его в панели.
   const openProposal = (p: LlmProposal) =>
     openExplainWithPrefill(connectionId, { sql: p.originalSql, database: p.database, member: p.member ?? member, proposalId: p.id });
   const [section, setSection] = useState<Section>("overview");
@@ -133,11 +134,6 @@ export function QueryTab({ connectionId, member, database, queryId, active }: { 
         <button type="button" onClick={() => void q.refetch()}>
           {t("diag.header.refresh")}
         </button>
-        {proposals.length > 0 && (
-          <button type="button" className="link" onClick={() => openProposal(proposals[0])}>
-            {t("llmAssist.badge", { count: proposals.length })}
-          </button>
-        )}
       </div>
       {q.error && <ErrorBanner error={q.error} onRetry={() => void q.refetch()} />}
       {sampler.error && <ErrorBanner error={sampler.error} />}
@@ -164,6 +160,10 @@ export function QueryTab({ connectionId, member, database, queryId, active }: { 
                   llmPlan={last && last.member === member ? last.result.plan : null}
                   onGetPlan={getPlan}
                   onConsole={() => open({ kind: "explain", connectionId, member, database, sql: detail.text ?? "" })}
+                  proposals={proposals.length}
+                  onProposals={() => {
+                    if (proposals.length > 0) openProposal(proposals[0]);
+                  }}
                 />
               )}
               {(s === "plan" || planOpened) && (

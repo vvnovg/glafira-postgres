@@ -2104,9 +2104,9 @@
   "llmAssist": {
     "ask": {
       "button": "Send to LLM assistant",
-      "chatLine": "Optimize query {{id}} from Glafira (or /optimize_query {{id}})",
-      "copied": "Copied: “{{line}}”. Paste it into the chat of your LLM assistant (Qwen Code, Claude Code…)",
-      "copyFailed": "Could not copy. Type in the chat of your LLM assistant: {{line}}",
+      "chatLine": "Optimize query {{id}} from Glafira",
+      "copied": "Request {{id}} sent. Tell your assistant “optimize the query from Glafira” — it fetches the request itself (a line with the id is on the clipboard).",
+      "copyFailed": "Request {{id}} sent. Tell your assistant “optimize the query from Glafira” — it fetches the request itself (could not copy the line with the id: “{{line}}”).",
       "waiting": "Waiting for the LLM: request {{id}}",
       "cancel": "Cancel request",
       "statusUnavailable": "MCP status is unavailable",
@@ -2158,7 +2158,7 @@
       "recs": "Recommendations",
       "noRecs": "No recommendations"
     },
-    "badge": "LLM proposals: {{count}}"
+    "badge": "LLM proposals: {{count}} — open in the console"
   },
   "mcp": {
     "unknownClient": "Unknown MCP client",
@@ -2216,7 +2216,8 @@
       "mcpEnable": "Glafira listens on a local socket (a named pipe on Windows) available only to your user. A client runs <code>glafira-pg mcp</code>, which connects to it. Off by default."
     },
     "llmAssist": {
-      "ask": "Saves a snapshot for the LLM assistant (query, statistics, plan, table DDL) and copies a line for its chat. The snapshot goes to the model without masking, even at the Diagnostics level.",
+      "ask": "Creates an optimization request: an assistant with MCP fetches it itself, can check plans and indexes, and returns proposals to the “LLM proposals” panel. Sent unmasked, even at Diagnostics.",
+      "copy": "Copies the whole snapshot as text (query, statistics, plan, DDL) for any chat; no MCP needed. The model's answer does not come back to Glafira.",
       "askServer": "The MCP server is off: turn it on in Settings → LLM assistants (MCP) and connect the assistant.",
       "askOtherInstance": "The MCP server runs in another Glafira window: send the request from that window.",
       "askError": "The MCP server failed to start: see Settings → LLM assistants (MCP).",

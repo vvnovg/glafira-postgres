@@ -30,7 +30,9 @@ export function SettingsPanel() {
   // видимую часть, когда страница нарисована. Каждое открытие — новый объект спеки вкладки, поэтому повторный щелчок
   // прокручивает снова. jsdom не знает scrollIntoView — вызов необязательный.
   // F1 (спец. P4 §11): в разделе MCP — глава «LLM-ассистенты (MCP)», в остальных — «Начало работы» (язык описан там).
-  // Раздел считается текущим, пока фокус в нём или пока вкладку открыл индикатор; фокус в другом разделе это снимает.
+  // Раздел считается текущим, пока фокус в нём, после щелчка в нём или пока вкладку открыл индикатор; фокус или щелчок в
+  // другом разделе это снимает. Щелчок — отдельно от фокуса: в WKWebView щелчок мышью по кнопке или флажку фокус на них не
+  // переносит, а по простому тексту не переносит нигде; pointerdown на фазе захвата видит и то, и другое.
   const spec = useWorkspace((st) => st.tabs.find((x) => x.id === tabId({ kind: "settings" })));
   const showMcp = spec?.kind === "settings" && spec.section === "mcp";
   const loaded = lang.data !== undefined;
@@ -58,7 +60,7 @@ export function SettingsPanel() {
       <div className="toolbar">
         <h2>{t("settings.title")}</h2>
       </div>
-      <section onFocusCapture={() => setMcpFocused(false)}>
+      <section onFocusCapture={() => setMcpFocused(false)} onPointerDownCapture={() => setMcpFocused(false)}>
         <h3>{t("settings.language.section")}</h3>
         <div className="field">
           <label htmlFor="settings-language">{t("settings.language.label")}</label>
@@ -82,7 +84,7 @@ export function SettingsPanel() {
         {byPolicy && <p className="hint">{t("settings.language.policy")}</p>}
         {change.error && <ErrorBanner error={change.error} />}
       </section>
-      <section onFocusCapture={() => setMcpFocused(false)}>
+      <section onFocusCapture={() => setMcpFocused(false)} onPointerDownCapture={() => setMcpFocused(false)}>
         <h3>{t("settings.display.section")}</h3>
         <label className="inline wrap">
           <input
@@ -96,7 +98,7 @@ export function SettingsPanel() {
         {ui.error && <ErrorBanner error={ui.error} onRetry={() => void ui.refetch()} />}
         {changeUi.error && <ErrorBanner error={changeUi.error} />}
       </section>
-      <div ref={mcpRef} onFocusCapture={() => setMcpFocused(true)}>
+      <div ref={mcpRef} onFocusCapture={() => setMcpFocused(true)} onPointerDownCapture={() => setMcpFocused(true)}>
         <McpSection />
       </div>
     </div>

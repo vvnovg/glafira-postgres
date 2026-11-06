@@ -574,4 +574,10 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .llm-compare-side + .llm-compare-side { padding-left: 12px; border-left: 1px solid var(--border); }
 .llm-compare-side h5 { margin: 0 0 4px; font-size: 13px; }
 .llm-compare-side p { margin: 4px 0 2px; }
+/* «Передать LLM-ассистенту»: строки ожидания (с «Отменить запрос») и уведомления — под кнопками своим рядом, каждая своей
+   строкой; пустой блок ряд не занимает. */
+.llm-ask-notes { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.llm-ask-notes.shown { flex-basis: 100%; }
+.llm-ask-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
+.llm-ask-notice { margin: 0; overflow-wrap: anywhere; }
 .tab-dot { color: var(--accent); font-size: 10px; line-height: 1; margin-left: 4px; }

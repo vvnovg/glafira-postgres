@@ -1,4 +1,4 @@
-import { act, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LanguageSettings } from "../../api/types";
@@ -82,6 +82,25 @@ describe("SettingsPanel", () => {
     act(() => toggle.focus());
     expect(useHelpContext.getState().byTab.settings).toBe("llm-mcp");
     act(() => screen.getByLabelText("Язык интерфейса").focus());
+    expect(useHelpContext.getState().byTab.settings).toBe("getting-started");
+  });
+
+  it("H2: F1 после щелчка мышью — по разделу под указателем (WKWebView не переносит фокус на кнопку и флажок при щелчке)", async () => {
+    vi.mocked(api.getLanguageSettings).mockResolvedValue(base);
+    renderWithClient(<SettingsPanel />);
+    const mcpHeading = await screen.findByRole("heading", { level: 3, name: "LLM-ассистенты (MCP)" });
+    expect(useHelpContext.getState().byTab.settings).toBe("getting-started");
+    // Щелчок по тексту раздела MCP (не фокусируемому): фокус не переходит, раздел всё равно текущий.
+    fireEvent.pointerDown(mcpHeading);
+    expect(document.activeElement).toBe(document.body);
+    expect(useHelpContext.getState().byTab.settings).toBe("llm-mcp");
+    // Щелчок в разделе «Язык» — снова «Начало работы».
+    fireEvent.pointerDown(screen.getByRole("heading", { level: 3, name: "Язык" }));
+    expect(useHelpContext.getState().byTab.settings).toBe("getting-started");
+    // И в разделе «Отображение» тоже.
+    fireEvent.pointerDown(mcpHeading);
+    expect(useHelpContext.getState().byTab.settings).toBe("llm-mcp");
+    fireEvent.pointerDown(screen.getByRole("heading", { level: 3, name: "Отображение" }));
     expect(useHelpContext.getState().byTab.settings).toBe("getting-started");
   });
 

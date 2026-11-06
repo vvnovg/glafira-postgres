@@ -226,7 +226,7 @@ describe("QueryTab", () => {
     await screen.findByText("SELECT * FROM shop.customers WHERE id = $1");
     const text = screen.getByRole("group", { name: "Текст запроса" });
     const row = text.nextElementSibling as HTMLElement;
-    expect(within(row).getAllByRole("button").map((b) => b.textContent)).toEqual(["Получить план", "Открыть в консоли", "Копировать запрос", "Скопировать для LLM", "Передать LLM-ассистенту", "?"]);
+    expect(within(row).getAllByRole("button").map((b) => b.textContent)).toEqual(["Получить план", "Открыть в консоли", "Копировать запрос", "Скопировать для LLM", "?", "Передать LLM-ассистенту", "?"]);
     expect(within(text.closest(".query-tab")!.querySelector(".toolbar") as HTMLElement).queryByRole("button", { name: "Скопировать для LLM" })).toBeNull();
     // Старой кнопки «План» под текстом нет: «План» — только подвкладка.
     expect(screen.queryByRole("button", { name: "План" })).toBeNull();
@@ -368,12 +368,44 @@ describe("QueryTab", () => {
     await waitFor(() => expect(ask).toBeEnabled());
     await user.click(ask);
     expect(api.createOptimizationRequest).toHaveBeenCalledWith("c", { member: "pg-1", database: "perf", source: { kind: "query", queryId: "7" }, sql: "SELECT * FROM shop.customers WHERE id = $1", params: [], plan: null });
-    expect(await navigator.clipboard.readText()).toBe("Оптимизируй запрос r7 из Glafira (или /optimize_query r7)");
+    expect(await navigator.clipboard.readText()).toBe("Оптимизируй запрос r7 из Glafira");
     view.unmount();
     vi.mocked(api.queryDetail).mockResolvedValue(detail({ textTruncated: true }));
     renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
     await screen.findByText("SELECT * FROM shop.customers WHERE id = $1");
     expect(screen.queryByRole("button", { name: "Передать LLM-ассистенту" })).toBeNull();
+  });
+
+  it("Z5: «?» у «Скопировать для LLM» — снимок текстом для любого чата, без MCP, ответ не вернётся; у «Передать» — запрос для ассистента с MCP", async () => {
+    vi.mocked(api.queryDetail).mockResolvedValue(detail());
+    vi.mocked(api.listConnections).mockResolvedValue([connection({ id: "c", llmAccess: "diagnostics" })]);
+    const user = userEvent.setup();
+    renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
+    await user.click(await screen.findByRole("button", { name: "Подсказка: Скопировать для LLM" }));
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "Копирует весь снимок текстом (запрос, статистику, план, DDL) — для любого чата, MCP не нужен. Ответ модели в Glafira не вернётся.",
+    );
+    await user.click(screen.getByRole("button", { name: "Подсказка: Передать LLM-ассистенту" }));
+    await waitFor(() => expect(screen.getByRole("tooltip")).toHaveTextContent(/ассистент с MCP заберёт его сам/));
+  });
+
+  it("Z8: «Предложения LLM: N — открыть в консоли» — в ряду под текстом сразу после «Передать LLM-ассистенту», не в шапке", async () => {
+    vi.mocked(api.queryDetail).mockResolvedValue(detail());
+    vi.mocked(api.listLlmProposals).mockResolvedValue([llmProposal({ id: "p1", requestId: null, originalQueryId: "7", member: "pg-1" })]);
+    const view = renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
+    const link = await screen.findByRole("button", { name: "Предложения LLM: 1 — открыть в консоли" });
+    const row = screen.getByRole("group", { name: "Текст запроса" }).nextElementSibling as HTMLElement;
+    expect(row).toContainElement(link);
+    expect(within(row).getAllByRole("button").map((b) => b.textContent)).toEqual([
+      "Получить план", "Открыть в консоли", "Копировать запрос", "Скопировать для LLM", "?", "Передать LLM-ассистенту", "?", "Предложения LLM: 1 — открыть в консоли",
+    ]);
+    expect(screen.getByRole("button", { name: "Обновить" }).closest(".toolbar")).not.toContainElement(link);
+    view.unmount();
+    // Обрезанный текст: «Передать LLM-ассистенту» нет, ссылка на предложения остаётся в ряду.
+    vi.mocked(api.queryDetail).mockResolvedValue(detail({ textTruncated: true }));
+    renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
+    const again = await screen.findByRole("button", { name: "Предложения LLM: 1 — открыть в консоли" });
+    expect(screen.getByRole("group", { name: "Текст запроса" }).nextElementSibling).toContainElement(again);
   });
 
   it("значок «Предложения LLM: N» открывает консоль с исходным текстом и выбранным предложением", async () => {
@@ -384,7 +416,7 @@ describe("QueryTab", () => {
     ]);
     const user = userEvent.setup();
     renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
-    await user.click(await screen.findByRole("button", { name: "Предложения LLM: 1" }));
+    await user.click(await screen.findByRole("button", { name: "Предложения LLM: 1 — открыть в консоли" }));
     expect(useWorkspace.getState().tabs.find((t) => t.id === "explain:c")).toMatchObject({
       prefill: { sql: "SELECT * FROM shop.customers WHERE id = $1", database: "perf", member: "pg-1", proposalId: "p1" },
     });

@@ -1,7 +1,7 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { useWorkspace } from "../../state/workspace";
+import { openExplainWithPrefill, useWorkspace } from "../../state/workspace";
 import { resetEventBus } from "../../test/events";
 import { connection, member, topology, topologyView } from "../../test/fixtures";
 import { llmProposal, optimizationRequest } from "../../test/llm";
@@ -434,5 +434,36 @@ describe("ExplainTab", () => {
     expect(list.getAllByRole("button").map((b) => b.textContent)).toEqual(["Вернуть: SELECT 2 -- rewritten", "Вернуть: SELECT 1 -- mine"]);
     await user.click(list.getByRole("button", { name: "Вернуть: SELECT 1 -- mine" }));
     expect(editor).toHaveValue("SELECT 1 -- mine");
+  });
+
+  it("Z9: две подстановки подряд (nonce 1, 2), вторая — с другой базой: заменённый текст в списке", async () => {
+    const view = (p: { sql: string; database?: string; nonce: number }) => <ExplainTab connectionId="c" member={undefined} database={undefined} sql={undefined} prefill={p} active />;
+    const { rerender } = renderWithClient(view({ sql: "SELECT count(*) FROM orders WHERE status = $1", database: "perf", nonce: 1 }));
+    const editor = await screen.findByRole("textbox", { name: "SQL" });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "База" })).toHaveValue("perf"));
+    rerender(view({ sql: "SELECT current_database()", database: "postgres", nonce: 2 }));
+    expect(editor).toHaveValue("SELECT current_database()");
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "База" })).toHaveValue("postgres"));
+    const list = within(screen.getByRole("region", { name: "Заменённые тексты" }));
+    expect(list.getAllByRole("button").map((b) => b.textContent)).toEqual(["Вернуть: SELECT count(*) FROM orders WHERE status = $1"]);
+  });
+
+  it("Z9: смоук через вкладку — три «Открыть в консоли EXPLAIN» из журнала (база, та же база, другая база)", async () => {
+    // Как TabContent: консоль получает спеку вкладки из рабочей области; вкладка не перемонтируется.
+    function Console() {
+      const tab = useWorkspace((s) => s.tabs.find((x) => x.id === "explain:c"));
+      return tab?.kind === "explain" ? <ExplainTab connectionId="c" member={tab.member} database={tab.database} sql={tab.sql} prefill={tab.prefill} active /> : null;
+    }
+    act(() => openExplainWithPrefill("c", { sql: "SELECT md5('p4b-smoke')", database: "perf" }));
+    renderWithClient(<Console />);
+    const editor = await screen.findByRole("textbox", { name: "SQL" });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "База" })).toHaveValue("perf"));
+    act(() => openExplainWithPrefill("c", { sql: "SELECT count(*) FROM orders WHERE status = 'new'", database: "perf" }));
+    expect(editor).toHaveValue("SELECT count(*) FROM orders WHERE status = 'new'");
+    act(() => openExplainWithPrefill("c", { sql: "SELECT current_database()", database: "postgres" }));
+    expect(editor).toHaveValue("SELECT current_database()");
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "База" })).toHaveValue("postgres"));
+    const list = within(screen.getByRole("region", { name: "Заменённые тексты" }));
+    expect(list.getAllByRole("button").map((b) => b.textContent)).toEqual(["Вернуть: SELECT count(*) FROM orders WHERE status = 'new'", "Вернуть: SELECT md5('p4b-smoke')"]);
   });
 });
