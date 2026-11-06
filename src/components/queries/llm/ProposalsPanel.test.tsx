@@ -23,6 +23,9 @@ const emit = (payload: unknown) => emitEvent("mcp://proposals", payload);
 const ORIGINAL = "SELECT o.id, o.total\nFROM shop.orders o\nWHERE date_trunc('day', o.created_at) = $1";
 const REWRITTEN = "SELECT o.id, o.total\nFROM shop.orders o\nWHERE o.created_at >= $1 AND o.created_at < $1 + interval '1 day'";
 
+/** Шапка показанного предложения (чип статуса, кто прислал, действия). */
+const cardHead = () => document.querySelector(".llm-proposal-head") as HTMLElement;
+
 const panel = (props: Partial<Parameters<typeof ProposalsPanel>[0]> = {}) => <ProposalsPanel connectionId="c" database="perf" active tabId="explain:c" focus={null} {...props} />;
 
 describe("ProposalsPanel", () => {
@@ -50,9 +53,77 @@ describe("ProposalsPanel", () => {
     expect(await screen.findByRole("button", { name: "Предложения LLM (2)" })).toHaveAttribute("aria-expanded", "true");
     const items = within(screen.getByRole("list", { name: "Список предложений" })).getAllByRole("button");
     expect(items.map((b) => b.textContent)).toEqual([
-      expect.stringMatching(/^Новое · qwen-code · .+ · SELECT 1 AS free$/),
-      expect.stringMatching(/^Принято · qwen-code · .+ · SELECT 1 AS accepted$/),
+      expect.stringMatching(/^Новое qwen-code \d{4}-\d\d-\d\d \d\d:\d\d:\d\d SELECT 1 AS free$/),
+      expect.stringMatching(/^Принято qwen-code \d{4}-\d\d-\d\d \d\d:\d\d:\d\d SELECT 1 AS accepted$/),
     ]);
+  });
+
+  it("Z4/Z6: пункт списка — карточка в две строки: чип статуса (цвет и слово), клиент и время; первая строка SQL моноширинно; выбор — aria-current, не ссылка", async () => {
+    vi.mocked(api.listLlmProposals).mockResolvedValue([
+      llmProposal({ id: "pa", createdAtMs: 30, rewrittenSql: "\nSELECT 1 AS fresh\nFROM t" }),
+      llmProposal({ id: "pb", status: "accepted", createdAtMs: 20, rewrittenSql: "SELECT 2" }),
+      llmProposal({ id: "pc", status: "rejected", reason: "Нужны те же строки", createdAtMs: 10, rewrittenSql: "SELECT 3" }),
+    ]);
+    renderWithClient(panel());
+    await screen.findByRole("button", { name: "Предложения LLM (3)" });
+    const [fresh, accepted, rejected] = within(screen.getByRole("list", { name: "Список предложений" })).getAllByRole("button");
+    for (const item of [fresh, accepted, rejected]) {
+      expect(item).not.toHaveClass("link");
+      expect(item).toHaveClass("llm-item");
+    }
+    expect(within(fresh).getByText("Новое")).toHaveClass("llm-status", "llm-status-new");
+    expect(within(accepted).getByText("Принято")).toHaveClass("llm-status", "llm-status-accepted");
+    expect(within(rejected).getByText("Отклонено")).toHaveClass("llm-status", "llm-status-rejected");
+    // Причина — не в пункте списка, а отдельной строкой в карточке.
+    expect(rejected).not.toHaveTextContent("Нужны те же строки");
+    expect(within(fresh).getByText("qwen-code")).toBeInTheDocument();
+    const sql = within(fresh).getByText("SELECT 1 AS fresh");
+    expect(sql.tagName).toBe("CODE");
+    expect(sql).toHaveClass("llm-item-sql");
+    expect(fresh).toHaveAttribute("aria-current", "true");
+    expect(accepted).toHaveAttribute("aria-current", "false");
+  });
+
+  it("Z4/Z6: шапка карточки — чип статуса и «От клиента, время»; «Принять» — основная, «Отклонить» рядом; «Сравнить планы», «Открыть в консоли», «Копировать» — в шапке, до текстов и разделов", async () => {
+    vi.mocked(api.listLlmProposals).mockResolvedValue([llmProposal({ originalSql: ORIGINAL, rewrittenSql: REWRITTEN, indexes: ["CREATE INDEX ON shop.orders (created_at)"] })]);
+    renderWithClient(panel());
+    const accept = await screen.findByRole("button", { name: "Принять" });
+    expect(accept).toHaveClass("primary");
+    const head = accept.closest(".llm-proposal-head") as HTMLElement;
+    expect(head).not.toBeNull();
+    expect(within(head).getByText("Новое")).toHaveClass("llm-status-new");
+    expect(within(head).getByText(/^От qwen-code, \d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/)).toBeInTheDocument();
+    expect(within(head).getByRole("button", { name: "Отклонить" })).not.toHaveClass("primary");
+    const table = screen.getByRole("table", { name: "Исходный и предложенный текст" });
+    const indexes = screen.getByRole("heading", { name: "Индексы" });
+    for (const name of ["Сравнить планы", "Открыть в консоли", "Копировать предложенный SQL"]) {
+      const button = within(head).getByRole("button", { name });
+      expect(button.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(button.compareDocumentPosition(indexes) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
+    // Разделы — заголовки, а не жирный текст среди абзацев.
+    expect(screen.getAllByRole("heading", { level: 4 }).map((h) => h.textContent)).toEqual(["Обоснование", "Индексы"]);
+  });
+
+  it("Z4: причина отклонения — своей строкой под чипом, не в одной строке со статусом", async () => {
+    vi.mocked(api.listLlmProposals).mockResolvedValue([llmProposal({ status: "rejected", reason: "Нужны те же строки" })]);
+    renderWithClient(panel());
+    const reason = await screen.findByText("Причина: Нужны те же строки");
+    const head = reason.closest(".llm-proposal-head") as HTMLElement;
+    expect(head).not.toBeNull();
+    const chip = within(head).getByText("Отклонено");
+    expect(chip).toHaveClass("llm-status-rejected");
+    expect(chip).not.toContainElement(reason);
+    expect(reason).toHaveClass("muted");
+    expect(reason.parentElement).not.toBe(chip.parentElement);
+  });
+
+  it("Z2: у таблицы сравнения текстов — colgroup: узкие колонки номеров и колонки текста", async () => {
+    vi.mocked(api.listLlmProposals).mockResolvedValue([llmProposal({ originalSql: ORIGINAL, rewrittenSql: REWRITTEN })]);
+    renderWithClient(panel());
+    const table = await screen.findByRole("table", { name: "Исходный и предложенный текст" });
+    const cols = [...table.querySelectorAll(":scope > colgroup > col")];
+    expect(cols.map((c) => c.className)).toEqual(["diff-num", "diff-text", "diff-num", "diff-text"]);
   });
 
   it("без предложений панель свёрнута; раскрытая — объясняет, откуда они берутся", async () => {
@@ -80,7 +151,7 @@ describe("ProposalsPanel", () => {
     expect(screen.getByText("**Range** <b>instead</b> of date_trunc")).toBeInTheDocument();
     expect(screen.getByText("Index Scan on created_at")).toBeInTheDocument();
     expect(screen.getByText("CREATE INDEX ON shop.orders (created_at)")).toBeInTheDocument();
-    expect(screen.getByText(/^От qwen-code, .+ · Новое$/)).toBeInTheDocument();
+    expect(screen.getByText(/^От qwen-code, /)).toBeInTheDocument();
     expect(screen.getByText("Glafira не проверяет, что переписанный запрос возвращает те же строки")).toBeInTheDocument();
   });
 
@@ -94,7 +165,7 @@ describe("ProposalsPanel", () => {
     renderWithClient(panel());
     await user.click(await screen.findByRole("button", { name: "Сравнить планы" }));
     expect(api.compareLlmProposal).toHaveBeenCalledWith("p1");
-    expect(await screen.findByRole("region", { name: "Сравнение планов" })).toHaveTextContent("Стоимость: была 120, стала 8,5");
+    expect(await screen.findByRole("region", { name: "Сравнение планов" })).toHaveTextContent("Стоимость: была 120,00, стала 8,50");
     await waitFor(() => expect(api.listLlmProposals).toHaveBeenCalledTimes(2));
     await user.click(screen.getByRole("button", { name: "Сравнить планы" }));
     expect(await screen.findByRole("alert")).toBeInTheDocument();
@@ -113,7 +184,7 @@ describe("ProposalsPanel", () => {
     expect(api.answerLlmProposal).toHaveBeenCalledWith("p1", "accepted", null);
     // Выбор остаётся на отвеченном предложении, хотя список пересортирован.
     await waitFor(() => expect(screen.queryByRole("button", { name: "Принять" })).toBeNull());
-    expect(screen.getByText(/^От qwen-code, .+ · Принято$/)).toBeInTheDocument();
+    expect(within(cardHead()).getByText("Принято")).toHaveClass("llm-status-accepted");
     await user.click(screen.getByRole("button", { name: /SELECT 2$/ }));
     await user.click(screen.getByRole("button", { name: "Отклонить" }));
     const reason = screen.getByRole("textbox", { name: "Причина (её увидит модель)" });
@@ -122,7 +193,8 @@ describe("ProposalsPanel", () => {
     vi.mocked(api.listLlmProposals).mockResolvedValue([{ ...p2, status: "rejected", reason: "Нужны те же строки" }, { ...p1, status: "accepted" }]);
     await user.click(screen.getByRole("button", { name: "Отклонить предложение" }));
     expect(api.answerLlmProposal).toHaveBeenLastCalledWith("p2", "rejected", "Нужны те же строки");
-    expect(await screen.findByText(/ · Отклонено: Нужны те же строки$/)).toBeInTheDocument();
+    expect(await screen.findByText("Причина: Нужны те же строки")).toBeInTheDocument();
+    expect(within(cardHead()).getByText("Отклонено")).toHaveClass("llm-status-rejected");
   });
 
   it("«Открыть в консоли» подставляет предложенный SQL с базой и узлом предложения; «Копировать» — его же", async () => {
@@ -187,7 +259,9 @@ describe("ProposalsPanel", () => {
     await user.click(screen.getByRole("button", { name: "Принять" }));
     await waitFor(() => expect(screen.queryByRole("button", { name: "Принять" })).toBeNull());
     expect(document.body).not.toHaveFocus();
-    expect(screen.getByText(/^От qwen-code/)).toHaveFocus();
+    // Фокус — на шапке карточки: читается новый статус и кто прислал.
+    expect(document.activeElement).toHaveClass("llm-proposal-meta");
+    expect(document.activeElement).toHaveTextContent(/^Принято\s*От qwen-code/);
     warn.mockRestore();
   });
 

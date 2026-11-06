@@ -2,7 +2,7 @@ import type { TFunction } from "i18next";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../../api/client";
-import type { AppError, LlmProposal, ProposalComparison } from "../../../api/types";
+import type { AppError, LlmProposal, ProposalComparison, ProposalStatus } from "../../../api/types";
 import { formatTimestamp } from "../../../lib/format";
 import { type DiffCell, type DiffRow, lineDiff, sideBySide } from "../../../lib/lineDiff";
 import { consoleProposals, useLlmProposals } from "../../../lib/useLlmProposals";
@@ -31,11 +31,18 @@ export interface ProposalFocus {
 
 /** Время без миллисекунд: «2026-11-04 12:03:04». */
 const when = (ms: number) => formatTimestamp(ms).slice(0, 19);
-/** Начало переписанного текста для списка: первая непустая строка, до 80 символов. */
+/** Начало переписанного текста для списка: первая непустая строка, до 80 символов (дальше обрезает «…» стиля). */
 const head = (sql: string) => (sql.split("\n").find((l) => l.trim() !== "") ?? "").trim().slice(0, 80);
-const statusText = (p: LlmProposal, t: TFunction) =>
-  p.status === "rejected" && p.reason ? t("llmAssist.panel.status.rejectedWith", { reason: p.reason }) : t(STATUS_KEYS[p.status]);
 const clientName = (p: LlmProposal, t: TFunction) => p.client ?? t("llmAssist.panel.unknownClient");
+
+/**
+ * Чип статуса: цвет (новое — акцент, принято — зелёный, отклонено — красный) и слово — смысл не держится на одном цвете.
+ * Причина отклонения — не здесь, а отдельной строкой в карточке.
+ */
+function StatusChip({ status }: { status: ProposalStatus }) {
+  const { t } = useTranslation();
+  return <span className={`llm-status llm-status-${status}`}>{t(STATUS_KEYS[status])}</span>;
+}
 
 /**
  * «Предложения LLM» под редактором консоли EXPLAIN (спец. P4 §8.4): предложения на запросы этой консоли и предложения без
@@ -84,20 +91,28 @@ export function ProposalsPanel({ connectionId, database, active, tabId, focus }:
   const current = list.find((p) => p.id === selected) ?? list[0] ?? null;
   return (
     <section className="llm-proposals" aria-label={t("llmAssist.panel.title")}>
-      <button type="button" className="link" aria-expanded={isOpen} aria-controls={bodyId} onClick={() => setOpen(!isOpen)}>
+      <button type="button" className="llm-proposals-toggle" aria-expanded={isOpen} aria-controls={bodyId} onClick={() => setOpen(!isOpen)}>
+        <span className="tree-caret" aria-hidden="true">
+          {isOpen ? "▾" : "▸"}
+        </span>
         {t("llmAssist.panel.heading", { count: list.length })}
       </button>
       <div id={bodyId} className="llm-proposals-region">
         {isOpen &&
           (list.length === 0 ? (
-            <p className="muted">{t("llmAssist.panel.empty")}</p>
+            <p className="llm-proposals-empty">{t("llmAssist.panel.empty")}</p>
           ) : (
             <div className="llm-proposals-body">
               <ul className="plain-list llm-proposals-list" aria-label={t("llmAssist.panel.list")}>
                 {list.map((p) => (
                   <li key={p.id}>
-                    <button type="button" className="link" aria-current={p.id === current?.id} onClick={() => setSelected(p.id)}>
-                      {t("llmAssist.panel.item", { status: statusText(p, t), client: clientName(p, t), time: when(p.createdAtMs), head: head(p.rewrittenSql) })}
+                    {/* Пункт — карточка в две строки: статус, клиент и время; начало предложенного текста. */}
+                    <button type="button" className="llm-item" aria-current={p.id === current?.id} onClick={() => setSelected(p.id)}>
+                      <span className="llm-item-meta">
+                        <StatusChip status={p.status} /> <span className="llm-item-client">{clientName(p, t)}</span>{" "}
+                        <span className="llm-item-time">{when(p.createdAtMs)}</span>
+                      </span>{" "}
+                      <code className="llm-item-sql">{head(p.rewrittenSql)}</code>
                     </button>
                   </li>
                 ))}
@@ -138,6 +153,13 @@ function DiffTable({ rows }: { rows: DiffRow[] }) {
   return (
     <div className="table-scroll">
       <table className="line-diff" aria-label={t("llmAssist.panel.diff")}>
+        {/* Ширины колонок: при table-layout: fixed их задаёт colgroup (иначе — первая строка, где у заголовков colspan). */}
+        <colgroup>
+          <col className="diff-num" />
+          <col className="diff-text" />
+          <col className="diff-num" />
+          <col className="diff-text" />
+        </colgroup>
         <thead>
           <tr>
             <th scope="col" colSpan={2}>
@@ -162,10 +184,12 @@ function DiffTable({ rows }: { rows: DiffRow[] }) {
 }
 
 /**
- * Выбранное предложение: кто и когда прислал, статус; исходный и предложенный текст рядом с подсветкой изменённых строк;
- * постоянная пометка о неравенстве результатов; обоснование и ожидаемый эффект — как текст (разметку модели не
- * применяем); индексы; «Сравнить планы», «Открыть в консоли», «Копировать»; у нового — «Принять» и «Отклонить» с
- * необязательной причиной. Итог сравнения из ответа команды виден сразу, не дожидаясь перечитывания списка.
+ * Выбранное предложение — карточка. Шапка: чип статуса, кто и когда прислал, «Принять» (основная) и «Отклонить»; под ней
+ * причина отклонения своей строкой и второй ряд — «Сравнить планы», «Открыть в консоли», «Копировать»; форма причины
+ * открывается сразу под шапкой. Дальше — исходный и предложенный текст рядом с подсветкой изменённых строк, постоянная
+ * пометка о неравенстве результатов, разделы «Обоснование», «Ожидаемый эффект» (как текст, разметку модели не применяем),
+ * «Индексы» и итог сравнения отдельным блоком. Итог сравнения из ответа команды виден сразу, не дожидаясь перечитывания
+ * списка. Ответ можно изменить (принято ↔ отклонено): у отвеченного — противоположное действие.
  */
 function ProposalView({ proposal: p, connectionId, onChanged }: { proposal: LlmProposal; connectionId: string; onChanged: () => void }) {
   const { t } = useTranslation();
@@ -182,7 +206,8 @@ function ProposalView({ proposal: p, connectionId, onChanged }: { proposal: LlmP
     if (rejecting) reasonRef.current?.focus();
   }, [rejecting]);
   const rejectRef = useRef<HTMLButtonElement>(null);
-  const headRef = useRef<HTMLParagraphElement>(null);
+  // После ответа фокус — на шапке: читаются новый статус и кто прислал.
+  const headRef = useRef<HTMLDivElement>(null);
   const comparison = compared ?? p.comparison ?? null;
 
   const perform = async (call: () => Promise<LlmProposal>, answered = false) => {
@@ -208,58 +233,42 @@ function ProposalView({ proposal: p, connectionId, onChanged }: { proposal: LlmP
 
   return (
     <div className="llm-proposal">
-      <p className="muted" tabIndex={-1} ref={headRef}>
-        {t("llmAssist.panel.from", { client: clientName(p, t), time: when(p.createdAtMs) })} · {statusText(p, t)}
-      </p>
-      <DiffTable rows={rows} />
-      <p className="diag-note">{t("llmAssist.panel.sameRows")}</p>
-      <h4>{t("llmAssist.panel.rationale")}</h4>
-      <p className="llm-text">{p.rationale}</p>
-      {p.expectedEffect && (
-        <>
-          <h4>{t("llmAssist.panel.effect")}</h4>
-          <p className="llm-text">{p.expectedEffect}</p>
-        </>
-      )}
-      <h4>{t("llmAssist.panel.indexes")}</h4>
-      {p.indexes.length === 0 ? (
-        <p className="muted">{t("llmAssist.panel.noIndexes")}</p>
-      ) : (
-        <ul className="plain-list">
-          {p.indexes.map((ddl, i) => (
-            <li key={`${ddl}:${i}`}>
-              <code>{ddl}</code>
-            </li>
-          ))}
-        </ul>
-      )}
-      <div className="toolbar">
-        <button
-          type="button"
-          aria-disabled={busy}
-          onClick={() => {
-            if (busy) return;
-            setComparing(true);
-            void perform(() => api.compareLlmProposal(p.id)).finally(() => setComparing(false));
-          }}
-        >
-          {t("llmAssist.panel.compare")}
-        </button>
-        <button type="button" onClick={openInConsole}>
-          {t("llmAssist.panel.openInConsole")}
-        </button>
-        <CopyButton text={p.rewrittenSql} label={t("llmAssist.panel.copy")} />
-        {/* Ответ можно изменить (принято ↔ отклонено): у отвеченного — противоположное действие. */}
-        {p.status !== "accepted" && (
-          <button type="button" aria-disabled={busy} onClick={() => void perform(() => api.answerLlmProposal(p.id, "accepted", null), true)}>
-            {t("llmAssist.panel.accept")}
+      <div className="llm-proposal-head">
+        <div className="llm-proposal-title">
+          <div className="llm-proposal-meta" tabIndex={-1} ref={headRef}>
+            <StatusChip status={p.status} /> <span className="muted">{t("llmAssist.panel.from", { client: clientName(p, t), time: when(p.createdAtMs) })}</span>
+          </div>
+          <div className="llm-proposal-answer">
+            {p.status !== "accepted" && (
+              <button type="button" className="primary" aria-disabled={busy} onClick={() => void perform(() => api.answerLlmProposal(p.id, "accepted", null), true)}>
+                {t("llmAssist.panel.accept")}
+              </button>
+            )}
+            {p.status !== "rejected" && (
+              <button type="button" ref={rejectRef} aria-expanded={rejecting} aria-disabled={busy} onClick={() => setRejecting(true)}>
+                {t("llmAssist.panel.reject")}
+              </button>
+            )}
+          </div>
+        </div>
+        {p.status === "rejected" && p.reason && <p className="muted llm-proposal-reason">{t("llmAssist.panel.rejectReason", { reason: p.reason })}</p>}
+        <div className="toolbar">
+          <button
+            type="button"
+            aria-disabled={busy}
+            onClick={() => {
+              if (busy) return;
+              setComparing(true);
+              void perform(() => api.compareLlmProposal(p.id)).finally(() => setComparing(false));
+            }}
+          >
+            {t("llmAssist.panel.compare")}
           </button>
-        )}
-        {p.status !== "rejected" && (
-          <button type="button" ref={rejectRef} aria-expanded={rejecting} aria-disabled={busy} onClick={() => setRejecting(true)}>
-            {t("llmAssist.panel.reject")}
+          <button type="button" onClick={openInConsole}>
+            {t("llmAssist.panel.openInConsole")}
           </button>
-        )}
+          <CopyButton text={p.rewrittenSql} label={t("llmAssist.panel.copy")} />
+        </div>
       </div>
       {rejecting && (
         <div className="llm-reject">
@@ -284,6 +293,32 @@ function ProposalView({ proposal: p, connectionId, onChanged }: { proposal: LlmP
         </div>
       )}
       {error && <ErrorBanner error={error} />}
+      <DiffTable rows={rows} />
+      <p className="diag-note">{t("llmAssist.panel.sameRows")}</p>
+      <div className="llm-proposal-section">
+        <h4>{t("llmAssist.panel.rationale")}</h4>
+        <p className="llm-text">{p.rationale}</p>
+      </div>
+      {p.expectedEffect && (
+        <div className="llm-proposal-section">
+          <h4>{t("llmAssist.panel.effect")}</h4>
+          <p className="llm-text">{p.expectedEffect}</p>
+        </div>
+      )}
+      <div className="llm-proposal-section">
+        <h4>{t("llmAssist.panel.indexes")}</h4>
+        {p.indexes.length === 0 ? (
+          <p className="muted">{t("llmAssist.panel.noIndexes")}</p>
+        ) : (
+          <ul className="plain-list">
+            {p.indexes.map((ddl, i) => (
+              <li key={`${ddl}:${i}`}>
+                <code>{ddl}</code>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
       {/* Единственная живая область: «Сравнение…» и итог (с заметкой hypopg) вставляются в неё и озвучиваются. */}
       <div aria-live="polite">
         {comparing && <p className="muted">{t("llmAssist.panel.comparing")}</p>}

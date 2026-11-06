@@ -1,12 +1,11 @@
 import { useTranslation } from "react-i18next";
 import type { PlanNode, PlanTree, ProposalComparison, Recommendation } from "../../../api/types";
-import { currentLocale } from "../../../i18n";
-import { formatTime } from "../../../lib/format";
+import { formatCount, formatTime } from "../../../lib/format";
 import { nodeLabel } from "../plan/planText";
 import { isKnownRecommendation, recommendTitle } from "../plan/recommendText";
 
-/** Стоимость планировщика: до двух знаков после запятой, без хвостовых нулей (как в окне проверки гипотезы). */
-const cost = (v: number) => v.toLocaleString(currentLocale(), { maximumFractionDigits: 2 });
+/** Стоимость планировщика — как в таблице плана (`PlanTree`): ровно два знака после запятой. */
+const cost = (v: number) => formatCount(v, 2);
 
 /** Горячие узлы плана в порядке обхода: без ANALYZE pg-advisor отмечает их по стоимости. */
 function hotNodes(n: PlanNode, out: PlanNode[] = []): PlanNode[] {
@@ -58,7 +57,10 @@ export function ProposalCompare({ comparison: c }: { comparison: ProposalCompari
     <section className="llm-compare" aria-label={t("llmAssist.compare.title")}>
       <h4>{t("llmAssist.compare.title")}</h4>
       <p>
-        {t("llmAssist.compare.cost", { before: cost(c.costBefore), after: cost(c.costAfter) })}{" "}
+        {t("llmAssist.compare.cost", { before: cost(c.costBefore), after: cost(c.costAfter) })}
+        <span className="muted" aria-hidden="true">
+          {" · "}
+        </span>
         <span className="muted">{t("llmAssist.compare.on", { member: c.member, time: formatTime(c.atMs) })}</span>
       </p>
       {c.withoutHypopg && (

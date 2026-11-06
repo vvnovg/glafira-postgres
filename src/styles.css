@@ -515,24 +515,63 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .llm-levels [role="radiogroup"] { display: inline-flex; gap: 12px; }
 
 
-/* Панель «Предложения LLM» (P4b): список слева, выбранное предложение справа; построчное сравнение; точка у вкладки. */
-.llm-proposals { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin: 6px 0; }
-.llm-proposals-body { display: grid; grid-template-columns: minmax(180px, 32ch) minmax(0, 1fr); gap: 12px; align-items: start; width: 100%; }
-.llm-proposals-list button { text-align: left; overflow-wrap: anywhere; }
-.llm-proposals-list button[aria-current="true"] { font-weight: 600; color: var(--fg); }
-.llm-proposal { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.llm-proposal h4 { margin: 6px 0 0; }
-.llm-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Панель «Предложения LLM» (P4b): ограниченный блок на --bg-alt (видно, где панель кончается и начинаются «Заменённые тексты»
+   и запуск плана); слева список — карточки в две строки, справа выбранное предложение — карточка на --bg. Текст прямо на
+   --bg-alt — цветом --fg: у --muted там 4,4:1. */
+.llm-proposals { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 8px; padding: 8px 12px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-alt); }
+.llm-proposals-toggle { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; padding: 2px 0; border: none; background: none; font-weight: 600; }
+.llm-proposals-region:empty { display: none; }
+.llm-proposals-empty { margin: 0; }
+.llm-proposals-body { display: grid; grid-template-columns: minmax(180px, 32ch) minmax(0, 1fr); gap: 12px; align-items: start; }
+.llm-proposals-list { display: flex; flex-direction: column; gap: 4px; }
+/* Пункт списка — не ссылка: строка «статус · клиент · время» и начало текста; выбранный — фоном карточки и полосой акцента
+   слева (и aria-current), а не одной жирностью. */
+.llm-item { display: flex; flex-direction: column; align-items: stretch; gap: 3px; width: 100%; padding: 5px 8px 5px 6px; border: 1px solid transparent; border-left: 3px solid transparent; border-radius: 4px; background: none; text-align: left; }
+.llm-item:hover { background: var(--bg); border-color: var(--border); }
+.llm-item[aria-current="true"] { background: var(--bg); border-color: var(--border); border-left-color: var(--accent); }
+.llm-item-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; font-size: 12px; }
+.llm-item-client { font-weight: 600; overflow-wrap: anywhere; }
+/* Время — приглушённее имени, но не --muted (на --bg-alt у него 4,4:1): с подмешанным --fg — не ниже 5,6:1 в обеих темах. */
+.llm-item-time { color: color-mix(in srgb, var(--muted) 80%, var(--fg)); white-space: nowrap; }
+.llm-item-sql { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Чип статуса: тонированный фон, рамка цвета статуса и слово — смысл не держится на одном цвете. Цвет текста подмешивает
+   --fg (как метки находок): не ниже 5,1:1 на --bg и --bg-alt в обеих темах; рамка — не ниже 3:1 (WCAG 1.4.11). */
+.llm-status { display: inline-block; padding: 0 6px; border: 1px solid; border-radius: 8px; font-size: 11px; font-weight: 600; line-height: 16px; white-space: nowrap; }
+.llm-status-new { color: color-mix(in srgb, var(--accent) 60%, var(--fg)); background: color-mix(in srgb, var(--accent) 14%, transparent); border-color: var(--accent); }
+.llm-status-accepted { color: color-mix(in srgb, var(--ok) 55%, var(--fg)); background: color-mix(in srgb, var(--ok) 16%, transparent); border-color: var(--ok); }
+.llm-status-rejected { color: color-mix(in srgb, var(--danger-text) 75%, var(--fg)); background: color-mix(in srgb, var(--danger) 14%, transparent); border-color: var(--danger); }
+/* Карточка предложения: шапка (статус, кто прислал, «Принять» / «Отклонить», второй ряд действий) отделена линией;
+   разделы — заголовок с линией сверху. */
+.llm-proposal { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
+.llm-proposal-head { display: flex; flex-direction: column; gap: 6px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.llm-proposal-title { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; }
+.llm-proposal-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; overflow-wrap: anywhere; }
+.llm-proposal-answer { display: flex; flex-wrap: wrap; gap: 8px; }
+.llm-proposal-reason { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.llm-proposal-section { display: flex; flex-direction: column; gap: 4px; padding-top: 8px; border-top: 1px solid var(--border); }
+.llm-proposal h4 { margin: 0; font-size: 13px; font-weight: 600; }
+.llm-proposal-section p { margin: 0; }
+.llm-text { margin: 0; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+.llm-reject { display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
 .llm-reject label { display: flex; flex-direction: column; gap: 4px; }
+/* Сравнение текстов: при table-layout: fixed ширины задаёт colgroup — узкие номера строк, остальное — тексту; длинная строка
+   переносится внутри своей колонки. */
 .line-diff { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.line-diff col.diff-num { width: calc(4ch + 12px); }
 .line-diff th { text-align: left; font-weight: 600; padding: 2px 6px; }
 .line-diff td { padding: 0 6px; vertical-align: top; white-space: pre-wrap; overflow-wrap: anywhere; }
-.line-diff td.num { width: 4ch; text-align: right; color: var(--muted); user-select: none; }
+.line-diff td.num { text-align: right; white-space: nowrap; color: var(--muted); user-select: none; }
 .line-diff .diff-del { background: color-mix(in srgb, var(--danger) 14%, transparent); }
 .line-diff .diff-add { background: color-mix(in srgb, var(--ok) 14%, transparent); }
 .line-diff .diff-empty { background: var(--bg-alt); }
 .line-diff .diff-mark { margin-right: 4px; color: var(--muted); }
-.llm-compare { display: flex; flex-direction: column; gap: 6px; }
-.llm-compare-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.llm-compare-side h5 { margin: 0 0 4px; }
+/* Итог «Сравнить планы» — свой блок с рамкой; колонки исходного и предложенного плана не шире своей половины: длинное имя
+   узла переносится, а не уходит за край окна. */
+.llm-compare { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; }
+.llm-compare p { margin: 0; }
+.llm-compare-cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.llm-compare-side { min-width: 0; overflow-wrap: anywhere; }
+.llm-compare-side + .llm-compare-side { padding-left: 12px; border-left: 1px solid var(--border); }
+.llm-compare-side h5 { margin: 0 0 4px; font-size: 13px; }
+.llm-compare-side p { margin: 4px 0 2px; }
 .tab-dot { color: var(--accent); font-size: 10px; line-height: 1; margin-left: 4px; }

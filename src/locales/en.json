@@ -2117,7 +2117,6 @@
       "heading": "LLM proposals ({{count}})",
       "empty": "No proposals yet: hand the query over to the LLM assistant, and its proposals will appear here",
       "list": "Proposals",
-      "item": "{{status}} · {{client}} · {{time}} · {{head}}",
       "newDot": "New LLM proposal",
       "from": "From {{client}}, {{time}}",
       "unknownClient": "unknown client",
@@ -2139,11 +2138,11 @@
       "reject": "Reject",
       "reason": "Reason (the model will see it)",
       "rejectConfirm": "Reject the proposal",
+      "rejectReason": "Reason: {{reason}}",
       "status": {
         "new": "New",
         "accepted": "Accepted",
-        "rejected": "Rejected",
-        "rejectedWith": "Rejected: {{reason}}"
+        "rejected": "Rejected"
       }
     },
     "compare": {

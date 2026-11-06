@@ -2155,7 +2155,6 @@
       "heading": "Предложения LLM ({{count}})",
       "empty": "Предложений пока нет: передайте запрос LLM-ассистенту, и его предложения появятся здесь",
       "list": "Список предложений",
-      "item": "{{status}} · {{client}} · {{time}} · {{head}}",
       "newDot": "Новое предложение LLM",
       "from": "От {{client}}, {{time}}",
       "unknownClient": "неизвестный клиент",
@@ -2177,11 +2176,11 @@
       "reject": "Отклонить",
       "reason": "Причина (её увидит модель)",
       "rejectConfirm": "Отклонить предложение",
+      "rejectReason": "Причина: {{reason}}",
       "status": {
         "new": "Новое",
         "accepted": "Принято",
-        "rejected": "Отклонено",
-        "rejectedWith": "Отклонено: {{reason}}"
+        "rejected": "Отклонено"
       }
     },
     "compare": {

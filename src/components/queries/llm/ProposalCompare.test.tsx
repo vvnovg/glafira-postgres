@@ -35,7 +35,7 @@ describe("ProposalCompare", () => {
   it("стоимость была / стала, узел, индекс использован; горячие узлы и рекомендации обоих планов рядом", () => {
     render(<ProposalCompare comparison={comparison()} />);
     const block = screen.getByRole("region", { name: "Сравнение планов" });
-    expect(within(block).getByText(/^Стоимость: была 120, стала 8,5/)).toBeInTheDocument();
+    expect(within(block).getByText(/^Стоимость: была 120,00, стала 8,50/)).toBeInTheDocument();
     expect(within(block).getByText(/^узел pg-1, /)).toBeInTheDocument();
     expect(within(block).getByText(DDL).parentElement).toHaveTextContent("Индекс использован");
     const before = within(block).getByRole("region", { name: "Исходный план" });
@@ -48,6 +48,15 @@ describe("ProposalCompare", () => {
     expect(within(after).getByText("Index Scan using <13456>btree_orders_status on shop.orders o")).toBeInTheDocument();
     expect(within(after).getByText("Рекомендаций нет")).toBeInTheDocument();
     expect(screen.queryByText(/нет hypopg/)).toBeNull();
+  });
+
+  it("Z3: стоимости — как в таблице плана (два знака), перед «узел …» — разделитель «·»", () => {
+    render(<ProposalCompare comparison={comparison({ costBefore: 8908.9, costAfter: 1905.98 })} />);
+    const block = screen.getByRole("region", { name: "Сравнение планов" });
+    const line = within(block).getByText(/^Стоимость: /).closest("p")!;
+    expect(line.textContent).toMatch(/^Стоимость: была 8\u00a0908,90, стала 1\u00a0905,98 · узел pg-1, \d\d:\d\d:\d\d$/);
+    // Стоимость горячего узла — тем же форматом.
+    expect(within(block).getByRole("region", { name: "Предложенный план" })).toHaveTextContent("стоимость 8,50");
   });
 
   it("без hypopg — пометка, индекс не использован", () => {
