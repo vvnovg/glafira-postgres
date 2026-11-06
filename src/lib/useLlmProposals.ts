@@ -58,8 +58,9 @@ export function useOptimizationRequests(connectionId: string): { requests: Optim
  * перечитываются по событию `mcp://proposals` этого подключения и по `refresh` — после своих действий (создание и отмена
  * запроса, ответ, сравнение). Вне Tauri (тесты, браузер) подписка отклоняется — это не ошибка. Ошибку чтения списки не
  * показывают: панель работает с тем, что есть. `filter` — объединение условий (см. `ProposalFilter`).
+ * `ready` — оба списка уже прочитаны хотя бы раз.
  */
-export function useLlmProposals(connectionId: string, filter: ProposalFilter): { requests: OptimizationRequest[]; proposals: LlmProposal[]; refresh(): void } {
+export function useLlmProposals(connectionId: string, filter: ProposalFilter): { requests: OptimizationRequest[]; proposals: LlmProposal[]; ready: boolean; refresh(): void } {
   const qc = useQueryClient();
   const requests = useQuery({ queryKey: ["llmRequests", connectionId], queryFn: () => api.listOptimizationRequests(connectionId) });
   const proposals = useQuery({ queryKey: ["llmProposals", connectionId, filter], queryFn: () => api.listLlmProposals(filter) });
@@ -68,7 +69,7 @@ export function useLlmProposals(connectionId: string, filter: ProposalFilter): {
     void qc.invalidateQueries({ queryKey: ["llmProposals", connectionId] });
   }, [qc, connectionId]);
   useProposalsEvents(connectionId, refresh);
-  return { requests: requests.data ?? NO_REQUESTS, proposals: proposals.data ?? NO_PROPOSALS, refresh };
+  return { requests: requests.data ?? NO_REQUESTS, proposals: proposals.data ?? NO_PROPOSALS, ready: requests.data !== undefined && proposals.data !== undefined, refresh };
 }
 
 /** Новые (без ответа) первыми, внутри — свежие первыми (спец. §8.2: «сначала новые»). */

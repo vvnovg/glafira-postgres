@@ -47,12 +47,13 @@ describe("ProposalCompare", () => {
     const after = within(block).getByRole("region", { name: "Предложенный план" });
     expect(within(after).getByText("Index Scan using <13456>btree_orders_status on shop.orders o")).toBeInTheDocument();
     expect(within(after).getByText("Рекомендаций нет")).toBeInTheDocument();
-    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.queryByText(/нет hypopg/)).toBeNull();
   });
 
   it("без hypopg — пометка, индекс не использован", () => {
     render(<ProposalCompare comparison={comparison({ withoutHypopg: true, indexesUsed: [{ ddl: DDL, used: false }] })} />);
-    expect(screen.getByRole("status")).toHaveTextContent("В этой базе нет hypopg: предложенный запрос спланирован без своих индексов");
+    expect(screen.getByText("В этой базе нет hypopg: предложенный запрос спланирован без своих индексов")).toBeInTheDocument();
+    expect(screen.queryByRole("status")).toBeNull();
     expect(screen.getByText("Индекс не использован")).toBeInTheDocument();
   });
 

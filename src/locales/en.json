@@ -1677,7 +1677,11 @@
       "pasteLabel": "Plan (text or JSON)",
       "pastePlaceholder": "Paste EXPLAIN output: text or FORMAT JSON, with or without the psql header",
       "parse": "Parse",
-      "pasteHint": "A plan obtained outside Glafira: from psql, auto_explain or a colleague. The server is not used."
+      "pasteHint": "A plan obtained outside Glafira: from psql, auto_explain or a colleague. The server is not used.",
+      "replaced": {
+        "title": "Replaced texts",
+        "restore": "Restore: {{head}}"
+      }
     },
     "snapshots": {
       "title": "Snapshots",
@@ -2128,6 +2132,7 @@
       "indexes": "Indexes",
       "noIndexes": "No indexes proposed",
       "compare": "Compare plans",
+      "comparing": "Comparing plans…",
       "openInConsole": "Open in console",
       "copy": "Copy the proposed SQL",
       "accept": "Accept",

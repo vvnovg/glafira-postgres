@@ -62,7 +62,7 @@ export function ProposalCompare({ comparison: c }: { comparison: ProposalCompari
         <span className="muted">{t("llmAssist.compare.on", { member: c.member, time: formatTime(c.atMs) })}</span>
       </p>
       {c.withoutHypopg && (
-        <p className="diag-warn" role="status">
+        <p className="diag-warn">
           {t("llmAssist.compare.withoutHypopg")}
         </p>
       )}

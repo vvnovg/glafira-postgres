@@ -190,4 +190,73 @@ describe("ProposalsPanel", () => {
     expect(screen.getByText(/^От qwen-code/)).toHaveFocus();
     warn.mockRestore();
   });
+
+  it("I1: «Сравнить планы» при открытой причине отклонения не закрывает форму, не стирает набранное и не роняет фокус", async () => {
+    const p = llmProposal({ id: "p1" });
+    const comparison: ProposalComparison = { costBefore: 120, costAfter: 8.5, indexesUsed: [], member: "pg-1", atMs: 1_700_000_000_000, planBefore: planTree(), planAfter: planTree(), recommendationsBefore: [], recommendationsAfter: [], withoutHypopg: false };
+    vi.mocked(api.listLlmProposals).mockResolvedValue([p]);
+    vi.mocked(api.compareLlmProposal).mockResolvedValue({ ...p, comparison });
+    const user = userEvent.setup();
+    renderWithClient(panel());
+    await user.click(await screen.findByRole("button", { name: "Отклонить" }));
+    const reason = screen.getByRole("textbox", { name: "Причина (её увидит модель)" });
+    await user.type(reason, "Нужны те же строки");
+    await user.click(screen.getByRole("button", { name: "Сравнить планы" }));
+    expect(await screen.findByRole("region", { name: "Сравнение планов" })).toBeInTheDocument();
+    const still = screen.getByRole("textbox", { name: "Причина (её увидит модель)" });
+    expect(still).toBe(reason);
+    expect(still).toHaveValue("Нужны те же строки");
+    // Фокус остаётся на нажатой кнопке, а не падает на <body>.
+    expect(screen.getByRole("button", { name: "Сравнить планы" })).toHaveFocus();
+  });
+
+  it("M1: консоль, смонтированная в фоне, не ставит точку на уже существовавшие предложения; пришедшее позже — ставит", async () => {
+    vi.mocked(api.listLlmProposals).mockResolvedValue([llmProposal({ id: "p1" })]);
+    renderWithClient(panel({ active: false }));
+    await screen.findByRole("button", { name: "Предложения LLM (1)" });
+    expect(useTabMarks.getState().marks["explain:c"]).toBeUndefined();
+    await waitFor(() => expect(eventBus.handlers.length).toBeGreaterThan(0));
+    vi.mocked(api.listLlmProposals).mockResolvedValue([llmProposal({ id: "p2", createdAtMs: 1_800_000_000_000 }), llmProposal({ id: "p1" })]);
+    emit({ kind: "proposal", connectionId: "c", proposalId: "p2" });
+    await waitFor(() => expect(useTabMarks.getState().marks["explain:c"]).toBe(true));
+  });
+
+  it("M3: у отвеченного — противоположное действие; отклонение принятого спрашивает причину, принятие отклонённого уходит сразу", async () => {
+    const p = llmProposal({ id: "p1", status: "accepted" });
+    vi.mocked(api.listLlmProposals).mockResolvedValue([p]);
+    vi.mocked(api.answerLlmProposal).mockImplementation(async (_id, status, reason) => ({ ...p, status, reason }));
+    const user = userEvent.setup();
+    renderWithClient(panel());
+    expect(await screen.findByRole("button", { name: "Отклонить" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Принять" })).toBeNull();
+    vi.mocked(api.listLlmProposals).mockResolvedValue([{ ...p, status: "rejected", reason: "Передумал" }]);
+    await user.click(screen.getByRole("button", { name: "Отклонить" }));
+    await user.type(screen.getByRole("textbox", { name: "Причина (её увидит модель)" }), "Передумал");
+    await user.click(screen.getByRole("button", { name: "Отклонить предложение" }));
+    expect(api.answerLlmProposal).toHaveBeenLastCalledWith("p1", "rejected", "Передумал");
+    expect(await screen.findByRole("button", { name: "Принять" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Отклонить" })).toBeNull();
+    vi.mocked(api.listLlmProposals).mockResolvedValue([{ ...p, status: "accepted" }]);
+    await user.click(screen.getByRole("button", { name: "Принять" }));
+    expect(api.answerLlmProposal).toHaveBeenLastCalledWith("p1", "accepted", null);
+    expect(await screen.findByRole("button", { name: "Отклонить" })).toBeInTheDocument();
+  });
+
+  it("M4/M2: пока идёт сравнение, в живой области — «Сравнение…»; заметка hypopg — внутри единственной живой области, без своей role=status", async () => {
+    const p = llmProposal({ id: "p1" });
+    const comparison: ProposalComparison = { costBefore: 1, costAfter: 1, indexesUsed: [], member: "pg-1", atMs: 1_700_000_000_000, planBefore: planTree(), planAfter: planTree(), recommendationsBefore: [], recommendationsAfter: [], withoutHypopg: true };
+    vi.mocked(api.listLlmProposals).mockResolvedValue([p]);
+    let done!: (v: unknown) => void;
+    vi.mocked(api.compareLlmProposal).mockReturnValue(new Promise((r) => (done = r)) as never);
+    const user = userEvent.setup();
+    const { container } = renderWithClient(panel());
+    await user.click(await screen.findByRole("button", { name: "Сравнить планы" }));
+    const live = container.querySelector('[aria-live="polite"]')!;
+    expect(live).toHaveTextContent("Сравнение планов…");
+    done({ ...p, comparison });
+    await waitFor(() => expect(live).not.toHaveTextContent("Сравнение планов…"));
+    expect(live).toHaveTextContent("В этой базе нет hypopg");
+    expect(container.querySelectorAll("[aria-live]").length).toBe(1);
+    expect(live.querySelector('[role="status"]')).toBeNull();
+  });
 });

@@ -417,4 +417,22 @@ describe("ExplainTab", () => {
     expect(panel.compareDocumentPosition(await screen.findByRole("button", { name: "План" })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(await within(panel).findByRole("table", { name: "Исходный и предложенный текст" })).toHaveTextContent("SELECT 9 AS from_card");
   });
+
+  it("M6: «Открыть в консоли» не теряет прежний текст — он в списке «Заменённые тексты» и возвращается (тот же узел и другой)", async () => {
+    const user = userEvent.setup();
+    const view = (p: { sql: string; database?: string; member?: string; nonce: number }) => <ExplainTab connectionId="c" member="pg-1" database="perf" sql={undefined} prefill={p} active />;
+    const { rerender } = renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql="SELECT 1 -- mine" active />);
+    const editor = await screen.findByRole("textbox", { name: "SQL" });
+    expect(screen.queryByRole("region", { name: "Заменённые тексты" })).toBeNull();
+    // Тот же узел и база.
+    rerender(view({ sql: "SELECT 2 -- rewritten", database: "perf", member: "pg-1", nonce: 1 }));
+    expect(editor).toHaveValue("SELECT 2 -- rewritten");
+    // Другой узел и база: запуск пересоздаётся, текст всё равно сохранён.
+    rerender(view({ sql: "SELECT 3 -- other", database: "postgres", member: "pg-2", nonce: 2 }));
+    expect(editor).toHaveValue("SELECT 3 -- other");
+    const list = within(screen.getByRole("region", { name: "Заменённые тексты" }));
+    expect(list.getAllByRole("button").map((b) => b.textContent)).toEqual(["Вернуть: SELECT 2 -- rewritten", "Вернуть: SELECT 1 -- mine"]);
+    await user.click(list.getByRole("button", { name: "Вернуть: SELECT 1 -- mine" }));
+    expect(editor).toHaveValue("SELECT 1 -- mine");
+  });
 });

@@ -46,7 +46,7 @@ const clientName = (p: LlmProposal, t: TFunction) => p.client ?? t("llmAssist.pa
  */
 export function ProposalsPanel({ connectionId, database, active, tabId, focus }: { connectionId: string; database: string | null; active: boolean; tabId: string; focus: ProposalFocus | null }) {
   const { t } = useTranslation();
-  const { requests, proposals, refresh } = useLlmProposals(connectionId, { connectionId });
+  const { requests, proposals, ready, refresh } = useLlmProposals(connectionId, { connectionId });
   const [pinned, setPinned] = useState<string[]>([]);
   const [open, setOpen] = useState<boolean | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -65,12 +65,16 @@ export function ProposalsPanel({ connectionId, database, active, tabId, focus }:
   useEffect(() => {
     if (selected === null && list.length > 0) setSelected(list[0].id);
   }, [selected, list]);
-  // Всё, что консоль показала активной, увидено; пометка — для пришедших, пока она в фоне.
+  // Всё, что консоль показала активной, увидено; пометка — для пришедших, пока она в фоне. Первый прочитанный список —
+  // уже существовавшие предложения: их консоль, смонтированная в фоне, новыми не считает.
   const seen = useRef(new Set<string>());
+  const seeded = useRef(false);
   useEffect(() => {
-    if (active) for (const p of list) seen.current.add(p.id);
-  }, [active, list]);
-  const unseen = !active && list.some((p) => !seen.current.has(p.id));
+    if (!ready) return;
+    if (active || !seeded.current) for (const p of list) seen.current.add(p.id);
+    seeded.current = true;
+  }, [ready, active, list]);
+  const unseen = !active && seeded.current && list.some((p) => !seen.current.has(p.id));
   const setMark = useTabMarks((s) => s.setMark);
   useEffect(() => setMark(tabId, unseen), [setMark, tabId, unseen]);
   useEffect(() => () => setMark(tabId, false), [setMark, tabId]);
@@ -169,13 +173,14 @@ function ProposalView({ proposal: p, connectionId, onChanged }: { proposal: LlmP
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<AppError | null>(null);
   const [compared, setCompared] = useState<ProposalComparison | null>(null);
+  const [comparing, setComparing] = useState(false);
   const [rejecting, setRejecting] = useState(false);
-  useEffect(() => {
-    if (rejecting) reasonRef.current?.focus();
-  }, [rejecting]);
   const [reason, setReason] = useState("");
   // Фокус: открытая причина получает его сразу; после ответа и отмены он возвращается на осмысленное место, а не на <body>.
   const reasonRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    if (rejecting) reasonRef.current?.focus();
+  }, [rejecting]);
   const rejectRef = useRef<HTMLButtonElement>(null);
   const headRef = useRef<HTMLParagraphElement>(null);
   const comparison = compared ?? p.comparison ?? null;
@@ -187,7 +192,8 @@ function ProposalView({ proposal: p, connectionId, onChanged }: { proposal: LlmP
     try {
       const next = await call();
       if (next.comparison) setCompared(next.comparison);
-      setRejecting(false);
+      // Форму причины закрывает только ответ: сравнение при открытой форме её не трогает.
+      if (answered) setRejecting(false);
       onChanged();
       if (answered) headRef.current?.focus();
     } catch (e) {
@@ -228,22 +234,31 @@ function ProposalView({ proposal: p, connectionId, onChanged }: { proposal: LlmP
         </ul>
       )}
       <div className="toolbar">
-        <button type="button" aria-disabled={busy} onClick={() => void perform(() => api.compareLlmProposal(p.id))}>
+        <button
+          type="button"
+          aria-disabled={busy}
+          onClick={() => {
+            if (busy) return;
+            setComparing(true);
+            void perform(() => api.compareLlmProposal(p.id)).finally(() => setComparing(false));
+          }}
+        >
           {t("llmAssist.panel.compare")}
         </button>
         <button type="button" onClick={openInConsole}>
           {t("llmAssist.panel.openInConsole")}
         </button>
         <CopyButton text={p.rewrittenSql} label={t("llmAssist.panel.copy")} />
-        {p.status === "new" && (
-          <>
-            <button type="button" aria-disabled={busy} onClick={() => void perform(() => api.answerLlmProposal(p.id, "accepted", null), true)}>
-              {t("llmAssist.panel.accept")}
-            </button>
-            <button type="button" ref={rejectRef} aria-expanded={rejecting} aria-disabled={busy} onClick={() => setRejecting(true)}>
-              {t("llmAssist.panel.reject")}
-            </button>
-          </>
+        {/* Ответ можно изменить (принято ↔ отклонено): у отвеченного — противоположное действие. */}
+        {p.status !== "accepted" && (
+          <button type="button" aria-disabled={busy} onClick={() => void perform(() => api.answerLlmProposal(p.id, "accepted", null), true)}>
+            {t("llmAssist.panel.accept")}
+          </button>
+        )}
+        {p.status !== "rejected" && (
+          <button type="button" ref={rejectRef} aria-expanded={rejecting} aria-disabled={busy} onClick={() => setRejecting(true)}>
+            {t("llmAssist.panel.reject")}
+          </button>
         )}
       </div>
       {rejecting && (
@@ -269,8 +284,11 @@ function ProposalView({ proposal: p, connectionId, onChanged }: { proposal: LlmP
         </div>
       )}
       {error && <ErrorBanner error={error} />}
-      {/* Живая область есть всегда: итог сравнения вставляется в неё и озвучивается. */}
-      <div aria-live="polite">{comparison && <ProposalCompare comparison={comparison} />}</div>
+      {/* Единственная живая область: «Сравнение…» и итог (с заметкой hypopg) вставляются в неё и озвучиваются. */}
+      <div aria-live="polite">
+        {comparing && <p className="muted">{t("llmAssist.panel.comparing")}</p>}
+        {comparison && <ProposalCompare comparison={comparison} />}
+      </div>
     </div>
   );
 }

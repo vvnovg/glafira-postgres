@@ -33,6 +33,10 @@ interface LastRun {
 /** Источник запросов на оптимизацию консоли — одна константа: кнопка сравнивает его с запросами подключения. */
 const CONSOLE_SOURCE: RequestSource = { kind: "console" };
 const NO_PARAMS: (string | null)[] = [];
+/** Сколько заменённых текстов помнит консоль. */
+const REPLACED_MAX = 10;
+/** Начало текста для списка: первая непустая строка, до 80 символов. */
+const head = (sql: string) => (sql.split("\n").find((l) => l.trim() !== "") ?? "").trim().slice(0, 80);
 
 /**
  * Номер версии для `PlanRunner` из `Member.serverVersion` ("16.4", "17beta1"): мажорная × 10 000 + минорная. Нужна одна
@@ -85,6 +89,9 @@ export function ExplainTab({
   const [last, setLast] = useState<LastRun | null>(null);
   // Уведомление «строка скопирована» живёт здесь: кнопка перемонтируется, когда появляется первый результат плана.
   const [sentNotice, setSentNotice] = useState<SentNotice | null>(null);
+  // Тексты, которые подстановка («Открыть в консоли») заменила: запуски в истории хранят планы, а не текст редактора, и
+  // при смене узла или базы история уходит вместе с запуском, поэтому прежний текст остаётся здесь и возвращается кнопкой.
+  const [replaced, setReplaced] = useState<string[]>([]);
   const [parsing, setParsing] = useState(false);
   const [parseError, setParseError] = useState<AppError | null>(null);
   // Повторное «Открыть в консоли» меняет спеку вкладки (при том же тексте — только её объект): новые узел, база и текст подставляются.
@@ -98,6 +105,7 @@ export function ExplainTab({
   // же подстановкой правку пользователя не затирает; консоль переходит на «Запрос» и ничего не запускает. Узла нет — лидер.
   useEffect(() => {
     if (!prefill) return;
+    if (sql.trim() !== "" && sql !== prefill.sql) setReplaced((r) => [sql, ...r.filter((x) => x !== sql)].slice(0, REPLACED_MAX));
     setSql(prefill.sql);
     setDb(prefill.database ?? null);
     setNode(prefill.member ?? null);
@@ -197,6 +205,20 @@ export function ExplainTab({
                 tabId={tabId({ kind: "explain", connectionId })}
                 focus={prefill?.proposalId ? { id: prefill.proposalId, nonce: prefill.nonce } : null}
               />
+              {replaced.length > 0 && (
+                <section className="llm-replaced" aria-label={t("diag.explain.replaced.title")}>
+                  <h4>{t("diag.explain.replaced.title")}</h4>
+                  <ul className="plain-list">
+                    {replaced.map((text, i) => (
+                      <li key={`${i}:${text}`}>
+                        <button type="button" className="link" onClick={() => setSql(text)}>
+                          {t("diag.explain.replaced.restore", { head: head(text) })}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
               {nodeName && dbName ? (
                 <>
                   <PlanRunner
