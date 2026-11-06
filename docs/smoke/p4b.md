@@ -90,7 +90,7 @@ grep -a -c propose_query_rewrite "/Applications/Glafira for PostgreSQL.app/Conte
 
 **Сделать**
 1. «Настройки» → «LLM-ассистенты (MCP)» → снимите «Разрешить MCP-сервер».
-2. Дерево → `perf` → «Диагностика» → «Консоль EXPLAIN», база `perf`, вставьте запрос из «Подготовки». Наведите на «?» рядом
+2. Дерево → `perf` → «Диагностика» → «Консоль EXPLAIN», база `perf`, вставьте запрос из «Подготовки». Нажмите «?» рядом
    с кнопкой «Передать LLM-ассистенту».
 3. Отметьте «Разрешить MCP-сервер» снова. Перезапустите `qwen` (выключение закрыло его сессию).
 4. Форма `perf` («Изменить подключение») → «Доступ для LLM» → «Нет» → «Сохранить». Снова посмотрите на кнопку и «?».
@@ -470,9 +470,9 @@ docker exec -d gp-pg-lab psql -U postgres -d orders -c "SELECT pg_sleep(60), 'p4
 2. Откройте «Настройки» → «LLM-ассистенты (MCP)» и форму `lab-app`. Наведите на значок «LLM» у `lab-app`.
 3. Спросите:
    > Выполни на lab-app через run_select: SELECT count(*) FROM shop.orders
-4. Уберите политику (вторая команда), перезапустите Glafira и `qwen`.
+4. Уберите политику (блок «Убрать политику»), перезапустите Glafira и `qwen`.
 
-**Терминал**
+**Задать политику:**
 ```bash
 rm -f /tmp/policy.plist && plutil -create xml1 /tmp/policy.plist
 ```
@@ -488,6 +488,8 @@ sudo cp /tmp/policy.plist "/Library/Managed Preferences/io.github.vvnovg.glafira
 ```bash
 sudo chmod 644 "/Library/Managed Preferences/io.github.vvnovg.glafira.postgres.plist"
 ```
+
+**Убрать политику:**
 ```bash
 sudo rm "/Library/Managed Preferences/io.github.vvnovg.glafira.postgres.plist"
 ```

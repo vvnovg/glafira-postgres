@@ -68,7 +68,7 @@ describe("AskLlmButton", () => {
   it.each<[string, Partial<McpStatus>, LlmAccess, RegExp]>([
     ["политика", { policyEnabled: false }, "diagnostics", /отключён политикой вашей организации/],
     ["политика важнее выключенного сервера", { policyEnabled: false, server: "stopped" }, "diagnostics", /отключён политикой вашей организации/],
-    ["сервер выключен", { server: "stopped" }, "diagnostics", /включите его в «Настройки» → «LLM-ассистенты \(MCP\)»/],
+    ["сервер выключен", { server: "stopped" }, "diagnostics", /включите его в «Настройках» → «LLM-ассистенты \(MCP\)»/],
     ["сервер в другом окне", { server: "otherInstance" }, "diagnostics", /работает в другом окне Glafira/],
     ["сервер не запустился", { server: "error", error: "bind failed" }, "diagnostics", /не запустился/],
     ["подключение закрыто", {}, "off", /Подключение закрыто для LLM-ассистентов/],
