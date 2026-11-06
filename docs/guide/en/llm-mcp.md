@@ -28,6 +28,8 @@ The [[ui:settings.mcp.connect.title]] block has ready snippets with the path to 
 - Cursor — a block for `~/.cursor/mcp.json`;
 - any other client that starts an MCP server with a command (stdio) — the command and the `mcp` argument.
 
+The client can also work with a model on your own computer, without the cloud: see the [Local models](local-llm.md) chapter.
+
 Open Glafira first, then start the client. If Glafira is closed, `glafira-pg mcp` starts it and waits up to 25 seconds, but clients do not wait long for the server (Qwen Code waits 30 seconds), and on a slow start the connection may time out. If you reinstalled Glafira to another location, copy the snippet again.
 
 Where the client stores the server depends on its scope. Claude Code adds a server to the `local` scope by default, which is the current project only; to make glafira-pg available in all projects add `--scope user` (`-s user`): `claude mcp add --scope user glafira-pg -- "<path>" mcp`. Qwen Code uses the `user` scope by default (all projects); `-s project` limits the server to the current project. Other flags are in `claude mcp add --help` and `qwen mcp add --help`.
@@ -44,7 +46,7 @@ Any program on your computer can fake a client name: the approval shows who conn
 
 With [[ui:connections.form.llmLevels.diagnostics]] the assistant gets:
 
-- the open connections (name, environment, kind, folder, level) and their topology: nodes with roles, lag and timeline, the Patroni state, topology events;
+- the open connections (name, environment, kind, folder, level, default database) and their topology: nodes with roles, lag and timeline, the Patroni state, topology events;
 - a health summary: the pulse and the findings of the quick tools (sessions, locks, xmin horizon, replicas, slots, and for Patroni failover readiness and health);
 - the report of any tool in the [[ui:sidebar.diagnostics]] group with findings and “what to do” texts;
 - activity: sessions with filters and observing them for up to 50 seconds — waits, top queries, sessions that appeared and left;

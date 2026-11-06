@@ -1,4 +1,4 @@
-export const GUIDE_CHAPTERS = ["getting-started", "connections", "objects", "diagnostics", "queries", "llm-mcp", "updates"] as const;
+export const GUIDE_CHAPTERS = ["getting-started", "connections", "objects", "diagnostics", "queries", "llm-mcp", "local-llm", "updates"] as const;
 
 export type ChapterId = (typeof GUIDE_CHAPTERS)[number];
 
