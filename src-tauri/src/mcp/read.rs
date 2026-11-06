@@ -1292,6 +1292,19 @@ fn setting_out(r: &Row) -> SettingOut {
     }
 }
 
+/// Фильтр `SETTINGS_SQL` (`$1`, `$2`): имена `names` (без краевых пробелов, в нижнем регистре) — ровно эти настройки,
+/// изменённые или нет, и тогда `changedOnly` не действует (так говорит схема параметра); без `names` — изменённые при
+/// `changedOnly` (по умолчанию `true`), иначе все. Смоук P4b, G6: правило проверено, ответы по именам и изменённых
+/// совпали по размеру случайно (25 строк в обоих).
+fn settings_filter(p: &SettingsParams) -> (Option<Vec<String>>, bool) {
+    let names: Option<Vec<String>> = p
+        .names
+        .as_ref()
+        .map(|v| v.iter().map(|n| n.trim().to_lowercase()).collect());
+    let changed_only = names.is_none() && p.changed_only.unwrap_or(true);
+    (names, changed_only)
+}
+
 /// `get_settings`: `pg_settings` узла; секреты — `redact_setting` (§6.2).
 async fn settings(st: &AppState, p: SettingsParams) -> Result<PgAnswer, ToolError> {
     open_for_llm(st, &p.connection_id).await?;
@@ -1300,10 +1313,7 @@ async fn settings(st: &AppState, p: SettingsParams) -> Result<PgAnswer, ToolErro
         .runtimes
         .target(&p.connection_id, Some(&member))
         .map_err(tool_error)?;
-    let names: Option<Vec<String>> = p
-        .names
-        .map(|v| v.into_iter().map(|n| n.trim().to_lowercase()).collect());
-    let changed_only = names.is_none() && p.changed_only.unwrap_or(true);
+    let (names, changed_only) = settings_filter(&p);
     let rows = on_catalog_node_within(
         catalog_limit(&profile),
         st.client(&p.connection_id, Some(&member), None),
@@ -2768,6 +2778,29 @@ mod tests {
         assert_eq!(p["partitions"].as_array().unwrap().len(), MAX_PARTITIONS);
         assert!(p.get("partitionsTotal").is_none());
         assert_eq!(out.table["ddl"], ddl.as_str());
+    }
+
+    /// Смоук P4b, G6: `names` — ровно названные настройки, `changedOnly` при них не действует; без `names` — изменённые
+    /// по умолчанию и все при `changedOnly: false`.
+    #[test]
+    fn settings_names_win_over_changed_only() {
+        let filter = |v: Value| settings_filter(&serde_json::from_value(v).unwrap());
+        let names = Some(vec!["work_mem".to_string(), "timezone".to_string()]);
+        assert_eq!(
+            filter(json!({"connectionId": "c", "names": [" work_mem", "TimeZone"]})),
+            (names.clone(), false)
+        );
+        assert_eq!(
+            filter(
+                json!({"connectionId": "c", "names": ["work_mem", "TimeZone"], "changedOnly": true})
+            ),
+            (names, false)
+        );
+        assert_eq!(filter(json!({"connectionId": "c"})), (None, true));
+        assert_eq!(
+            filter(json!({"connectionId": "c", "changedOnly": false})),
+            (None, false)
+        );
     }
 
     /// Смоук P4b, M2: на уровне `diagnostics` статистика значений не читается, и ответ говорит почему (модель

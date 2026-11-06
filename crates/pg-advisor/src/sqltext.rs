@@ -319,6 +319,152 @@ pub fn mask_literals(text: &str, opts: MaskOptions) -> (String, usize) {
     (out, masked)
 }
 
+/// Типы типизированных литералов (`date '2026-06-01'`), которые pg_stat_statements нормализует в `date $1`: такой
+/// текст не разбирается ни `pg_query`, ни сервером. Слова — в нижнем регистре; составные имена — раньше своих начал.
+const TYPED_LITERAL_TYPES: [&[&str]; 34] = [
+    &["timestamp", "with", "time", "zone"],
+    &["timestamp", "without", "time", "zone"],
+    &["time", "with", "time", "zone"],
+    &["time", "without", "time", "zone"],
+    &["double", "precision"],
+    &["date"],
+    &["time"],
+    &["timetz"],
+    &["timestamp"],
+    &["timestamptz"],
+    &["interval"],
+    &["uuid"],
+    &["json"],
+    &["jsonb"],
+    &["numeric"],
+    &["decimal"],
+    &["int2"],
+    &["int4"],
+    &["int8"],
+    &["smallint"],
+    &["integer"],
+    &["int"],
+    &["bigint"],
+    &["real"],
+    &["float4"],
+    &["float8"],
+    &["text"],
+    &["varchar"],
+    &["char"],
+    &["boolean"],
+    &["bool"],
+    &["inet"],
+    &["cidr"],
+    &["bytea"],
+];
+
+/// Нормализованный текст pg_stat_statements с типизированными литералами (смоук P4b, G5): `<тип> $N` → `$N::<тип>`
+/// для типов `TYPED_LITERAL_TYPES` (без учёта регистра, целыми словами; имя типа — как в тексте). Строки, идентификаторы
+/// в кавычках, комментарии и тела долларовых кавычек не трогаются; тип, перед которым точка (`s.date`), и тип,
+/// отделённый от `$N` комментарием, — тоже. Уже приведённый `$1::date` остаётся как есть.
+pub fn cast_typed_literal_params(sql: &str) -> String {
+    let b = sql.as_bytes();
+    let tokens = sql_tokens(b);
+    let mut out = String::with_capacity(sql.len() + 16);
+    let mut copied = 0;
+    for (k, tok) in tokens.iter().enumerate() {
+        let Token::Param(param_start, param_end) = *tok else {
+            continue;
+        };
+        let Some((type_start, type_end)) = typed_literal_type(sql, &tokens[..k]) else {
+            continue;
+        };
+        out.push_str(&sql[copied..type_start]);
+        out.push_str(&sql[param_start..param_end]);
+        out.push_str("::");
+        out.push_str(&sql[type_start..type_end]);
+        copied = param_end;
+    }
+    out.push_str(&sql[copied..]);
+    out
+}
+
+/// Лексема для `cast_typed_literal_params`: слово без кавычек, параметр `$N` или что-то другое (строка, идентификатор в
+/// кавычках, комментарий, число, знак) с позицией начала. Позиции — байтовые, на границах символов.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Token {
+    Word(usize, usize),
+    Param(usize, usize),
+    Other(usize),
+}
+
+/// Лексемы текста без пробельных символов — как в `count_params`, но со словами.
+fn sql_tokens(b: &[u8]) -> Vec<Token> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        let next = b.get(i + 1).copied();
+        if c.is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        match c {
+            b'\'' => {
+                let escapes =
+                    i > 0 && matches!(b[i - 1], b'e' | b'E') && (i < 2 || !ident_cont(b[i - 2]));
+                i = skip_quoted(b, i + 1, b'\'', escapes);
+            }
+            b'"' => i = skip_quoted(b, i + 1, b'"', false),
+            b'-' if next == Some(b'-') => i = line_comment_end(b, i),
+            b'/' if next == Some(b'*') => i = block_comment_end(b, i).0,
+            b'$' if next.is_some_and(|d| d.is_ascii_digit()) => {
+                i += 1;
+                while b.get(i).is_some_and(u8::is_ascii_digit) {
+                    i += 1;
+                }
+                out.push(Token::Param(start, i));
+                continue;
+            }
+            b'$' => i = dollar_tag(b, i).map_or(i + 1, |end| dollar_quote_end(b, i, end)),
+            c if c.is_ascii_alphabetic() || c == b'_' || c >= 0x80 => {
+                while b.get(i).is_some_and(|c| ident_cont(*c)) {
+                    i += 1;
+                }
+                out.push(Token::Word(start, i));
+                continue;
+            }
+            c if c.is_ascii_digit() => {
+                // Число вместе с хвостом (`1e5`, `0x1F`): хвост — не слово.
+                while b.get(i).is_some_and(|c| ident_cont(*c) || *c == b'.') {
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+        out.push(Token::Other(start));
+    }
+    out
+}
+
+/// Тип из `TYPED_LITERAL_TYPES`, которым кончаются лексемы `before` (перед параметром): начало и конец его текста. Перед
+/// типом не должно быть точки — `s.date` это имя, а не тип.
+fn typed_literal_type(sql: &str, before: &[Token]) -> Option<(usize, usize)> {
+    TYPED_LITERAL_TYPES.iter().find_map(|words| {
+        let from = before.len().checked_sub(words.len())?;
+        let mut span = None;
+        for (tok, word) in before[from..].iter().zip(words.iter()) {
+            let Token::Word(s, e) = *tok else {
+                return None;
+            };
+            if !sql[s..e].eq_ignore_ascii_case(word) {
+                return None;
+            }
+            span = Some(span.map_or((s, e), |(first, _)| (first, e)));
+        }
+        let qualified = from
+            .checked_sub(1)
+            .is_some_and(|p| matches!(before[p], Token::Other(at) if sql.as_bytes()[at] == b'.'));
+        span.filter(|_| !qualified)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,6 +776,98 @@ mod tests {
     }
 
     /// Повторное маскирование ничего не меняет: `$N`, `/*…*/` и `--…` — уже маска.
+    /// Смоук P4b, G5: `date $1` из pgss становится `$1::date`, каждая форма типа из списка.
+    #[test]
+    fn typed_literal_params_become_casts() {
+        let cast = cast_typed_literal_params;
+        for t in [
+            "date",
+            "time",
+            "timetz",
+            "timestamp",
+            "timestamptz",
+            "timestamp with time zone",
+            "timestamp without time zone",
+            "time with time zone",
+            "time without time zone",
+            "interval",
+            "uuid",
+            "json",
+            "jsonb",
+            "numeric",
+            "decimal",
+            "int2",
+            "int4",
+            "int8",
+            "smallint",
+            "integer",
+            "int",
+            "bigint",
+            "real",
+            "double precision",
+            "float4",
+            "float8",
+            "text",
+            "varchar",
+            "char",
+            "boolean",
+            "bool",
+            "inet",
+            "cidr",
+            "bytea",
+        ] {
+            assert_eq!(
+                cast(&format!("SELECT * FROM t WHERE a = {t} $1")),
+                format!("SELECT * FROM t WHERE a = $1::{t}"),
+                "{t}"
+            );
+        }
+        assert_eq!(
+            cast("SELECT count(*) FROM o WHERE o.created_at >= TIMESTAMPTZ $1 - Interval $2"),
+            "SELECT count(*) FROM o WHERE o.created_at >= $1::TIMESTAMPTZ - $2::Interval"
+        );
+        assert_eq!(
+            cast("SELECT a FROM t WHERE d BETWEEN date $1 AND date $12 LIMIT $13"),
+            "SELECT a FROM t WHERE d BETWEEN $1::date AND $12::date LIMIT $13"
+        );
+        assert_eq!(
+            cast("SELECT timestamp\n  with time\tzone $1, double  precision $2"),
+            "SELECT $1::timestamp\n  with time\tzone, $2::double  precision"
+        );
+        assert_eq!(cast("SELECT (date $1)"), "SELECT ($1::date)");
+    }
+
+    /// Строки, идентификаторы в кавычках, комментарии, долларовые кавычки и уже приведённые параметры не меняются, как и
+    /// слова, которые типом здесь не являются.
+    #[test]
+    fn typed_literal_casts_leave_everything_else_alone() {
+        for text in [
+            "SELECT 'date $1' FROM t",
+            "SELECT E'it\\'s date $1' FROM t",
+            "SELECT \"date $1\" FROM t",
+            "SELECT 1 -- date $1\nFROM t",
+            "SELECT 1 /* date $1 /* nested */ */ FROM t",
+            "SELECT $$date $1$$, $f$ date $2 $f$",
+            "SELECT * FROM t WHERE d = $1::date",
+            "SELECT * FROM t WHERE d = date($1)",
+            "SELECT * FROM t WHERE date = $1",
+            "SELECT * FROM t WHERE d = mydate $1",
+            "SELECT * FROM t WHERE d = date_x $1",
+            "SELECT * FROM t WHERE d = s.date $1",
+            "SELECT * FROM t WHERE d = date /* c */ $1",
+            "SELECT ts AT TIME ZONE $1 FROM t",
+            "SELECT * FROM t WHERE a = b$1",
+            "SELECT * FROM t WHERE d = character varying $1",
+            "SELECT * FROM t LIMIT $1",
+        ] {
+            assert_eq!(cast_typed_literal_params(text), text);
+        }
+        assert_eq!(
+            cast_typed_literal_params("SELECT 'x' || text $1, '-- date $2' FROM t -- int $3"),
+            "SELECT 'x' || $1::text, '-- date $2' FROM t -- int $3"
+        );
+    }
+
     #[test]
     fn masking_is_idempotent() {
         for text in [

@@ -7,6 +7,7 @@
 use glafira_mcp_core::error::ToolError;
 use glafira_pg_mcp::params::{SQL_AND_QUERY_ID_BOTH, SQL_AND_QUERY_ID_NEITHER};
 use pg_advisor::sqlcheck::{self, Checked, Purpose};
+use pg_advisor::sqltext::cast_typed_literal_params;
 
 use super::access::{err, invalid_argument, tool_error};
 use super::guard;
@@ -82,9 +83,10 @@ pub(crate) fn check_pgss_text(query_id: i64, text: &str) -> Result<(), ToolError
 
 /// Подсказка к синтаксической ошибке текста pgss (E5): pgss хранит нормализованный текст, где константы типизированных
 /// литералов (`interval '1 day'`, `timestamptz '…'`) стали `$N`, и такой текст не разбирается ни шлюзом, ни сервером.
+/// Частые типы шлюз приводит сам (`cast_typed_literal_params`, смоук P4b, G5); подсказка — для оставшихся.
 pub(crate) fn pgss_syntax_hint(query_id: i64) -> String {
     format!(
-        "pg_stat_statements stores query {query_id} in normalized form, and this text is not valid SQL as is (constants of typed literals such as interval '1 day' or timestamptz '…' became $N). Pass sql with values in place of such $N instead."
+        "pg_stat_statements stores query {query_id} in normalized form: its constants became $N placeholders, and some of them need a type that the text does not give (typed literals such as point '(1,2)'). Pass sql instead of queryId, written with $N::type casts (for example $1::date) or with real values in place of such $N."
     )
 }
 
@@ -201,7 +203,8 @@ async fn pgss_text(
 }
 
 /// Текст для плана: SQL модели как есть или текст pgss (он тоже проходит `sqlcheck`: в pgss бывают и служебные
-/// команды).
+/// команды). В тексте pgss типизированные литералы частых типов (`date $1`) сначала становятся приведениями (`$1::date`,
+/// `cast_typed_literal_params`, смоук P4b, G5): иначе текст не разбирается.
 pub(crate) async fn sql_source(
     st: &AppState,
     id: &str,
@@ -216,7 +219,7 @@ pub(crate) async fn sql_source(
             syntax_hint: None,
         }),
         Asked::QueryId(q) => {
-            let text = pgss_text(st, id, member, database, q).await?;
+            let text = cast_typed_literal_params(&pgss_text(st, id, member, database, q).await?);
             check_pgss_text(q, &text)?;
             Ok(SqlSource {
                 text,
@@ -369,7 +372,7 @@ mod tests {
         let hint = pgss_syntax_hint(42);
         assert_eq!(
             hint,
-            "pg_stat_statements stores query 42 in normalized form, and this text is not valid SQL as is (constants of typed literals such as interval '1 day' or timestamptz '…' became $N). Pass sql with values in place of such $N instead."
+            "pg_stat_statements stores query 42 in normalized form: its constants became $N placeholders, and some of them need a type that the text does not give (typed literals such as point '(1,2)'). Pass sql instead of queryId, written with $N::type casts (for example $1::date) or with real values in place of such $N."
         );
         assert_eq!(
             guard::with_hint("syntax error at or near \"$1\" (position 118)", &hint),

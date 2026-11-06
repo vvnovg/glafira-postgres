@@ -440,30 +440,74 @@ async fn plan_of_a_pgss_query_is_masked() {
     assert_eq!(e.code, "not_found", "{}", e.message);
 }
 
-/// E5: pgss хранит запрос с константами типизированных литералов (`timestamptz '…'`, `interval '…'`) как
-/// `timestamptz $1 - interval $2`, и сервер такой текст не разбирает (SQLSTATE 42601): `invalid_sql` с текстом и
-/// позицией сервера и подсказкой передать `sql` со значениями — у `explain_query` и у `hypothetical_index`; у SQL модели
-/// с той же ошибкой подсказки нет.
+/// queryid запроса `sql` в pgss: запрос выполняется суперпользователем, id — из `EXPLAIN (VERBOSE)` того же запроса.
+async fn pgss_query_id(perf: &str, sql: &str) -> i64 {
+    let su = common::superuser(perf, "perf").await;
+    su.batch_execute(sql).await.unwrap();
+    let plan: Value = su
+        .query_one(&format!("EXPLAIN (VERBOSE, FORMAT JSON) {sql}"), &[])
+        .await
+        .unwrap()
+        .get(0);
+    plan[0]["Query Identifier"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("{plan}"))
+}
+
+/// Смоук P4b, G5: pgss хранит запрос с типизированными литералами (`timestamptz '…'`, `interval '…'`) как
+/// `timestamptz $1 - interval $2`, и раньше `explain_query` и `hypothetical_index` по queryId отвечали `invalid_sql`.
+/// Теперь шлюз приводит частые типы сам (`$1::timestamptz - $2::interval`), и план строится.
+#[tokio::test]
+async fn pgss_text_with_typed_literals_is_planned() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st, _m) = open_for_llm(&perf).await;
+    let qid = pgss_query_id(
+        &perf,
+        "SELECT count(*) FROM shop.orders o \
+         WHERE o.created_at >= timestamptz '2026-01-01 00:00:00+00' - interval '1 day'",
+    )
+    .await;
+    // Значения для $1 и $2: без них на PG < 16 раньше сработала бы проверка GENERIC_PLAN.
+    let params = json!(["2026-01-01 00:00:00+00", "1 day"]);
+    let a = ok(read_op(
+        &st,
+        explain(json!({
+            "connectionId": "it", "database": "perf", "queryId": qid.to_string(), "params": params
+        })),
+    )
+    .await);
+    let PgOutput::Explain(out) = &a.body else {
+        panic!("не план")
+    };
+    assert!(out.tables.iter().any(|t| t == "shop.orders"), "{out:?}");
+    let a = ok(read_op(
+        &st,
+        hypo(json!({
+            "connectionId": "it", "database": "perf", "queryId": qid.to_string(), "params": params,
+            "indexes": ["CREATE INDEX ON shop.orders (created_at)"]
+        })),
+    )
+    .await);
+    assert!(matches!(a.body, PgOutput::Hypo(_)));
+}
+
+/// E5: тип, которого шлюз не приводит (`point '(1,2)'` → `point $1`), — сервер текст не разбирает (SQLSTATE 42601):
+/// `invalid_sql` с текстом и позицией сервера и подсказкой передать `sql` с приведениями `$N::type` или значениями — у
+/// `explain_query` и у `hypothetical_index`; у SQL модели с той же ошибкой подсказки нет.
 #[tokio::test]
 async fn syntax_error_of_a_pgss_text_carries_the_hint() {
     let Some(perf) = common::perf_addr() else {
         return;
     };
     let (_dir, st, _m) = open_for_llm(&perf).await;
-    const PROBE: &str = "SELECT count(*) FROM shop.orders o \
-                         WHERE o.created_at >= timestamptz '2026-01-01 00:00:00+00' - interval '1 day'";
-    let su = common::superuser(&perf, "perf").await;
-    su.batch_execute(PROBE).await.unwrap();
-    let plan: Value = su
-        .query_one(&format!("EXPLAIN (VERBOSE, FORMAT JSON) {PROBE}"), &[])
-        .await
-        .unwrap()
-        .get(0);
-    let qid = plan[0]["Query Identifier"]
-        .as_i64()
-        .unwrap_or_else(|| panic!("{plan}"));
-    // Значения для $1 и $2: без них на PG < 16 раньше сработала бы проверка GENERIC_PLAN.
-    let params = json!(["2026-01-01 00:00:00+00", "1 day"]);
+    let qid = pgss_query_id(
+        &perf,
+        "SELECT count(*) FROM shop.orders o WHERE o.id > (point '(1,2)' <-> point '(3,4)')",
+    )
+    .await;
+    let params = json!(["(1,2)", "(3,4)"]);
     let hinted = |e: &glafira_mcp_core::error::ToolError| {
         assert_eq!(e.code, "invalid_sql", "{}", e.message);
         assert!(
@@ -477,7 +521,7 @@ async fn syntax_error_of_a_pgss_text_carries_the_hint() {
                 "). pg_stat_statements stores query {qid} in normalized form"
             )) && e
                 .message
-                .ends_with("Pass sql with values in place of such $N instead."),
+                .contains("written with $N::type casts (for example $1::date)"),
             "{}",
             e.message
         );
@@ -505,7 +549,7 @@ async fn syntax_error_of_a_pgss_text_carries_the_hint() {
         &st,
         explain(json!({
             "connectionId": "it", "database": "perf", "params": params,
-            "sql": "SELECT count(*) FROM shop.orders o WHERE o.created_at >= timestamptz $1 - interval $2"
+            "sql": "SELECT count(*) FROM shop.orders o WHERE o.id > (point $1 <-> point $2)"
         })),
     )
     .await
@@ -515,6 +559,74 @@ async fn syntax_error_of_a_pgss_text_carries_the_hint() {
         e.message.starts_with("syntax error") && !e.message.contains("normalized form"),
         "SQL модели — без подсказки: {}",
         e.message
+    );
+}
+
+/// Смоук P4b, G6: `get_settings` с `names` и с `changedOnly` в смоуке дали ответы одной длины (2910 байт) — совпадение:
+/// `names` выбирает ровно названные настройки (без учёта регистра, неизвестные имена пропускаются, `changedOnly` при них
+/// не действует), без `names` — только изменённые (источник не `default`, не `override` и не настройки соединения
+/// Glafira).
+#[tokio::test]
+async fn settings_by_names_and_changed_only() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st, _m) = open_for_llm(&perf).await;
+    let settings = |v: Value| PgRead::Settings(serde_json::from_value(v).unwrap());
+    let rows = |a: &PgAnswer| -> Vec<(String, String)> {
+        let PgOutput::Settings(list) = &a.body else {
+            panic!("не настройки")
+        };
+        let mut v: Vec<(String, String)> = list
+            .iter()
+            .map(|s| (s.name.to_lowercase(), s.source.clone()))
+            .collect();
+        v.sort();
+        v
+    };
+    let changed = rows(&ok(read_op(
+        &st,
+        settings(json!({"connectionId": "it", "changedOnly": true})),
+    )
+    .await));
+    assert!(!changed.is_empty());
+    assert!(
+        changed
+            .iter()
+            .all(|(_, src)| !["default", "override", "client", "session"].contains(&src.as_str())),
+        "{changed:?}"
+    );
+    assert!(
+        !changed.iter().any(|(n, _)| n == "autovacuum_naptime"),
+        "на стенде autovacuum_naptime — по умолчанию: {changed:?}"
+    );
+    for changed_only in [json!(true), json!(false), Value::Null] {
+        let named = rows(&ok(read_op(
+            &st,
+            settings(json!({
+                "connectionId": "it", "changedOnly": changed_only,
+                "names": ["work_mem", "TimeZone", " autovacuum_naptime", "no_such_setting"]
+            })),
+        )
+        .await));
+        let names: Vec<&str> = named.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            ["autovacuum_naptime", "timezone", "work_mem"],
+            "changedOnly {changed_only}"
+        );
+        assert_eq!(named[0].1, "default", "{named:?}");
+    }
+    let all = rows(&ok(read_op(
+        &st,
+        settings(json!({"connectionId": "it", "changedOnly": false})),
+    )
+    .await));
+    assert!(
+        all.len() > changed.len() + 100,
+        "{} / {}",
+        all.len(),
+        changed.len()
     );
 }
 
