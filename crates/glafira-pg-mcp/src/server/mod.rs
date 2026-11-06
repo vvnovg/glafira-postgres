@@ -16,7 +16,9 @@ use rmcp::{ErrorData, RoleServer, ServerHandler, tool_handler};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::model::{ObserveCtx, PgAnswer, PgBackend, PgObserve, PgRead, ProgressFn, Report};
+use crate::model::{
+    ObserveCtx, PgAnswer, PgBackend, PgObserve, PgRead, ProgressFn, Report, join_hints,
+};
 use crate::params::OBSERVE_GRACE_S;
 use crate::truncate::{self, FIT_LIMIT, TRUNCATED_HINT};
 
@@ -224,7 +226,7 @@ fn report_value(r: &Report) -> Result<Value, ToolError> {
     if truncated {
         v["truncated"] = Value::Bool(true);
         let hint = match r.hint.as_deref() {
-            Some(h) => format!("{h} {TRUNCATED_HINT}"),
+            Some(h) => join_hints(h, TRUNCATED_HINT),
             None => TRUNCATED_HINT.to_string(),
         };
         v["hint"] = Value::String(hint);

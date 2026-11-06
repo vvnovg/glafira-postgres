@@ -50,6 +50,17 @@ pub const QUERY_SORTS: [&str; 14] = [
     "cpuTime",
 ];
 
+/// Режим `get_top_queries` без `mode` (E1): `window`, если задан `windowS` (модель спрашивает «за последние 15 минут»),
+/// иначе `sinceReset`. Единственное место правила: его берут `TopQueriesParams::validate` и прямой вызов бэкенда
+/// (`mcp::read::top_request` приложения).
+pub fn default_top_mode(window_s: Option<u32>) -> &'static str {
+    if window_s.is_some() {
+        MODE_WINDOW
+    } else {
+        MODE_SINCE_RESET
+    }
+}
+
 fn in_range(
     v: Option<u32>,
     default: u32,
@@ -292,15 +303,10 @@ impl TopQueriesParams {
             &mut self.database,
             &mut self.search,
         ]);
-        // `windowS` без `mode` — окно (модель спрашивает «за последние 15 минут»), иначе по умолчанию `sinceReset`.
-        let mode = self.mode.take().unwrap_or_else(|| {
-            if self.window_s.is_some() {
-                MODE_WINDOW
-            } else {
-                MODE_SINCE_RESET
-            }
-            .to_string()
-        });
+        let mode = self
+            .mode
+            .take()
+            .unwrap_or_else(|| default_top_mode(self.window_s).to_string());
         if mode != MODE_SINCE_RESET && mode != MODE_WINDOW {
             return Err(ToolError::invalid_argument(format!(
                 "mode must be sinceReset or window, got {mode}"
@@ -663,6 +669,13 @@ mod tests {
             (h.member, h.database, h.sql, h.query_id.as_deref()),
             (None, None, None, Some("7"))
         );
+    }
+
+    /// Правило режима топа без `mode` — одно на крейт и приложение (`mcp::read::top_request`).
+    #[test]
+    fn default_top_mode_follows_the_window() {
+        assert_eq!(default_top_mode(Some(300)), MODE_WINDOW);
+        assert_eq!(default_top_mode(None), MODE_SINCE_RESET);
     }
 
     /// E2: ровно один из `sql` и `queryId` после обнуления пустых; сообщение называет случай.

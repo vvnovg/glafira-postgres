@@ -113,8 +113,9 @@ pub fn parse_count(sql: &str) -> Result<usize, String> {
 
 /// Текст гипотетического индекса без имени (P4a, E4): модели пишут `CREATE INDEX idx_x ON …`, а hypopg даёт индексу
 /// своё имя. Одно `CREATE INDEX [IF NOT EXISTS] имя ON …` без `UNIQUE` и `CONCURRENTLY` (по дереву разбора) → тот же
-/// текст без `[IF NOT EXISTS] имя`: вырезается по токенам `pg_query::scan` от конца `INDEX` до конца имени (имя — один
-/// токен перед `ON`, в кавычках или без; `IF NOT EXISTS` без имени PostgreSQL не принимает). Иначе `None` — текст
+/// текст без `[IF NOT EXISTS] имя`: по токенам `pg_query::scan` всё от конца `INDEX` до начала `ON` заменяется одним
+/// пробелом (имя — один токен перед `ON`, в кавычках или без, может стоять вплотную к `ON`: `"x"ON`; `IF NOT EXISTS` без
+/// имени PostgreSQL не принимает). Иначе `None` — текст
 /// проверяется как есть, и отказы `check` прежние: имя со схемой не разбирается, `UNIQUE`, `CONCURRENTLY`, комментарий
 /// между `INDEX` и `ON`, не `CREATE INDEX`. `check` имя по-прежнему отвергает: снимает его вызывающий (шлюз MCP).
 ///
@@ -144,8 +145,8 @@ pub fn without_index_name(ddl: &str) -> Option<String> {
         return None;
     }
     let from = usize::try_from(tokens[1].end).ok()?;
-    let to = usize::try_from(tokens[name].end).ok()?;
-    Some(format!("{}{}", ddl.get(..from)?, ddl.get(to..)?))
+    let to = usize::try_from(tokens[name + 1].start).ok()?;
+    Some(format!("{} {}", ddl.get(..from)?, ddl.get(to..)?))
 }
 
 /// Байтовое смещение `pg_query` (`location`; −1 — неизвестно) → номер символа с 1.
@@ -630,8 +631,13 @@ mod tests {
             ),
             (
                 "  CREATE INDEX\n  idx\n  ON t USING btree (a) WHERE a > 0",
-                "  CREATE INDEX\n  ON t USING btree (a) WHERE a > 0",
+                "  CREATE INDEX ON t USING btree (a) WHERE a > 0",
             ),
+            // Имя вплотную к ON: режется до начала ON, между INDEX и ON — один пробел.
+            ("CREATE INDEX \"x\"ON t (a)", "CREATE INDEX ON t (a)"),
+            // `$` в имени (без кавычек — не первым символом, в кавычках — любым) уходит вместе с именем.
+            ("CREATE INDEX idx$1 ON t (a)", "CREATE INDEX ON t (a)"),
+            ("CREATE INDEX \"$x\" ON t (a)", "CREATE INDEX ON t (a)"),
             ("CREATE INDEX if ON t (a)", "CREATE INDEX ON t (a)"),
             // Комментарий вне заголовка остаётся: его отвергает правило P3b (`validate_ddl`) приложения.
             (
@@ -652,6 +658,10 @@ mod tests {
             "CREATE INDEX CONCURRENTLY idx ON t (a)",
             "CREATE INDEX IF NOT EXISTS ON t (a)",
             "CREATE INDEX idx ON t (a); CREATE INDEX idx2 ON t (b)",
+            // Комментарий перед CREATE и в заголовке: имя не снимается, отказ — прежний.
+            "/* c */ CREATE INDEX idx ON t (a)",
+            "-- c\nCREATE INDEX idx ON t (a)",
+            "CREATE /* c */ INDEX idx ON t (a)",
             "CREATE INDEX /* c */ idx ON t (a)",
             "CREATE INDEX idx -- c\n ON t (a)",
             "SELECT 1",

@@ -9,15 +9,17 @@ use std::time::Duration;
 
 use futures_util::future::join_all;
 use glafira_mcp_core::error::ToolError;
+use glafira_pg_mcp::model::join_hints;
 use glafira_pg_mcp::model::{
     ActivityOut, ColumnStat, ConnectionInfo, ExplainOut, FindingOut, HealthSummary, HypoIndexOut,
     HypoOut, MemberInfo, ObserveCtx, PatroniInfo, PgAnswer, PgObserve, PgOutput, PgRead,
     PlanSummaryOut, Report, SettingOut, TableOut, TopologyInfo, UnavailableOut,
 };
 use glafira_pg_mcp::params::{
-    ACTIVITY_LIMIT_DEFAULT, ActivityParams, ExplainParams, HypoIndexParams, QueryDetailsParams,
-    RunDiagnosticParams, SQL_AND_QUERY_ID_BOTH, SQL_AND_QUERY_ID_NEITHER, SettingsParams,
-    TOP_LIMIT_DEFAULT, TOPOLOGY_EVENTS_MAX, TableDetailsParams, TopQueriesParams,
+    ACTIVITY_LIMIT_DEFAULT, ActivityParams, ExplainParams, HypoIndexParams, MODE_SINCE_RESET,
+    MODE_WINDOW, QueryDetailsParams, RunDiagnosticParams, SQL_AND_QUERY_ID_BOTH,
+    SQL_AND_QUERY_ID_NEITHER, SettingsParams, TOP_LIMIT_DEFAULT, TOPOLOGY_EVENTS_MAX,
+    TableDetailsParams, TopQueriesParams, default_top_mode,
 };
 use pg_advisor::findings::FindingTarget;
 use pg_advisor::plan::json::from_json;
@@ -698,15 +700,18 @@ pub(crate) fn parse_sort(s: Option<&str>) -> Result<QuerySort, ToolError> {
 
 /// Запрос инструмента `queries` по параметрам `get_top_queries`: предел отчёта — ближайший допустимый в P3 (50 или 100),
 /// ответ потом режется до `limit`; окно по умолчанию — 900 с, окно проверяется P3 (`diag::queries::validate`) до
-/// открытия подключения; без `mode` режим — окно, если задан `windowS` (как в `validate` крейта). Итог: параметры,
-/// `limit`, режим окна.
+/// открытия подключения; без `mode` (вызов не через шлюз — без `validate` крейта) режим — по правилу крейта
+/// `default_top_mode`. Итог: параметры, `limit`, режим окна.
 pub(crate) fn top_request(p: &TopQueriesParams) -> Result<(QueriesParams, usize, bool), ToolError> {
     let limit = p.limit.unwrap_or(TOP_LIMIT) as usize;
-    let window = match p.mode.as_deref() {
-        None => p.window_s.is_some(),
-        Some("sinceReset") => false,
-        Some("window") => true,
-        Some(m) => {
+    let window = match p
+        .mode
+        .as_deref()
+        .unwrap_or_else(|| default_top_mode(p.window_s))
+    {
+        MODE_SINCE_RESET => false,
+        MODE_WINDOW => true,
+        m => {
             return Err(invalid_argument(format!(
                 "Unknown mode {m}: use sinceReset or window"
             )));
@@ -799,10 +804,10 @@ fn top_answer(
     }
 }
 
-/// Подсказка `more` к уже имеющейся (через пробел): ни одна не теряется.
-fn add_hint(hint: &mut Option<String>, more: &str) {
+/// Подсказка `more` к уже имеющейся (`join_hints` крейта: граница предложения между ними): ни одна не теряется.
+pub(crate) fn add_hint(hint: &mut Option<String>, more: &str) {
     *hint = Some(match hint.take() {
-        Some(h) => format!("{h} {more}"),
+        Some(h) => join_hints(&h, more),
         None => more.to_string(),
     });
 }
@@ -835,7 +840,8 @@ async fn node_databases(
 
 /// Фильтр `database` у `get_top_queries` дал пустой отчёт (E3): модель могла подставить базу другого подключения и
 /// решить, что сервер простаивает. Базы нет на узле — `not_found` со списком баз (`database_missing`); есть — `None`,
-/// ответ пустой, как раньше. Сбой служебного запроса — тоже `None`: отчёт важнее проверки.
+/// ответ пустой, как раньше. Сбой служебного запроса — тоже `None` (с записью `debug` в журнал приложения): отчёт
+/// важнее проверки.
 async fn filter_database_missing(
     st: &AppState,
     id: &str,
@@ -843,7 +849,17 @@ async fn filter_database_missing(
     database: &str,
     connection_db: &str,
 ) -> Option<ToolError> {
-    let all = node_databases(st, id, member).await.ok()?;
+    let all = match node_databases(st, id, member).await {
+        Ok(all) => all,
+        Err(e) => {
+            tracing::debug!(
+                "get_top_queries: databases of {member} not read, the filter database is not checked: {}: {}",
+                e.code,
+                e.message
+            );
+            return None;
+        }
+    };
     database_missing(database, member, all, connection_db)
 }
 
@@ -2420,8 +2436,9 @@ mod tests {
             "{SINCE_RESET_WINDOW_HINT}"
         );
         assert!(r.data.get("coverageS").is_none_or(|c| c != 0), "{}", r.data);
-        let mut hint = Some("First.".to_string());
-        add_hint(&mut hint, "Second.");
+        // Подсказки без точки (как `NO_WINDOW_HINT`, `SINCE_RESET_WINDOW_HINT`): склейка ставит границу предложения.
+        let mut hint = Some("First".to_string());
+        add_hint(&mut hint, "Second");
         assert_eq!(hint.as_deref(), Some("First. Second."));
         let mut hint = None;
         add_hint(&mut hint, "Only.");
@@ -3043,6 +3060,19 @@ mod tests {
         );
         let e = one("CREATE INDEX s.idx ON t (a)").unwrap_err();
         assert!(e.message.starts_with("syntax error"), "{}", e.message);
+        // Правило P3b (`$`, комментарии) — к тексту без имени: `$` в имени вырезается вместе с ним.
+        assert_eq!(
+            one("CREATE INDEX idx$1 ON t (a)").ok().as_deref(),
+            Some("CREATE INDEX ON t (a)")
+        );
+        assert_eq!(
+            one("CREATE INDEX \"x\"ON t (a)").ok().as_deref(),
+            Some("CREATE INDEX ON t (a)")
+        );
+        assert_eq!(
+            one("/* c */ CREATE INDEX idx ON t (a)").unwrap_err().code,
+            "invalid_sql"
+        );
     }
 
     /// E5: синтаксическая ошибка текста pgss (`queryId`) — с подсказкой после текста и позиции; у SQL модели и у прочих

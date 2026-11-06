@@ -11,6 +11,21 @@ use serde_json::Value;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+/// Подсказка `more` после подсказки `first` (поле `hint` отчёта): у каждой части — точка в конце, если её нет, между
+/// ними — пробел, чтобы модель видела границу предложений. Тексты подсказок пишутся без точки; одна подсказка идёт как
+/// есть.
+pub fn join_hints(first: &str, more: &str) -> String {
+    fn sentence(s: &str) -> String {
+        let s = s.trim_end();
+        if s.ends_with(['.', '!', '?']) {
+            s.to_string()
+        } else {
+            format!("{s}.")
+        }
+    }
+    format!("{} {}", sentence(first), sentence(more))
+}
+
 use crate::params::{
     ActivityParams, ConnectionParams, ExplainParams, HypoIndexParams, OBSERVE_GRACE_S,
     ObserveActivityParams, ObserveQueriesParams, QueryDetailsParams, RunDiagnosticParams,
@@ -389,4 +404,17 @@ pub struct ObservedActivity {
     pub peak_sessions: u32,
     pub peak_lock_waits: u32,
     pub summary: Value,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Подсказки склеиваются границей предложения: у каждой части — точка в конце (если её не было), между ними — пробел.
+    #[test]
+    fn hints_are_joined_as_sentences() {
+        assert_eq!(join_hints("First", "Second"), "First. Second.");
+        assert_eq!(join_hints("First.", "Second?"), "First. Second?");
+        assert_eq!(join_hints("First. ", "Second"), "First. Second.");
+    }
 }

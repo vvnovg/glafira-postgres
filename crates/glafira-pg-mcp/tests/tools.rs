@@ -194,7 +194,7 @@ impl PgBackend for FakePg {
                     let r = match p.tool.as_str() {
                         "sessions" => report("sessions", sessions_data(3000)),
                         "hinted" => Report {
-                            hint: Some("Earlier hint.".into()),
+                            hint: Some("Earlier hint".into()),
                             ..report("sessions", sessions_data(3000))
                         },
                         "blob" => report("blob", json!({"kind": "blob", "text": "x".repeat(200_000)})),
@@ -1010,7 +1010,8 @@ async fn long_report_data_is_truncated_with_a_hint() {
     )
     .await);
     assert_eq!(hinted["truncated"], true);
-    assert_eq!(hinted["hint"], format!("Earlier hint. {TRUNCATED_HINT}"));
+    // Подсказка без точки: склейка сама ставит границу предложения.
+    assert_eq!(hinted["hint"], format!("Earlier hint. {TRUNCATED_HINT}."));
     assert_eq!(
         e.audit.tail(1)[0]["masked"],
         5,

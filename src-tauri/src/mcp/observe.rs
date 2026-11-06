@@ -26,7 +26,7 @@ use tokio::time::Instant;
 
 use super::access::{check_connection, ensure_open, err, masks, open_for_llm, tool_error};
 use super::mask::{MAX_QUERY_BYTES, cut_text, mask_text};
-use super::read::{TOP_LIMIT, mask_statements, member_or_leader, parse_sort, report_out};
+use super::read::{TOP_LIMIT, add_hint, mask_statements, member_or_leader, parse_sort, report_out};
 use crate::conn::run_blocking;
 use crate::diag::queries::{
     Detect, Observed, PgssInstalled, QueriesMode, QueriesParams, Snapshot, detect,
@@ -598,15 +598,14 @@ pub async fn observe_top_queries(
         .map_err(tool_error)?;
     let masked = mask_statements(access, &mut report, None, Some(limit));
     let mut out = report_out(report);
-    let hints: Vec<&str> = [
+    for hint in [
         around.cancelled.then_some(CANCELLED_HINT),
         around.hint.as_deref(),
     ]
     .into_iter()
     .flatten()
-    .collect();
-    if !hints.is_empty() {
-        out.hint = Some(hints.join(" "));
+    {
+        add_hint(&mut out.hint, hint);
     }
     Ok(PgAnswer {
         body: PgOutput::ObservedQueries(out),
