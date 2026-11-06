@@ -350,12 +350,14 @@ async fn lab_sessions_locks_and_horizon_are_read_with_masked_texts() {
         q.contains("shop.orders") && q.contains('$') && q.contains("/*…*/"),
         "{q}"
     );
+    // Текст исправления — у находки или один раз в `fixes` по её id (смоук P4b, дополнение к правке A).
     assert!(
-        sessions["findings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|f| f["title"].is_string() && f["fix"].is_string() && f.get("links").is_none()),
+        sessions["findings"].as_array().unwrap().iter().all(|f| {
+            let fix = f
+                .get("fix")
+                .or_else(|| sessions["fixes"].get(f["id"].as_str().unwrap()));
+            f["title"].is_string() && fix.is_some_and(Value::is_string) && f.get("links").is_none()
+        }),
         "{sessions}"
     );
     // Счётчик литералов дошёл от бэкенда до журнала: у держателя два, у жертвы один.
@@ -696,6 +698,12 @@ async fn matrix_settings_and_table_details_on_every_version() {
             stats.iter().all(|s| s.get("mostCommonVals").is_none()
                 && s.get("mostCommonFreqs").is_none()
                 && s.get("histogramBounds").is_none()),
+            "{addr}: {t}"
+        );
+        assert!(
+            t["hint"]
+                .as_str()
+                .is_some_and(|h| h.contains("mostCommonVals")),
             "{addr}: {t}"
         );
     }

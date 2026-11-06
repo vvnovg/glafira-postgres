@@ -14,6 +14,13 @@ use crate::params::{DEFAULT_WINDOW_S, WINDOWS_S};
 const MAX_ID_CHARS: usize = 128;
 const MAX_SYMPTOM_CHARS: usize = 1_000;
 const ANSWER_LANGUAGE: &str = "Answer in the language the user writes in.";
+/// Объём ответа (смоук P4b, M3): ответ сценария был очень длинным, а у локальной модели с контекстом 64k не хватило
+/// места.
+pub const ANSWER_BUDGET: &str = "Keep the answer short: start with a summary of up to about 10 lines (what is happening or the main problem, the likely cause, the next action) and give details only when the user asks for them.";
+/// Инструменты → экраны и кнопки Glafira (смоук P4b, M4): модель перечисляла пользователю имена инструментов как
+/// «действия в Glafira». Подписи в “…” — точные английские строки `src/locales/en.json` (дерево диагностики, карточка
+/// запроса, консоль EXPLAIN, панель предложений); тест `quoted_labels_are_the_english_ui_labels` сверяет их со словарём.
+pub const GLAFIRA_SCREENS: &str = "When you tell the user what to do in Glafira, name its screens and buttons, never tool names. Screens behind the tools: get_health_summary → “Pulse”; sessions and get_activity → “Sessions” (with the buttons “Cancel query…” and “Terminate session…”) and “Idle in transaction”; waits and observe_activity → “Wait profile”; locks → “Locks”; horizon → “xmin horizon”; replication → “Replicas”; slots → “Replication slots”; failover → “Failover readiness”; health → “Health matrix”; get_top_queries, observe_top_queries and get_query_details → “Queries” and the query card that opens from its row; explain_query and hypothetical_index → “EXPLAIN console”; the user's own actions are listed in “Actions journal”. To have a query optimized, the user clicks “Send to LLM assistant” in the EXPLAIN console or the query card; proposals appear in the “LLM proposals” panel of the EXPLAIN console with “Compare plans”.";
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -131,10 +138,11 @@ pub fn optimize_query_text(request_id: Option<&str>) -> String {
          rewrittenSql, indexes if any, rationale and expectedEffect. The rewritten query must return the same rows as \
          the original: Glafira does not check that.\n\
          5. In the chat, briefly explain each variant and ask the user to compare the plans in Glafira (the “LLM \
-         proposals” panel of the EXPLAIN console, “Compare plans”) and to accept or reject them. Later, list_proposals \
-         shows the decision and the comparison.\n\n\
+         proposals” panel of the EXPLAIN console, “Compare plans”) and to accept or reject them. list_proposals shows \
+         the decision and the comparison. The user's decisions and comparisons change at any time: when asked about \
+         them, call list_proposals again right before answering and never answer from an earlier result.\n\n\
          Glafira never runs the proposed SQL or creates the indexes, and nothing in the database can be changed through \
-         this gateway. {ANSWER_LANGUAGE}"
+         this gateway. {ANSWER_BUDGET} {ANSWER_LANGUAGE}"
     )
 }
 
@@ -146,16 +154,18 @@ pub fn triage_incident_text(connection_id: &str, symptom: Option<&str>) -> Strin
     format!(
         "Triage an incident on the PostgreSQL connection with connectionId \"{connection_id}\" in Glafira. {reported}\n\n\
          1. Call get_health_summary with connectionId \"{connection_id}\": the pulse and the findings of the quick \
-         checks.\n\
-         2. For the findings, call run_diagnostic with the matching tool: locks (lock waits and blockers), horizon (who \
-         holds the xmin horizon), replication (lag), slots (replication slots) and, for a Patroni cluster, failover and \
-         health. list_diagnostics lists the tools and their parameters.\n\
+         checks of sessions, locks, horizon, replication and slots. Prefer its findings to new calls.\n\
+         2. Only for the findings that need details, call run_diagnostic with the matching tool: locks (lock waits and \
+         blockers), horizon (who holds the xmin horizon), replication (lag), slots (replication slots) and, for a \
+         Patroni cluster, failover and health; at most 3 run_diagnostic calls before the summary. list_diagnostics \
+         lists the tools and their parameters.\n\
          3. If there is load right now, call observe_activity for 30 seconds to see the waits and the top queries \
          during the window.\n\
          4. Summarize: what is happening, the likely causes ranked by evidence, what to do in Glafira (which screen and \
-         which action, for example cancelling or terminating a session in Sessions) and what to check outside Glafira \
-         (server logs, OS metrics, the application). The tools cannot change anything: the user acts in Glafira.\n\n\
-         {ANSWER_LANGUAGE}"
+         which button) and what to check outside Glafira (server logs, OS metrics, the application). The tools cannot \
+         change anything: the user acts in Glafira.\n\n\
+         {GLAFIRA_SCREENS}\n\n\
+         {ANSWER_BUDGET} {ANSWER_LANGUAGE}"
     )
 }
 
@@ -169,15 +179,16 @@ pub fn analyze_top_queries_text(
     format!(
         "Analyze the top queries of the PostgreSQL connection with connectionId \"{connection_id}\" in Glafira ({node}) \
          over the last {window_s} seconds.\n\n\
-         1. Call get_top_queries with connectionId \"{connection_id}\"{member_arg}, mode \"window\" and windowS \
-         {window_s}. If the window has no coverage (the sampler buffer is empty), call observe_top_queries for 50 \
-         seconds, or get_top_queries with mode \"sinceReset\".\n\
-         2. For the 3–5 queries that matter most (total time, calls, rows, I/O), call get_query_details and \
-         explain_query with their queryId.\n\
+         1. Call get_top_queries with connectionId \"{connection_id}\"{member_arg}, mode \"window\", windowS \
+         {window_s} and limit 10. If the window has no coverage (the sampler buffer is empty), call \
+         observe_top_queries for 50 seconds with limit 10, or get_top_queries with mode \"sinceReset\" and limit 10.\n\
+         2. Pick at most 3 queries that matter most (total time, calls, rows, I/O). Look at them one query at a time, \
+         not in parallel: call get_query_details and explain_query with its queryId before the next query.\n\
          3. Give recommendations per query: indexes (check them with hypothetical_index), rewrites, settings. For the \
          candidates for a rewrite, call propose_query_rewrite with connectionId and queryId (database defaults to the \
          connection's database) so that the user can compare the plans in Glafira.\n\n\
-         {ANSWER_LANGUAGE}"
+         {GLAFIRA_SCREENS}\n\n\
+         {ANSWER_BUDGET} {ANSWER_LANGUAGE}"
     )
 }
 
@@ -197,7 +208,8 @@ pub fn review_config_text(connection_id: &str, member: Option<&str>) -> String {
          3. Give recommendations with their risks and say whether a restart is needed (context postmaster). For a \
          Patroni cluster, settings are changed with patronictl edit-config, not in postgresql.conf. Glafira does not \
          change the configuration.\n\n\
-         {ANSWER_LANGUAGE}"
+         {GLAFIRA_SCREENS}\n\n\
+         {ANSWER_BUDGET} {ANSWER_LANGUAGE}"
     )
 }
 
@@ -295,14 +307,114 @@ mod tests {
         );
     }
 
-    #[test]
-    fn every_text_asks_for_the_users_language() {
-        for t in [
+    fn all_texts() -> [String; 4] {
+        [
             optimize_query_text(None),
             triage_incident_text("c1", None),
             analyze_top_queries_text("c1", None, 900),
             review_config_text("c1", Some("pg-2")),
+        ]
+    }
+
+    /// Подписи в “…”.
+    fn quoted(text: &str) -> Vec<&str> {
+        text.split('“')
+            .skip(1)
+            .filter_map(|part| part.split_once('”').map(|(label, _)| label))
+            .collect()
+    }
+
+    fn strings(v: &serde_json::Value, out: &mut std::collections::HashSet<String>) {
+        match v {
+            serde_json::Value::String(s) => {
+                out.insert(s.clone());
+            }
+            serde_json::Value::Object(m) => m.values().for_each(|x| strings(x, out)),
+            serde_json::Value::Array(a) => a.iter().for_each(|x| strings(x, out)),
+            _ => {}
+        }
+    }
+
+    /// Смоук P4b, M4: каждая подпись интерфейса в “…” в текстах сценариев и в карте экранов — точная строка словаря
+    /// `src/locales/en.json` (словарь встроен в тест, как `mcp::texts` приложения встраивает его в бинарь). Подпись,
+    /// переименованная в интерфейсе, роняет этот тест.
+    #[test]
+    fn quoted_labels_are_the_english_ui_labels() {
+        let en: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../src/locales/en.json")).unwrap();
+        let mut labels = std::collections::HashSet::new();
+        strings(&en, &mut labels);
+        let map = quoted(GLAFIRA_SCREENS);
+        for label in [
+            "Pulse",
+            "Sessions",
+            "Idle in transaction",
+            "Wait profile",
+            "Locks",
+            "xmin horizon",
+            "Replicas",
+            "Replication slots",
+            "Queries",
+            "EXPLAIN console",
+            "Actions journal",
+            "Send to LLM assistant",
+            "LLM proposals",
+            "Compare plans",
         ] {
+            assert!(map.contains(&label), "{label} нет в карте экранов");
+        }
+        for text in all_texts()
+            .iter()
+            .map(String::as_str)
+            .chain([GLAFIRA_SCREENS])
+        {
+            for label in quoted(text) {
+                assert!(labels.contains(label), "“{label}” нет в en.json");
+            }
+        }
+    }
+
+    /// Смоук P4b, M1, M3, M4: короткий итог во всех четырёх сценариях, карта экранов — в трёх, где модель советует
+    /// действия; пределы вызовов у разбора топа и инцидента; свежий list_proposals перед ответом о решениях.
+    #[test]
+    fn scenarios_keep_the_answer_and_the_context_small() {
+        for t in all_texts() {
+            assert!(t.contains(ANSWER_BUDGET), "{t}");
+        }
+        let [optimize, triage, analyze, review] = all_texts();
+        assert!(!optimize.contains(GLAFIRA_SCREENS));
+        for t in [&triage, &analyze, &review] {
+            assert!(t.contains(GLAFIRA_SCREENS), "{t}");
+        }
+        for phrase in [
+            "change at any time",
+            "call list_proposals again right before answering",
+            "never answer from an earlier result",
+        ] {
+            assert!(optimize.contains(phrase), "{phrase}: {optimize}");
+        }
+        for phrase in [
+            "Prefer its findings",
+            "at most 3 run_diagnostic calls before the summary",
+        ] {
+            assert!(triage.contains(phrase), "{phrase}: {triage}");
+        }
+        for phrase in [
+            "windowS 900 and limit 10",
+            "at most 3 queries",
+            "one query at a time, not in parallel",
+        ] {
+            assert!(analyze.contains(phrase), "{phrase}: {analyze}");
+        }
+        assert!(
+            !analyze.contains("3–5"),
+            "деталей — не больше трёх запросов: {analyze}"
+        );
+    }
+
+    #[test]
+    fn every_text_asks_for_the_users_language() {
+        for t in all_texts() {
             assert!(t.ends_with(ANSWER_LANGUAGE), "{t}");
         }
         assert!(review_config_text("c1", Some("pg-2")).contains("member \"pg-2\""));

@@ -18,7 +18,7 @@ use rmcp::model::{
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, tool_handler};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::model::{
     ObserveCtx, PgAnswer, PgBackend, PgObserve, PgRead, ProgressFn, Report, join_hints,
@@ -40,13 +40,15 @@ Nothing in the database can be changed through this gateway: SQL runs only in re
 transactions (run_select reads data with one SELECT), plans are built without executing queries, \
 and propose_query_rewrite only stores a proposal in Glafira for the user to review. Cancelling or \
 terminating sessions, dropping replication slots, switchover, restarts and configuration changes \
-are done by the user in Glafira or elsewhere: describe what to do and where.
+are done by the user in Glafira or elsewhere: describe what to do and where, naming Glafira's \
+screens and buttons, never tool names.
 
 To investigate an incident, start with get_health_summary, then call run_diagnostic for the tools \
 behind its findings (list_diagnostics lists them). For load and slow queries use get_activity or \
 observe_activity, get_top_queries or observe_top_queries, get_query_details, explain_query and \
-hypothetical_index. Findings come with an English title and fix: take the facts from them, then \
-explain them, set priorities and find connections between them.
+hypothetical_index. Findings come with an English title and a fix; reports and get_health_summary \
+give the fix text of each finding id once, in fixes. Take the facts from them, then explain them, \
+set priorities and find connections between them.
 
 At the diagnostics level, literals in query texts and plans are replaced with $1, $2 and so on, and \
 comment bodies with /*…*/: do not try to restore or guess the masked values.
@@ -65,7 +67,8 @@ hypothetical_index, then call propose_query_rewrite with the requestId: one or s
 You can also propose a rewrite for a query you found yourself (connectionId and sql or queryId; \
 database defaults to the connection's database). Glafira does not run the rewritten SQL or create \
 indexes: the user compares the plans in Glafira and accepts or rejects the proposal; check the \
-decision with list_proposals. The rewritten query must return the same rows: Glafira does not \
+decision with list_proposals, and call it again right before answering about decisions: the user \
+can change them at any time. The rewritten query must return the same rows: Glafira does not \
 check that.
 
 run_select reads data and works only for connections with llmAccess \"data\"; nothing is masked \
@@ -252,10 +255,46 @@ fn answer(value: Value, masked: Option<u64>, rows: Option<u64>) -> CallOk {
     ok
 }
 
+/// Текст исправления находки — один раз на ответ (смоук P4b, дополнение к правке A: в топе запросов каждая строка
+/// повторяла длинный `fix` своего правила). `fix` уходит из находок `value["findings"]` в `value["fixes"]` (id находки →
+/// текст): первый текст правила записывается, такой же у следующих находок снимается; находка, чей текст отличается от
+/// записанного (в тексте есть параметры, например `noIdleTimeout`), свой `fix` сохраняет. Пустой текст (правила нет в
+/// словаре) не отдаётся. Заголовки (`title`, с параметрами строки) остаются у каждой находки.
+pub(crate) fn fixes_once(value: &mut Value) {
+    let Some(findings) = value.get_mut("findings").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let mut fixes = Map::new();
+    for f in findings.iter_mut().filter_map(Value::as_object_mut) {
+        let (Some(id), Some(fix)) = (
+            f.get("id").and_then(Value::as_str).map(str::to_string),
+            f.get("fix").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        let once = match fixes.get(&id) {
+            None if !fix.is_empty() => {
+                fixes.insert(id, Value::String(fix.to_string()));
+                true
+            }
+            None => true,
+            Some(known) => known.as_str() == Some(fix),
+        };
+        if once {
+            f.remove("fix");
+        }
+    }
+    if !fixes.is_empty() {
+        value["fixes"] = Value::Object(fixes);
+    }
+}
+
 /// Отчёт с усечением массивов `data` до 100 КБ (§10.1): `truncated: true` и `hint` (подсказка приложения, если она
-/// была, остаётся первой); не помещается — `response_too_large`.
+/// была, остаётся первой); не помещается — `response_too_large`. Тексты исправлений находок — один раз (`fixes_once`).
 fn report_value(r: &Report) -> Result<Value, ToolError> {
-    let (mut v, truncated) = truncate::fit(to_value(r)?, FIT_LIMIT).map_err(|()| {
+    let mut v = to_value(r)?;
+    fixes_once(&mut v);
+    let (mut v, truncated) = truncate::fit(v, FIT_LIMIT).map_err(|()| {
         ToolError::new(
             "response_too_large",
             "The report is larger than 100 KB even after truncation; narrow the request: member, filters, limit",

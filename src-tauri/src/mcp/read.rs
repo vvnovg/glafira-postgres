@@ -133,6 +133,9 @@ const ZERO_OMITTED_COUNTERS: [&str; 26] = [
 pub const MAX_HISTORY_POINTS: usize = 12;
 /// Профиль ожиданий без единого сэмпла и без тиков сэмплера в окне (смоук P4b, G1).
 const NO_WAIT_SAMPLES_HINT: &str = "The wait sampler collected no samples in this window (it runs while the wait profile or the sessions of this node are open in Glafira, or during observe_activity): call observe_activity for a live sample";
+/// `get_table_details` на уровне `diagnostics` (смоук P4b, M2): статистика значений не читается — модель не должна
+/// придумывать иную причину их отсутствия.
+pub const VALUE_STATS_HINT: &str = "Value statistics (mostCommonVals, mostCommonFreqs, histogramBounds) are returned only when the connection's LLM access is \"diagnostics and data\" (llmAccess \"data\")";
 
 /// Операция чтения.
 pub async fn read_op(st: &AppState, op: PgRead) -> Result<PgAnswer, ToolError> {
@@ -1201,12 +1204,21 @@ async fn table_details(st: &AppState, p: TableDetailsParams) -> Result<PgAnswer,
     )
     .await
     .map_err(tool_error)?;
-    Ok(answer(PgOutput::Table(table_out(details, stats)?)))
+    Ok(answer(PgOutput::Table(table_out(
+        details,
+        stats,
+        with_values,
+    )?)))
 }
 
 /// Таблица для модели — JSON-сериализация `TableDetails` (форма интерфейса) с партициями не длиннее `MAX_PARTITIONS`
-/// (`cut_partitions`, полное число — в `partitioning.partitionsTotal`) и статистика колонок в порядке таблицы.
-fn table_out(mut details: TableDetails, stats: Vec<ColumnStat>) -> Result<TableOut, ToolError> {
+/// (`cut_partitions`, полное число — в `partitioning.partitionsTotal`) и статистика колонок в порядке таблицы. Без
+/// значений (`with_values` ложно, уровень `diagnostics`) — подсказка `VALUE_STATS_HINT` (смоук P4b, M2).
+fn table_out(
+    mut details: TableDetails,
+    stats: Vec<ColumnStat>,
+    with_values: bool,
+) -> Result<TableOut, ToolError> {
     let total = cut_partitions(&mut details);
     let column_stats = order_like(stats, &details.columns);
     let mut table = serde_json::to_value(&details)
@@ -1217,6 +1229,7 @@ fn table_out(mut details: TableDetails, stats: Vec<ColumnStat>) -> Result<TableO
     Ok(TableOut {
         table,
         column_stats,
+        hint: (!with_values).then(|| VALUE_STATS_HINT.to_string()),
     })
 }
 
@@ -2733,7 +2746,7 @@ mod tests {
     /// `partitioning.partitionsTotal`; строка `-- partitions:` в DDL режется так же.
     #[test]
     fn table_partitions_are_cut_in_the_list_and_the_ddl() {
-        let out = table_out(partitioned(250), vec![]).unwrap();
+        let out = table_out(partitioned(250), vec![], true).unwrap();
         let p = &out.table["partitioning"];
         assert_eq!(p["partitions"].as_array().unwrap().len(), MAX_PARTITIONS);
         assert_eq!(p["partitions"][199]["name"], "events_0199");
@@ -2750,11 +2763,48 @@ mod tests {
         // До предела — как у интерфейса.
         let t = partitioned(MAX_PARTITIONS);
         let ddl = t.ddl.clone();
-        let out = table_out(t, vec![]).unwrap();
+        let out = table_out(t, vec![], true).unwrap();
         let p = &out.table["partitioning"];
         assert_eq!(p["partitions"].as_array().unwrap().len(), MAX_PARTITIONS);
         assert!(p.get("partitionsTotal").is_none());
         assert_eq!(out.table["ddl"], ddl.as_str());
+    }
+
+    /// Смоук P4b, M2: на уровне `diagnostics` статистика значений не читается, и ответ говорит почему (модель
+    /// придумывала причину, по которой PostgreSQL «не собирает» частые значения); на уровне `data` подсказки нет.
+    #[test]
+    fn table_answer_says_when_value_statistics_are_withheld() {
+        let stat = ColumnStat {
+            column: "status".into(),
+            null_frac: 0.0,
+            avg_width: 4,
+            n_distinct: 1.0,
+            correlation: Some(1.0),
+            most_common_vals: None,
+            most_common_freqs: None,
+            histogram_bounds: None,
+        };
+        let diagnostics = table_out(partitioned(1), vec![stat.clone()], false).unwrap();
+        assert_eq!(diagnostics.hint.as_deref(), Some(VALUE_STATS_HINT));
+        assert!(
+            VALUE_STATS_HINT.contains("mostCommonVals, mostCommonFreqs, histogramBounds")
+                && VALUE_STATS_HINT.contains("\"diagnostics and data\""),
+            "{VALUE_STATS_HINT}"
+        );
+        let data = table_out(
+            partitioned(1),
+            vec![ColumnStat {
+                most_common_vals: Some(json!(["new"])),
+                most_common_freqs: Some(json!([1.0])),
+                ..stat
+            }],
+            true,
+        )
+        .unwrap();
+        assert_eq!(data.hint, None);
+        let v = serde_json::to_value(&data).unwrap();
+        assert!(v.get("hint").is_none(), "{v}");
+        assert_eq!(v["columnStats"][0]["mostCommonVals"], json!(["new"]));
     }
 
     // Задача 12: EXPLAIN и гипотезы.

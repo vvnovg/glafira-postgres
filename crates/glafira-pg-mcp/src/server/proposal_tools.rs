@@ -78,7 +78,7 @@ impl PgServer {
     }
 
     #[tool(
-        description = "List your query rewrite proposals with the user's decision: status new, accepted or rejected (reason when the user gave one), and comparison: the result of “Compare plans” if the user ran it (costBefore, costAfter, indexesUsed, member, withoutHypopg). Filter by connectionId or requestId; newest first. Check it after proposing instead of asking the user in the chat.",
+        description = "List your query rewrite proposals with the user's decision: status new, accepted or rejected (reason when the user gave one), and comparison: the result of “Compare plans” if the user ran it (costBefore, costAfter, indexesUsed, member, withoutHypopg). Filter by connectionId or requestId; newest first. Check it after proposing instead of asking the user in the chat. The user's decisions and comparisons change at any time: call list_proposals again right before answering about them, never answer from an earlier result.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,

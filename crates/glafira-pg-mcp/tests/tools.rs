@@ -64,6 +64,15 @@ fn finding(id: &str) -> FindingOut {
     }
 }
 
+/// Находка с заданным текстом исправления (смоук P4b, дополнение: текст — один раз на ответ).
+fn finding_fixed(id: &str, fix: &str) -> FindingOut {
+    FindingOut {
+        id: id.into(),
+        fix: fix.into(),
+        ..finding(id)
+    }
+}
+
 fn report(tool: &str, data: Value) -> Report {
     Report {
         tool: tool.into(),
@@ -198,6 +207,16 @@ impl PgBackend for FakePg {
                             ..report("sessions", sessions_data(3000))
                         },
                         "blob" => report("blob", json!({"kind": "blob", "text": "x".repeat(200_000)})),
+                        "repeated" => Report {
+                            findings: vec![
+                                finding_fixed("query_temp", "Raise work_mem"),
+                                finding_fixed("query_temp", "Raise work_mem"),
+                                finding_fixed("noIdleTimeout", "Set it: ALTER ROLE a SET x = 1"),
+                                finding_fixed("noIdleTimeout", "Set it: ALTER ROLE b SET x = 1"),
+                                finding_fixed("newRule", ""),
+                            ],
+                            ..report("queries", json!({"kind": "queries", "rows": []}))
+                        },
                         other => report(other, json!({"kind": other, "rows": []})),
                     };
                     PgAnswer::new(PgOutput::Report(r)).with_masked(5)
@@ -227,6 +246,7 @@ impl PgBackend for FakePg {
                         most_common_freqs: None,
                         histogram_bounds: None,
                     }],
+                    hint: Some("Value statistics are returned only at the data level".into()),
                 })),
                 PgRead::Settings(_) => PgAnswer::new(PgOutput::Settings(vec![
                     SettingOut {
@@ -879,9 +899,10 @@ async fn responses_are_objects_in_camel_case() {
     assert_eq!(v["patroni"]["paused"], false);
     let v = ok(call(c, "get_health_summary", json!({"connectionId": "c1"})).await);
     assert_eq!(
-        v["findings"][0]["fix"],
+        v["fixes"]["horizon.oldXmin"],
         "Ask the owner to commit or cancel it in Glafira"
     );
+    assert!(v["findings"][0].get("fix").is_none(), "{v}");
     assert_eq!(v["unavailable"][0]["tool"], "slots");
     let v = ok(call(
         c,
@@ -907,6 +928,11 @@ async fn responses_are_objects_in_camel_case() {
         v["columnStats"][0].get("mostCommonVals").is_none(),
         "без значений на уровне diagnostics"
     );
+    // Смоук P4b, M2: подсказка приложения доходит до модели.
+    assert_eq!(
+        v["hint"],
+        "Value statistics are returned only at the data level"
+    );
     let v = ok(call(
         c,
         "get_query_details",
@@ -930,6 +956,67 @@ async fn responses_are_objects_in_camel_case() {
     );
     let v = ok(call(c, "get_activity", json!({"connectionId": "c1"})).await);
     assert_eq!(v["total"], 2);
+}
+
+/// Смоук P4b, дополнение к правке A: текст исправления каждого правила — один раз на ответ, в `fixes` по id находки;
+/// находка, чей текст отличается от записанного для её id (в тексте есть параметры), свой `fix` сохраняет; пустой
+/// текст (правило новее словаря) не отдаётся. Так — у отчётов (`run_diagnostic`, `get_top_queries`,
+/// `observe_top_queries`) и у `get_health_summary`.
+#[tokio::test]
+async fn fix_texts_are_sent_once_per_answer() {
+    let e = env().await;
+    let v = ok(call(
+        &e.client,
+        "run_diagnostic",
+        json!({"connectionId": "c1", "tool": "repeated"}),
+    )
+    .await);
+    assert_eq!(
+        v["fixes"],
+        json!({
+            "query_temp": "Raise work_mem",
+            "noIdleTimeout": "Set it: ALTER ROLE a SET x = 1"
+        }),
+        "{v}"
+    );
+    let fixes: Vec<Option<&str>> = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f.get("fix").and_then(Value::as_str))
+        .collect();
+    assert_eq!(
+        fixes,
+        [
+            None,
+            None,
+            None,
+            Some("Set it: ALTER ROLE b SET x = 1"),
+            None
+        ],
+        "{v}"
+    );
+    let titles = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["title"].is_string())
+        .count();
+    assert_eq!(titles, 5, "заголовки остаются у каждой находки");
+    let top = ok(call(&e.client, "get_top_queries", json!({"connectionId": "c1"})).await);
+    assert_eq!(
+        top["fixes"]["sessions.longTransaction"],
+        "Ask the owner to commit or cancel it in Glafira"
+    );
+    assert!(top["findings"][0].get("fix").is_none(), "{top}");
+    let observed = ok(call(
+        &e.client,
+        "observe_top_queries",
+        json!({"connectionId": "c1", "durationSeconds": 10}),
+    )
+    .await);
+    assert!(observed["fixes"].is_object(), "{observed}");
+    assert!(observed["findings"][0].get("fix").is_none(), "{observed}");
 }
 
 // ---- Усечение ----

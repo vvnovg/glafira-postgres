@@ -1,4 +1,4 @@
-//! Размеры ответов модели (смоук P4b, G1–G4) на pg-perf (`GPG_IT_PERF`): `get_top_queries` (10 строк, окно 900 с и с
+//! Размеры ответов модели (смоук P4b, G1–G4 и тексты находок) на pg-perf (`GPG_IT_PERF`): `get_top_queries` (10 строк, окно 900 с и с
 //! момента сброса) и `get_query_details` первой строки окна — сколько байт получает клиент MCP (текст и
 //! `structuredContent`). Только печать, без проверок размеров: тест помечен `#[ignore]`, запуск —
 //! `cargo test --test it_mcp_sizes -- --ignored --nocapture --test-threads=1`. Окно берётся из буфера сэмплера pgss:
@@ -125,6 +125,28 @@ async fn perf_answer_sizes() {
         println!(
             "SIZE {name}: text {t} B, structuredContent {s} B, to the client {} B",
             t + s
+        );
+    }
+    // Находки и тексты исправлений (смоук P4b, дополнение к правке A: текст правила — один раз в `fixes`).
+    for (name, r) in [("windowS 900", &window), ("sinceReset", &since)] {
+        let v: Value = serde_json::from_str(&text(r)).unwrap();
+        let part = |k: &str| v.get(k).map_or(0, |x| x.to_string().len());
+        // Те же находки с текстом у каждой — как до дополнения к правке A.
+        let mut inline = v["findings"].clone();
+        for f in inline.as_array_mut().into_iter().flatten() {
+            if f.get("fix").is_none()
+                && let Some(fix) = v["fixes"].get(f["id"].as_str().unwrap_or_default())
+            {
+                f["fix"] = fix.clone();
+            }
+        }
+        println!(
+            "SIZE get_top_queries {name}: findings {} B ({} items) + fixes {} B; with the fix in every finding {} B; data.rows {} B",
+            part("findings"),
+            v["findings"].as_array().map_or(0, Vec::len),
+            part("fixes"),
+            inline.to_string().len(),
+            v["data"]["rows"].to_string().len()
         );
     }
     let rows = top["data"]["rows"].as_array().map_or(0, Vec::len);

@@ -9,7 +9,7 @@ use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, tool, tool_router};
 use serde_json::json;
 
-use super::{PgServer, answer, args, report_value, to_value, unexpected};
+use super::{PgServer, answer, args, fixes_once, report_value, to_value, unexpected};
 use crate::model::{PgObserve, PgOutput, PgRead};
 use crate::params::{
     ActivityParams, ConnectionParams, ExplainParams, HypoIndexParams, OBSERVE_DEFAULT_S,
@@ -89,7 +89,7 @@ impl PgServer {
     }
 
     #[tool(
-        description = "Quick health summary of a connection: the pulse (connections, transactions, WAL, replication, waits) and the findings of the fast diagnostics (sessions, locks, horizon, replication, slots; for Patroni also failover and health) ordered by severity. Diagnostics that failed or did not finish within 20 seconds are listed in unavailable. Start an incident investigation here.",
+        description = "Quick health summary of a connection: the pulse (connections, transactions, WAL, replication, waits) and the findings of the fast diagnostics (sessions, locks, horizon, replication, slots; for Patroni also failover and health) ordered by severity, each with an English title; the fix text of each finding id is given once in fixes (a finding keeps its own fix only when it differs). Diagnostics that failed or did not finish within 20 seconds are listed in unavailable. Start an incident investigation here.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -113,7 +113,9 @@ impl PgServer {
             .call(&ctx, meta, async {
                 let a = self.read_db(PgRead::HealthSummary(p.clone())).await?;
                 let h = expect!(a.body, HealthSummary)?;
-                Ok(answer(to_value(&h)?, a.masked, a.rows))
+                let mut v = to_value(&h)?;
+                fixes_once(&mut v);
+                Ok(answer(v, a.masked, a.rows))
             })
             .await)
     }
@@ -148,7 +150,7 @@ impl PgServer {
     }
 
     #[tool(
-        description = "Run one Glafira diagnostic tool (ids from list_diagnostics) on a member or on the whole cluster and return its report: the tool data, findings with an English title and fix, and the parts that are unavailable with the reason. Without member the tool follows the leader (primary); cluster tools ignore member. windowS (300, 900 or 3600) applies to waits; waits omits intervals without samples, and a window without any samples has no intervals and a hint. Rows of the queries tool have the form of get_top_queries rows. A report over 100 KB is truncated: truncated is true and hint says how to narrow it.",
+        description = "Run one Glafira diagnostic tool (ids from list_diagnostics) on a member or on the whole cluster and return its report: the tool data, findings with an English title, the fix text of each finding id once in fixes (a finding keeps its own fix only when it differs), and the parts that are unavailable with the reason. Without member the tool follows the leader (primary); cluster tools ignore member. windowS (300, 900 or 3600) applies to waits; waits omits intervals without samples, and a window without any samples has no intervals and a hint. Rows of the queries tool have the form of get_top_queries rows. A report over 100 KB is truncated: truncated is true and hint says how to narrow it.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -242,7 +244,7 @@ impl PgServer {
     }
 
     #[tool(
-        description = "Top queries from pg_stat_statements on a member. mode sinceReset (the default without windowS) gives totals since the last statistics reset; mode window (the default when windowS is given) gives the last windowS seconds (300, 900 or 3600, default 900) from Glafira's buffer, which fills while the Queries tab or a query card is open in Glafira; without the buffer the coverage is 0, then use observe_top_queries or sinceReset. sort: totalTime (default), meanTime, maxTime, stddevTime, calls, rowsPerCall, sharedRead, hitRatio, tempWritten, walBytes, ioTime, planTime, jitTime or cpuTime. limit 1..=100, default 10; filters database (a database that does not exist on the member gives not_found with the list of databases) and search (a case-insensitive substring of the query text). At the diagnostics access level search matches the masked text ($N in place of literals) within the top 200 queries by the chosen sort, so an empty result may mean the query is outside that window. In each row counters that are 0 are omitted (calls, totalExecMs, meanExecMs and rows are always present), own is present only when true (Glafira's own query), and the query text is cut to the first 500 characters with textTruncated true (get_query_details gives the full text).",
+        description = "Top queries from pg_stat_statements on a member. mode sinceReset (the default without windowS) gives totals since the last statistics reset; mode window (the default when windowS is given) gives the last windowS seconds (300, 900 or 3600, default 900) from Glafira's buffer, which fills while the Queries tab or a query card is open in Glafira; without the buffer the coverage is 0, then use observe_top_queries or sinceReset. sort: totalTime (default), meanTime, maxTime, stddevTime, calls, rowsPerCall, sharedRead, hitRatio, tempWritten, walBytes, ioTime, planTime, jitTime or cpuTime. limit 1..=100, default 10; filters database (a database that does not exist on the member gives not_found with the list of databases) and search (a case-insensitive substring of the query text). At the diagnostics access level search matches the masked text ($N in place of literals) within the top 200 queries by the chosen sort, so an empty result may mean the query is outside that window. In each row counters that are 0 are omitted (calls, totalExecMs, meanExecMs and rows are always present), own is present only when true (Glafira's own query), and the query text is cut to the first 500 characters with textTruncated true (get_query_details gives the full text). Findings of the rows have an English title; the fix text of each finding id is given once in fixes.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -338,7 +340,7 @@ impl PgServer {
     }
 
     #[tool(
-        description = "Table details: columns, indexes, constraints, statistics, partitions (up to 200, also in the DDL comment; partitioning.partitionsTotal is the full count when there are more), triggers and DDL, plus pg_stats per column in columnStats (null fraction, average width, distinct values, correlation; at the data access level also most common values and histogram bounds).",
+        description = "Table details: columns, indexes, constraints, statistics, partitions (up to 200, also in the DDL comment; partitioning.partitionsTotal is the full count when there are more), triggers and DDL, plus pg_stats per column in columnStats (null fraction, average width, distinct values, correlation). Value statistics (mostCommonVals, mostCommonFreqs, histogramBounds) are returned only when the connection's llmAccess is \"data\" (“Diagnostics and data” in Glafira); at the diagnostics level hint says that they are withheld.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,

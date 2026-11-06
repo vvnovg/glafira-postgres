@@ -391,6 +391,10 @@ pub struct ColumnStat {
 pub struct TableOut {
     pub table: Value,
     pub column_stats: Vec<ColumnStat>,
+    /// Подсказка модели: на уровне `diagnostics` — что статистика значений отдаётся только на уровне `data` (смоук
+    /// P4b, M2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

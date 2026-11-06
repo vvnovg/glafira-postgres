@@ -301,6 +301,53 @@ async fn descriptions_say_what_compact_answers_omit() {
     }
 }
 
+/// Смоук P4b, M1, M2 и дополнение к правке A: свежий `list_proposals` перед ответом о решениях пользователя, статистика
+/// значений — только на уровне `data` (и подсказка об этом), текст исправления находок — один раз в `fixes`; экраны
+/// Glafira вместо имён инструментов (M4).
+#[tokio::test]
+async fn descriptions_and_instructions_carry_the_smoke_texts() {
+    let c = client(Arc::new(Fake::new())).await;
+    let tools = c.list_all_tools().await.unwrap();
+    let description = |name: &str| {
+        tools
+            .iter()
+            .find(|t| t.name == name)
+            .and_then(|t| t.description.as_deref())
+            .unwrap()
+            .to_string()
+    };
+    let proposals = description("list_proposals");
+    for phrase in [
+        "change at any time",
+        "call list_proposals again right before answering",
+        "never answer from an earlier result",
+    ] {
+        assert!(proposals.contains(phrase), "{phrase}: {proposals}");
+    }
+    let table = description("get_table_details");
+    for phrase in [
+        "mostCommonVals, mostCommonFreqs, histogramBounds",
+        "only when the connection's llmAccess is \"data\"",
+        "hint says that they are withheld",
+    ] {
+        assert!(table.contains(phrase), "{phrase}: {table}");
+    }
+    for name in ["run_diagnostic", "get_top_queries", "get_health_summary"] {
+        let d = description(name);
+        assert!(
+            d.contains("the fix text of each finding id") && d.contains("once in fixes"),
+            "{name}: {d}"
+        );
+    }
+    for phrase in [
+        "call it again right before answering about decisions",
+        "give the fix text of each finding id once, in fixes",
+        "naming Glafira's screens and buttons, never tool names",
+    ] {
+        assert!(INSTRUCTIONS.contains(phrase), "{phrase}");
+    }
+}
+
 /// Абзац P4b в `instructions` (§5.4): сценарий оптимизации, кнопка «Send to LLM assistant» (решение владельца Q4),
 /// Glafira не выполняет предложенный SQL; база по-прежнему не меняется, предложение пишется в Glafira.
 #[tokio::test]

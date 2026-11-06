@@ -650,6 +650,13 @@ async fn data_level_shows_literals_and_pg_stats_values() {
         status.get("mostCommonVals").is_none_or(Value::is_null),
         "{status}"
     );
+    // Смоук P4b, M2: ответ говорит, почему значений нет.
+    assert!(
+        v["hint"]
+            .as_str()
+            .is_some_and(|h| h.contains("\"diagnostics and data\"")),
+        "{v}"
+    );
     set_access(&st, "it", LlmAccess::Data);
     let v = gw.ok("get_table_details", table).await;
     let status = column(&v, "status");
@@ -657,5 +664,6 @@ async fn data_level_shows_literals_and_pg_stats_values() {
         status["mostCommonVals"].to_string().contains("new"),
         "{status}"
     );
+    assert!(v.get("hint").is_none(), "{v}");
     busy.await.unwrap().unwrap();
 }
