@@ -2216,8 +2216,8 @@
       "mcpEnable": "Glafira listens on a local socket (a named pipe on Windows) available only to your user. A client runs <code>glafira-pg mcp</code>, which connects to it. Off by default."
     },
     "llmAssist": {
-      "ask": "Creates an optimization request: an assistant with MCP fetches it itself, can check plans and indexes, and returns proposals to the “LLM proposals” panel. Sent unmasked, even at Diagnostics.",
-      "copy": "Copies the whole snapshot as text (query, statistics, plan, DDL) for any chat; no MCP needed. The model's answer does not come back to Glafira.",
+      "ask": "Creates a request an MCP assistant fetches with the snapshot (query, statistics, plan, DDL); it can check plans and indexes and returns proposals to “LLM proposals”. Not masked, even at Diagnostics.",
+      "copy": "Copies the whole snapshot as text (query, statistics, plan, DDL) for any chat; no MCP needed. The model's answer does not come back to Glafira. The copy is not masked: check literals before pasting.",
       "askServer": "The MCP server is off: turn it on in Settings → LLM assistants (MCP) and connect the assistant.",
       "askOtherInstance": "The MCP server runs in another Glafira window: send the request from that window.",
       "askError": "The MCP server failed to start: see Settings → LLM assistants (MCP).",

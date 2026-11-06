@@ -265,6 +265,49 @@ describe("ProposalsPanel", () => {
     warn.mockRestore();
   });
 
+  it("#3: фокус после ответа приходит на шапку, где статус уже новый, — не дожидаясь перечитывания списка", async () => {
+    const p = llmProposal({ id: "p1" });
+    vi.mocked(api.listLlmProposals).mockResolvedValue([p]);
+    vi.mocked(api.answerLlmProposal).mockImplementation(async (_id, status, reason) => ({ ...p, status, reason }));
+    const user = userEvent.setup();
+    renderWithClient(panel());
+    const accept = await screen.findByRole("button", { name: "Принять" });
+    // Что видит скринридер в момент переноса фокуса: текст элемента, получившего фокус.
+    const atFocus: string[] = [];
+    const record = (e: FocusEvent) => atFocus.push((e.target as HTMLElement).textContent ?? "");
+    document.addEventListener("focusin", record);
+    // Перечитывание списка после ответа висит: шапка не может взять новый статус из списка.
+    let reread!: (v: unknown) => void;
+    vi.mocked(api.listLlmProposals).mockReturnValueOnce(new Promise((r) => (reread = r)) as never);
+    await user.click(accept);
+    await waitFor(() => expect(document.activeElement).toHaveClass("llm-proposal-meta"));
+    expect(atFocus[atFocus.length - 1]).toMatch(/^Принято\s*От qwen-code/);
+    expect(screen.queryByRole("button", { name: "Принять" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Отклонить" })).toBeInTheDocument();
+    // Список ещё старый: пункт показывает прежний статус, пока перечитывание не пришло.
+    const item = within(screen.getByRole("list", { name: "Список предложений" })).getByRole("button");
+    expect(item).toHaveTextContent(/^Новое/);
+    reread([{ ...p, status: "accepted" }]);
+    await waitFor(() => expect(item).toHaveTextContent(/^Принято/));
+    expect(within(cardHead()).getByText("Принято")).toHaveClass("llm-status-accepted");
+
+    // Отклонение с причиной: в момент фокуса — «Отклонено» и причина, хотя список ещё «Принято».
+    await user.click(screen.getByRole("button", { name: "Отклонить" }));
+    await user.type(screen.getByRole("textbox", { name: "Причина (её увидит модель)" }), "Нужны те же строки");
+    vi.mocked(api.listLlmProposals).mockReturnValueOnce(new Promise((r) => (reread = r)) as never);
+    atFocus.length = 0;
+    await user.click(screen.getByRole("button", { name: "Отклонить предложение" }));
+    await waitFor(() => expect(document.activeElement).toHaveClass("llm-proposal-meta"));
+    expect(atFocus[atFocus.length - 1]).toMatch(/^Отклонено\s*От qwen-code/);
+    expect(within(cardHead()).getByText("Причина: Нужны те же строки")).toBeInTheDocument();
+    expect(item).toHaveTextContent(/^Принято/);
+    reread([{ ...p, status: "rejected", reason: "Нужны те же строки" }]);
+    await waitFor(() => expect(item).toHaveTextContent(/^Отклонено/));
+    expect(within(cardHead()).getByText("Отклонено")).toHaveClass("llm-status-rejected");
+    expect(screen.getByRole("button", { name: "Принять" })).toBeInTheDocument();
+    document.removeEventListener("focusin", record);
+  });
+
   it("I1: «Сравнить планы» при открытой причине отклонения не закрывает форму, не стирает набранное и не роняет фокус", async () => {
     const p = llmProposal({ id: "p1" });
     const comparison: ProposalComparison = { costBefore: 120, costAfter: 8.5, indexesUsed: [], member: "pg-1", atMs: 1_700_000_000_000, planBefore: planTree(), planAfter: planTree(), recommendationsBefore: [], recommendationsAfter: [], withoutHypopg: false };

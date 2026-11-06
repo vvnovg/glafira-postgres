@@ -57,10 +57,11 @@ export function ProposalCompare({ comparison: c }: { comparison: ProposalCompari
     <section className="llm-compare" aria-label={t("llmAssist.compare.title")}>
       <h4>{t("llmAssist.compare.title")}</h4>
       <p>
-        {t("llmAssist.compare.cost", { before: cost(c.costBefore), after: cost(c.costAfter) })}
+        {/* Пробелы — вне скрытой точки: для скринридера и брайля «стала …» и «узел …» не сливаются в одно слово. */}
+        {t("llmAssist.compare.cost", { before: cost(c.costBefore), after: cost(c.costAfter) })}{" "}
         <span className="muted" aria-hidden="true">
-          {" · "}
-        </span>
+          ·
+        </span>{" "}
         <span className="muted">{t("llmAssist.compare.on", { member: c.member, time: formatTime(c.atMs) })}</span>
       </p>
       {c.withoutHypopg && (

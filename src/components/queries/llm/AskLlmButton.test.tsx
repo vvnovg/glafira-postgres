@@ -100,6 +100,8 @@ describe("AskLlmButton", () => {
     // Z5: в отличие от «Скопировать для LLM» — запрос, который ассистент с MCP забирает сам и отвечает в панель.
     expect(screen.getByRole("tooltip")).toHaveTextContent(/ассистент с MCP заберёт его сам/);
     expect(screen.getByRole("tooltip")).toHaveTextContent(/«Предложения LLM»/);
+    // #5: что именно уходит со снимком.
+    expect(screen.getByRole("tooltip")).toHaveTextContent("(текст запроса, статистика, план, DDL)");
   });
 
   it("читает только запросы подключения, предложения не запрашивает", async () => {

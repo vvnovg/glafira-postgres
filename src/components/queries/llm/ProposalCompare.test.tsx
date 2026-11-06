@@ -59,6 +59,16 @@ describe("ProposalCompare", () => {
     expect(within(block).getByRole("region", { name: "Предложенный план" })).toHaveTextContent("стоимость 8,50");
   });
 
+  it("#4: точка-разделитель скрыта от скринридера, а пробелы вокруг неё — нет: «стала …» и «узел …» не сливаются", () => {
+    render(<ProposalCompare comparison={comparison({ costBefore: 8908.9, costAfter: 1905.98 })} />);
+    const line = screen.getByText(/^Стоимость: /).closest("p")!;
+    // Текст строки так, как его получает скринридер: без узлов aria-hidden.
+    const spoken = line.cloneNode(true) as HTMLElement;
+    spoken.querySelectorAll('[aria-hidden="true"]').forEach((hidden) => hidden.remove());
+    expect(spoken.textContent).toMatch(/стала 1\u00a0905,98\s+узел pg-1, /);
+    expect(spoken.textContent).not.toContain("·");
+  });
+
   it("без hypopg — пометка, индекс не использован", () => {
     render(<ProposalCompare comparison={comparison({ withoutHypopg: true, indexesUsed: [{ ddl: DDL, used: false }] })} />);
     expect(screen.getByText("В этой базе нет hypopg: предложенный запрос спланирован без своих индексов")).toBeInTheDocument();

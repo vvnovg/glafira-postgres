@@ -383,10 +383,24 @@ describe("QueryTab", () => {
     renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
     await user.click(await screen.findByRole("button", { name: "Подсказка: Скопировать для LLM" }));
     expect(await screen.findByRole("tooltip")).toHaveTextContent(
-      "Копирует весь снимок текстом (запрос, статистику, план, DDL) — для любого чата, MCP не нужен. Ответ модели в Glafira не вернётся.",
+      "Копирует весь снимок текстом (запрос, статистику, план, DDL) — для любого чата, MCP не нужен. Ответ модели в Glafira не вернётся. Копия не маскируется: проверьте литералы перед отправкой.",
     );
     await user.click(screen.getByRole("button", { name: "Подсказка: Передать LLM-ассистенту" }));
-    await waitFor(() => expect(screen.getByRole("tooltip")).toHaveTextContent(/ассистент с MCP заберёт его сам/));
+    await waitFor(() => expect(screen.getByRole("tooltip")).toHaveTextContent(/ассистент с MCP заберёт его сам вместе со снимком \(текст запроса, статистика, план, DDL\)/));
+  });
+
+  it("#5/#6: обе подсказки LLM в en и ru называют содержимое снимка и предупреждают, что он не маскируется", () => {
+    const { ask: ruAsk, copy: ruCopy } = ru.hints.llmAssist;
+    const { ask: enAsk, copy: enCopy } = en.hints.llmAssist;
+    expect(ruAsk).toContain("(текст запроса, статистика, план, DDL)");
+    expect(ruAsk).toContain("без маскирования");
+    expect(enAsk).toContain("(query, statistics, plan, DDL)");
+    expect(enAsk).toContain("Not masked, even at Diagnostics.");
+    // «Скопировать для LLM» — не безопасный вариант: копия тоже без маскирования, литералы надо проверить.
+    expect(ruCopy).toContain("Копия не маскируется: проверьте литералы перед отправкой.");
+    expect(enCopy).toContain("The copy is not masked: check literals before pasting.");
+    // Предел подсказки en (pnpm i18n:check) — 200 символов.
+    for (const text of [enAsk, enCopy]) expect(text.length).toBeLessThanOrEqual(200);
   });
 
   it("Z8: «Предложения LLM: N — открыть в консоли» — в ряду под текстом сразу после «Передать LLM-ассистенту», не в шапке", async () => {

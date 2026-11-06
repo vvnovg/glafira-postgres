@@ -1,5 +1,6 @@
 import type { TFunction } from "i18next";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../../api/client";
 import type { AppError, LlmProposal, ProposalComparison, ProposalStatus } from "../../../api/types";
@@ -189,7 +190,8 @@ function DiffTable({ rows }: { rows: DiffRow[] }) {
  * открывается сразу под шапкой. Дальше — исходный и предложенный текст рядом с подсветкой изменённых строк, постоянная
  * пометка о неравенстве результатов, разделы «Обоснование», «Ожидаемый эффект» (как текст, разметку модели не применяем),
  * «Индексы» и итог сравнения отдельным блоком. Итог сравнения из ответа команды виден сразу, не дожидаясь перечитывания
- * списка. Ответ можно изменить (принято ↔ отклонено): у отвеченного — противоположное действие.
+ * списка. Ответ можно изменить (принято ↔ отклонено): у отвеченного — противоположное действие. Статус, причина и кнопки
+ * ответа в шапке берутся из ответа команды, пока список его не перечитал: фокус после ответа приходит на новый статус.
  */
 function ProposalView({ proposal: p, connectionId, onChanged }: { proposal: LlmProposal; connectionId: string; onChanged: () => void }) {
   const { t } = useTranslation();
@@ -209,6 +211,12 @@ function ProposalView({ proposal: p, connectionId, onChanged }: { proposal: LlmP
   // После ответа фокус — на шапке: читаются новый статус и кто прислал.
   const headRef = useRef<HTMLDivElement>(null);
   const comparison = compared ?? p.comparison ?? null;
+  // Ответ, который список ещё не перечитал (перечитывание асинхронно): шапка показывает его сразу, а не прежний статус.
+  const [answer, setAnswer] = useState<LlmProposal | null>(null);
+  const { status, reason: rejectReason } = answer ?? p;
+  useEffect(() => {
+    if (answer && answer.status === p.status && (answer.reason ?? null) === (p.reason ?? null)) setAnswer(null);
+  }, [answer, p.status, p.reason]);
 
   const perform = async (call: () => Promise<LlmProposal>, answered = false) => {
     if (busy) return;
@@ -217,10 +225,16 @@ function ProposalView({ proposal: p, connectionId, onChanged }: { proposal: LlmP
     try {
       const next = await call();
       if (next.comparison) setCompared(next.comparison);
-      // Форму причины закрывает только ответ: сравнение при открытой форме её не трогает.
-      if (answered) setRejecting(false);
+      if (answered) {
+        // Форму причины закрывает только ответ: сравнение при открытой форме её не трогает. Шапка с новым статусом
+        // отрисована до переноса фокуса (flushSync), поэтому скринридер читает «Принято» / «Отклонено», а не прежний статус.
+        flushSync(() => {
+          setAnswer(next);
+          setRejecting(false);
+        });
+        headRef.current?.focus();
+      }
       onChanged();
-      if (answered) headRef.current?.focus();
     } catch (e) {
       setError(toAppError(e));
     } finally {
@@ -236,22 +250,22 @@ function ProposalView({ proposal: p, connectionId, onChanged }: { proposal: LlmP
       <div className="llm-proposal-head">
         <div className="llm-proposal-title">
           <div className="llm-proposal-meta" tabIndex={-1} ref={headRef}>
-            <StatusChip status={p.status} /> <span className="muted">{t("llmAssist.panel.from", { client: clientName(p, t), time: when(p.createdAtMs) })}</span>
+            <StatusChip status={status} /> <span className="muted">{t("llmAssist.panel.from", { client: clientName(p, t), time: when(p.createdAtMs) })}</span>
           </div>
           <div className="llm-proposal-answer">
-            {p.status !== "accepted" && (
+            {status !== "accepted" && (
               <button type="button" className="primary" aria-disabled={busy} onClick={() => void perform(() => api.answerLlmProposal(p.id, "accepted", null), true)}>
                 {t("llmAssist.panel.accept")}
               </button>
             )}
-            {p.status !== "rejected" && (
+            {status !== "rejected" && (
               <button type="button" ref={rejectRef} aria-expanded={rejecting} aria-disabled={busy} onClick={() => setRejecting(true)}>
                 {t("llmAssist.panel.reject")}
               </button>
             )}
           </div>
         </div>
-        {p.status === "rejected" && p.reason && <p className="muted llm-proposal-reason">{t("llmAssist.panel.rejectReason", { reason: p.reason })}</p>}
+        {status === "rejected" && rejectReason && <p className="muted llm-proposal-reason">{t("llmAssist.panel.rejectReason", { reason: rejectReason })}</p>}
         <div className="toolbar">
           <button
             type="button"
