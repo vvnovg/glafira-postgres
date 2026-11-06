@@ -9,7 +9,7 @@ import { type ExplainPrefill, tabId, useWorkspace } from "../../state/workspace"
 import { SubTabs } from "../catalog/SubTabs";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { CopyLlmButton } from "./CopyLlmButton";
-import { AskLlmButton } from "./llm/AskLlmButton";
+import { AskLlmButton, type SentNotice } from "./llm/AskLlmButton";
 import { PlanRunner } from "./plan/PlanRunner";
 import { PlanView } from "./plan/PlanView";
 import { Recommendations } from "./plan/Recommendations";
@@ -81,6 +81,8 @@ export function ExplainTab({
   // Разобранный план хранится одним объектом: дерево плана сбрасывает развёртку при смене объекта.
   const [parsed, setParsed] = useState<ParsedPlan | null>(null);
   const [last, setLast] = useState<LastRun | null>(null);
+  // Уведомление «строка скопирована» живёт здесь: кнопка перемонтируется, когда появляется первый результат плана.
+  const [sentNotice, setSentNotice] = useState<SentNotice | null>(null);
   const [parsing, setParsing] = useState(false);
   const [parseError, setParseError] = useState<AppError | null>(null);
   // Повторное «Открыть в консоли» меняет спеку вкладки (при том же тексте — только её объект): новые узел, база и текст подставляются.
@@ -199,7 +201,7 @@ export function ExplainTab({
                     extraActions={
                       <>
                         {sql.trim() !== "" && <CopyLlmButton connectionId={connectionId} member={nodeName} database={dbName} source={{ kind: "sql", sql }} plan={lastPlan} />}
-                        <AskLlmButton connectionId={connectionId} member={nodeName} database={dbName} source={CONSOLE_SOURCE} sql={sql} params={lastParams} plan={lastPlan} />
+                        <AskLlmButton connectionId={connectionId} member={nodeName} database={dbName} source={CONSOLE_SOURCE} sql={sql} params={lastParams} plan={lastPlan} sent={sentNotice} onSent={setSentNotice} />
                       </>
                     }
                   />

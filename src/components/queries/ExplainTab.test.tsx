@@ -392,8 +392,11 @@ describe("ExplainTab", () => {
     await screen.findByRole("treegrid", { name: "Дерево плана" });
     const ask = screen.getByRole("button", { name: "Передать LLM-ассистенту" });
     await waitFor(() => expect(ask).toBeEnabled());
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest({ status: "answered" })]);
     await user.click(ask);
     expect(api.createOptimizationRequest).toHaveBeenLastCalledWith("c", { member: "pg-1", database: "perf", source: { kind: "console" }, sql, params: ["disputed"], plan });
+    // Список перечитался и знает о созданном запросе (он уже отвечен) — можно отправлять снова.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Передать LLM-ассистенту" })).toBeEnabled());
     // Текст правили — план и значения прежнего запуска к нему не относятся.
     await user.type(screen.getByRole("textbox", { name: "SQL" }), " ");
     await user.click(screen.getByRole("button", { name: "Передать LLM-ассистенту" }));

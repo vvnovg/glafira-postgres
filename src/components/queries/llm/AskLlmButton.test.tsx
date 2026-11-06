@@ -1,5 +1,6 @@
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppError, LlmAccess, McpStatus } from "../../../api/types";
 import { resetEventBus } from "../../../test/events";
@@ -21,7 +22,7 @@ vi.mock("../../../api/client", async (importOriginal) => {
 });
 
 import { api } from "../../../api/client";
-import { AskLlmButton } from "./AskLlmButton";
+import { AskLlmButton, type SentNotice } from "./AskLlmButton";
 
 const SQL = "SELECT count(*) FROM shop.orders WHERE status = $1";
 const props = { connectionId: "c", member: "pg-1", database: "perf", source: { kind: "console" } as const, sql: SQL, params: ["disputed"], plan: null };
@@ -179,6 +180,54 @@ describe("AskLlmButton", () => {
     expect(await screen.findByText(/Запрос длиннее 65536 байт: его нельзя передать кнопкой «Передать LLM-ассистенту»/)).toBeInTheDocument();
     rerender(<AskLlmButton {...props} sql="  " />);
     expect(screen.getByRole("button", { name: LABEL })).toBeDisabled();
+  });
+
+  it("статус ожидания и пояснения о нечитаемом состоянии лежат внутри живой области, кнопки — снаружи", async () => {
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest()]);
+    const { unmount } = renderWithClient(<AskLlmButton {...props} />);
+    const waitingText = await screen.findByText("Ждёт ответа LLM: запрос r3a9f1c");
+    expect(screen.getByRole("status")).toContainElement(waitingText);
+    expect(screen.getByRole("status")).not.toContainElement(screen.getByRole("button", { name: "Отменить запрос" }));
+    unmount();
+    setStatus(undefined, { error: { code: "INTERNAL", message: "boom", retryable: true } });
+    const second = renderWithClient(<AskLlmButton {...props} />);
+    expect(screen.getByRole("status")).toContainElement(await screen.findByText("Статус MCP недоступен"));
+    expect(screen.getByRole("status")).not.toContainElement(screen.getByRole("button", { name: "Повторить" }));
+    second.unmount();
+    setStatus(mcpStatus());
+    vi.mocked(api.listOptimizationRequests).mockRejectedValue({ code: "INTERNAL", message: "disk", retryable: true });
+    renderWithClient(<AskLlmButton {...props} />);
+    expect(screen.getByRole("status")).toContainElement(await screen.findByText("Не удалось прочитать запросы этого подключения"));
+  });
+
+  it("быстрый второй клик между созданием и перечитыванием списка не создаёт дубль", async () => {
+    vi.mocked(api.createOptimizationRequest).mockResolvedValue(optimizationRequest());
+    const user = userEvent.setup();
+    renderWithClient(<AskLlmButton {...props} />);
+    const button = screen.getByRole("button", { name: LABEL });
+    await waitFor(() => expect(button).toBeEnabled());
+    // Список ещё не знает о новом запросе (остаётся пустым).
+    await user.click(button);
+    await screen.findByText(/Скопировано/);
+    expect(button).toBeDisabled();
+    await user.click(button);
+    expect(api.createOptimizationRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("уведомление можно держать снаружи: после перемонтирования кнопки оно остаётся", async () => {
+    vi.mocked(api.createOptimizationRequest).mockResolvedValue(optimizationRequest());
+    const user = userEvent.setup();
+    function Host({ shown }: { shown: boolean }) {
+      const [sent, setSent] = useState<SentNotice | null>(null);
+      return shown ? <AskLlmButton {...props} sent={sent} onSent={setSent} /> : <AskLlmButton key="b" {...props} sent={sent} onSent={setSent} />;
+    }
+    const { rerender } = renderWithClient(<Host shown />);
+    const button = screen.getByRole("button", { name: LABEL });
+    await waitFor(() => expect(button).toBeEnabled());
+    await user.click(button);
+    await screen.findByText(/Скопировано/);
+    rerender(<Host shown={false} />);
+    expect(screen.getByText(/Скопировано/)).toBeInTheDocument();
   });
 
   it("область уведомлений присутствует всегда (живая область)", () => {

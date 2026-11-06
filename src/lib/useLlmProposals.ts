@@ -41,7 +41,8 @@ function useProposalsEvents(connectionId: string, refresh: () => void): void {
  */
 export function useOptimizationRequests(connectionId: string): { requests: OptimizationRequest[]; state: RequestsState; refresh(): void; retry(): void } {
   const qc = useQueryClient();
-  const q = useQuery({ queryKey: ["llmRequests", connectionId], queryFn: () => api.listOptimizationRequests(connectionId) });
+  // retry: false — «не прочиталось» должно показаться сразу, а не после автоповторов (кнопка без пояснения не должна долго быть неактивной).
+  const q = useQuery({ queryKey: ["llmRequests", connectionId], queryFn: () => api.listOptimizationRequests(connectionId), retry: false });
   const refresh = useCallback(() => {
     void qc.invalidateQueries({ queryKey: ["llmRequests", connectionId] });
   }, [qc, connectionId]);

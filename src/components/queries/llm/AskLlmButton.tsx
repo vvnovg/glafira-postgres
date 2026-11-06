@@ -36,6 +36,13 @@ function serverOff(status: McpStatus): Off | null {
   }
 }
 
+/** Строка для чата последнего созданного запроса и удалось ли её скопировать. */
+export interface SentNotice {
+  id: string;
+  line: string;
+  copied: boolean;
+}
+
 export interface AskLlmProps {
   connectionId: string;
   member: string;
@@ -46,6 +53,12 @@ export interface AskLlmProps {
   params: (string | null)[];
   /** Последний план вкладки, пока SQL, узел и база не менялись (как у «Скопировать для LLM»); иначе Rust строит пробный. */
   plan: PlanTree | null;
+  /**
+   * Уведомление о скопированной строке можно держать снаружи (родитель, переживающий перемонтирование кнопки); без
+   * `onSent` кнопка хранит его сама.
+   */
+  sent?: SentNotice | null;
+  onSent?: (sent: SentNotice | null) => void;
 }
 
 /**
@@ -57,18 +70,21 @@ export interface AskLlmProps {
  * иначе кнопка позволила бы дубль запроса). Значок «?» объясняет причину, а у активной кнопки — что снимок уходит модели
  * без маскирования. Пока запрос этого источника ждёт ответа, рядом «Ждёт ответа LLM» и «Отменить запрос», второй запрос
  * не создаётся. Читает только запросы подключения (`useOptimizationRequests`), предложения кнопке не нужны.
- * Уведомление о скопированной строке живёт в кнопке: при её перемонтировании (в консоли — когда появляется результат
- * плана) оно исчезает, а статус ожидания остаётся — он выводится из списка запросов.
+ * Уведомление о скопированной строке по умолчанию живёт в кнопке; в консоли его держит `ExplainTab` (`sent`/`onSent`),
+ * потому что кнопка перемонтируется, когда появляется результат плана. Статус ожидания выводится из списка запросов.
+ * Между созданием и перечитыванием списка кнопка тоже неактивна: второй быстрый клик дубля не создаёт.
  */
-export function AskLlmButton({ connectionId, member, database, source, sql, params, plan }: AskLlmProps) {
+export function AskLlmButton({ connectionId, member, database, source, sql, params, plan, sent: sentProp, onSent }: AskLlmProps) {
   const { t } = useTranslation();
   const { status, loading: statusLoading, error: statusError, refetch: refetchStatus } = useMcpStatus();
   const profile = useConnectionProfile(connectionId);
   const { requests, state: requestsState, refresh, retry: retryRequests } = useOptimizationRequests(connectionId);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<AppError | null>(null);
-  /** Строка для чата последнего созданного запроса и удалось ли её скопировать. */
-  const [sent, setSent] = useState<{ id: string; line: string; copied: boolean } | null>(null);
+  const [ownSent, setOwnSent] = useState<SentNotice | null>(null);
+  const controlled = onSent !== undefined;
+  const sent = controlled ? (sentProp ?? null) : ownSent;
+  const setSent = controlled ? onSent : setOwnSent;
   const waiting = waitingRequest(requests, source, database);
 
   // Что мешает отправить. `null` вместе с `ready === false` — ещё читается, без пояснения.
@@ -86,7 +102,9 @@ export function AskLlmButton({ connectionId, member, database, source, sql, para
     if (requestsState === "failed") off = "requests";
     else if (requestsState === "loading") ready = false;
   }
-  const can = ready && off === null && sql.trim() !== "" && !busy && waiting === null;
+  // Запрос создан, но список ещё не перечитан: ждём его, иначе быстрый второй клик создал бы дубль.
+  const justSent = sent !== null && !requests.some((r) => r.id === sent.id);
+  const can = ready && off === null && sql.trim() !== "" && !busy && waiting === null && !justSent;
 
   const ask = async () => {
     setBusy(true);
@@ -131,25 +149,21 @@ export function AskLlmButton({ connectionId, member, database, source, sql, para
         {t("llmAssist.ask.button")}
       </button>
       <Hint k={off ? OFF_HINTS[off] : "hints.llmAssist.ask"} label={t("llmAssist.ask.button")} />
-      {waiting && (
-        <span className="llm-waiting">
-          <span>{t("llmAssist.ask.waiting", { id: waiting.id })}</span>
-          <button type="button" className="link" onClick={() => void cancel(waiting.id)}>
-            {t("llmAssist.ask.cancel")}
-          </button>
-        </span>
-      )}
-      {unreadable && (
-        <span className="llm-waiting muted">
-          <span>{unreadable}</span>
-          <button type="button" className="link" onClick={off === "status" ? refetchStatus : retryRequests}>
-            {t("common.retry")}
-          </button>
-        </span>
-      )}
       <span role="status" className="muted">
+        {waiting && <span>{t("llmAssist.ask.waiting", { id: waiting.id })} </span>}
+        {unreadable && <span>{unreadable} </span>}
         {error ? tr(error) : notice}
       </span>
+      {waiting && (
+        <button type="button" className="link" onClick={() => void cancel(waiting.id)}>
+          {t("llmAssist.ask.cancel")}
+        </button>
+      )}
+      {unreadable && (
+        <button type="button" className="link" onClick={off === "status" ? refetchStatus : retryRequests}>
+          {t("common.retry")}
+        </button>
+      )}
     </>
   );
 }
