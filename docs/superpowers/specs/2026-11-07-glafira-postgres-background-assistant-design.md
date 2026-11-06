@@ -155,8 +155,9 @@ queued ──► starting ──► running ──► done      (proposalIds п�
 - Glafira пишет MCP-конфиг запуска `agent-runs/<runId>.mcp.json` (0600, каталог 0700; удаляется в конце запуска):
   `{"mcpServers": {"glafira-pg": {"command": "<current_exe>", "args": ["mcp"], "env": {"GLAFIRA_AGENT_TICKET": "<билет>"}, …}}}`.
   Конфиг — файлом, а не строкой в аргументах: аргументы процессов видны другим пользователям в `ps`.
-- Шим: если переменная `GLAFIRA_AGENT_TICKET` задана (32 hex), строка рукопожатия — `GLAFIRA-MCP/1 <token> run=<билет>\n` (до
-  256 байт, как раньше). Без переменной — прежняя форма; старые шимы работают как прежде.
+- Шим: если переменная `GLAFIRA_AGENT_TICKET` задана (64 hex-символа), строка рукопожатия — `GLAFIRA-MCP/1 <token> run=<билет>\n`
+  (до 256 байт, как раньше). Без переменной — прежняя форма; старые шимы работают как прежде. Переменная задана, но билет
+  неверной формы — шим завершается с ошибкой, а не подключается обычной сессией; с билетом шим Glafira не запускает.
 - Сервер проверяет токен как раньше, затем билет — функцией приложения (`TicketCheck`, сравнение за постоянное время).
   Неизвестный или истёкший билет → `ERR bad_ticket The background run is over: start it again in Glafira` и закрытие. Верный →
   у сессии `SessionView.run = Some(runId)`. У запуска одновременно не больше одной сессии; повторное подключение после обрыва
@@ -179,7 +180,7 @@ queued ──► starting ──► running ──► done      (proposalIds п�
 | Минимальная версия | 0.26 | 2.1 |
 | Промпт | stdin (позиционный промпт не передаётся) | `-p`, текст — в stdin |
 | MCP | `--mcp-config <файл> --allowed-mcp-server-names glafira-pg` | `--mcp-config <файл> --strict-mcp-config` |
-| Встроенные инструменты | Выключены все: разрешающим списком (`--core-tools` пустой), если проверка CLI подтвердит; иначе `--exclude-tools` со всем списком встроенных инструментов этой версии | `--tools ""` |
+| Встроенные инструменты | Выключены все: разрешающим списком из одного несуществующего имени (`--core-tools glafira_none`; пустой список Qwen Code ничего не выключает) и `--exclude-tools agent` (подагенты обходят разрешающий список), если проверка CLI подтвердит; иначе `--exclude-tools` со всем списком встроенных инструментов этой версии | `--tools ""` |
 | Одобрение вызовов Glafira | `--allowed-tools` для инструментов `glafira-pg` и `"trust": true` у сервера в конфиге запуска, без `yolo`, если в режиме без окна неодобренный вызов отклоняется; иначе `--approval-mode yolo` (встроенных инструментов нет) | `--allowedTools mcp__glafira-pg --permission-mode dontAsk` |
 | Пределы CLI (запасные; главные — у Glafira, §4.4, §5.2) | `--max-wall-time <срок + 30>s --max-tool-calls 40` | `--max-budget-usd <предел>` без Ollama |
 | Модель | `-m <модель>`; пусто — `model.name` из `~/.qwen/settings.json` | `--model <модель>`; через Ollama — ещё `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL` |
