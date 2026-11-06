@@ -2,6 +2,20 @@
 
 The Russian version is in [docs/changelog](docs/changelog/). The section of a version is shown in About as the update notes, in the interface language.
 
+## 0.6.0
+Release date: 2026-11-06.
+- MCP gateway for LLM assistants: Qwen Code, Claude Code, Claude Desktop, Cursor and other MCP clients connect to Glafira with `glafira-pg mcp` (the same application file without a window; it starts Glafira if it is closed). The assistant reads diagnostics and cannot change a database. 14 read-only tools: connections and topology, a health summary, the report of any “Diagnostics” tool with findings, sessions and observing activity for up to 50 seconds, the `pg_stat_statements` top (since reset, for a window or by observing) and the query card, a table with its statistics, server parameters with secrets hidden, a plan without execution with recommendations, and an index hypothesis check with hypopg.
+- Access: MCP is off by default. “Settings” → “LLM assistants (MCP)” turns it on and has ready snippets for the clients. Every new client is approved in a dialog. Every connection starts closed to assistants and is opened with the “LLM access” level “Diagnostics” in the connection form (an `LLM` badge in the tree); export and import do not carry the level. Passwords, SSH keys, connection strings, the actions journal and the application settings never reach the assistant.
+- The assistant's SQL is checked with the PostgreSQL 18 parser (libpg_query) before it reaches the server: one statement only, utility commands and dangerous functions are refused. The plan is built in a read-only transaction that is always rolled back, on a separate connection with `application_name = glafira-pg-mcp`.
+- Masking: literals in query texts from `pg_stat_activity` and `pg_stat_statements`, in running instances and in plan conditions are replaced with `$1`, `$2`… and comment bodies with `/*…*/` before they reach the assistant; text search in the top matches the masked text.
+- Sessions, revoking and the journal: an `LLM` indicator at the bottom of the sidebar while a client is connected. Sessions are closed and clients revoked in the settings; a revoked client, a new level and turning MCP off take effect from the assistant's next call. The MCP journal (`mcp-audit.jsonl`, the last 200 records in the settings) shows every call, its result and the number of masked literals; “Open in EXPLAIN console” puts the assistant's query into the console without running it.
+- Limits: a response is at most 100 KB, 60 calls a minute and one observation at a time per session.
+- Organization policy: `mcpEnabled` forbids MCP, `mcpMaxAccess` caps the access level; an unreadable policy or a wrong value forbids MCP too.
+- EXPLAIN: a query calling a function that runs SQL from a string (`query_to_xml`, `cursor_to_xml`, `ts_stat`, `ts_rewrite`) is treated as writing, since the string may call an administrative function, so “Plan with execution” asks for confirmation.
+- Guide: the “LLM assistants (MCP)” chapter and the “Local models” chapter — Qwen3.6-35B-A3B, Gemma 4 26B and two dense models in Ollama measured on six typical tasks, and setting up Qwen Code and Claude Code without the cloud. The administrator guide covers the MCP policy, the gateway's load and its files.
+- `THIRD_PARTY.md` lists libpg_query and the C code it brings into the app (the PostgreSQL parser, upb, xxHash).
+- Development: CI installs libclang for bindgen (pg_query) on every platform; `dev/llm-eval` runs local models against the gateway on the stand.
+
 ## 0.5.1
 Release date: 2026-11-03.
 - EXPLAIN console: without a chosen database it now uses the connection's “Default database” instead of the first database of the server (usually `postgres`), so a query to a table of another database no longer fails with “relation … does not exist”.
