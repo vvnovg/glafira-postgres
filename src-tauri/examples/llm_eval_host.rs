@@ -7,6 +7,11 @@
 //! (по умолчанию `~/.glafira-llm-eval`: путь сокета должен уложиться в 100 байт), `EVAL_LAB` (`localhost:5470`),
 //! `EVAL_PERF` (`localhost:5471`), `EVAL_PATRONI` (`http://localhost:8011,http://localhost:8012,http://localhost:8013`).
 //! Только для разработки: пароли — известные пароли стенда (`README.md`, «Стенд»).
+//!
+//! Проверка агентских CLI (`dev/agent-check`, план P4c, задача 1): `EVAL_REQUESTS=<n>` создаёт n запросов на оптимизацию
+//! «из консоли» подключения `perf` с текстом `EVAL_REQUEST_SQL` (по умолчанию — запрос с плохим планом из смоука P4b) и
+//! печатает их id в строке готовности: `READY <home> requests=r…,r…`. Каждый вариант проверки берёт свой запрос: на один
+//! запрос — не больше пяти предложений.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,6 +21,8 @@ use glafira_pg_lib::conn::profile::{
     ConnectionKind, ConnectionProfile, Environment, HostOverride, HostPort, LlmAccess,
     PatroniSettings, PgSettings, PgTls, SslMode, TargetServerType,
 };
+use glafira_pg_lib::mcp::llm::requests::RequestSource;
+use glafira_pg_lib::mcp::llm::{CreateRequestArgs, create_request};
 use glafira_pg_lib::secrets::{
     MemoryStore, PATRONI_PASSWORD, PG_PASSWORD, SecretStore, secret_key,
 };
@@ -25,6 +32,9 @@ const PG_USER: &str = "glafira_diag";
 const PG_PASSWORD_VALUE: &str = "glafira-secret";
 const PATRONI_USER: &str = "patroni";
 const PATRONI_PASSWORD_VALUE: &str = "patroni-secret";
+
+/// Запрос с плохим планом (смоук P4b): функция над колонкой в условии, подзапрос на каждую строку, сортировка под `LIMIT`.
+const DEFAULT_REQUEST_SQL: &str = "SELECT o.id, o.total, (SELECT count(*) FROM shop.order_items i WHERE i.order_id = o.id) AS items FROM shop.orders o WHERE date_trunc('day', o.created_at) = date '2026-06-01' AND o.status <> 'done' ORDER BY o.total DESC LIMIT 20";
 
 fn env_or(name: &str, default: &str) -> String {
     std::env::var(name)
@@ -153,7 +163,12 @@ async fn main() {
         data_dir.display(),
         status.open_connections
     );
-    println!("READY {}", home.display());
+    let requests = create_requests(&st).await;
+    if requests.is_empty() {
+        println!("READY {}", home.display());
+    } else {
+        println!("READY {} requests={}", home.display(), requests.join(","));
+    }
 
     // Подтверждение новых клиентов — вместо диалога Glafira. Процесс работает, пока его не остановят (SIGINT/SIGTERM);
     // оставшийся `mcp.json` следующий запуск заменит сам (сервер из файла не отвечает — файл удаляется до bind).
@@ -163,4 +178,41 @@ async fn main() {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+}
+
+/// `EVAL_REQUESTS` запросов на оптимизацию к `perf` (MCP уже включён); без переменной — ни одного.
+async fn create_requests(st: &AppState) -> Vec<String> {
+    let n: usize = env_or("EVAL_REQUESTS", "0")
+        .parse()
+        .expect("EVAL_REQUESTS — число");
+    if n == 0 {
+        return Vec::new();
+    }
+    let sql = env_or("EVAL_REQUEST_SQL", DEFAULT_REQUEST_SQL);
+    // Снимку нужен узел открытого подключения: без pg-perf запросы не создать.
+    let member = st
+        .runtimes
+        .view("perf")
+        .topology
+        .map(|t| t.members[0].name.clone())
+        .expect("подключение perf не открылось: нужен pg-perf (EVAL_PERF)");
+    let mut ids = Vec::with_capacity(n);
+    for _ in 0..n {
+        let r = create_request(
+            st,
+            "perf",
+            CreateRequestArgs {
+                member: member.clone(),
+                database: "perf".into(),
+                source: RequestSource::Console,
+                sql: sql.clone(),
+                params: vec![],
+                plan: None,
+            },
+        )
+        .await
+        .expect("запрос на оптимизацию");
+        ids.push(r.id);
+    }
+    ids
 }
