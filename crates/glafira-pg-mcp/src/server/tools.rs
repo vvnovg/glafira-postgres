@@ -242,7 +242,7 @@ impl PgServer {
     }
 
     #[tool(
-        description = "Top queries from pg_stat_statements on a member. mode sinceReset (default) gives totals since the last statistics reset; mode window gives the last windowS seconds (300, 900 or 3600, default 900) from Glafira's buffer, which fills while the Queries tab or a query card is open in Glafira; without the buffer the coverage is 0, then use observe_top_queries or sinceReset. sort: totalTime (default), meanTime, maxTime, stddevTime, calls, rowsPerCall, sharedRead, hitRatio, tempWritten, walBytes, ioTime, planTime, jitTime or cpuTime. limit 1..=100, default 10; filters database and search (a case-insensitive substring of the query text). At the diagnostics access level search matches the masked text ($N in place of literals) within the top 200 queries by the chosen sort, so an empty result may mean the query is outside that window.",
+        description = "Top queries from pg_stat_statements on a member. mode sinceReset (the default without windowS) gives totals since the last statistics reset; mode window (the default when windowS is given) gives the last windowS seconds (300, 900 or 3600, default 900) from Glafira's buffer, which fills while the Queries tab or a query card is open in Glafira; without the buffer the coverage is 0, then use observe_top_queries or sinceReset. sort: totalTime (default), meanTime, maxTime, stddevTime, calls, rowsPerCall, sharedRead, hitRatio, tempWritten, walBytes, ioTime, planTime, jitTime or cpuTime. limit 1..=100, default 10; filters database (a database that does not exist on the member gives not_found with the list of databases) and search (a case-insensitive substring of the query text). At the diagnostics access level search matches the masked text ($N in place of literals) within the top 200 queries by the chosen sort, so an empty result may mean the query is outside that window.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -431,7 +431,7 @@ impl PgServer {
     }
 
     #[tool(
-        description = "Check whether hypothetical indexes would help a query, with the hypopg extension: pass sql or queryId (and params, as in explain_query) and 1..=5 CREATE INDEX statements without CONCURRENTLY or UNIQUE. Returns the plan cost before and after, whether each index is used and its estimated size, and the new plan. Nothing is created in the database. Needs hypopg on the server.",
+        description = "Check whether hypothetical indexes would help a query, with the hypopg extension: pass sql or queryId (and params, as in explain_query) and 1..=5 CREATE INDEX statements without CONCURRENTLY or UNIQUE (an index name, if given, is ignored). Returns the plan cost before and after, whether each index is used and its estimated size, and the new plan. Nothing is created in the database. Needs hypopg on the server.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,

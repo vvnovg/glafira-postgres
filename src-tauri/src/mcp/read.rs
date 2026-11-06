@@ -16,8 +16,8 @@ use glafira_pg_mcp::model::{
 };
 use glafira_pg_mcp::params::{
     ACTIVITY_LIMIT_DEFAULT, ActivityParams, ExplainParams, HypoIndexParams, QueryDetailsParams,
-    RunDiagnosticParams, SettingsParams, TOP_LIMIT_DEFAULT, TOPOLOGY_EVENTS_MAX,
-    TableDetailsParams, TopQueriesParams,
+    RunDiagnosticParams, SQL_AND_QUERY_ID_BOTH, SQL_AND_QUERY_ID_NEITHER, SettingsParams,
+    TOP_LIMIT_DEFAULT, TOPOLOGY_EVENTS_MAX, TableDetailsParams, TopQueriesParams,
 };
 use pg_advisor::findings::FindingTarget;
 use pg_advisor::plan::json::from_json;
@@ -83,6 +83,10 @@ pub const ACTIVITY_LIMIT: u32 = ACTIVITY_LIMIT_DEFAULT;
 pub(crate) const TOP_LIMIT: u32 = TOP_LIMIT_DEFAULT;
 /// Истории pgss узла для окна ещё нет: подсказка модели (спец. §5.2).
 const NO_WINDOW_HINT: &str = "Glafira has no pg_stat_statements history for this node yet (it is collected while the Queries tab or a query card is open in Glafira): call observe_top_queries for a fresh window or use mode sinceReset";
+/// Модель прислала `windowS` при явном `sinceReset` (E1): окно не применено — подсказка модели.
+const SINCE_RESET_WINDOW_HINT: &str = "windowS is ignored in mode sinceReset: these are totals since the last pg_stat_statements reset (data.pgss.statsResetMs); use mode window for a window";
+/// Имён баз в отказе `not_found` фильтра `database` у `get_top_queries` (E3); остальные — «…and N more».
+pub const MAX_DATABASE_NAMES: usize = 50;
 /// Значение `pg_stats` длиннее — обрезается (спец. §5.2).
 pub const MAX_STATS_VALUE_BYTES: usize = 2048;
 const TRUNCATED_MARK: &str = "…[truncated]";
@@ -694,11 +698,13 @@ pub(crate) fn parse_sort(s: Option<&str>) -> Result<QuerySort, ToolError> {
 
 /// Запрос инструмента `queries` по параметрам `get_top_queries`: предел отчёта — ближайший допустимый в P3 (50 или 100),
 /// ответ потом режется до `limit`; окно по умолчанию — 900 с, окно проверяется P3 (`diag::queries::validate`) до
-/// открытия подключения. Итог: параметры, `limit`, режим окна.
+/// открытия подключения; без `mode` режим — окно, если задан `windowS` (как в `validate` крейта). Итог: параметры,
+/// `limit`, режим окна.
 pub(crate) fn top_request(p: &TopQueriesParams) -> Result<(QueriesParams, usize, bool), ToolError> {
     let limit = p.limit.unwrap_or(TOP_LIMIT) as usize;
     let window = match p.mode.as_deref() {
-        None | Some("sinceReset") => false,
+        None => p.window_s.is_some(),
+        Some("sinceReset") => false,
         Some("window") => true,
         Some(m) => {
             return Err(invalid_argument(format!(
@@ -726,10 +732,12 @@ pub(crate) fn top_request(p: &TopQueriesParams) -> Result<(QueriesParams, usize,
 
 /// `get_top_queries`: отчёт инструмента `queries` (P3 §4.5). Порядок (решение владельца 2026-11-04): доступ и
 /// аргументы — до открытия подключения; поиск на уровне `diagnostics` откладывается (`take_masked_search`), затем
-/// `diag::run` и `top_answer`.
+/// `diag::run` и `top_answer`. Фильтр `database` без единой строки отчёта — проверка, есть ли такая база на узле
+/// (`filter_database_missing`, E3). `windowS` при явном `sinceReset` — подсказка в ответе (E1).
 async fn top_queries(st: &AppState, p: TopQueriesParams) -> Result<PgAnswer, ToolError> {
-    let (_, access) = check_connection(st, &p.connection_id)?;
+    let (profile, access) = check_connection(st, &p.connection_id)?;
     let (mut q, limit, window) = top_request(&p)?;
+    let ignored_window = !window && p.window_s.is_some();
     let search = take_masked_search(&mut q, access);
     ensure_open(st, &p.connection_id).await?;
     let req = DiagRequest {
@@ -741,17 +749,37 @@ async fn top_queries(st: &AppState, p: TopQueriesParams) -> Result<PgAnswer, Too
     let report = diag::run(st, &p.connection_id, req)
         .await
         .map_err(tool_error)?;
-    Ok(top_answer(report, access, search.as_ref(), limit, window))
+    let no_rows = matches!(&report.data, DiagData::Queries(d) if d.rows.is_empty());
+    if let (true, Some(database), Some(member)) =
+        (no_rows, p.database.as_deref(), report.member.as_deref())
+    {
+        let connection_db = resolve_database(&profile, None);
+        if let Some(e) =
+            filter_database_missing(st, &p.connection_id, member, database, &connection_db).await
+        {
+            return Err(e);
+        }
+    }
+    Ok(top_answer(
+        report,
+        access,
+        search.as_ref(),
+        limit,
+        window,
+        ignored_window,
+    ))
 }
 
 /// Ответ `get_top_queries` из отчёта `queries`: маскирование, поиск по замаскированному тексту и только потом предел
-/// ответа `limit` (`mask_statements`); окно без истории — покрытие 0 и подсказка.
+/// ответа `limit` (`mask_statements`); окно без истории — покрытие 0 и подсказка; `ignored_window` — модель прислала
+/// `windowS` при явном `sinceReset` (E1): подсказка, что окно не применено. Подсказки склеиваются (`add_hint`).
 fn top_answer(
     mut report: DiagReport,
     access: LlmAccess,
     search: Option<&MaskedSearch>,
     limit: usize,
     window: bool,
+    ignored_window: bool,
 ) -> PgAnswer {
     let no_history =
         window && matches!(&report.data, DiagData::Queries(d) if d.coverage_s.is_none());
@@ -759,13 +787,99 @@ fn top_answer(
     let mut out = report_out(report);
     if no_history {
         out.data["coverageS"] = json!(0);
-        out.hint = Some(NO_WINDOW_HINT.to_string());
+        add_hint(&mut out.hint, NO_WINDOW_HINT);
+    }
+    if ignored_window {
+        add_hint(&mut out.hint, SINCE_RESET_WINDOW_HINT);
     }
     PgAnswer {
         body: PgOutput::Report(out),
         masked,
         rows: None,
     }
+}
+
+/// Подсказка `more` к уже имеющейся (через пробел): ни одна не теряется.
+fn add_hint(hint: &mut Option<String>, more: &str) {
+    *hint = Some(match hint.take() {
+        Some(h) => format!("{h} {more}"),
+        None => more.to_string(),
+    });
+}
+
+/// Базы узла (E3): имя и «показывать ли модели» — не шаблон и с `datallowconn`. Только имена (§6.2: ни хостов, ни
+/// владельцев, ни настроек).
+const DATABASES_SQL: &str =
+    marked_sql!("SELECT datname::text, datallowconn AND NOT datistemplate FROM pg_database");
+
+/// Базы узла `member` (E3) — тем же путём узла, что `pgss_text` (`diag_target` + `on_member`, пул каталога узла,
+/// только чтение).
+async fn node_databases(
+    st: &AppState,
+    id: &str,
+    member: &str,
+) -> Result<Vec<(String, bool)>, ToolError> {
+    let target = st
+        .runtimes
+        .diag_target(id, Some(member), false)
+        .map_err(tool_error)?;
+    on_member(st, id, &target, |c| {
+        Box::pin(async move {
+            let rows = c.query(DATABASES_SQL, &[]).await.map_err(|e| from_pg(&e))?;
+            Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
+        })
+    })
+    .await
+    .map_err(tool_error)
+}
+
+/// Фильтр `database` у `get_top_queries` дал пустой отчёт (E3): модель могла подставить базу другого подключения и
+/// решить, что сервер простаивает. Базы нет на узле — `not_found` со списком баз (`database_missing`); есть — `None`,
+/// ответ пустой, как раньше. Сбой служебного запроса — тоже `None`: отчёт важнее проверки.
+async fn filter_database_missing(
+    st: &AppState,
+    id: &str,
+    member: &str,
+    database: &str,
+    connection_db: &str,
+) -> Option<ToolError> {
+    let all = node_databases(st, id, member).await.ok()?;
+    database_missing(database, member, all, connection_db)
+}
+
+/// Отказ E3, если базы `database` нет среди баз узла `all` (имя, показывается ли): текст называет узел, базы узла без
+/// шаблонов и баз без `datallowconn` (по алфавиту, не больше `MAX_DATABASE_NAMES`, дальше «…and N more») и базу
+/// подключения. Есть (даже шаблоном) — `None`.
+fn database_missing(
+    database: &str,
+    member: &str,
+    all: Vec<(String, bool)>,
+    connection_db: &str,
+) -> Option<ToolError> {
+    if all.iter().any(|(name, _)| name == database) {
+        return None;
+    }
+    let mut names: Vec<String> = all
+        .into_iter()
+        .filter_map(|(name, listed)| listed.then_some(name))
+        .collect();
+    names.sort();
+    let more = names.len().saturating_sub(MAX_DATABASE_NAMES);
+    names.truncate(MAX_DATABASE_NAMES);
+    let mut list = if names.is_empty() {
+        "none".to_string()
+    } else {
+        names.join(", ")
+    };
+    if more > 0 {
+        list.push_str(&format!(", …and {more} more"));
+    }
+    Some(err(
+        "not_found",
+        format!(
+            "Database {database} does not exist on {member}; databases: {list} (the connection's database: {connection_db})"
+        ),
+    ))
 }
 
 /// `get_query_details`: карточка P3 §7.2 (`query_detail_answer`); доступ и `queryId` проверяются до открытия
@@ -1070,35 +1184,65 @@ fn check_sql(original: &str, purpose: Purpose) -> Result<(), ToolError> {
 }
 
 /// Текст pgss по `queryId` — те же проверки, что у SQL модели; слишком длинный называется хранимым текстом запроса:
-/// модель прислала только `queryId`, не SQL.
+/// модель прислала только `queryId`, не SQL. Синтаксическая ошибка разбора — с подсказкой `pgss_syntax_hint` (E5).
 fn check_pgss_text(query_id: i64, text: &str) -> Result<(), ToolError> {
     if normalize(text).len() > MAX_SQL_BYTES {
         return Err(invalid_argument(format!(
             "The text of query {query_id} stored in pg_stat_statements is longer than {MAX_SQL_BYTES} bytes: the gateway does not plan it"
         )));
     }
-    check_sql(text, Purpose::Explain)
+    check_sql(text, Purpose::Explain).map_err(|e| {
+        // Ошибка грамматики `pg_query` — текст парсера PostgreSQL («syntax error at or near …», «… at end of input»),
+        // как у SQLSTATE 42601 сервера; прочие отказы `sqlcheck` (вид выражения, функции) так не начинаются.
+        if e.code == "invalid_sql" && e.message.starts_with("syntax error") {
+            err(
+                "invalid_sql",
+                guard::with_hint(&e.message, &pgss_syntax_hint(query_id)),
+            )
+        } else {
+            e
+        }
+    })
 }
 
-/// Строки `indexes` у `hypothetical_index` до соединения: число (1–`MAX_HYPO_INDEXES`), `sqlcheck` (`HypoIndex`) и
-/// правило P3b `validate_ddl` (без `;`, комментариев, `$` и обратной косой вне кавычек).
-fn check_index_ddls(ddls: &[String]) -> Result<(), ToolError> {
+/// Подсказка к синтаксической ошибке текста pgss (E5): pgss хранит нормализованный текст, где константы типизированных
+/// литералов (`interval '1 day'`, `timestamptz '…'`) стали `$N`, и такой текст не разбирается ни шлюзом, ни сервером.
+fn pgss_syntax_hint(query_id: i64) -> String {
+    format!(
+        "pg_stat_statements stores query {query_id} in normalized form, and this text is not valid SQL as is (constants of typed literals such as interval '1 day' or timestamptz '…' became $N). Pass sql with values in place of such $N instead."
+    )
+}
+
+/// Строки `indexes` у `hypothetical_index` до соединения: число (1–`MAX_HYPO_INDEXES`), имя индекса снимается
+/// (`sqlcheck::without_index_name`, E4: модели называют индексы, hypopg даёт свои имена), затем `sqlcheck`
+/// (`HypoIndex`) и правило P3b `validate_ddl` (без `;`, комментариев, `$` и обратной косой вне кавычек). Итог —
+/// проверенные строки: они и идут в hypopg и в ответ (`indexes[].ddl`). Диалог P3b имя не снимает: там правило прежнее.
+fn check_index_ddls(ddls: &[String]) -> Result<Vec<String>, ToolError> {
     if ddls.is_empty() || ddls.len() > MAX_HYPO_INDEXES {
         return Err(invalid_argument(format!(
             "Pass from 1 to {MAX_HYPO_INDEXES} statements in indexes"
         )));
     }
-    for ddl in ddls {
-        check_sql(ddl, Purpose::HypoIndex)?;
-        hypopg::validate_ddl(ddl).map_err(|e| err("invalid_sql", e.message))?;
-    }
-    Ok(())
+    ddls.iter()
+        .map(|ddl| {
+            // Длинный текст не разбирается лишний раз: его отвергнет `check_sql`.
+            let ddl = (ddl.len() <= MAX_SQL_BYTES)
+                .then(|| sqlcheck::without_index_name(ddl))
+                .flatten()
+                .unwrap_or_else(|| ddl.clone());
+            check_sql(&ddl, Purpose::HypoIndex)?;
+            hypopg::validate_ddl(&ddl).map_err(|e| err("invalid_sql", e.message))?;
+            Ok(ddl)
+        })
+        .collect()
 }
 
-/// Откуда SQL: прислала модель или текст pgss по `queryId` — план по нему не «SQL модели» и маскируется (§6.1).
+/// Откуда SQL: прислала модель или текст pgss по `queryId` — план по нему не «SQL модели» и маскируется (§6.1);
+/// синтаксическая ошибка сервера в тексте pgss получает подсказку (`syntax_hint`, E5).
 struct SqlSource {
     text: String,
     from_pgss: bool,
+    syntax_hint: Option<String>,
 }
 
 /// Что прислала модель: ровно одно из `sql` и `queryId`; `sql` проверен `sqlcheck`, `queryId` — число. До соединения.
@@ -1107,7 +1251,11 @@ enum Asked<'a> {
     QueryId(i64),
 }
 
+/// Правило и сообщения — как у `validate` крейта (пустая строка — «не задана»): через шлюз сюда приходит уже
+/// нормализованная пара, а при прямом вызове `read_op` (тесты, будущие вызовы приложения) проверка остаётся страховкой.
 fn asked<'a>(sql: Option<&'a str>, query_id: Option<&str>) -> Result<Asked<'a>, ToolError> {
+    let sql = sql.filter(|s| !s.trim().is_empty());
+    let query_id = query_id.filter(|q| !q.trim().is_empty());
     match (sql, query_id) {
         (Some(s), None) => {
             check_sql(s, Purpose::Explain)?;
@@ -1116,7 +1264,8 @@ fn asked<'a>(sql: Option<&'a str>, query_id: Option<&str>) -> Result<Asked<'a>, 
         (None, Some(q)) => Ok(Asked::QueryId(
             query_detail::parse_query_id(q).map_err(tool_error)?,
         )),
-        _ => Err(invalid_argument("Pass exactly one of sql and queryId")),
+        (Some(_), Some(_)) => Err(invalid_argument(SQL_AND_QUERY_ID_BOTH)),
+        (None, None) => Err(invalid_argument(SQL_AND_QUERY_ID_NEITHER)),
     }
 }
 
@@ -1186,6 +1335,7 @@ async fn sql_source(
         Asked::Sql(s) => Ok(SqlSource {
             text: s.to_string(),
             from_pgss: false,
+            syntax_hint: None,
         }),
         Asked::QueryId(q) => {
             let text = pgss_text(st, id, member, database, q).await?;
@@ -1193,6 +1343,7 @@ async fn sql_source(
             Ok(SqlSource {
                 text,
                 from_pgss: true,
+                syntax_hint: Some(pgss_syntax_hint(q)),
             })
         }
     }
@@ -1260,7 +1411,8 @@ async fn explain(st: &AppState, p: ExplainParams) -> Result<PgAnswer, ToolError>
             tx.version_num(),
         )?;
         // Текст — как его прислала модель: `GuardTx` нормализует сам, позиции ошибок — в исходном тексте.
-        tx.prepare_one(&source.text).await?;
+        tx.prepare_one_hinted(&source.text, source.syntax_hint.as_deref())
+            .await?;
         let raw = tx.probe(&source.text, &params).await?;
         Ok::<_, ToolError>((params, raw))
     }
@@ -1336,7 +1488,7 @@ async fn hypo(st: &AppState, p: HypoIndexParams) -> Result<PgAnswer, ToolError> 
     let (profile, access) = check_connection(st, &p.connection_id)?;
     let database = resolve_database(&profile, p.database.as_deref());
     let asked = asked(p.sql.as_deref(), p.query_id.as_deref())?;
-    check_index_ddls(&p.indexes)?;
+    let index_ddls = check_index_ddls(&p.indexes)?;
     ensure_open(st, &p.connection_id).await?;
     let member = member_or_leader(st, &p.connection_id, p.member.as_deref())?;
     let source = sql_source(st, &p.connection_id, &member, &database, asked).await?;
@@ -1355,7 +1507,8 @@ async fn hypo(st: &AppState, p: HypoIndexParams) -> Result<PgAnswer, ToolError> 
             false,
             tx.version_num(),
         )?;
-        tx.prepare_one(&source.text).await?;
+        tx.prepare_one_hinted(&source.text, source.syntax_hint.as_deref())
+            .await?;
         tx.probe(&source.text, &params).await?;
         tx.rollback().await?;
         // Исходный текст: `check_many` нормализует его сам (`validate_many`), а позиции ошибок EXPLAIN считает по нему.
@@ -1365,7 +1518,7 @@ async fn hypo(st: &AppState, p: HypoIndexParams) -> Result<PgAnswer, ToolError> 
             sql: source.text.clone(),
             params,
             search_path: None,
-            index_ddls: p.indexes.clone(),
+            index_ddls,
             timeout_s: EXPLAIN_TIMEOUT_S,
         };
         hypopg::check_many(tx.client(), &req)
@@ -2232,6 +2385,86 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(e.code, "invalid_argument");
+        // E1: `windowS` без `mode` — окно и при прямом вызове (без `validate` крейта); явный `sinceReset` — нет.
+        let (q, _, window) = top_request(&p(json!({"connectionId": "c", "windowS": 3600})))
+            .ok()
+            .unwrap();
+        assert_eq!((q.mode, window), (QueriesMode::Window { s: 3600 }, true));
+        let (q, _, window) = top_request(&p(
+            json!({"connectionId": "c", "mode": "sinceReset", "windowS": 900}),
+        ))
+        .ok()
+        .unwrap();
+        assert_eq!((q.mode, window), (QueriesMode::SinceReset, false));
+    }
+
+    /// E1: `sinceReset` с присланным `windowS` — ответ «с момента сброса» и подсказка, что окно не применено; подсказки
+    /// склеиваются, ни одна не теряется.
+    #[test]
+    fn since_reset_with_a_window_says_the_window_is_ignored() {
+        let a = top_answer(
+            statements_report(),
+            LlmAccess::Diagnostics,
+            None,
+            20,
+            false,
+            true,
+        );
+        let PgOutput::Report(r) = &a.body else {
+            unreachable!()
+        };
+        assert_eq!(r.hint.as_deref(), Some(SINCE_RESET_WINDOW_HINT));
+        assert!(
+            SINCE_RESET_WINDOW_HINT.starts_with("windowS is ignored in mode sinceReset")
+                && SINCE_RESET_WINDOW_HINT.contains("use mode window"),
+            "{SINCE_RESET_WINDOW_HINT}"
+        );
+        assert!(r.data.get("coverageS").is_none_or(|c| c != 0), "{}", r.data);
+        let mut hint = Some("First.".to_string());
+        add_hint(&mut hint, "Second.");
+        assert_eq!(hint.as_deref(), Some("First. Second."));
+        let mut hint = None;
+        add_hint(&mut hint, "Only.");
+        assert_eq!(hint.as_deref(), Some("Only."));
+    }
+
+    /// E3: базы фильтра нет на узле — `not_found` со списком баз узла (без шаблонов и баз без `datallowconn`, по
+    /// алфавиту, не больше `MAX_DATABASE_NAMES`) и базой подключения; есть (даже шаблон) — отказа нет.
+    #[test]
+    fn missing_filter_database_lists_the_databases_of_the_node() {
+        let all = |names: &[(&str, bool)]| -> Vec<(String, bool)> {
+            names.iter().map(|(n, l)| (n.to_string(), *l)).collect()
+        };
+        let node = all(&[
+            ("postgres", true),
+            ("template1", false),
+            ("perf", true),
+            ("template0", false),
+            ("Archive", true),
+        ]);
+        let e = database_missing("orders", "pg-1", node.clone(), "perf").unwrap();
+        assert_eq!(
+            (e.code.as_str(), e.message.as_str()),
+            (
+                "not_found",
+                "Database orders does not exist on pg-1; databases: Archive, perf, postgres (the connection's database: perf)"
+            )
+        );
+        assert!(database_missing("perf", "pg-1", node.clone(), "perf").is_none());
+        assert!(
+            database_missing("template1", "pg-1", node, "perf").is_none(),
+            "база есть, хоть и не в списке"
+        );
+        let many: Vec<(String, bool)> = (0..55).map(|i| (format!("db{i:02}"), true)).collect();
+        let e = database_missing("nope", "pg-2", many, "db00").unwrap();
+        assert!(
+            e.message.contains("db00, db01")
+                && e.message
+                    .contains("db49, …and 5 more (the connection's database: db00)")
+                && !e.message.contains("db50"),
+            "{}",
+            e.message
+        );
     }
 
     #[test]
@@ -2337,6 +2570,7 @@ mod tests {
             Some(&s),
             limit,
             window,
+            false,
         );
         assert_eq!(top_rows(&a), ["SELECT * FROM orders WHERE note = $1"]);
         assert_eq!(a.masked, Some(1));
@@ -2352,7 +2586,14 @@ mod tests {
         assert!(r.hint.is_none());
 
         // Без поиска — первые `limit` строк, литералы только у них.
-        let a = top_answer(statements_report(), LlmAccess::Diagnostics, None, 2, false);
+        let a = top_answer(
+            statements_report(),
+            LlmAccess::Diagnostics,
+            None,
+            2,
+            false,
+            false,
+        );
         assert_eq!(
             top_rows(&a),
             [
@@ -2363,7 +2604,14 @@ mod tests {
         assert_eq!(a.masked, Some(2));
 
         // Окно без истории: покрытие 0 и подсказка.
-        let a = top_answer(statements_report(), LlmAccess::Diagnostics, None, 20, true);
+        let a = top_answer(
+            statements_report(),
+            LlmAccess::Diagnostics,
+            None,
+            20,
+            true,
+            false,
+        );
         let PgOutput::Report(r) = &a.body else {
             unreachable!()
         };
@@ -2720,8 +2968,9 @@ mod tests {
     #[test]
     fn hypothesis_ddls_are_checked_before_the_server() {
         let ddls = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert!(
-            check_index_ddls(&ddls(&["CREATE INDEX ON t (a)", "CREATE INDEX ON t (b);"])).is_ok()
+        assert_eq!(
+            check_index_ddls(&ddls(&["CREATE INDEX ON t (a)", "CREATE INDEX ON t (b);"])).ok(),
+            Some(ddls(&["CREATE INDEX ON t (a)", "CREATE INDEX ON t (b);"]))
         );
         assert_eq!(check_index_ddls(&[]).unwrap_err().code, "invalid_argument");
         assert_eq!(
@@ -2737,11 +2986,96 @@ mod tests {
             ("CREATE INDEX ON t ((pg_sleep(1)))", "forbidden_function"),
             // `sqlcheck` пропускает комментарий, правило P3b — нет.
             ("CREATE INDEX ON t (a) /* x */", "invalid_sql"),
+            // E4: имя снимается, но прочие отказы — прежние.
+            ("CREATE INDEX idx ON t (a) /* x */", "invalid_sql"),
+            ("CREATE INDEX s.idx ON t (a)", "invalid_sql"),
+            ("CREATE UNIQUE INDEX idx ON t (a)", "invalid_sql"),
+            ("CREATE INDEX CONCURRENTLY idx ON t (a)", "invalid_sql"),
+            (
+                "CREATE INDEX idx ON t ((a), (b)); CREATE INDEX ON t (c)",
+                "invalid_sql",
+            ),
+            ("CREATE INDEX idx ON t (a) WHERE b = $1", "invalid_sql"),
         ] {
             assert_eq!(
                 check_index_ddls(&ddls(&[ddl])).unwrap_err().code,
                 code,
                 "{ddl}"
+            );
+        }
+    }
+
+    /// E4: модель называет индекс гипотезы — имя (и `IF NOT EXISTS`) снимается до проверок; в hypopg и в ответ идёт
+    /// проверенный текст без имени.
+    #[test]
+    fn hypothesis_index_names_are_dropped() {
+        let one = |ddl: &str| check_index_ddls(&[ddl.to_string()]).map(|v| v[0].clone());
+        for (ddl, want) in [
+            (
+                "CREATE INDEX idx_orders_status ON shop.orders (status)",
+                "CREATE INDEX ON shop.orders (status)",
+            ),
+            (
+                "CREATE INDEX \"Orders By Status\" ON shop.orders (status);",
+                "CREATE INDEX ON shop.orders (status);",
+            ),
+            (
+                "create index if not exists idx on shop.orders using btree (status) where status <> 'done'",
+                "create index on shop.orders using btree (status) where status <> 'done'",
+            ),
+        ] {
+            match one(ddl) {
+                Ok(got) => assert_eq!(got, want, "{ddl}"),
+                Err(e) => panic!("{ddl}: {}: {}", e.code, e.message),
+            }
+        }
+        let e = one("CREATE UNIQUE INDEX idx ON t (a)").unwrap_err();
+        assert!(
+            e.message.starts_with("UNIQUE is not supported"),
+            "{}",
+            e.message
+        );
+        let e = one("CREATE INDEX CONCURRENTLY idx ON t (a)").unwrap_err();
+        assert!(
+            e.message.starts_with("CONCURRENTLY is not supported"),
+            "{}",
+            e.message
+        );
+        let e = one("CREATE INDEX s.idx ON t (a)").unwrap_err();
+        assert!(e.message.starts_with("syntax error"), "{}", e.message);
+    }
+
+    /// E5: синтаксическая ошибка текста pgss (`queryId`) — с подсказкой после текста и позиции; у SQL модели и у прочих
+    /// отказов — без неё.
+    #[test]
+    fn syntax_errors_of_a_pgss_text_carry_the_normalized_text_hint() {
+        let hint = pgss_syntax_hint(42);
+        assert_eq!(
+            hint,
+            "pg_stat_statements stores query 42 in normalized form, and this text is not valid SQL as is (constants of typed literals such as interval '1 day' or timestamptz '…' became $N). Pass sql with values in place of such $N instead."
+        );
+        assert_eq!(
+            guard::with_hint("syntax error at or near \"$1\" (position 118)", &hint),
+            format!("syntax error at or near \"$1\" (position 118). {hint}")
+        );
+        let e = check_pgss_text(42, "SELECT * FROM t WHERE a = ").unwrap_err();
+        assert_eq!(e.code, "invalid_sql");
+        assert_eq!(
+            e.message,
+            format!("syntax error at end of input. {hint}"),
+            "текст разбора — как сейчас, подсказка — после"
+        );
+        let e = check_sql("SELECT * FROM t WHERE a = ", Purpose::Explain).unwrap_err();
+        assert_eq!(
+            e.message, "syntax error at end of input",
+            "SQL модели — без подсказки"
+        );
+        for text in ["SELECT pg_sleep($1)", "EXPLAIN SELECT 1"] {
+            let e = check_pgss_text(42, text).unwrap_err();
+            assert!(
+                !e.message.contains("normalized form"),
+                "{text}: {}",
+                e.message
             );
         }
     }
@@ -2767,6 +3101,20 @@ mod tests {
         ] {
             let e = asked(sql, qid).err().unwrap();
             assert_eq!(e.code, code, "{sql:?} {qid:?}");
+        }
+        // Те же правило и сообщения, что у `validate` крейта (E2): пустая строка — «не задана».
+        assert!(matches!(
+            asked(Some("SELECT 1"), Some("")),
+            Ok(Asked::Sql("SELECT 1"))
+        ));
+        assert!(matches!(asked(Some(" "), Some("7")), Ok(Asked::QueryId(7))));
+        for (sql, qid, want) in [
+            (Some("SELECT 1"), Some("42"), SQL_AND_QUERY_ID_BOTH),
+            (None, None, SQL_AND_QUERY_ID_NEITHER),
+            (Some(""), Some(" "), SQL_AND_QUERY_ID_NEITHER),
+        ] {
+            let e = asked(sql, qid).err().unwrap();
+            assert_eq!(e.message, want, "{sql:?} {qid:?}");
         }
     }
 

@@ -438,6 +438,84 @@ async fn plan_of_a_pgss_query_is_masked() {
     assert_eq!(e.code, "not_found", "{}", e.message);
 }
 
+/// E5: pgss хранит запрос с константами типизированных литералов (`timestamptz '…'`, `interval '…'`) как
+/// `timestamptz $1 - interval $2`, и сервер такой текст не разбирает (SQLSTATE 42601): `invalid_sql` с текстом и
+/// позицией сервера и подсказкой передать `sql` со значениями — у `explain_query` и у `hypothetical_index`; у SQL модели
+/// с той же ошибкой подсказки нет.
+#[tokio::test]
+async fn syntax_error_of_a_pgss_text_carries_the_hint() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st, _m) = open_for_llm(&perf).await;
+    const PROBE: &str = "SELECT count(*) FROM shop.orders o \
+                         WHERE o.created_at >= timestamptz '2026-01-01 00:00:00+00' - interval '1 day'";
+    let su = common::superuser(&perf, "perf").await;
+    su.batch_execute(PROBE).await.unwrap();
+    let plan: Value = su
+        .query_one(&format!("EXPLAIN (VERBOSE, FORMAT JSON) {PROBE}"), &[])
+        .await
+        .unwrap()
+        .get(0);
+    let qid = plan[0]["Query Identifier"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("{plan}"));
+    // Значения для $1 и $2: без них на PG < 16 раньше сработала бы проверка GENERIC_PLAN.
+    let params = json!(["2026-01-01 00:00:00+00", "1 day"]);
+    let hinted = |e: &glafira_mcp_core::error::ToolError| {
+        assert_eq!(e.code, "invalid_sql", "{}", e.message);
+        assert!(
+            e.message.starts_with("syntax error at or near \"$")
+                && e.message.contains("(position "),
+            "текст и позиция сервера — как раньше: {}",
+            e.message
+        );
+        assert!(
+            e.message.contains(&format!(
+                "). pg_stat_statements stores query {qid} in normalized form"
+            )) && e
+                .message
+                .ends_with("Pass sql with values in place of such $N instead."),
+            "{}",
+            e.message
+        );
+    };
+    let e = read_op(
+        &st,
+        explain(json!({
+            "connectionId": "it", "database": "perf", "queryId": qid.to_string(), "params": params
+        })),
+    )
+    .await
+    .unwrap_err();
+    hinted(&e);
+    let e = read_op(
+        &st,
+        hypo(json!({
+            "connectionId": "it", "database": "perf", "queryId": qid.to_string(), "params": params,
+            "indexes": ["CREATE INDEX orders_created_idx ON shop.orders (created_at)"]
+        })),
+    )
+    .await
+    .unwrap_err();
+    hinted(&e);
+    let e = read_op(
+        &st,
+        explain(json!({
+            "connectionId": "it", "database": "perf", "params": params,
+            "sql": "SELECT count(*) FROM shop.orders o WHERE o.created_at >= timestamptz $1 - interval $2"
+        })),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, "invalid_sql", "{}", e.message);
+    assert!(
+        e.message.starts_with("syntax error") && !e.message.contains("normalized form"),
+        "SQL модели — без подсказки: {}",
+        e.message
+    );
+}
+
 #[tokio::test]
 async fn hypotheses_through_the_gateway() {
     let Some(perf) = common::perf_addr() else {
@@ -465,6 +543,21 @@ async fn hypotheses_through_the_gateway() {
     );
     assert!(out.cost_after < out.cost_before);
     assert!(out.plan_text.contains("status"), "{}", out.plan_text);
+    // E4: имя гипотезы от модели снимается — hypopg даёт своё, в ответе проверенный текст без имени.
+    let a = ok(read_op(
+        &st,
+        hypo(json!({
+            "connectionId": "it", "database": "perf",
+            "sql": "SELECT count(*) FROM shop.orders WHERE status = $1", "params": ["disputed"],
+            "indexes": ["CREATE INDEX IF NOT EXISTS \"idx_orders_status\" ON shop.orders (status)"]
+        })),
+    )
+    .await);
+    let PgOutput::Hypo(out) = &a.body else {
+        panic!("не гипотеза")
+    };
+    assert_eq!(out.indexes[0].ddl, "CREATE INDEX ON shop.orders (status)");
+    assert!(out.indexes[0].used, "{:?}", out.indexes);
     // Отказ сервера одной из гипотез — invalid_sql; база без hypopg — FEATURE_UNAVAILABLE с подсказкой.
     let e = read_op(
         &st,

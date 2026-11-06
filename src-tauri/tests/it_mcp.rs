@@ -815,6 +815,103 @@ async fn perf_top_queries_and_statements_observation() {
     log.assert_reported(10.0).await;
 }
 
+/// По итогам прогона локальных моделей (E1, E3) — путь модели целиком: `windowS` без `mode` — окно (без истории — покрытие
+/// 0 и подсказка), `sinceReset` с `windowS` — итоги с момента сброса и подсказка, что окно не применено; база фильтра,
+/// которой нет на узле, — `not_found` со списком баз узла (только имена); существующая база без строк — пустой ответ без
+/// ошибки.
+#[tokio::test(flavor = "multi_thread")]
+async fn perf_top_queries_window_without_mode_and_missing_database() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st) = common::open_server_in(&perf, "perf").await;
+    let g = gateway(st).await;
+    let c = &g.client;
+    let window = ok(call(
+        c,
+        "get_top_queries",
+        json!({"connectionId": "it", "windowS": 900, "limit": 3}),
+    )
+    .await);
+    assert_eq!(window["data"]["mode"]["kind"], "window", "{window}");
+    assert_eq!(window["data"]["mode"]["s"], 900, "{window}");
+    assert_eq!(window["data"]["coverageS"], 0, "{window}");
+    assert!(
+        window["hint"]
+            .as_str()
+            .is_some_and(|h| h.contains("observe_top_queries")),
+        "{window}"
+    );
+    let since = ok(call(
+        c,
+        "get_top_queries",
+        json!({"connectionId": "it", "mode": "sinceReset", "windowS": 900, "limit": 3}),
+    )
+    .await);
+    assert_eq!(since["data"]["mode"]["kind"], "sinceReset", "{since}");
+    assert!(
+        since["hint"]
+            .as_str()
+            .is_some_and(|h| h.starts_with("windowS is ignored in mode sinceReset")),
+        "{since}"
+    );
+    assert!(
+        !since["data"]["rows"].as_array().unwrap().is_empty(),
+        "{since}"
+    );
+
+    let missing = err(&call(
+        c,
+        "get_top_queries",
+        json!({"connectionId": "it", "database": "no_such_db_e3"}),
+    )
+    .await);
+    assert!(
+        missing.starts_with("not_found: Database no_such_db_e3 does not exist on "),
+        "{missing}"
+    );
+    let list = missing
+        .split("; databases: ")
+        .nth(1)
+        .and_then(|rest| rest.split(" (the connection's database: perf)").next())
+        .unwrap_or_else(|| panic!("{missing}"));
+    let names: Vec<&str> = list.split(", ").collect();
+    assert!(
+        names.contains(&"perf") && names.contains(&"postgres"),
+        "{missing}"
+    );
+    assert!(
+        !names.iter().any(|n| n.starts_with("template")),
+        "без шаблонов: {missing}"
+    );
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(names, sorted, "по алфавиту: {missing}");
+    // Ничего сверх узла (имя из get_topology) и имён баз: ни роли, ни строки подключения.
+    let member = since["member"].as_str().unwrap();
+    assert_eq!(
+        missing,
+        format!(
+            "not_found: Database no_such_db_e3 does not exist on {member}; databases: {list} (the connection's database: perf)"
+        )
+    );
+    assert!(!missing.contains("glafira_diag"), "{missing}");
+    assert_eq!(logged(&g.audit, "get_top_queries")["code"], "not_found");
+
+    // Существующая база без строк: окно без истории (строк нет — проверка базы идёт и находит её) и шаблон.
+    for args in [
+        json!({"connectionId": "it", "database": "perf", "mode": "window", "windowS": 300}),
+        json!({"connectionId": "it", "database": "template1"}),
+        json!({"connectionId": "it", "database": "perf", "search": "no-such-text-e3"}),
+    ] {
+        let v = ok(call(c, "get_top_queries", args.clone()).await);
+        assert!(
+            v["data"]["rows"].as_array().unwrap().is_empty(),
+            "{args}: {v}"
+        );
+    }
+}
+
 /// EXPLAIN модели: план без выполнения, отказ враждебного SQL на разборе и на пробе плана (встроенная SQL-функция),
 /// `queryId` из топа с GENERIC_PLAN, гипотезы hypopg; запись только планируется (строки на месте), статистика базы не
 /// сброшена.

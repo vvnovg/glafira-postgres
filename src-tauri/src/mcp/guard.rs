@@ -78,6 +78,11 @@ pub(crate) fn with_position(message: &str, position: Option<usize>, leading: usi
     }
 }
 
+/// Сообщение об ошибке SQL и подсказка после него (текст и позиция — как были).
+pub(crate) fn with_hint(message: &str, hint: &str) -> String {
+    format!("{message}. {hint}")
+}
+
 /// Служебный шаг (сессия, версия, точка сохранения): его ошибка — не в тексте модели.
 fn service_ctx() -> Context {
     Context {
@@ -114,9 +119,14 @@ fn step_error(s: Step, ctx: Context) -> ToolError {
 }
 
 /// Отказ сервера при `prepare`: ошибка самого текста — `invalid_sql` с его текстом и позицией в тексте модели
-/// (символы с 1; `leading` — ведущие пробельные символы, снятые `normalize`); срок и права — `TIMEOUT` и
-/// `NOT_AUTHORIZED`, как у пробы; прочее (соединение, сервер) — как у остальных инструментов.
-fn prepare_error(e: &tokio_postgres::Error, leading: usize) -> ToolError {
+/// (символы с 1; `leading` — ведущие пробельные символы, снятые `normalize`), у синтаксической (SQLSTATE 42601) —
+/// ещё `syntax_hint` после них; срок и права — `TIMEOUT` и `NOT_AUTHORIZED`, как у пробы; прочее (соединение, сервер) —
+/// как у остальных инструментов.
+fn prepare_error(
+    e: &tokio_postgres::Error,
+    leading: usize,
+    syntax_hint: Option<&str>,
+) -> ToolError {
     let Some(db) = e.as_db_error() else {
         return tool_error(from_pg(e));
     };
@@ -131,10 +141,13 @@ fn prepare_error(e: &tokio_postgres::Error, leading: usize) -> ToolError {
         Some(ErrorPosition::Original(p)) => Some(*p as usize),
         _ => None,
     };
-    err(
-        "invalid_sql",
-        with_position(db.message(), position, leading),
-    )
+    let message = with_position(db.message(), position, leading);
+    match syntax_hint {
+        Some(hint) if *code == SqlState::SYNTAX_ERROR => {
+            err("invalid_sql", with_hint(&message, hint))
+        }
+        _ => err("invalid_sql", message),
+    }
 }
 
 /// Сессия и транзакция §7.3 на открытом соединении: `SESSION_SQL` своим запросом, затем `BEGIN READ ONLY` и
@@ -212,6 +225,16 @@ impl GuardTx {
     /// (`$1 IS NULL`) — не ошибка: анализ идёт уже после проверки числа выражений. Без выполнения: `prepare` — только
     /// Parse и Describe. `sql` — текст, как его прислала модель (нормализуется здесь).
     pub async fn prepare_one(&self, sql: &str) -> Result<(), ToolError> {
+        self.prepare_one_hinted(sql, None).await
+    }
+
+    /// `prepare_one` с подсказкой `syntax_hint` после текста и позиции синтаксической ошибки сервера (SQLSTATE 42601):
+    /// у текста pgss по `queryId` (E5) — он нормализован и может не разбираться как есть.
+    pub async fn prepare_one_hinted(
+        &self,
+        sql: &str,
+        syntax_hint: Option<&str>,
+    ) -> Result<(), ToolError> {
         let c = self.client();
         let text = normalize(sql);
         let rejected = within(self.timeout_s, async {
@@ -233,7 +256,7 @@ impl GuardTx {
         .map_err(|s| step_error(s, service_ctx()))?;
         match rejected {
             None => Ok(()),
-            Some(e) => Err(prepare_error(&e, leading_chars(sql))),
+            Some(e) => Err(prepare_error(&e, leading_chars(sql), syntax_hint)),
         }
     }
 

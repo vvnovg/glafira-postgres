@@ -212,8 +212,8 @@ fn answer(value: Value, masked: Option<u64>, rows: Option<u64>) -> CallOk {
     ok
 }
 
-/// Отчёт с усечением массивов `data` до 100 КБ (§10.1): `truncated: true` и `hint`; не помещается —
-/// `response_too_large`.
+/// Отчёт с усечением массивов `data` до 100 КБ (§10.1): `truncated: true` и `hint` (подсказка приложения, если она
+/// была, остаётся первой); не помещается — `response_too_large`.
 fn report_value(r: &Report) -> Result<Value, ToolError> {
     let (mut v, truncated) = truncate::fit(to_value(r)?, FIT_LIMIT).map_err(|()| {
         ToolError::new(
@@ -223,7 +223,11 @@ fn report_value(r: &Report) -> Result<Value, ToolError> {
     })?;
     if truncated {
         v["truncated"] = Value::Bool(true);
-        v["hint"] = Value::String(TRUNCATED_HINT.to_string());
+        let hint = match r.hint.as_deref() {
+            Some(h) => format!("{h} {TRUNCATED_HINT}"),
+            None => TRUNCATED_HINT.to_string(),
+        };
+        v["hint"] = Value::String(hint);
     }
     Ok(v)
 }

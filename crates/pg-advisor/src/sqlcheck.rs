@@ -24,7 +24,8 @@ pub enum Purpose {
     /// `explain_query`, запрос `hypothetical_index`, предложение (P4b): одно `SELECT` / `INSERT` / `UPDATE` / `DELETE` /
     /// `MERGE` — без ANALYZE оно не выполняется.
     Explain,
-    /// Строка `indexes` у `hypothetical_index`: одно `CREATE INDEX ON …` без имени, `CONCURRENTLY` и `UNIQUE` (P3b).
+    /// Строка `indexes` у `hypothetical_index`: одно `CREATE INDEX ON …` без имени, `CONCURRENTLY` и `UNIQUE` (P3b);
+    /// имя, присланное моделью, шлюз снимает до проверки (`without_index_name`).
     HypoIndex,
     /// `run_select` (P4b): одно `SELECT` без `INTO`, блокировок строк и изменяющих CTE на любой глубине.
     Select,
@@ -108,6 +109,43 @@ pub fn parse_count(sql: &str) -> Result<usize, String> {
     pg_query::parse(sql, pg_query::ParserOptions::DEFAULT)
         .map(|r| r.protobuf.stmts.len())
         .map_err(|e| e.to_string())
+}
+
+/// Текст гипотетического индекса без имени (P4a, E4): модели пишут `CREATE INDEX idx_x ON …`, а hypopg даёт индексу
+/// своё имя. Одно `CREATE INDEX [IF NOT EXISTS] имя ON …` без `UNIQUE` и `CONCURRENTLY` (по дереву разбора) → тот же
+/// текст без `[IF NOT EXISTS] имя`: вырезается по токенам `pg_query::scan` от конца `INDEX` до конца имени (имя — один
+/// токен перед `ON`, в кавычках или без; `IF NOT EXISTS` без имени PostgreSQL не принимает). Иначе `None` — текст
+/// проверяется как есть, и отказы `check` прежние: имя со схемой не разбирается, `UNIQUE`, `CONCURRENTLY`, комментарий
+/// между `INDEX` и `ON`, не `CREATE INDEX`. `check` имя по-прежнему отвергает: снимает его вызывающий (шлюз MCP).
+///
+/// Вызывает `pg_query::parse` — требования к стеку те же, что у [`check`].
+pub fn without_index_name(ddl: &str) -> Option<String> {
+    use pg_query::protobuf::Token;
+    let parsed = pg_query::parse(ddl, pg_query::ParserOptions::DEFAULT).ok()?;
+    let [stmt] = parsed.protobuf.stmts.as_slice() else {
+        return None;
+    };
+    let Some(NodeEnum::IndexStmt(ix)) = stmt.stmt.as_ref().and_then(|s| s.node.as_ref()) else {
+        return None;
+    };
+    if ix.idxname.is_empty() || ix.unique || ix.concurrent {
+        return None;
+    }
+    let tokens = pg_query::scan(ddl).ok()?.tokens;
+    let is = |i: usize, t: Token| tokens.get(i).is_some_and(|x| x.token == t as i32);
+    let name = if ix.if_not_exists { 5 } else { 2 };
+    let header = is(0, Token::Create)
+        && is(1, Token::Index)
+        && (!ix.if_not_exists || (is(2, Token::IfP) && is(3, Token::Not) && is(4, Token::Exists)))
+        && !is(name, Token::SqlComment)
+        && !is(name, Token::CComment)
+        && is(name + 1, Token::On);
+    if !header {
+        return None;
+    }
+    let from = usize::try_from(tokens[1].end).ok()?;
+    let to = usize::try_from(tokens[name].end).ok()?;
+    Some(format!("{}{}", ddl.get(..from)?, ddl.get(to..)?))
 }
 
 /// Байтовое смещение `pg_query` (`location`; −1 — неизвестно) → номер символа с 1.
@@ -571,6 +609,62 @@ mod tests {
                 "functions": [{"name": "lower"}],
                 "tables": [{"schema": "shop", "name": "orders"}]
             })
+        );
+    }
+
+    /// Имя гипотетического индекса снимается (P4a, E4): по дереву разбора и токенам — в кавычках, с `IF NOT EXISTS`,
+    /// с `USING` и `WHERE`, с переводами строк; прочие формы — `None`, текст проверяется как есть, и отказы `check`
+    /// прежние.
+    #[test]
+    fn index_name_is_dropped_by_tokens() {
+        for (ddl, want) in [
+            (
+                "CREATE INDEX idx_orders_status ON shop.orders (status)",
+                "CREATE INDEX ON shop.orders (status)",
+            ),
+            ("create index \"My Idx\" on t (a)", "create index on t (a)"),
+            ("CREATE INDEX \"й\" ON t (a)", "CREATE INDEX ON t (a)"),
+            (
+                "CREATE INDEX IF NOT EXISTS idx ON t (a);",
+                "CREATE INDEX ON t (a);",
+            ),
+            (
+                "  CREATE INDEX\n  idx\n  ON t USING btree (a) WHERE a > 0",
+                "  CREATE INDEX\n  ON t USING btree (a) WHERE a > 0",
+            ),
+            ("CREATE INDEX if ON t (a)", "CREATE INDEX ON t (a)"),
+            // Комментарий вне заголовка остаётся: его отвергает правило P3b (`validate_ddl`) приложения.
+            (
+                "CREATE INDEX idx ON t (a) /* x */",
+                "CREATE INDEX ON t (a) /* x */",
+            ),
+        ] {
+            assert_eq!(without_index_name(ddl).as_deref(), Some(want), "{ddl}");
+            assert!(
+                check(want, Purpose::HypoIndex).is_ok(),
+                "{want}: принимается проверкой"
+            );
+        }
+        for ddl in [
+            "CREATE INDEX ON t (a)",
+            "CREATE INDEX s.idx ON t (a)",
+            "CREATE UNIQUE INDEX idx ON t (a)",
+            "CREATE INDEX CONCURRENTLY idx ON t (a)",
+            "CREATE INDEX IF NOT EXISTS ON t (a)",
+            "CREATE INDEX idx ON t (a); CREATE INDEX idx2 ON t (b)",
+            "CREATE INDEX /* c */ idx ON t (a)",
+            "CREATE INDEX idx -- c\n ON t (a)",
+            "SELECT 1",
+            "",
+        ] {
+            assert_eq!(without_index_name(ddl), None, "{ddl}");
+        }
+        // Отказ имени у самой проверки — прежний (её назначение `HypoIndex` общее с P3b-правилом).
+        let r = check("CREATE INDEX idx ON t (a)", Purpose::HypoIndex).unwrap_err();
+        assert!(
+            r.message.starts_with("Index names are not accepted"),
+            "{}",
+            r.message
         );
     }
 

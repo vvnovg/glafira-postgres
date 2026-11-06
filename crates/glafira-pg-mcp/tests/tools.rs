@@ -193,6 +193,10 @@ impl PgBackend for FakePg {
                     }
                     let r = match p.tool.as_str() {
                         "sessions" => report("sessions", sessions_data(3000)),
+                        "hinted" => Report {
+                            hint: Some("Earlier hint.".into()),
+                            ..report("sessions", sessions_data(3000))
+                        },
                         "blob" => report("blob", json!({"kind": "blob", "text": "x".repeat(200_000)})),
                         other => report(other, json!({"kind": other, "rows": []})),
                     };
@@ -662,12 +666,12 @@ async fn parameters_are_checked_at_the_boundaries_before_the_backend() {
         (
             "explain_query",
             json!({"connectionId": "c1", "database": "perf"}),
-            "pass exactly one of sql and queryId".into(),
+            "pass exactly one of sql and queryId: neither was given".into(),
         ),
         (
             "explain_query",
             json!({"connectionId": "c1", "database": "perf", "sql": "SELECT 1", "queryId": "1"}),
-            "pass exactly one of sql and queryId".into(),
+            "pass exactly one of sql and queryId: both were given".into(),
         ),
         (
             "hypothetical_index",
@@ -759,6 +763,64 @@ async fn blank_sql_and_padded_query_id_are_normalised() {
     );
 }
 
+/// Пустые строки необязательных полей — «не заданы» (E2): `state: ""` не отсеивает все сессии, `queryId: ""` рядом с
+/// `sql` не мешает; журнал хранит то, что прислала модель.
+#[tokio::test]
+async fn blank_optional_strings_reach_the_backend_as_none() {
+    let e = env().await;
+    let c = &e.client;
+    ok(call(
+        c,
+        "get_activity",
+        json!({"connectionId": "c1", "member": "", "state": "", "waitEventType": " ", "application": ""}),
+    )
+    .await);
+    ok(call(
+        c,
+        "explain_query",
+        json!({"connectionId": "c1", "sql": "SELECT 1", "queryId": ""}),
+    )
+    .await);
+    ok(call(
+        c,
+        "get_top_queries",
+        json!({"connectionId": "c1", "mode": "", "sort": "", "search": " ", "database": ""}),
+    )
+    .await);
+    let reads = e.fake.reads.lock().unwrap().clone();
+    let PgRead::Activity(a) = &reads[0] else {
+        panic!("{:?}", reads[0])
+    };
+    assert_eq!(
+        (&a.member, &a.state, &a.wait_event_type, &a.application),
+        (&None, &None, &None, &None)
+    );
+    let PgRead::Explain(x) = &reads[1] else {
+        panic!("{:?}", reads[1])
+    };
+    assert_eq!(
+        (x.sql.as_deref(), x.query_id.as_deref()),
+        (Some("SELECT 1"), None)
+    );
+    let PgRead::TopQueries(t) = &reads[2] else {
+        panic!("{:?}", reads[2])
+    };
+    assert_eq!(
+        (
+            t.mode.as_deref(),
+            t.sort.as_deref(),
+            t.search.as_deref(),
+            t.database.as_deref()
+        ),
+        (Some("sinceReset"), Some("totalTime"), None, None)
+    );
+    // `tail` — новые первыми.
+    let tail = e.audit.tail(3);
+    assert_eq!(tail[2]["args"]["state"], "", "журнал: как прислала модель");
+    assert_eq!(tail[1]["args"]["queryId"], "");
+    assert_eq!(tail[0]["args"]["sort"], "");
+}
+
 #[tokio::test]
 async fn defaults_are_filled_before_the_backend() {
     let e = env().await;
@@ -793,8 +855,8 @@ async fn defaults_are_filled_before_the_backend() {
     };
     assert_eq!(
         (t.mode.as_deref(), t.window_s, t.sort.as_deref(), t.limit),
-        (Some("sinceReset"), None, Some("totalTime"), Some(10)),
-        "окно без режима window не передаётся"
+        (Some("window"), Some(300), Some("totalTime"), Some(10)),
+        "windowS без mode выбирает окно"
     );
     let PgRead::TopQueries(w) = &reads[2] else {
         panic!("{:?}", reads[2])
@@ -940,6 +1002,15 @@ async fn long_report_data_is_truncated_with_a_hint() {
     .await);
     assert_eq!(small["truncated"], false);
     assert!(small.get("hint").is_none());
+    // Подсказка отчёта не теряется при усечении: подсказки склеиваются.
+    let hinted = ok(call(
+        &e.client,
+        "run_diagnostic",
+        json!({"connectionId": "c1", "tool": "hinted"}),
+    )
+    .await);
+    assert_eq!(hinted["truncated"], true);
+    assert_eq!(hinted["hint"], format!("Earlier hint. {TRUNCATED_HINT}"));
     assert_eq!(
         e.audit.tail(1)[0]["masked"],
         5,
