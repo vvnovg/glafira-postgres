@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 import type { ReadinessItem, ReadinessStatus, StepStatus, TestEvent, TestReport, TopologyWarning } from "../../api/types";
 import { tr } from "../../i18n/text";
+import { llmRoleParams } from "../../lib/llmRole";
 import { CopyButton } from "../common/CopyButton";
 
 const STEP_ICON: Record<StepStatus, string> = { running: "⏳", ok: "✅", failed: "❌", skipped: "⏭" };
@@ -39,18 +40,19 @@ function StatusIcon({ icon, label }: { icon: string; label: string }) {
 
 /** Тексты пункта: вариант — `params.reason` (если есть), иначе статус; ключи `readiness.<id>.<вариант>`. */
 function itemText(item: ReadinessItem, t: Translate) {
+  const params = llmRoleParams(item, t);
   const variant = item.params.reason ?? item.status;
   return {
-    title: t(`readiness.${item.id}.title`, item.params),
-    state: t(`readiness.${item.id}.${variant}`, item.params),
+    title: t(`readiness.${item.id}.title`, params),
+    state: t(`readiness.${item.id}.${variant}`, params),
     affects:
       item.status === "ok"
         ? null
         : item.params.hint
           ? t(`readiness.${item.id}.hints.${item.params.hint}`)
-          : t(`readiness.${item.id}.affects`, item.params),
+          : t(`readiness.${item.id}.affects`, params),
     // Шаги включения — по факту состояния сервера (`params.enable`: пакет → предзагрузка → CREATE EXTENSION).
-    enable: item.status === "ok" || !item.params.enable ? null : t(`readiness.${item.id}.enable.${item.params.enable}`, item.params),
+    enable: item.status === "ok" || !item.params.enable ? null : t(`readiness.${item.id}.enable.${item.params.enable}`, params),
     // Примечание о порядке в shared_preload_libraries не нужно, когда библиотека уже загружена (`enable: create`).
     note:
       item.status === "ok" || !item.params.hint

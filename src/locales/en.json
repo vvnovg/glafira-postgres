@@ -377,11 +377,15 @@
       "llmAccess": "LLM access",
       "llmLevels": {
         "off": "None",
-        "diagnostics": "Diagnostics"
+        "diagnostics": "Diagnostics",
+        "data": "Diagnostics and data"
       },
       "llmPolicyOff": "MCP is disabled by your organization: the level has no effect",
       "llmServerOff": "The MCP server is off: turn it on in Settings → LLM assistants (MCP)",
-      "llmStatusUnavailable": "MCP status is unavailable"
+      "llmStatusUnavailable": "MCP status is unavailable",
+      "llmProdWarning": "Production database data will be sent to the LLM provider",
+      "llmDataPolicy": "Reading data is limited by your organization",
+      "llmDataAsDiagnostics": "Acts as “Diagnostics”: reading data is limited by your organization"
     }
   },
   "hostKey": {
@@ -481,7 +485,8 @@
     },
     "diagnostics": "Diagnostics",
     "pulse": "Pulse",
-    "llmBadge": "LLM access: diagnostics"
+    "llmBadge": "LLM access: diagnostics",
+    "llmBadgeData": "LLM access: diagnostics and data"
   },
   "tabs": {
     "settings": "Settings",
@@ -794,6 +799,20 @@
       "warn": "The role is not a member of pg_read_all_data",
       "version": "PostgreSQL 13: grant SELECT on the tables of the queries you want to explain",
       "affects": "EXPLAIN of application queries fails with “permission denied”"
+    },
+    "llmRole": {
+      "title": "LLM role (run_select)",
+      "ok": "The role has no rights beyond reading",
+      "superuser": "Role {{role}} is a superuser: through run_select the model could {{abilities}} if it gets past the list of denied functions",
+      "member": "Role {{role}} is a member of {{memberships}}: through run_select the model could {{abilities}} if it gets past the list of denied functions",
+      "affects": "This is only a warning. For a test stand, add a separate connection with a role that only reads (SQL on the right) and give “Diagnostics and data” to it",
+      "ability": {
+        "superuser": "terminate sessions, write, read server files and run programs",
+        "pg_signal_backend": "terminate sessions",
+        "pg_write_all_data": "write",
+        "pg_read_server_files": "read server files",
+        "pg_execute_server_program": "run programs"
+      }
     },
     "extension": {
       "title": "Extension {{name}}",
@@ -2096,7 +2115,7 @@
       "environment": "Marks the connection with a color. prod connections ask you to type the connection name before any change.",
       "readOnly": "Blocks everything that changes data or the cluster. Recommended for prod.",
       "sshTarget": "A host or an alias from ~/.ssh/config, not user@host: enter the user in the “SSH user” field. ProxyJump, the agent and hardware keys are honored. Port and user come from the config when empty.",
-      "llmAccess": "What an LLM assistant may read over MCP. Diagnostics: topology, reports, activity, top queries, plans without execution; literals are masked. Not exported with the connection."
+      "llmAccess": "What an LLM assistant may read over MCP. Diagnostics: reports, activity, top queries, plans; literals are masked. Diagnostics and data: also run_select and pg_stats values, unmasked. Not exported."
     },
     "import": {
       "target": "Where new folders and connections go. Existing ones stay where they are.",

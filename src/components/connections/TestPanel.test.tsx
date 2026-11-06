@@ -263,6 +263,32 @@ describe("TestPanel", () => {
     expect(container.querySelectorAll("td.readiness-fix")).toHaveLength(3);
   });
 
+  it("пункт llmRole называет права роли и что через них сможет модель", () => {
+    render(
+      <TestPanel
+        events={[]}
+        report={{
+          ok: true,
+          topology: null,
+          readiness: [
+            {
+              id: "llmRole",
+              status: "warn",
+              params: { role: "app", memberships: "pg_signal_backend, pg_write_all_data", reason: "member" },
+              fix: "CREATE ROLE glafira_llm LOGIN PASSWORD '…';",
+            },
+          ],
+        }}
+      />,
+    );
+    expect(screen.getByText("Роль для LLM (run_select)")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Роль app — член pg_signal_backend, pg_write_all_data: через run_select модель сможет завершать сессии, писать, если обойдёт список запрещённых функций",
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("значки статусов читаются как текст", () => {
     render(
       <TestPanel

@@ -257,7 +257,12 @@ export function ConnectionForm({ initial, tabId, copyOf }: { initial: Connection
           />
         </span>
 
-        <LlmAccessGroup idPrefix={uid} profile={profile} onChange={setProfile} />
+        <LlmAccessGroup
+          idPrefix={uid}
+          profile={profile}
+          onChange={setProfile}
+          roleItem={report?.readiness.find((i) => i.id === "llmRole") ?? null}
+        />
 
         <label htmlFor={`${uid}-color`}>{t("connections.form.color")}</label>
         <input id={`${uid}-color`} type="color" value={profile.color} onChange={(e) => setProfile({ ...profile, color: e.target.value })} />

@@ -43,7 +43,7 @@ describe("LlmAccessGroup", () => {
     const user = userEvent.setup();
     renderWithClient(<Harness initial={newProfile()} onProfile={onProfile} />);
     expect(screen.getByRole("radiogroup", { name: "Доступ для LLM" })).toBeInTheDocument();
-    expect(screen.getAllByRole("radio")).toHaveLength(2);
+    expect(screen.getAllByRole("radio")).toHaveLength(3);
     expect(screen.getByRole("radio", { name: "Нет" })).toBeChecked();
     await user.click(screen.getByRole("radio", { name: "Диагностика" }));
     expect(onProfile).toHaveBeenLastCalledWith(expect.objectContaining({ llmAccess: "diagnostics" }));

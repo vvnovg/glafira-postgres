@@ -508,6 +508,8 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .mcp-snippet pre { margin: 4px 0 8px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-alt); white-space: pre-wrap; word-break: break-all; font-size: 12px; }
 /* Значок «LLM» в дереве и группа «Доступ для LLM» в форме подключения (спец. P4 §11). */
 .llm-badge { font-size: 10px; padding: 0 3px; border: 1px solid var(--accent); border-radius: 3px; color: var(--accent); }
+.llm-badge--data { background: var(--accent); border-color: var(--accent); color: #fff; }
+.llm-notes { display: flex; flex-direction: column; gap: 2px; flex-basis: 100%; }
 .tree-conn .llm-badge { cursor: default; }
 .llm-levels { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; }
 .llm-levels [role="radiogroup"] { display: inline-flex; gap: 12px; }

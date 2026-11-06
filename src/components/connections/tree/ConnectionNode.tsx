@@ -4,10 +4,8 @@ import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../../api/client";
 import type { AppError, ConnectionProfile, TopologyView } from "../../../api/types";
 import { tr } from "../../../i18n/text";
-import { effectiveLlmAccess } from "../../../lib/llmAccess";
 import { roleLabel } from "../../../lib/topology";
 import { disconnectedView, ofConnection, refreshAfterConnect, useTopology } from "../../../lib/useConnectionEvents";
-import { useMcpStatus } from "../../../lib/useMcpStatus";
 import { useWorkspace } from "../../../state/workspace";
 import { EnvBadge } from "../../common/EnvBadge";
 import { Glyph } from "../../common/Glyph";
@@ -15,6 +13,7 @@ import { hostKeyUnknown } from "../profile";
 import { TrustHostKeyDialog } from "../TrustHostKeyDialog";
 import { CatalogNodes } from "./CatalogNodes";
 import { FolderMenu, type FolderMenuItem } from "./FolderMenu";
+import { LlmBadge } from "./LlmBadge";
 import { useFocusMenuItem } from "./treeFocus";
 
 /**
@@ -45,9 +44,6 @@ export function ConnectionNode({
   const { data: view = disconnectedView } = topologyQ;
   const live = view.state === "connected" || view.state === "degraded";
   const focusItem = useFocusMenuItem({ kind: "connection", connectionId: c.id });
-  // Значок «LLM» (спец. P4 §11) — по действующему уровню: политика, запретившая MCP, его снимает; пока статус MCP не
-  // пришёл — по уровню профиля (значок говорит, что подключение открыто для ассистента, а не что сервер работает).
-  const llm = effectiveLlmAccess(c, useMcpStatus().status);
 
   // Локальная ошибка — про прошлую попытку или действие. Когда подключение снова здорово («connected»),
   // она устарела и не должна висеть под живым узлом.
@@ -226,11 +222,7 @@ export function ConnectionNode({
           {c.name}
         </button>
         <EnvBadge environment={c.environment} readOnly={c.readOnly} />
-        {llm !== "off" && (
-          <span className="llm-badge" role="img" title={t("sidebar.llmBadge")} aria-label={t("sidebar.llmBadge")}>
-            LLM
-          </span>
-        )}
+        <LlmBadge connection={c} />
         {c.kind === "patroni" && <span className="kind-badge">Patroni</span>}
         {serverRole !== undefined && serverRole !== "unknown" && <span className="kind-badge">{roleLabel(serverRole, "server")}</span>}
         <span className="tree-menu-anchor">

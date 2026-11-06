@@ -36,8 +36,8 @@ export interface AppError {
 
 export type Environment = "local" | "dev" | "test" | "stage" | "prod";
 export type ConnectionKind = "server" | "hostList" | "patroni";
-/** Доступ LLM-ассистентов к подключению через MCP (P4 §4.1); P4b добавит "data". */
-export type LlmAccess = "off" | "diagnostics";
+/** Уровень доступа LLM-ассистентов к подключению (спец. P4 §4.1); `data` — P4b. */
+export type LlmAccess = "off" | "diagnostics" | "data";
 /** Потолок уровня доступа LLM по политике администратора (`mcpMaxAccess`). */
 export type McpMaxAccess = "diagnostics" | "data";
 export type TargetServerType = "primary" | "standby" | "preferStandby" | "any";
