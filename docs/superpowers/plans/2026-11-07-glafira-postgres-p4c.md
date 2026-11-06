@@ -1361,6 +1361,61 @@ Expected: в коммите только спека (журнал плана `.s
 `.gitignore`).
 
 
+### Итог задачи 1 — поправки к задачам 5, 6, 8, 9 и 11 (обязательны)
+
+Задача 1 выполнена 2026-11-07 (коммит инструмента `f5c5fdb`; прогоны `dev/agent-check/out/20261107-021001` — 21 вариант и
+`20261107-023613` — canary; итог — спека §4.1 и §16 «Итог проверки CLI»; журнал — `.superpowers/sdd/p4c/decisions.md`).
+Тексты задач 5, 6, 8, 9 и 11 написаны до проверки; исполнитель применяет поправки ниже поверх них, при расхождении правы
+поправки. Решение контроллера: вместо разрешающего списка (у Qwen Code его нет) — проверка инструментов по событию `init`
+потока (спека §4.1 «Проверка инструментов»).
+
+**Задача 5 (`agent::presets`):**
+1. Убрать `QWEN_NO_BUILTIN_TOOLS` (`--core-tools glafira_none --exclude-tools agent`): `--core-tools` оставляет 12–13 служебных
+   инструментов. Вместо него — `pub const QWEN_BUILTIN_TOOLS: [&str; 31] = ["web_fetch", "get_goal", "update_goal", "tool_call", "tool_search", "read_mcp_resource", "agent", "list_agents", "task_stop", "send_message", "skill", "read_file", "manage_memory", "search_memory", "zoom_image", "grep_search", "edit", "notebook_edit", "write_file", "run_shell_command", "report_findings", "enter_worktree", "exit_worktree", "record_artifact", "cron_create", "cron_list", "cron_delete", "loop_wakeup", "autofix_pr", "monitor", "glob"];` (Qwen Code 0.26.5) и аргументы
+   `--exclude-tools` + все 31 имя подряд.
+2. Qwen Code: добавить `--safe-mode`; вывод `-o stream-json` вместо `-o json`; `--approval-mode` не передаётся; остальное — как в
+   задаче (`--mcp-config`, `--allowed-mcp-server-names glafira-pg`, `--allowed-tools` с девятью `mcp__glafira-pg__<имя>` из
+   `RUN_TOOL_NAMES`, `--chat-recording false`, `--max-wall-time <срок + 30>s`, `--max-tool-calls 40`, `-m`; `"trust": true` у
+   сервера в MCP-конфиге).
+3. Claude Code: добавить `--setting-sources project,local`; вывод `--output-format stream-json --verbose` вместо
+   `--output-format json`; `--max-budget-usd` — только без Ollama (как в задаче).
+4. `OutputFormat`: вариант `Json` заменяется на `StreamJson` (оба пресета); `Text` пресеты не используют.
+5. Золотые тесты пресетов — с этими аргументами (порядок — как в задаче 5); отдельный тест: в аргументах Qwen Code есть все
+   имена `QWEN_BUILTIN_TOOLS` и нет `--core-tools`, `--approval-mode`, `--bare`; у Claude Code нет `--bare`.
+
+**Задача 6 (`agent::process`, `agent::queue`, `agent::runs`):**
+1. `FailReason::UnsafeTools` (JSON `unsafeTools`).
+2. Проверка инструментов. `read_stream` stdout разбирает строки JSON до первого события `{"type": "system", "subtype":
+   "init"}` (у Claude Code перед ним бывают другие системные события) и отправляет его `tools` (строки) в `oneshot`; новый
+   метод `AgentProcess::init_tools(&mut self) -> BoxFuture<'_, Option<Vec<String>>>` (`None` — поток кончился без `init`).
+   Очередь сразу после `spawn` ждёт его не дольше `INIT_TIMEOUT = 60 с`: есть имя без префикса `mcp__glafira-pg__` →
+   остановка группы процессов, `failed` / `unsafeTools`, предупреждение `unsafe <имена через запятую>`; нет события или срок
+   вышел → то же с предупреждением `unsafe no-init`. `FakeSpawner` получает сценарии `init(&[…])` и «без init».
+   Тесты: лишний инструмент → `unsafeTools`, процесс остановлен, вызовов нет; только `mcp__glafira-pg__*` → запуск идёт
+   дальше; без `init` → `unsafeTools` через 60 с (остановленное время).
+3. `final_text`: поток JSON по строке — последнее событие `type == "result"`: `result` (итог), `subtype`, `total_cost_usd`;
+   разбор массива (`-o json` Qwen Code) и объекта (`--output-format json` Claude Code) оставить как запасной; нет события —
+   хвост 4 КБ.
+4. Стоимость: `cost_usd` пишется только у Claude Code без Ollama (через Ollama она выдуманная — около 0,3 $ за запуск).
+5. `cli_limit`: Qwen Code — код 55 (в stderr `FatalBudgetExceededError`); Claude Code — код ≠ 0 и `subtype`, начинающийся с
+   `error_max` (подтверждено `error_max_budget_usd`).
+
+**Задача 8 (`glafira-fake-agent`):** при `-o stream-json` / `--output-format stream-json` агент печатает первым событием
+`{"type":"system","subtype":"init","tools":[…]}` с именами инструментов, полученными от шлюза (`tools/list`, с префиксом
+`mcp__glafira-pg__`), последним — `{"type":"result","subtype":"success","result":…}`. Новый режим `unsafe`: `init` с лишним
+`run_shell_command` и без вызовов — тест ждёт `failed` / `unsafeTools` и ни одного вызова в журнале шлюза.
+
+**Задача 9 (TS):** `FailReason` += `"unsafeTools"`; `agentText` — «агенту доступны не только инструменты Glafira: <имена>;
+запуск остановлен до первого хода» (предупреждение `unsafe <имена>`) и «агент не сообщил список своих инструментов; запуск
+остановлен» (`unsafe no-init`); тесты на оба текста.
+
+**Задача 11 (документы):** глава — пресеты по §4.1 (флаги против пользовательских хуков и настроек: `--safe-mode`,
+`--setting-sources project,local`; что `QWEN.md` и `~/.claude/CLAUDE.md` прогон не проверил), «Если не работает» —
+`unsafeTools` (обновите Glafira: новая версия CLI добавила встроенный инструмент); чек-лист выпуска — прогон `dev/agent-check`
+на текущих версиях CLI и обновление `QWEN_BUILTIN_TOOLS` по описи `q-inventory`; спека P4c §4.1 и §16 уже обновлены задачей 1
+(шаг «синхронизация спеки» их не переписывает).
+
+
 ### Task 2: Ядро шлюза — билет запуска в рукопожатии, область сессии через `Gate`, поле `run`
 
 Рукопожатие получает необязательный билет: `GLAFIRA-MCP/1 <token> run=<билет>`. Сервер ядра сначала проверяет токен,
