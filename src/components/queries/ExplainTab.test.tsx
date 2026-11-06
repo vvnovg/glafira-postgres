@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useWorkspace } from "../../state/workspace";
 import { resetEventBus } from "../../test/events";
 import { connection, member, topology, topologyView } from "../../test/fixtures";
-import { optimizationRequest } from "../../test/llm";
+import { llmProposal, optimizationRequest } from "../../test/llm";
 import { mcpStatus } from "../../test/mcp";
 import { planNode, planTree } from "../../test/plans";
 import { renderWithClient } from "../../test/render";
@@ -401,5 +401,20 @@ describe("ExplainTab", () => {
     await user.type(screen.getByRole("textbox", { name: "SQL" }), " ");
     await user.click(screen.getByRole("button", { name: "Передать LLM-ассистенту" }));
     expect(api.createOptimizationRequest).toHaveBeenLastCalledWith("c", { member: "pg-1", database: "perf", source: { kind: "console" }, sql: `${sql} `, params: [], plan: null });
+  });
+
+  it("«Предложения LLM» — сразу под редактором; подстановка значка карточки выбирает её предложение", async () => {
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest({ id: "r9", source: { kind: "query", queryId: "7" }, status: "answered" })]);
+    vi.mocked(api.listLlmProposals).mockResolvedValue([llmProposal({ id: "p9", requestId: "r9", rewrittenSql: "SELECT 9 AS from_card" })]);
+    renderWithClient(
+      <ExplainTab connectionId="c" member="pg-1" database="perf" sql="SELECT 1" active prefill={{ sql: "SELECT 1", database: "perf", member: "pg-1", nonce: 5, proposalId: "p9" }} />,
+    );
+    const editor = await screen.findByRole("textbox", { name: "SQL" });
+    const panel = screen.getByRole("region", { name: "Предложения LLM" });
+    // Под редактором и над кнопками запуска.
+    expect(editor.parentElement).toContainElement(panel);
+    expect(editor.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(panel.compareDocumentPosition(await screen.findByRole("button", { name: "План" })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(await within(panel).findByRole("table", { name: "Исходный и предложенный текст" })).toHaveTextContent("SELECT 9 AS from_card");
   });
 });

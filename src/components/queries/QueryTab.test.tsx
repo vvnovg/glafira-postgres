@@ -5,7 +5,7 @@ import type { QueryDetail } from "../../api/types";
 import { useWorkspace } from "../../state/workspace";
 import { resetEventBus } from "../../test/events";
 import { connection, member, topology, topologyView } from "../../test/fixtures";
-import { optimizationRequest } from "../../test/llm";
+import { llmProposal, optimizationRequest } from "../../test/llm";
 import { mcpStatus } from "../../test/mcp";
 import { renderWithClient } from "../../test/render";
 import en from "../../locales/en.json";
@@ -374,5 +374,27 @@ describe("QueryTab", () => {
     renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
     await screen.findByText("SELECT * FROM shop.customers WHERE id = $1");
     expect(screen.queryByRole("button", { name: "Передать LLM-ассистенту" })).toBeNull();
+  });
+
+  it("значок «Предложения LLM: N» открывает консоль с исходным текстом и выбранным предложением", async () => {
+    vi.mocked(api.queryDetail).mockResolvedValue(detail());
+    vi.mocked(api.listLlmProposals).mockResolvedValue([
+      llmProposal({ id: "p1", requestId: null, originalQueryId: "7", originalSql: "SELECT * FROM shop.customers WHERE id = $1", member: "pg-1" }),
+      llmProposal({ id: "p2", requestId: null, originalQueryId: "8" }),
+    ]);
+    const user = userEvent.setup();
+    renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
+    await user.click(await screen.findByRole("button", { name: "Предложения LLM: 1" }));
+    expect(useWorkspace.getState().tabs.find((t) => t.id === "explain:c")).toMatchObject({
+      prefill: { sql: "SELECT * FROM shop.customers WHERE id = $1", database: "perf", member: "pg-1", proposalId: "p1" },
+    });
+    expect(useWorkspace.getState().activeId).toBe("explain:c");
+  });
+
+  it("без предложений значка нет", async () => {
+    vi.mocked(api.queryDetail).mockResolvedValue(detail());
+    renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
+    await screen.findByRole("button", { name: "Обновить" });
+    expect(screen.queryByRole("button", { name: /^Предложения LLM/ })).toBeNull();
   });
 });

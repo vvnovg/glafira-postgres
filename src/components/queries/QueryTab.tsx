@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { ExplainResult } from "../../api/types";
+import type { ExplainResult, LlmProposal } from "../../api/types";
 import { useTopology } from "../../lib/useConnectionEvents";
+import { queryProposals, useLlmProposals } from "../../lib/useLlmProposals";
 import { useQueryDetail } from "../../lib/useQueryDetail";
 import { useStatementsSampler } from "../../lib/useStatementsSampler";
-import { tabId, useWorkspace } from "../../state/workspace";
+import { openExplainWithPrefill, tabId, useWorkspace } from "../../state/workspace";
 import { SubTabs } from "../catalog/SubTabs";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { QueryOverview } from "./QueryOverview";
@@ -22,6 +23,7 @@ type Section = "overview" | "plan";
  * (скрытой на «Обзоре»): значения параметров, история и показанный план живут, пока открыта вкладка. Заголовок вкладки,
  * открытой без текста (из находки), становится началом текста, когда тот прочитан. Узла больше нет в топологии —
  * заглушка с выбором другого узла (открывает запрос там, как и переключатель узла), карточка и сэмплер не опрашиваются.
+ * В шапке — значок «Предложения LLM: N» (P4b): открывает консоль с панелью и последним предложением.
  */
 export function QueryTab({ connectionId, member, database, queryId, active }: { connectionId: string; member: string; database: string; queryId: string; active: boolean }) {
   const { t } = useTranslation();
@@ -38,6 +40,12 @@ export function QueryTab({ connectionId, member, database, queryId, active }: { 
   const gone = topo !== null && !topo.members.some((m) => m.name === member);
   const sampler = useStatementsSampler(connectionId, member, live && !gone);
   const q = useQueryDetail(connectionId, member, database, queryId, { active, live: live && !gone, tickAtMs: sampler.live?.atMs ?? null });
+  // Предложения LLM к этому запросу (спец. P4 §8.4): по queryid и по запросам из карточки.
+  const llm = useLlmProposals(connectionId, { connectionId });
+  const proposals = queryProposals(llm.proposals, llm.requests, database, queryId);
+  // Значок открывает консоль подключения с исходным текстом предложения и выбирает его в панели.
+  const openProposal = (p: LlmProposal) =>
+    openExplainWithPrefill(connectionId, { sql: p.originalSql, database: p.database, member: p.member ?? member, proposalId: p.id });
   const [section, setSection] = useState<Section>("overview");
   const [planOpened, setPlanOpened] = useState(false);
   /** Последний план вкладки и узел, где он получен (ANALYZE чтения с лидера идёт на реплику). */
@@ -125,6 +133,11 @@ export function QueryTab({ connectionId, member, database, queryId, active }: { 
         <button type="button" onClick={() => void q.refetch()}>
           {t("diag.header.refresh")}
         </button>
+        {proposals.length > 0 && (
+          <button type="button" className="link" onClick={() => openProposal(proposals[0])}>
+            {t("llmAssist.badge", { count: proposals.length })}
+          </button>
+        )}
       </div>
       {q.error && <ErrorBanner error={q.error} onRetry={() => void q.refetch()} />}
       {sampler.error && <ErrorBanner error={sampler.error} />}

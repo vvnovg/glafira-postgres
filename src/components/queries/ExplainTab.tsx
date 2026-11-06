@@ -9,6 +9,7 @@ import { type ExplainPrefill, tabId, useWorkspace } from "../../state/workspace"
 import { SubTabs } from "../catalog/SubTabs";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { CopyLlmButton } from "./CopyLlmButton";
+import { ProposalsPanel } from "./llm/ProposalsPanel";
 import { AskLlmButton, type SentNotice } from "./llm/AskLlmButton";
 import { PlanRunner } from "./plan/PlanRunner";
 import { PlanView } from "./plan/PlanView";
@@ -49,6 +50,7 @@ function versionNum(text: string | null | undefined): number {
  * active — вкладка сейчас видна: скрытая список баз не читает, а при возвращении читает заново. Список нужен только режиму
  * «Запрос» и только пока база не известна (спека или выбор): «Вставить план» от него не зависит.
  * prefill — подстановка «Открыть в консоли EXPLAIN» из журнала MCP: применяется один раз на nonce.
+ * Под редактором — панель «Предложения LLM» (P4b): `prefill.proposalId` выбирает в ней предложение.
  * «Скопировать для LLM» получает план последнего запуска, пока SQL, узел и база не менялись, иначе Rust строит пробный план сам;
  * «Передать LLM-ассистенту» — тот же план и значения параметров последнего запуска (спец. P4 §8.1).
  */
@@ -187,6 +189,14 @@ export function ExplainTab({
             {/* Обе панели остаются смонтированными: переключение на «Вставить план» не стирает историю и значения параметров запуска. */}
             <div className="explain-panel" hidden={s !== "sql"}>
               <textarea className="mono explain-sql" aria-label="SQL" rows={8} value={sql} onChange={(e) => setSql(e.target.value)} placeholder={t("diag.explain.placeholder")} />
+              {/* Предложения LLM — под редактором (спец. P4 §8.4); значок карточки выбирает своё предложение по nonce подстановки. */}
+              <ProposalsPanel
+                connectionId={connectionId}
+                database={dbName}
+                active={active}
+                tabId={tabId({ kind: "explain", connectionId })}
+                focus={prefill?.proposalId ? { id: prefill.proposalId, nonce: prefill.nonce } : null}
+              />
               {nodeName && dbName ? (
                 <>
                   <PlanRunner

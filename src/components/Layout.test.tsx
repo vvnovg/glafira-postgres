@@ -7,6 +7,7 @@ import { mcpStatus } from "../test/mcp";
 import { ENV_COLORS } from "../lib/env";
 import type { ConnectionProfile } from "../api/types";
 import { useHelpContext } from "../state/helpContext";
+import { useTabMarks } from "../state/tabMarks";
 import { useWorkspace } from "../state/workspace";
 import { renderWithClient } from "../test/render";
 import { Layout } from "./Layout";
@@ -40,6 +41,7 @@ const hex = (c: string) => {
 
 describe("Layout tabs", () => {
   beforeEach(() => {
+    useTabMarks.setState({ marks: {} });
     useHelpContext.setState({ byTab: {} });
     useWorkspace.setState({
       tabs: [
@@ -166,6 +168,16 @@ describe("Layout tabs", () => {
     expect(within(list).getByRole("tab", { name: "shop.orders_id_seq" })).toBeInTheDocument();
     // Значки приходят вместе со списком подключений, позже заголовков.
     await waitFor(() => expect(within(list).getAllByText("PROD")).toHaveLength(4));
+  });
+
+  it("точка у вкладки консоли — в имени самой вкладки, пока у неё есть непоказанное предложение LLM", () => {
+    useWorkspace.setState({ tabs: [{ kind: "explain", connectionId: "c1", id: "explain:c1" }, { kind: "settings", id: "settings" }], activeId: "settings" });
+    useTabMarks.setState({ marks: { "explain:c1": true } });
+    renderWithClient(<Layout />);
+    expect(screen.getByRole("img", { name: "Новое предложение LLM" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Новое предложение LLM/ })).toBeInTheDocument();
+    act(() => useTabMarks.getState().setMark("explain:c1", false));
+    expect(screen.queryByRole("img", { name: "Новое предложение LLM" })).toBeNull();
   });
 
   it("подписывается на события наблюдения", () => {

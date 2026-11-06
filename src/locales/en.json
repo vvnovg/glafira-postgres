@@ -2107,7 +2107,54 @@
       "cancel": "Cancel request",
       "statusUnavailable": "MCP status is unavailable",
       "requestsFailed": "Could not read the requests of this connection"
-    }
+    },
+    "panel": {
+      "title": "LLM proposals",
+      "heading": "LLM proposals ({{count}})",
+      "empty": "No proposals yet: hand the query over to the LLM assistant, and its proposals will appear here",
+      "list": "Proposals",
+      "item": "{{status}} · {{client}} · {{time}} · {{head}}",
+      "newDot": "New LLM proposal",
+      "from": "From {{client}}, {{time}}",
+      "unknownClient": "unknown client",
+      "original": "Original",
+      "rewritten": "Proposed",
+      "diff": "Original and proposed text",
+      "removed": "Removed line",
+      "added": "Added line",
+      "sameRows": "Glafira does not check that the rewritten query returns the same rows",
+      "rationale": "Rationale",
+      "effect": "Expected effect",
+      "indexes": "Indexes",
+      "noIndexes": "No indexes proposed",
+      "compare": "Compare plans",
+      "openInConsole": "Open in console",
+      "copy": "Copy the proposed SQL",
+      "accept": "Accept",
+      "reject": "Reject",
+      "reason": "Reason (the model will see it)",
+      "rejectConfirm": "Reject the proposal",
+      "status": {
+        "new": "New",
+        "accepted": "Accepted",
+        "rejected": "Rejected",
+        "rejectedWith": "Rejected: {{reason}}"
+      }
+    },
+    "compare": {
+      "title": "Plan comparison",
+      "cost": "Cost: was {{before}}, became {{after}}",
+      "on": "node {{member}}, {{time}}",
+      "withoutHypopg": "hypopg is not installed in this database: the proposed query was planned without its indexes",
+      "before": "Original plan",
+      "after": "Proposed plan",
+      "hot": "Hot nodes",
+      "noHot": "No hot nodes",
+      "nodeCost": "cost {{cost}}",
+      "recs": "Recommendations",
+      "noRecs": "No recommendations"
+    },
+    "badge": "LLM proposals: {{count}}"
   },
   "mcp": {
     "unknownClient": "Unknown MCP client",

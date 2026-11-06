@@ -12,6 +12,8 @@ export interface ExplainPrefill {
   database?: string;
   member?: string;
   nonce: number;
+  /** Предложение LLM, которое консоль покажет выбранным в панели (значок «Предложения LLM: N» карточки, P4b). */
+  proposalId?: string;
 }
 
 export type TabSpec =

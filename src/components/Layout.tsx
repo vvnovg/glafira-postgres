@@ -11,6 +11,8 @@ import { FolderMenu } from "./connections/tree/FolderMenu";
 import { ApprovalDialog } from "./mcp/ApprovalDialog";
 import { Sidebar } from "./Sidebar";
 import { i18n } from "../i18n";
+import { useTabMarks } from "../state/tabMarks";
+import { Glyph } from "./common/Glyph";
 import { TabContent } from "./TabContent";
 import { useConnectionEvents } from "../lib/useConnectionEvents";
 import { useMcpEvents } from "../lib/useMcpStatus";
@@ -110,6 +112,7 @@ function useTabOverflow(tabIds: string[], activeId: string | null) {
 export function Layout() {
   const { t } = useTranslation(); // заодно перерисовывает заголовки вкладок при смене языка
   const { tabs, activeId, activate, close } = useWorkspace();
+  const marks = useTabMarks((s) => s.marks);
   useHelpShortcut();
   useConnectionEvents();
   useMcpEvents();
@@ -154,6 +157,7 @@ export function Layout() {
                   {conn && <EnvBadge environment={conn.environment} readOnly={conn.readOnly} />}
                   <button type="button" role="tab" aria-selected={isActive} onClick={() => activate(tab.id)}>
                     {tabTitle(tab, byId)}
+                    {marks[tab.id] && <Glyph symbol="●" label={t("llmAssist.panel.newDot")} className="tab-dot" />}
                   </button>
                   <button
                     type="button"
