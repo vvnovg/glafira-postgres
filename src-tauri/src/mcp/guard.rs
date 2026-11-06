@@ -93,7 +93,8 @@ fn service_ctx() -> Context {
 }
 
 /// Ошибка SQL модели (спец. §10.2): отказ сервера при разборе и планировании — `invalid_sql` с его текстом и позицией;
-/// запись во время планирования — тоже `invalid_sql` (шлюз строит планы только в `READ ONLY`); без hypopg —
+/// запись во время планирования и план больше 8 МБ (§15) — тоже `invalid_sql` (шлюз строит планы только в `READ ONLY`;
+/// большой план — константа в тексте запроса); без hypopg —
 /// `FEATURE_UNAVAILABLE` с подсказкой; прочее — как у остальных инструментов (`tool_error`).
 pub(crate) fn sql_error(e: AppError) -> ToolError {
     match e.key.as_str() {
@@ -105,6 +106,8 @@ pub(crate) fn sql_error(e: AppError) -> ToolError {
             err("invalid_sql", message)
         }
         "errors.explain.oneStatement" => err("invalid_sql", "Pass exactly one SQL statement"),
+        // Спец. P4 §15: константа, вычисленная планировщиком, раздула план — исправляется в тексте запроса.
+        "errors.explain.planTooLarge" => err("invalid_sql", e.message),
         "errors.explain.writes" => err("invalid_sql", PLAN_WRITES),
         "errors.hypo.notInstalled" => err("FEATURE_UNAVAILABLE", HYPOPG_MISSING),
         _ => tool_error(e),
@@ -439,5 +442,17 @@ mod tests {
             "The plan was not produced in time; execution was cancelled, nothing changed"
         ));
         assert_eq!(e.code, "TIMEOUT");
+        // Спец. P4 §15: план больше 8 МБ — ошибка самого SQL (константа, вычисленная планировщиком): `invalid_sql`,
+        // модель исправляет запрос.
+        let e = sql_error(crate::explain::run::plan_too_large(
+            crate::explain::run::MAX_PLAN_BYTES,
+        ));
+        assert_eq!(e.code, "invalid_sql");
+        assert!(
+            e.message.starts_with("The plan is larger than 8 MB")
+                && e.message.contains("repeat('x', 100000000)"),
+            "{}",
+            e.message
+        );
     }
 }

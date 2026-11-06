@@ -7,7 +7,7 @@ use bytes::BytesMut;
 use pg_advisor::plan::json::from_json;
 use pg_advisor::plan::{PlanTree, relations};
 use tokio_postgres::error::{ErrorPosition, SqlState};
-use tokio_postgres::types::{Format, IsNull, ToSql, Type, to_sql_checked};
+use tokio_postgres::types::{Format, FromSql, IsNull, ToSql, Type, to_sql_checked};
 use tokio_postgres::{Client, SimpleQueryMessage};
 
 use crate::actions::journal::{self, ActionRecord, ExplainRecord, RecordConnection};
@@ -31,6 +31,55 @@ const ANALYZE_OPTIONS: &str = "ANALYZE, BUFFERS, WAL, VERBOSE, SETTINGS, FORMAT 
 const CLIENT_MARGIN_S: u64 = 5;
 /// Первые слова пишущих инструкций: даже EXPLAIN без выполнения проверяет у них права записи.
 const WRITE_WORDS: [&str; 5] = ["insert", "update", "delete", "merge", "create"];
+
+/// Предел строки плана EXPLAIN (текст JSON) до разбора (спец. P4 §15, решение владельца по смоуку P4b): константа,
+/// которую планировщик вычисляет заранее (`repeat('x', 1e8)` литералами), попадает в VERBOSE-план целиком, и разбор
+/// такого JSON в дерево в памяти приложения в разы больше самого текста. Строка длиннее — отказ `planTooLarge` до
+/// `serde_json`: консоль P3, `explain_query` и гипотезы P4a, проба и сравнение планов P4b.
+pub(crate) const MAX_PLAN_BYTES: usize = 8 * 1024 * 1024;
+
+/// Значение колонки плана как есть — байты текста JSON: длина проверяется до разбора (`plan_json`), без копии.
+struct RawJson<'a>(&'a [u8]);
+
+impl<'a> FromSql<'a> for RawJson<'a> {
+    fn from_sql(
+        ty: &Type,
+        raw: &'a [u8],
+    ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        // jsonb в двоичном формате начинается с номера версии (1), как у `FromSql` для `serde_json::Value`.
+        Ok(RawJson(if *ty == Type::JSONB {
+            raw.get(1..).unwrap_or_default()
+        } else {
+            raw
+        }))
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        matches!(*ty, Type::JSON | Type::JSONB | Type::TEXT)
+    }
+}
+
+/// Отказ: план длиннее `max` байт (`MAX_PLAN_BYTES`).
+pub(crate) fn plan_too_large(max: usize) -> AppError {
+    app_err!(
+        ErrorCode::InvalidInput,
+        "errors.explain.planTooLarge",
+        "The plan is larger than {{maxMb}} MB and was not read: the query probably has a large constant that the planner computes in advance (for example repeat('x', 100000000)). Make such values smaller or remove them from the query",
+        maxMb = max.div_ceil(1024 * 1024)
+    )
+}
+
+/// План из текста JSON строки EXPLAIN: длиннее `max` байт — `plan_too_large` без разбора.
+fn plan_json(text: &[u8], max: usize) -> Result<serde_json::Value, Step> {
+    if text.len() > max {
+        return Err(Step::App(plan_too_large(max)));
+    }
+    serde_json::from_slice(text).map_err(|e| {
+        Step::App(AppError::internal_with(format!(
+            "EXPLAIN output is not JSON: {e}"
+        )))
+    })
+}
 
 /// Ошибка одного EXPLAIN: сырая ошибка сервера нужна до перевода в `AppError` (25006, «вторая инструкция»).
 pub(crate) enum Step {
@@ -376,25 +425,22 @@ async fn explain_query(c: &Client, text: &str, params: &Params) -> Result<serde_
                 SimpleQueryMessage::Row(r) => Some(r),
                 _ => None,
             });
-            let json = row
+            let json: &str = row
                 .and_then(|r| r.try_get(0).ok().flatten())
                 .ok_or_else(|| Step::App(AppError::internal_with("EXPLAIN returned no rows")))?;
-            return serde_json::from_str(json).map_err(|e| {
-                Step::App(AppError::internal_with(format!(
-                    "EXPLAIN output is not JSON: {e}"
-                )))
-            });
+            return plan_json(json.as_bytes(), MAX_PLAN_BYTES);
         }
         Params::None => c.query(text, &[]).await?,
     };
     let row = rows
         .first()
         .ok_or_else(|| Step::App(AppError::internal_with("EXPLAIN returned no rows")))?;
-    row.try_get::<_, serde_json::Value>(0).map_err(|e| {
+    let raw = row.try_get::<_, RawJson>(0).map_err(|e| {
         Step::App(AppError::internal_with(format!(
             "EXPLAIN output is not JSON: {e}"
         )))
-    })
+    })?;
+    plan_json(raw.0, MAX_PLAN_BYTES)
 }
 
 /// Контекст пробного плана. Обычно — `READ ONLY` (побочный эффект ловит сервер), подсказка 42501 — по первому слову.
@@ -628,6 +674,51 @@ mod tests {
         );
         assert!(begin_sql(false, 5, None).starts_with("/* glafira */ BEGIN; "));
         assert!(crate::product::is_marked_sql(ROLLBACK_SQL));
+    }
+
+    /// Спец. P4 §15 (решение владельца по смоуку P4b): строка плана длиннее предела — отказ до разбора JSON; предел
+    /// — параметр `plan_json`, тест берёт маленький.
+    #[test]
+    fn plan_longer_than_the_limit_is_refused_before_parsing() {
+        let plan = br#"[{"Plan": {"Node Type": "Result"}}]"#;
+        let Err(Step::App(e)) = plan_json(plan, plan.len() - 1) else {
+            panic!("план длиннее предела разобран")
+        };
+        assert_eq!(e.key, "errors.explain.planTooLarge");
+        assert_eq!(e.code, ErrorCode::InvalidInput);
+        assert!(
+            e.message.contains("repeat('x', 100000000)"),
+            "{}",
+            e.message
+        );
+        // Длина — та, что пришла, а не разобранная: недописанный JSON длиннее предела тоже не разбирается.
+        let Err(Step::App(e)) = plan_json(b"[{\"Plan\": ", 4) else {
+            panic!("не отказ")
+        };
+        assert_eq!(e.key, "errors.explain.planTooLarge");
+        assert!(matches!(plan_json(plan, plan.len()), Ok(v) if v.is_array()));
+        let Err(Step::App(e)) = plan_json(b"not json", 100) else {
+            panic!("не JSON разобран")
+        };
+        assert_eq!(e.code, ErrorCode::Internal);
+        assert_eq!(
+            plan_too_large(MAX_PLAN_BYTES)
+                .params
+                .get("maxMb")
+                .map(String::as_str),
+            Some("8")
+        );
+    }
+
+    #[test]
+    fn raw_json_column_is_taken_as_is_and_jsonb_loses_its_version_byte() {
+        let text = br#"[{"Plan": {}}]"#;
+        assert_eq!(RawJson::from_sql(&Type::JSON, text).unwrap().0, text);
+        let mut jsonb = vec![1u8];
+        jsonb.extend_from_slice(text);
+        assert_eq!(RawJson::from_sql(&Type::JSONB, &jsonb).unwrap().0, text);
+        assert!(<RawJson as FromSql>::accepts(&Type::JSON));
+        assert!(!<RawJson as FromSql>::accepts(&Type::INT4));
     }
 
     #[test]

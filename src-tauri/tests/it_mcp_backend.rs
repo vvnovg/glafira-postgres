@@ -562,6 +562,42 @@ async fn syntax_error_of_a_pgss_text_carries_the_hint() {
     );
 }
 
+/// Спец. P4 §15: план больше 8 МБ (константа, вычисленная планировщиком) модели не разбирается — `invalid_sql` с
+/// советом убрать большую константу, у `explain_query` и `hypothetical_index`.
+#[tokio::test]
+async fn plan_larger_than_eight_megabytes_is_invalid_sql() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st, _m) = open_for_llm(&perf).await;
+    let sql = "SELECT count(*) FROM shop.orders WHERE status = repeat('x', 9 * 1024 * 1024)";
+    let e = read_op(
+        &st,
+        explain(json!({"connectionId": "it", "database": "perf", "sql": sql})),
+    )
+    .await
+    .unwrap_err();
+    let refused = |e: &glafira_mcp_core::error::ToolError| {
+        assert_eq!(e.code, "invalid_sql", "{}", e.message);
+        assert!(
+            e.message.starts_with("The plan is larger than 8 MB"),
+            "{}",
+            e.message
+        );
+    };
+    refused(&e);
+    let e = read_op(
+        &st,
+        hypo(json!({
+            "connectionId": "it", "database": "perf", "sql": sql,
+            "indexes": ["CREATE INDEX ON shop.orders (status)"]
+        })),
+    )
+    .await
+    .unwrap_err();
+    refused(&e);
+}
+
 /// Смоук P4b, G6: `get_settings` с `names` и с `changedOnly` в смоуке дали ответы одной длины (2910 байт) — совпадение:
 /// `names` выбирает ровно названные настройки (без учёта регистра, неизвестные имена пропускаются, `changedOnly` при них
 /// не действует), без `names` — только изменённые (источник не `default`, не `override` и не настройки соединения

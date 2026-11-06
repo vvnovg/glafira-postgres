@@ -363,6 +363,54 @@ async fn plan_and_analyze_read_tier_on_perf() {
 
 /// Административная функция (спец. §15 п. 10): READ ONLY её не остановит, поэтому вызов в VERBOSE-плане пробы —
 /// ярус записи с предупреждением `adminFunction`. План без ANALYZE функцию не выполняет.
+/// Спец. P4 §15 (решение владельца по смоуку P4b): константа, которую планировщик вычисляет заранее, попадает в
+/// VERBOSE-план целиком; план больше 8 МБ не разбирается — отказ `errors.explain.planTooLarge`, и пробный план, и
+/// выполнение.
+#[tokio::test]
+async fn plan_larger_than_eight_megabytes_is_refused() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st) = common::open_server_in(&perf, "perf").await;
+    let m = member_of(&st).await;
+    for mode in [Mode::Plan, Mode::Analyze] {
+        let e = explain::run::run(
+            &st,
+            "it",
+            &req(
+                &m,
+                "perf",
+                "SELECT repeat('x', 9 * 1024 * 1024)",
+                mode,
+                Params::None,
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (ErrorCode::InvalidInput, "errors.explain.planTooLarge"),
+            "{mode:?}: {}",
+            e.message
+        );
+    }
+    // Чуть меньше предела — план как обычно.
+    let r = explain::run::run(
+        &st,
+        "it",
+        &req(
+            &m,
+            "perf",
+            "SELECT repeat('x', 7 * 1024 * 1024)",
+            Mode::Plan,
+            Params::None,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.mode, Mode::Plan);
+}
+
 #[tokio::test]
 async fn admin_function_call_moves_the_statement_to_the_write_tier() {
     let Some(perf) = common::perf_addr() else {

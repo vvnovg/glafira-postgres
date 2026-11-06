@@ -225,7 +225,8 @@
       "writes": "The query writes data (a volatile function or trigger): run it as a write with confirmation",
       "writeOnReplica": "A write cannot be executed on a replica: choose the primary",
       "serverReadOnly": "The server does not accept writes in this session (read-only transaction default or standby)",
-      "writeNotConfirmed": "Executing a write needs confirmation: run it with “Execute and roll back”"
+      "writeNotConfirmed": "Executing a write needs confirmation: run it with “Execute and roll back”",
+      "planTooLarge": "The plan is larger than {{maxMb}} MB and was not read: the query probably has a large constant that the planner computes in advance (for example repeat('x', 100000000)). Make such values smaller or remove them from the query"
     },
     "hypo": {
       "badDdl": "The hypothesis must be a single CREATE INDEX ON … statement without CONCURRENTLY or UNIQUE",
