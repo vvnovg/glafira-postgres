@@ -111,6 +111,25 @@ pub fn parse_count(sql: &str) -> Result<usize, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Текст единственного выражения без хвоста за ним — `;` и комментариев (`SELECT 1; -- c` → `SELECT 1`) — по
+/// `stmt_location` и `stmt_len` разбора (`stmt_len` 0 — до конца текста: комментарий в конце без `;` остаётся).
+/// `None` — текст не разбирается или выражение не одно. Нужен, когда текст встраивается в другое выражение (подзапрос
+/// курсора `run_select`, P4b): `;` внутри скобок сервер не примет.
+///
+/// Вызывает `pg_query::parse` — требования к стеку те же, что у [`check`].
+pub fn statement_text(sql: &str) -> Option<&str> {
+    let parsed = pg_query::parse(sql, pg_query::ParserOptions::DEFAULT).ok()?;
+    let [stmt] = parsed.protobuf.stmts.as_slice() else {
+        return None;
+    };
+    let start = usize::try_from(stmt.stmt_location).ok()?;
+    let end = match usize::try_from(stmt.stmt_len).ok()? {
+        0 => sql.len(),
+        len => start.checked_add(len)?,
+    };
+    sql.get(start..end).map(str::trim)
+}
+
 /// Текст гипотетического индекса без имени (P4a, E4): модели пишут `CREATE INDEX idx_x ON …`, а hypopg даёт индексу
 /// своё имя. Одно `CREATE INDEX [IF NOT EXISTS] имя ON …` без `UNIQUE` и `CONCURRENTLY` (по дереву разбора) → тот же
 /// текст без `[IF NOT EXISTS] имя`: по токенам `pg_query::scan` всё от конца `INDEX` до начала `ON` заменяется одним
@@ -547,6 +566,31 @@ mod tests {
         assert_eq!(parse_count("SELECT $$;$$, $q$ ; $q$"), Ok(1));
         assert_eq!(parse_count(""), Ok(0));
         assert_eq!(parse_count("-- только комментарий"), Ok(0));
+    }
+
+    /// Хвост за единственным выражением (`;`, комментарии после неё) снимается, ведущий комментарий — тоже (разбор
+    /// начинает выражение с первого слова); комментарий без `;` в конце — часть выражения; `;` в строке — не конец; не
+    /// одно выражение или ошибка разбора — `None`. Смещения разбора — байтовые: `é` перед хвостом не мешает.
+    #[test]
+    fn statement_text_drops_the_tail_after_the_statement() {
+        assert_eq!(statement_text("SELECT 1"), Some("SELECT 1"));
+        assert_eq!(statement_text("SELECT 1; -- c"), Some("SELECT 1"));
+        assert_eq!(statement_text("SELECT 1 ; /* c */ ;"), Some("SELECT 1"));
+        assert_eq!(
+            statement_text("SELECT 'a;b' -- c"),
+            Some("SELECT 'a;b' -- c")
+        );
+        assert_eq!(
+            statement_text("/* lead */ SELECT 'é';\n-- tail"),
+            Some("SELECT 'é'")
+        );
+        assert_eq!(
+            statement_text("WITH w AS (SELECT 1) SELECT * FROM w;"),
+            Some("WITH w AS (SELECT 1) SELECT * FROM w")
+        );
+        assert_eq!(statement_text("SELECT 1; SELECT 2"), None);
+        assert_eq!(statement_text("-- c"), None);
+        assert_eq!(statement_text("SELECT ("), None);
     }
 
     /// Грамматика — PostgreSQL 18: числа PG 16 (основание, `_`), JSON_TABLE и MERGE … RETURNING из PG 17,

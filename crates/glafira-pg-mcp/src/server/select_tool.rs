@@ -53,8 +53,8 @@ impl PgServer {
 }
 
 /// Ответ бэкенда → результат вызова: предел ответа и число строк для журнала (`rows`; значения в журнал не пишутся).
-fn select_ok(answer_: PgAnswer) -> Result<CallOk, ToolError> {
-    let PgOutput::Select(mut out) = answer_.body else {
+fn select_ok(reply: PgAnswer) -> Result<CallOk, ToolError> {
+    let PgOutput::Select(mut out) = reply.body else {
         return Err(unexpected());
     };
     fit_rows(&mut out, HARD_LIMIT_BYTES);

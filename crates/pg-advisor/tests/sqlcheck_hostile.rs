@@ -250,7 +250,8 @@ fn forbidden_calls_are_found_at_any_depth() {
     }
 }
 
-/// Имена в кавычках, в другом регистре, со схемой и каталогом; схема `net` целиком; функциональная запись `(row).f`.
+/// Имена в кавычках, в другом регистре, со схемой и каталогом; схемы `net`, `aws_s3`, `aws_lambda` целиком;
+/// функциональная запись `(row).f`.
 #[test]
 fn quoted_and_qualified_names_are_still_functions() {
     for (sql, shown) in [
@@ -269,6 +270,14 @@ fn quoted_and_qualified_names_are_still_functions() {
         (
             "SELECT net._http_collect_response(1)",
             "net._http_collect_response",
+        ),
+        (
+            "SELECT * FROM aws_s3.query_export_to_s3('SELECT * FROM t', aws_commons.create_s3_uri('b', 'k', 'r'))",
+            "aws_s3.query_export_to_s3",
+        ),
+        (
+            "SELECT AWS_LAMBDA.invoke('arn:aws:lambda:x', '{}'::json)",
+            "aws_lambda.invoke",
         ),
         (
             "SELECT (ROW('GET', 'http://evil.example/', NULL, NULL, NULL)::http_request).http",

@@ -108,8 +108,13 @@ mod tests {
             "\"DISCARD ",
             "\"RESET ",
         ];
-        // Куски уже помеченного `format!` и опции EXPLAIN.
-        const ALLOWED: [&str; 2] = ["\"SELECT 't', ", "\"ANALYZE, BUFFERS"];
+        // Куски уже помеченного `format!` и опции EXPLAIN; обёртка курсора `run_select` (P4b): внутри — текст модели,
+        // и курсор, как EXPLAIN пользователя, без метки (`mcp::select::cursor_query`).
+        const ALLOWED: [&str; 3] = [
+            "\"SELECT 't', ",
+            "\"ANALYZE, BUFFERS",
+            "\"SELECT {} FROM (SELECT * FROM (\\n{body}\\n) q OFFSET 0)",
+        ];
         fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
             for e in std::fs::read_dir(dir).unwrap() {
                 let p = e.unwrap().path();

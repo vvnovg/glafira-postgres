@@ -3,9 +3,9 @@
 //! `ADMIN_FUNCTIONS` — перенос из `src-tauri/src/explain/tier.rs`: ярус EXPLAIN ANALYZE P3 берёт список отсюда.
 //! `DENIED_FUNCTIONS` — он же и функции, которые читают файлы сервера и большие объекты, ходят на другие серверы, меняют
 //! настройки, держат блокировки, спят, шлют уведомления, читают логическую репликацию или выполняют SQL из строки.
-//! Шаблон с `*` на конце — префикс имени; сравнение без учёта регистра и схемы, кроме схемы `net` (pg_net) — она
-//! запрещена целиком. Поиск в тексте выражений — для VERBOSE-плана пробы (спец. §7.3, шаг 3): план печатает и вызовы,
-//! которых разбор не видит (функциональная запись `(row).f`, вызовы из представлений).
+//! Шаблон с `*` на конце — префикс имени; сравнение без учёта регистра и схемы, кроме схем `DENIED_SCHEMAS` (pg_net,
+//! aws_s3, aws_lambda) — они запрещены целиком. Поиск в тексте выражений — для VERBOSE-плана пробы (спец. §7.3, шаг 3):
+//! план печатает и вызовы, которых разбор не видит (функциональная запись `(row).f`, вызовы из представлений).
 
 use serde_json::Value;
 
@@ -76,7 +76,7 @@ pub const DENIED_FUNCTIONS: &[&str] = admin_functions!(
     "pg_read_binary_file",
     "pg_stat_file",
     "pg_ls_*",
-    // Другие серверы и внешние вызовы (dblink, pgsql-http; pg_net — схема `net`).
+    // Другие серверы и внешние вызовы (dblink, pgsql-http; pg_net, aws_s3, aws_lambda — схемами, `DENIED_SCHEMAS`).
     "dblink*",
     "http*",
     // Настройки, блокировки, ожидание, уведомления.
@@ -130,8 +130,11 @@ pub const SQL_FROM_STRING: &[&str] = &[
     "pgr_*",
 ];
 
-/// Схемы, все функции которых запрещены: pg_net (`net.http_get`, `net._http_collect_response`…).
-pub const DENIED_SCHEMAS: &[&str] = &["net"];
+/// Схемы, все функции которых запрещены, — внешние вызовы: pg_net (`net.http_get`, `net._http_collect_response`…),
+/// aws_s3 (`aws_s3.query_export_to_s3` — выгрузка результата запроса из строки в S3, `aws_s3.table_import_from_s3`) и
+/// aws_lambda (`aws_lambda.invoke`) Amazon RDS / Aurora (P4b, решение владельца). Вспомогательная `aws_commons` (только
+/// собирает значения составных типов) — не запрещена.
+pub const DENIED_SCHEMAS: &[&str] = &["net", "aws_s3", "aws_lambda"];
 
 /// Имя подходит под шаблон: точно или, если шаблон кончается на `*`, по префиксу; без учёта регистра.
 fn matches_pattern(pattern: &str, name: &str) -> bool {
@@ -373,7 +376,7 @@ mod tests {
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(unique.len(), DENIED_FUNCTIONS.len(), "без повторов");
-        assert_eq!(DENIED_SCHEMAS, ["net"]);
+        assert_eq!(DENIED_SCHEMAS, ["net", "aws_s3", "aws_lambda"]);
     }
 
     #[test]
@@ -475,6 +478,17 @@ mod tests {
         assert!(
             !is_denied_qualified(Some("network"), "lower"),
             "схема net — целиком, network — нет"
+        );
+        assert!(is_denied_qualified(Some("aws_s3"), "query_export_to_s3"));
+        assert!(is_denied_qualified(Some("AWS_S3"), "table_import_from_s3"));
+        assert!(is_denied_qualified(Some("aws_lambda"), "invoke"));
+        assert!(
+            !is_denied_qualified(None, "invoke"),
+            "без схемы имя invoke не запрещено: схема — целиком, имена — нет"
+        );
+        assert!(
+            !is_denied_qualified(Some("aws_commons"), "create_s3_uri"),
+            "aws_commons только собирает значения"
         );
     }
 
@@ -582,6 +596,11 @@ mod tests {
             denied_in_plan(&net).as_deref(),
             Some("net._http_collect_response"),
             "запрещена схема — имя со схемой"
+        );
+        let lambda = json!({"Plan": {"Node Type": "Function Scan", "Function Call": "aws_lambda.invoke('f'::text, '{}'::json)"}});
+        assert_eq!(
+            denied_in_plan(&lambda).as_deref(),
+            Some("aws_lambda.invoke")
         );
         // Функциональная запись `(row).http` в плане печатается обычным вызовом.
         let row = json!({"Plan": {"Node Type": "Result", "Output": [

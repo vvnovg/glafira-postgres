@@ -2,7 +2,7 @@
 //! (своё соединение `glafira-pg-mcp`, `READ ONLY`, `standard_conforming_strings = on` на всю сессию; после вызова и при
 //! брошенном вызове сессии сервера нет — нет ни транзакции, ни виртуальных индексов), запрещённая функция за
 //! представлением — по VERBOSE-плану, план текста pgss по `queryId` — замаскирован; наблюдение — `observe_activity` и
-//! `observe_top_queries`. Запускать с `--test-threads=1`.
+//! `observe_top_queries`; `run_select` (P4b) — обрезка значений на сервере. Запускать с `--test-threads=1`.
 
 mod common;
 
@@ -12,10 +12,12 @@ use glafira_pg_lib::conn::profile::LlmAccess;
 use glafira_pg_lib::explain::Params;
 use glafira_pg_lib::mcp::guard;
 use glafira_pg_lib::mcp::read::{EXPLAIN_TIMEOUT_S, observe_op, read_op};
+use glafira_pg_lib::mcp::select;
 use glafira_pg_lib::state::AppState;
-use glafira_pg_mcp::model::{ObserveCtx, PgAnswer, PgObserve, PgOutput, PgRead};
+use glafira_pg_mcp::model::{ObserveCtx, PgAnswer, PgObserve, PgOutput, PgRead, SelectOut};
+use glafira_pg_mcp::params::RunSelectParams;
 use serde_json::{Value, json};
-use tokio_postgres::Client;
+use tokio_postgres::{Client, SimpleQueryMessage};
 
 const MCP_APP: &str = "glafira-pg-mcp";
 
@@ -740,4 +742,119 @@ async fn omitted_database_uses_the_connection_database() {
     };
     assert_eq!(v["text"], json!(pgss_text), "карточка запроса {qid}: {v}");
     wait_no_mcp_sessions(&probe, "после вызовов без database").await;
+}
+
+/// `run_select` подключения `it` без узла и базы (узел — единственный, база — `perf`).
+async fn run_select(st: &AppState, sql: &str) -> SelectOut {
+    let p = RunSelectParams {
+        connection_id: "it".into(),
+        member: None,
+        database: None,
+        sql: sql.into(),
+        max_rows: None,
+    };
+    let a = ok(select::run_select(st, p, ObserveCtx::new(Duration::from_secs(10))).await);
+    let PgOutput::Select(out) = a.body else {
+        panic!("не выборка")
+    };
+    assert_eq!(a.rows, Some(out.row_count), "в журнал — число строк");
+    out
+}
+
+/// `run_select` (P4b, решение владельца Q5): значения обрезаются на сервере. Обёртка курсора (`select::cursor_query`)
+/// отдаёт не больше 2049 символов значения — 10 млн символов по проводу не идут. `run_select` целиком: колонки — по
+/// выражению модели, текст значений — как у функции вывода типа (`t`/`f`, `inet` без `/32`, `char(n)` с пробелами),
+/// NULL остаётся NULL, порядок подзапроса сохраняется; хвост `; -- …` и выражение без колонок обёртке не мешают. После
+/// вызовов сессий SQL модели нет.
+#[tokio::test]
+async fn run_select_cuts_long_values_on_the_server() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st, m) = open_for_llm(&perf).await;
+    let mut p = st.profile("it").unwrap();
+    p.llm_access = LlmAccess::Data;
+    st.connections.upsert(p).unwrap();
+    let probe = common::superuser(&perf, "perf").await;
+
+    let tx = guard::begin(&st, "it", Some(&m), "perf", select::SELECT_TIMEOUT_S)
+        .await
+        .unwrap();
+    let wrapped = select::cursor_query("SELECT repeat('€', 10000000), NULL::text, true", 3);
+    let messages = tx.client().simple_query(&wrapped).await.unwrap();
+    let row = messages
+        .iter()
+        .find_map(|m| match m {
+            SimpleQueryMessage::Row(r) => Some(r),
+            _ => None,
+        })
+        .unwrap();
+    let value = row.get(0).unwrap();
+    assert_eq!(value.chars().count(), select::SERVER_CUT_CHARS);
+    assert_eq!(
+        value.len(),
+        3 * select::SERVER_CUT_CHARS,
+        "по проводу — 2049 символов «€»"
+    );
+    assert_eq!((row.get(1), row.get(2)), (None, Some("t")));
+    tx.finish().await;
+
+    let started = std::time::Instant::now();
+    let out = run_select(
+        &st,
+        "SELECT g, repeat('x', 1000000) AS v, NULL AS n, g > 1 AS b, '10.0.0.1'::inet AS ip, 'a '::char(3) AS c \
+         FROM generate_series(1, 30) g ORDER BY g DESC; -- хвост",
+    )
+    .await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    let columns: Vec<(&str, &str)> = out
+        .columns
+        .iter()
+        .map(|c| (c.name.as_str(), c.type_name.as_str()))
+        .collect();
+    assert_eq!(
+        columns,
+        [
+            ("g", "int4"),
+            ("v", "text"),
+            ("n", "text"),
+            ("b", "bool"),
+            ("ip", "inet"),
+            ("c", "bpchar")
+        ]
+    );
+    assert_eq!(
+        (out.row_count, out.truncated, out.truncated_values),
+        (30, false, 30)
+    );
+    let cut = format!(
+        "{}{}",
+        "x".repeat(select::MAX_VALUE_BYTES),
+        select::TRUNCATED_MARK
+    );
+    let some = |v: &str| Some(v.to_string());
+    assert_eq!(
+        out.rows[0],
+        [
+            some("30"),
+            Some(cut),
+            None,
+            some("t"),
+            some("10.0.0.1"),
+            some("a  ")
+        ]
+    );
+    assert_eq!(
+        (out.rows[29][0].as_deref(), out.rows[29][3].as_deref()),
+        (Some("1"), Some("f"))
+    );
+
+    let out = run_select(&st, "SELECT FROM generate_series(1, 3)").await;
+    assert!(out.columns.is_empty());
+    assert_eq!(out.rows, vec![Vec::<Option<String>>::new(); 3]);
+    wait_no_mcp_sessions(&probe, "после run_select сессий SQL модели нет").await;
 }
