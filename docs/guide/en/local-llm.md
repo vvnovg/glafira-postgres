@@ -12,7 +12,7 @@ The rest of the chapter is about the third option; a client for the second is se
 
 ## What a local model can do {#capabilities}
 
-Tested on a Mac mini with an M4 Pro and 48 GB of memory, models in Ollama quantized to 4 bits with a 64K-token context (32K for Gemma 4 31B). The test stand: a three-node Patroni cluster, a server with an orders database and a server under a pgbench load. Six typical tasks, three runs of each model:
+Tested on a Mac mini with an M4 Pro and 48 GB of memory, models in Ollama quantized to 4 bits with a 64K-token context (32K for Gemma 4 31B). The test stand: a three-node Patroni cluster, a server with an orders database and a server under a pgbench load (tasks 4–6 run on it). Six typical tasks, three runs of each model:
 
 1. What is happening on the cluster — name the leader and the replicas.
 2. Who holds the xmin horizon — name the session and quote its query; the literals in the quote must stay masked.
@@ -23,14 +23,14 @@ Tested on a Mac mini with an M4 Pro and 48 GB of memory, models in Ollama quanti
 
 | Model (4-bit) | Correct answers | Generation, typically | Tasks 1–3, 5, 6 | Top over 15 minutes |
 |---|---|---|---|---|
-| Qwen3.6-35B-A3B | 17 of 18 | 60–80 tokens/s | 6–30 s | 1.5–2 min |
-| Gemma 4 26B | 18 of 18 | 35–50 tokens/s | 7–42 s | 1.5 min |
-| Qwen3.8-27B | 18 of 18 | 15–20 tokens/s | 23–100 s | 5–7 min |
-| Gemma 4 31B | 16 of 18 | 7–15 tokens/s | 47–119 s | 4–7.5 min |
+| Qwen3.6-35B-A3B | 18 of 18 | 50–80 tokens/s | 6–27 s | 1.3–2.1 min |
+| Gemma 4 26B | 18 of 18 | 30–50 tokens/s | 7–42 s | 1.3–1.7 min |
+| Qwen3.8-27B | 18 of 18 | 15–20 tokens/s | 23–124 s | 5–7 min |
+| Gemma 4 31B | 16 of 18 | 7–14 tokens/s | 47–134 s | 4–7.5 min |
 
-Generation is the number of answer tokens per second of model time, including reading the context; the first question after the model is loaded into memory is slower. Qwen3.6-35B-A3B and Gemma 4 26B answer ordinary questions in tens of seconds. The dense Qwen3.8-27B and Gemma 4 31B use all of their parameters for every token and answer in minutes, and up to 7 minutes on a task with several large tool answers. For everyday work on a Mac, Qwen3.6-35B-A3B and Gemma 4 26B fit: Gemma made no mistakes in these tasks, Qwen is faster.
+Generation is the number of answer tokens per second of model time, including reading the context; the first question after the model is loaded into memory is slower. Qwen3.6-35B-A3B and Gemma 4 26B answer ordinary questions in tens of seconds. The dense Qwen3.8-27B and Gemma 4 31B use all of their parameters for every token and answer in half a minute to two minutes, and up to 7 minutes on a task with several large tool answers. For everyday work on a Mac, Qwen3.6-35B-A3B and Gemma 4 26B fit: neither made a mistake, Qwen is faster.
 
-All mistakes were in the fourth task. Once Qwen3.6 titled its answer "over the last 15 minutes" although it mixed 30 seconds of observation with statistics since the reset. Once Gemma 4 31B answered "recently" without naming the period, and another time it presented statistics since the reset as the current load. In a trial run without load, Qwen3.6 once used another connection's database, got an empty top and decided that the server was idle. The models fixed wrong tool arguments themselves on the next attempt (a name for a hypothetical index, an empty `queryId`, observing for longer than 50 seconds): Glafira answers with a clear error, but this costs an extra step. A script checked the answers by key signs; disputed ones were reread by hand.
+Only Gemma 4 31B made mistakes, in the fourth task: once it answered "recently" without naming the period, and another time it presented statistics since the reset as the current load. In several accepted answers of the other models, a heading "over the last 15 minutes" stands next to a note about the real period, for example "from 30 seconds of observation". In a trial run without load, Qwen3.6 once used another connection's database, got an empty top and decided that the server was idle. The models fixed wrong tool arguments themselves on the next attempt (a name for a hypothetical index, an empty `queryId`, observing for longer than 50 seconds): Glafira answers with a clear error, but this costs an extra step. A script checked the answers by key signs; disputed ones were reread by hand.
 
 No answer revealed the original values of masked literals, and no model changed anything on the server: the gateway does not allow it. The models erred only in their conclusions — check them against the MCP journal. The hardest task is the fourth: the model has to notice that there is no 15-minute window and say honestly which period its statistics cover.
 
@@ -109,7 +109,7 @@ claude --disallowedTools "Bash Edit Write WebFetch WebSearch Task Read Glob Grep
 
 `ANTHROPIC_BASE_URL` goes without `/v1`. `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` turns off updates, telemetry and error reports. No Anthropic account sign-in is needed. In Glafira the client is called `claude-code`.
 
-Both clients were tested on three tasks from the [table above](local-llm.md#capabilities) — the cluster, the xmin horizon and the query plan — with the `qwen3.6-64k:35b-a3b` model in Ollama, three runs each. The clients ran without a window and with the same built-in tools turned off: Qwen Code with calls approved automatically (`--approval-mode yolo`), Claude Code with Glafira's tools allowed (`--allowedTools`):
+Both clients were tested on three tasks from the [table above](local-llm.md#capabilities) — the cluster, the xmin horizon and the query plan — with the `qwen3.6-64k:35b-a3b` model in Ollama, three runs each. The clients ran without a window, and the same built-in tools were turned off with command-line flags rather than the settings file: Qwen Code with calls approved automatically (`--approval-mode yolo`), Claude Code with Glafira's tools allowed (`--allowedTools`):
 
 | Client | Correct answers | Cluster | xmin horizon | Query plan |
 |---|---|---|---|---|

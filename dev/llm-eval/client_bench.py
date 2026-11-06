@@ -85,6 +85,7 @@ def main():
         bench.docker_bg("gp-pg-perf", "pgbench", "-n", "-U", "postgres", "-d", "perf", "-f", "/perf/heavy.sql",
                         "-c", "1", "-T", "14400")
         started_load = True
+        time.sleep(30)  # нагрузка должна успеть попасть в активность до первого вопроса
     try:
         for r in range(1, args.reps + 1):
             for scn in args.scenarios.split(","):
