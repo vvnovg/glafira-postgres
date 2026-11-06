@@ -28,17 +28,20 @@ pub async fn cancel_optimization_request(
 
 /// Запросы подключения, сначала новые: статус «Ждёт ответа LLM» в консоли и карточке.
 #[tauri::command]
-pub fn list_optimization_requests(
+pub async fn list_optimization_requests(
     state: State<'_, AppState>,
     connection_id: String,
-) -> Vec<OptimizationRequest> {
-    state.llm.requests.list(&connection_id)
+) -> AppResult<Vec<OptimizationRequest>> {
+    Ok(state.llm.requests.list(&connection_id))
 }
 
 /// Предложения для панели консоли и значка карточки, сначала новые.
 #[tauri::command]
-pub fn list_llm_proposals(state: State<'_, AppState>, filter: ProposalFilter) -> Vec<LlmProposal> {
-    state.llm.proposals.list(&filter)
+pub async fn list_llm_proposals(
+    state: State<'_, AppState>,
+    filter: ProposalFilter,
+) -> AppResult<Vec<LlmProposal>> {
+    Ok(state.llm.proposals.list(&filter))
 }
 
 #[tauri::command]

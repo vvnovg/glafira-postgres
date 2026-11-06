@@ -95,6 +95,7 @@ impl RequestStore {
     ) -> AppResult<T> {
         self.0.update(f)
     }
+
     pub fn create(&self, r: NewRequest) -> AppResult<OptimizationRequest> {
         self.update(|items| {
             let id = super::new_id('r', |id| items.iter().any(|x| x.id == id));
@@ -118,15 +119,28 @@ impl RequestStore {
         })
     }
 
-    /// «Отменить» в консоли и карточке: модель получит `request_closed`. Повторная отмена ничего не меняет.
+    /// «Отменить» в консоли и карточке: модель получит `request_closed`. Отмена меняет только `Waiting`
+    /// (спец. §8.1: `waiting` → `answered` | `cancelled`); `Answered` и `Cancelled` возвращаются как есть.
     pub fn cancel(&self, id: &str) -> AppResult<OptimizationRequest> {
+        self.cancel_changed(id).map(|(r, _)| r)
+    }
+
+    /// Как `cancel`, плюс признак «статус изменился» (для события; без изменения нет записи на диск).
+    pub fn cancel_changed(&self, id: &str) -> AppResult<(OptimizationRequest, bool)> {
+        let current = self.get(id).ok_or_else(|| request_not_found(id))?;
+        if current.status != RequestStatus::Waiting {
+            return Ok((current, false));
+        }
         self.update(|items| {
             let r = items
                 .iter_mut()
                 .find(|x| x.id == id)
                 .ok_or_else(|| request_not_found(id))?;
+            if r.status != RequestStatus::Waiting {
+                return Ok((r.clone(), false));
+            }
             r.status = RequestStatus::Cancelled;
-            Ok(r.clone())
+            Ok((r.clone(), true))
         })
     }
 
@@ -176,6 +190,7 @@ impl RequestStore {
         })
     }
 }
+
 #[cfg(test)]
 pub(crate) mod tests {
     use serde_json::json;
@@ -241,15 +256,35 @@ pub(crate) mod tests {
         let got = s.get(&r.id).unwrap();
         assert_eq!(got.status, RequestStatus::Answered);
         assert_eq!(got.proposal_ids, ["p000001"]);
-        assert_eq!(s.cancel(&r.id).unwrap().status, RequestStatus::Cancelled);
+        let w = s.create(new("c1")).unwrap();
+        assert_eq!(s.cancel(&w.id).unwrap().status, RequestStatus::Cancelled);
         assert_eq!(
-            s.attach_proposal(&r.id, "p000002").unwrap_err().key,
+            s.attach_proposal(&w.id, "p000002").unwrap_err().key,
             "errors.llm.requestClosed"
         );
         assert_eq!(
             s.cancel("r000000").unwrap_err().key,
             "errors.llm.requestNotFound"
         );
+    }
+
+    #[test]
+    fn cancel_changes_only_a_waiting_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = RequestStore::open(dir.path());
+        let r = s.create(new("c1")).unwrap();
+        s.attach_proposal(&r.id, "p000001").unwrap();
+        let (got, changed) = s.cancel_changed(&r.id).unwrap();
+        assert_eq!(got.status, RequestStatus::Answered);
+        assert!(!changed);
+        assert_eq!(s.get(&r.id).unwrap().status, RequestStatus::Answered);
+        s.attach_proposal(&r.id, "p000002").unwrap();
+        assert_eq!(s.get(&r.id).unwrap().proposal_ids, ["p000001", "p000002"]);
+        let w = s.create(new("c1")).unwrap();
+        assert!(s.cancel_changed(&w.id).unwrap().1);
+        let (again, changed) = s.cancel_changed(&w.id).unwrap();
+        assert_eq!(again.status, RequestStatus::Cancelled);
+        assert!(!changed);
     }
 
     #[test]

@@ -141,6 +141,8 @@ pub struct ProposalFilter {
 }
 
 impl ProposalFilter {
+    /// `connection_id` сужает всегда; `request_ids`, `database` и `query_id` объединяются (ИЛИ): подходит
+    /// предложение, совпавшее хотя бы с одним из заданных; если ни одного нет, подходят все.
     pub fn matches(&self, p: &LlmProposal) -> bool {
         if self
             .connection_id
@@ -361,6 +363,7 @@ impl ProposalStore {
         })
     }
 }
+
 #[cfg(test)]
 pub(crate) mod tests {
     use serde_json::json;

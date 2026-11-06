@@ -255,15 +255,19 @@ pub async fn create_request(
     Ok(r)
 }
 
-/// «Отменить» запрос: модель получит `request_closed`.
+/// «Отменить» запрос: модель получит `request_closed`. Меняет только `Waiting`; у `Answered` и
+/// `Cancelled` ничего не меняется, события нет.
 pub async fn cancel_request(st: &AppState, request_id: &str) -> AppResult<OptimizationRequest> {
     let (stores, id) = (st.llm.clone(), request_id.to_string());
-    let r = off_thread(move || stores.requests.cancel(&id)).await?;
-    st.llm.emit(ProposalsEvent::request(&r));
+    let (r, changed) = off_thread(move || stores.requests.cancel_changed(&id)).await?;
+    if changed {
+        st.llm.emit(ProposalsEvent::request(&r));
+    }
     Ok(r)
 }
 
-/// «Принять» / «Отклонить» в панели (спец. §8.4); запись `proposalAnswered`.
+/// «Принять» / «Отклонить» в панели (спец. §8.4). Повторный ответ разрешён (пользователь передумал:
+/// принято ↔ отклонено); каждый ответ пишет `proposalAnswered` в журнал и шлёт событие.
 pub async fn answer_proposal(
     st: &AppState,
     id: &str,
@@ -426,6 +430,18 @@ mod tests {
         assert_eq!(got[1].kind, ProposalsEventKind::Proposal);
         assert_eq!(got[1].proposal_id.as_deref(), Some(p.id.as_str()));
         assert_eq!(got[1].request_id.as_deref(), Some(r.id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_answered_request_is_a_silent_no_op() {
+        let (_d, st) = state_with(LlmAccess::Diagnostics);
+        let rec = Arc::new(Recorder::default());
+        st.llm.set_sink(rec.clone());
+        let r = st.llm.requests.create(requests::tests::new("c1")).unwrap();
+        st.llm.requests.attach_proposal(&r.id, "p000001").unwrap();
+        let got = cancel_request(&st, &r.id).await.unwrap();
+        assert_eq!(got.status, requests::RequestStatus::Answered);
+        assert!(rec.0.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
