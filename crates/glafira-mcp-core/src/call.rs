@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use rmcp::RoleServer;
 use rmcp::model::{
-    CacheScope, CallToolResult, ContentBlock, Implementation, ListToolsResult, ProtocolVersion,
-    ResultType, Tool,
+    CacheScope, CallToolResult, ContentBlock, Implementation, ListPromptsResult, ListToolsResult,
+    Prompt, ProtocolVersion, ResultType, Tool,
 };
 use rmcp::service::RequestContext;
 use serde_json::{Map, Value};
@@ -359,6 +359,28 @@ impl SessionCtx {
             extra,
         }));
         out
+    }
+
+    /// Ответ `prompts/list`: клиент опознаётся и подтверждение запрашивается так же, как в [`Self::list_tools_result`];
+    /// подсказки кеша — только для 2026-07-28 (тело — как у `#[prompt_handler]` rmcp 3.5).
+    pub fn list_prompts_result(
+        &self,
+        prompts: Vec<Prompt>,
+        rctx: &RequestContext<RoleServer>,
+    ) -> ListPromptsResult {
+        let view = self.identify(rctx.client_info());
+        self.request_approval(&view);
+        let cache_hints = rctx
+            .protocol_version()
+            .is_some_and(|v| v >= ProtocolVersion::V_2026_07_28);
+        ListPromptsResult {
+            result_type: Some(ResultType::COMPLETE),
+            prompts,
+            meta: None,
+            next_cursor: None,
+            ttl_ms: cache_hints.then_some(0),
+            cache_scope: cache_hints.then_some(CacheScope::Public),
+        }
     }
 
     /// Ответ `tools/list`. Клиент протокола 2026-07-28 не шлёт `initialize`, а список инструментов просит сразу после

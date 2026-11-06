@@ -7,9 +7,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use glafira_mcp_core::{CallOk, SessionCtx, SessionFactory, ToolError};
+use rmcp::handler::server::prompt::PromptContext;
+use rmcp::handler::server::router::prompt::PromptRouter;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::model::{
-    DiscoverResult, Implementation, InitializeRequestParams, InitializeResult, ListToolsResult,
+    DiscoverResult, GetPromptRequestParams, GetPromptResponse, Implementation,
+    InitializeRequestParams, InitializeResult, ListPromptsResult, ListToolsResult,
     PaginatedRequestParams, ProgressNotificationParam, ServerCapabilities, ServerConfig,
 };
 use rmcp::service::RequestContext;
@@ -23,6 +26,7 @@ use crate::model::{
 use crate::params::OBSERVE_GRACE_S;
 use crate::truncate::{self, FIT_LIMIT, TRUNCATED_HINT};
 
+pub mod prompts;
 mod proposal_tools;
 pub mod select_tool;
 mod tools;
@@ -87,6 +91,14 @@ pub const TOOL_NAMES: [&str; 18] = [
     "list_proposals",
 ];
 
+/// Сценарии P4b (спец. §9), в Qwen Code — слэш-команды «MCP: glafira-pg».
+pub const PROMPT_NAMES: [&str; 4] = [
+    "optimize_query",
+    "triage_incident",
+    "analyze_top_queries",
+    "review_config",
+];
+
 pub const BUSY_MESSAGE: &str = "Another observation (observe_activity or observe_top_queries) is running in this session; wait for it to finish";
 
 /// Строит [`PgServer`] на каждую сессию; `backend` — реализация приложения (она же `Gate` ядра).
@@ -126,6 +138,8 @@ pub struct PgServer {
     time_unit: Duration,
     #[allow(dead_code)] // поле читает код макроса tool_handler
     tool_router: ToolRouter<Self>,
+    #[allow(dead_code)] // читают `list_prompts` и `get_prompt`; как у `tool_router`
+    prompt_router: PromptRouter<PgServer>,
 }
 
 impl PgServer {
@@ -135,6 +149,7 @@ impl PgServer {
             backend,
             time_unit,
             tool_router: Self::tool_router() + Self::select_router() + Self::proposal_router(),
+            prompt_router: Self::prompt_router(),
         }
     }
 
@@ -259,7 +274,12 @@ fn report_value(r: &Report) -> Result<Value, ToolError> {
 impl ServerHandler for PgServer {
     fn get_info(&self) -> ServerConfig {
         let o = self.ctx.options();
-        let mut c = ServerConfig::new(ServerCapabilities::builder().enable_tools().build());
+        let mut c = ServerConfig::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_prompts()
+                .build(),
+        );
         c.server_info = Implementation::new(&o.name, &o.version);
         c.instructions = Some(o.instructions.clone());
         c
@@ -299,5 +319,28 @@ impl ServerHandler for PgServer {
         Ok(self
             .ctx
             .list_tools_result(self.tool_router.list_all(), &context))
+    }
+
+    async fn list_prompts(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, ErrorData> {
+        Ok(self
+            .ctx
+            .list_prompts_result(self.prompt_router.list_all(), &context))
+    }
+
+    /// Текст сценария данных не содержит: права проверяют инструменты, которые модель вызовет по нему. Клиент
+    /// опознаётся и подтверждение запрашивается сразу, как в `list_tools`. Тело — как у `#[prompt_handler]` rmcp 3.5.1.
+    async fn get_prompt(
+        &self,
+        request: GetPromptRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResponse, ErrorData> {
+        let view = self.ctx.identify(context.client_info());
+        self.ctx.request_approval(&view);
+        let prompt_context = PromptContext::new(self, request.name, request.arguments, context);
+        self.prompt_router.get_prompt(prompt_context).await
     }
 }
