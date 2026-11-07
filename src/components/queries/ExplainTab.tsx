@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../api/client";
 import type { AppError, ExplainParams, ParsedPlan, PlanTree, RequestSource } from "../../api/types";
 import { formatShortTimestamp, formatTimestamp } from "../../lib/format";
+import { differingHead } from "../../lib/sqlHead";
 import { useConnectionProfile } from "../../lib/useConnectionProfile";
 import { useTopology } from "../../lib/useConnectionEvents";
 import { flushExplainDraft, readExplainDraft, saveExplainDraft } from "../../state/explainDraft";
@@ -37,8 +38,6 @@ const CONSOLE_SOURCE: RequestSource = { kind: "console" };
 const NO_PARAMS: (string | null)[] = [];
 /** Сколько заменённых текстов помнит консоль. */
 const REPLACED_MAX = 10;
-/** Подпись заменённого текста — не длиннее (полный текст — в подсказке кнопки). */
-const HEAD_MAX = 80;
 
 /** Заменённый текст и когда его заменили. */
 interface Replaced {
@@ -46,24 +45,10 @@ interface Replaced {
   at: number;
 }
 
-/** Непустые строки текста без отступов. */
-const lines = (sql: string) =>
-  sql
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l !== "");
-
-/**
- * Подпись заменённого текста (смоук P4b, R4): первая непустая строка; если она та же, что у текста редактора (предложение
- * модели обычно начинается так же), — первая строка, которой тексты расходятся, с «…» впереди.
- */
-function replacedHead(text: string, current: string): string {
-  const own = lines(text);
-  const now = lines(current);
-  if (own.length === 0) return "";
-  if (own[0] !== now[0]) return own[0].slice(0, HEAD_MAX);
-  const i = own.findIndex((l, k) => l !== now[k]);
-  return i < 0 ? own[0].slice(0, HEAD_MAX) : `… ${own[i]}`.slice(0, HEAD_MAX);
+/** Текст `sql`, который сейчас заменяют, — первым в список (с временем); прежний пункт с тем же текстом уходит. */
+function withReplaced(list: Replaced[], sql: string): Replaced[] {
+  if (sql.trim() === "") return list;
+  return [{ text: sql, at: Date.now() }, ...list.filter((x) => x.text !== sql)].slice(0, REPLACED_MAX);
 }
 
 /**
@@ -86,6 +71,8 @@ function versionNum(text: string | null | undefined): number {
  * кнопок с «Скопировать для LLM» и «Передать LLM-ассистенту» и их строками статуса, результат плана, «История») → панель
  * «Предложения LLM» (P4b): `prefill.proposalId` выбирает в ней предложение, а предложение на запрос, переданный отсюда,
  * выбирается само (R2).
+ * «Заменённые тексты» (R4, смоук P4c R22): подстановка и «Вернуть» кладут заменяемый текст первым в список (с временем замены);
+ * пункт, равный тексту редактора, не показывается — «Вернуть» его была бы пустым действием.
  * Подстановка текста (`prefill`, «Вернуть») сразу убирает план прежнего текста (R6); «Вернуть» и подстановка с
  * `prefill.autoPlan` (предложение, ссылка карточки, журнал MCP) сразу строят «План» по новому тексту (R11), без выполнения.
  * «Скопировать для LLM» получает план последнего запуска, пока SQL, узел и база не менялись, иначе Rust строит пробный план сам;
@@ -157,7 +144,7 @@ export function ExplainTab({
   // «План» строится, если подстановка просит (`autoPlan`). Узла нет — лидер.
   useEffect(() => {
     if (!prefill) return;
-    if (sql.trim() !== "" && sql !== prefill.sql) setReplaced((r) => [{ text: sql, at: Date.now() }, ...r.filter((x) => x.text !== sql)].slice(0, REPLACED_MAX));
+    if (sql !== prefill.sql) setReplaced((r) => withReplaced(r, sql));
     setSql(prefill.sql);
     setDb(prefill.database ?? null);
     setNode(prefill.member ?? null);
@@ -195,6 +182,8 @@ export function ExplainTab({
   const lastFresh = last && last.sql === sql && last.node === nodeName && last.db === dbName ? last : null;
   const lastPlan = lastFresh?.plan ?? null;
   const lastParams = lastFresh && lastFresh.params.kind === "values" ? lastFresh.params.values : NO_PARAMS;
+  // Пункт с текстом редактора — пустое действие (R22): не показывается, пока текст тот же.
+  const shownReplaced = replaced.filter((r) => r.text !== sql);
 
   const parse = async () => {
     setParseError(null);
@@ -251,11 +240,11 @@ export function ExplainTab({
             <div className="explain-panel" hidden={s !== "sql"}>
               <textarea className="mono explain-sql" aria-label="SQL" rows={8} value={sql} onChange={(e) => setSql(e.target.value)} placeholder={t("diag.explain.placeholder")} />
               {/* «Вернуть» — сразу под редактором (смоук P4b, R1a); подпись различает тексты с одинаковым началом (R4). */}
-              {replaced.length > 0 && (
+              {shownReplaced.length > 0 && (
                 <section className="llm-replaced" aria-label={t("diag.explain.replaced.title")}>
                   <h4>{t("diag.explain.replaced.title")}</h4>
                   <ul className="plain-list">
-                    {replaced.map((r, i) => (
+                    {shownReplaced.map((r, i) => (
                       <li key={`${i}:${r.text}`}>
                         <span className="muted llm-replaced-time" title={formatTimestamp(r.at).slice(0, 19)}>
                           {formatShortTimestamp(r.at)}
@@ -265,11 +254,13 @@ export function ExplainTab({
                           className="link"
                           title={r.text}
                           onClick={() => {
+                            // Текст, который «Вернуть» заменяет (например, предложение), тоже можно вернуть (R22).
+                            setReplaced((list) => withReplaced(list, sql));
                             setSql(r.text);
                             substitute(true);
                           }}
                         >
-                          {t("diag.explain.replaced.restore", { head: replacedHead(r.text, sql) })}
+                          {t("diag.explain.replaced.restore", { head: differingHead(r.text, sql) })}
                         </button>
                       </li>
                     ))}
