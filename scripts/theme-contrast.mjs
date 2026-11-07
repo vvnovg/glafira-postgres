@@ -1,8 +1,11 @@
 // Контраст и различимость цветов темы: чистые функции для theme-contrast.test.mjs (`pnpm test:scripts`).
-// Разбирает переменные --bg и --wait-* из src/styles.css; считает WCAG-контраст и ΔE в OKLab (формулы CSS Color 4).
+// Разбирает фоны, текстовые цвета и --wait-* из src/styles.css; считает WCAG-контраст и ΔE в OKLab (формулы CSS Color 4).
 
-/** Переменные, которые разбирает `parseThemeVars`: фон темы и цвета классов ожиданий. */
-const isThemeVar = (name) => name === "--bg" || name.startsWith("--wait-");
+/** Переменные с цветом `#rrggbb`, которые разбирает `parseThemeVars`: фоны, приглушённый текст, акцент и его заливка. */
+const THEME_VARS = new Set(["--bg", "--bg-alt", "--muted", "--accent", "--accent-fill"]);
+
+/** Переменные, которые разбирает `parseThemeVars`: `THEME_VARS` и цвета классов ожиданий. */
+const isThemeVar = (name) => THEME_VARS.has(name) || name.startsWith("--wait-");
 
 /** Убирает комментарии `/* … *\/`: в них бывают примеры объявлений, которые не должны попасть в разбор. */
 const stripComments = (css) => css.replace(/\/\*[\s\S]*?\*\//g, "");

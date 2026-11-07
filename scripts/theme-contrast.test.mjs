@@ -9,6 +9,8 @@ const GREYS = ["extension", "activity", "other"];
 const ALL = [...MAIN, ...GREYS];
 // WCAG 1.4.11: нетекстовые элементы (столбцы, образцы легенды) — не ниже 3:1 к фону.
 const MIN_CONTRAST = 3;
+// WCAG 1.4.3 (AA): обычный текст — не ниже 4,5:1 к своему фону.
+const MIN_TEXT_CONTRAST = 4.5;
 // ΔE здесь — евклидово расстояние в OKLab, умноженное на 100 (шкала навыка dataviz: «8» значит 0,08 в единицах OKLab).
 const MIN_DELTA_E = 8;
 // Серый — «нейтральный», пока его цветность OKLCH (C = √(a² + b²)) не выше этого значения (хроматические цвета палитры — от 0,10).
@@ -23,27 +25,42 @@ test("parseThemeVars: переменные из :root и из блока тём�
   const sample = `
     :root {
       --bg: #FFFFFF;
+      --bg-alt: #F4F5F7;
       --fg: #111111; /* --wait-fake: #000000; */
+      --muted: #5f6673;
+      --accent: #2563EB;
+      --accent-fill: #2563eb;
+      --danger-text: var(--danger);
       --wait-cpu: #2A78D6;
       --wait-bufferPin: #e34948;
       font-size: 13px;
     }
-    .x { --wait-skipped: #123456; }
+    .x { --wait-skipped: #123456; --accent: #000000; }
     @media (prefers-color-scheme: dark) {
-      :root { --bg: #1b1d21; --wait-cpu: #3987e5; }
+      :root { --bg: #1b1d21; --accent: #5b9cf8; --wait-cpu: #3987e5; }
     }
     @media (min-width: 600px) {
       :root { --wait-cpu: #000001; }
     }
   `;
   const { light: l, dark: d } = parseThemeVars(sample);
-  assert.deepEqual([...l], [["--bg", "#ffffff"], ["--wait-cpu", "#2a78d6"], ["--wait-bufferPin", "#e34948"]]);
-  assert.deepEqual([...d], [["--bg", "#1b1d21"], ["--wait-cpu", "#3987e5"]]);
+  assert.deepEqual([...l], [
+    ["--bg", "#ffffff"],
+    ["--bg-alt", "#f4f5f7"],
+    ["--muted", "#5f6673"],
+    ["--accent", "#2563eb"],
+    ["--accent-fill", "#2563eb"],
+    ["--wait-cpu", "#2a78d6"],
+    ["--wait-bufferPin", "#e34948"],
+  ]);
+  assert.deepEqual([...d], [["--bg", "#1b1d21"], ["--accent", "#5b9cf8"], ["--wait-cpu", "#3987e5"]]);
 });
 
 test("parseThemeVars: значение не #rrggbb — ошибка с именем переменной (иначе проверка контраста молча пропустила бы её)", () => {
   assert.throws(() => parseThemeVars(":root { --bg: #fff; --wait-cpu: red; }"), /--bg|--wait-cpu/);
   assert.throws(() => parseThemeVars(":root { --wait-cpu: var(--accent); }"), /--wait-cpu/);
+  assert.throws(() => parseThemeVars(":root { --accent-fill: var(--accent); }"), /--accent-fill/);
+  assert.throws(() => parseThemeVars(":root { --muted: #888; }"), /--muted/);
 });
 
 test("contrastRatio: формула WCAG на известных парах", () => {
@@ -70,6 +87,25 @@ for (const theme of ["light", "dark"]) {
   test(`${theme}: заданы фон и все 11 цветов классов`, () => {
     assert.ok(bg, "нет --bg");
     for (const cls of ALL) assert.ok(color(cls), `нет --wait-${cls}`);
+  });
+
+  // Пары текста и фона из правки контраста P4b (смоук 2026-11-07): заливка «Принять» и значка данных, ссылки и полосы
+  // выбора цветом акцента, приглушённый текст на панелях с фоном --bg-alt.
+  test(`${theme}: акцент, его заливка и приглушённый текст — не ниже ${MIN_TEXT_CONTRAST}:1 (WCAG AA)`, () => {
+    const pairs = [
+      ["белый на --accent-fill («Принять», значок данных, флажки)", "#ffffff", vars.get("--accent-fill")],
+      ["--accent на --bg (ссылки, «Предложения LLM: N — открыть в консоли»)", vars.get("--accent"), bg],
+      ["--accent на --bg-alt (ссылки боковой панели и находок)", vars.get("--accent"), vars.get("--bg-alt")],
+      ["--muted на --bg-alt (приглушённый текст на панелях)", vars.get("--muted"), vars.get("--bg-alt")],
+    ];
+    for (const [name, fg, back] of pairs) assert.ok(fg && back, `нет цвета для пары: ${name}`);
+    const bad = pairs
+      .map(([name, fg, back]) => ({ name, fg, back, ratio: contrastRatio(fg, back) }))
+      .filter((p) => p.ratio < MIN_TEXT_CONTRAST);
+    assert.deepEqual(
+      bad.map((p) => `${p.name}: ${p.fg} к ${p.back} — ${p.ratio.toFixed(2)}:1`),
+      [],
+    );
   });
 
   test(`${theme}: каждый --wait-* даёт контраст не ниже ${MIN_CONTRAST}:1 к --bg`, () => {
