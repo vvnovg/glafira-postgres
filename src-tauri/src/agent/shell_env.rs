@@ -17,9 +17,11 @@ const BEGIN: &str = "__GLAFIRA_BEGIN_5c1e__";
 const END: &str = "__GLAFIRA_END_5c1e__";
 /// Переменные самой оболочки — не окружение пользователя.
 const SKIP_VARS: [&str; 4] = ["_", "SHLVL", "PWD", "OLDPWD"];
-/// Сколько ждать конца stdout после выхода процесса: фоновый процесс профиля может держать stdout открытым, а вывод
-/// самого процесса к этому времени уже прочитан.
+/// Сколько ждать конца stdout и stderr после выхода процесса: фоновый процесс профиля может держать их открытыми, а
+/// вывод самого процесса к этому времени уже прочитан.
 const DRAIN_GRACE: Duration = Duration::from_millis(500);
+/// Сколько stderr хранить (начало): он нужен только для текста ошибки (`detect::version_of`).
+const STDERR_KEEP: usize = 16 * 1024;
 
 /// Окружение процесса агента. `Debug` показывает только имена переменных: в значениях бывают ключи API и токены.
 #[derive(Clone, PartialEq, Eq, Default)]
@@ -206,20 +208,57 @@ pub(crate) fn run_marked(shell: &Path, script: &str, timeout: Duration) -> Optio
     let full = format!("printf '%s' '{BEGIN}'; {script}; printf '%s' '{END}'");
     let mut cmd = Command::new(shell);
     cmd.arg("-ilc").arg(full);
-    let (_, out) = run_with_timeout(cmd, timeout).ok()??;
-    between(&out, BEGIN.as_bytes(), END.as_bytes())
+    let done = run_with_timeout(cmd, timeout).ok()??;
+    between(&done.stdout, BEGIN.as_bytes(), END.as_bytes())
 }
 
-/// Процесс без stdin, stdout — в память, stderr — в никуда; срок — на процесс. После выхода процесса конец stdout
-/// ждётся не дольше `DRAIN_GRACE` (фоновый процесс профиля может держать stdout), отдаётся прочитанное. `Err` — процесс не
-/// запустился; `Ok(None)` — не уложился в срок (убит). Блокирующий вызов.
+/// Процесс `run_with_timeout`, закончившийся сам.
+#[derive(Debug)]
+pub(crate) struct Finished {
+    pub code: Option<i32>,
+    pub stdout: Vec<u8>,
+    /// Начало stderr, до `STDERR_KEEP`.
+    pub stderr: Vec<u8>,
+}
+
+/// Читатель потока процесса в своём потоке ОС: в `buf` — не больше `keep` байт (остальное читается и отбрасывается, чтобы
+/// процесс не встал на полном pipe), в конце — сигнал `done`.
+fn read_all(
+    mut from: impl Read + Send + 'static,
+    keep: usize,
+    done: mpsc::Sender<()>,
+) -> Arc<Mutex<Vec<u8>>> {
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let sink = buf.clone();
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 8192];
+        loop {
+            match from.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let mut b = sink.lock_safe();
+                    let room = keep.saturating_sub(b.len()).min(n);
+                    b.extend_from_slice(&chunk[..room]);
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        let _ = done.send(());
+    });
+    buf
+}
+
+/// Процесс без stdin, stdout — в память, начало stderr — тоже; срок — на процесс. После выхода процесса конец stdout и
+/// stderr ждётся не дольше `DRAIN_GRACE` (фоновый процесс профиля может их держать), отдаётся прочитанное. `Err` —
+/// процесс не запустился; `Ok(None)` — не уложился в срок (убит). Блокирующий вызов.
 pub(crate) fn run_with_timeout(
     mut cmd: Command,
     timeout: Duration,
-) -> io::Result<Option<(Option<i32>, Vec<u8>)>> {
+) -> io::Result<Option<Finished>> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -227,26 +266,14 @@ pub(crate) fn run_with_timeout(
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     let mut child = cmd.spawn()?;
-    let Some(mut out) = child.stdout.take() else {
+    let (Some(out), Some(err)) = (child.stdout.take(), child.stderr.take()) else {
         let _ = child.kill();
         let _ = child.wait();
         return Ok(None);
     };
-    let buf = Arc::new(Mutex::new(Vec::new()));
     let (done_tx, done_rx) = mpsc::channel::<()>();
-    let sink = buf.clone();
-    std::thread::spawn(move || {
-        let mut chunk = [0u8; 8192];
-        loop {
-            match out.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => sink.lock_safe().extend_from_slice(&chunk[..n]),
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(_) => break,
-            }
-        }
-        let _ = done_tx.send(());
-    });
+    let stdout = read_all(out, usize::MAX, done_tx.clone());
+    let stderr = read_all(err, STDERR_KEEP, done_tx);
     let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
@@ -259,9 +286,21 @@ pub(crate) fn run_with_timeout(
             }
         }
     };
-    let _ = done_rx.recv_timeout(DRAIN_GRACE);
-    let out = std::mem::take(&mut *buf.lock_safe());
-    Ok(Some((status.code(), out)))
+    let drained = Instant::now() + DRAIN_GRACE;
+    for _ in 0..2 {
+        if done_rx
+            .recv_timeout(drained.saturating_duration_since(Instant::now()))
+            .is_err()
+        {
+            break;
+        }
+    }
+    let take = |b: &Arc<Mutex<Vec<u8>>>| std::mem::take(&mut *b.lock_safe());
+    Ok(Some(Finished {
+        code: status.code(),
+        stdout: take(&stdout),
+        stderr: take(&stderr),
+    }))
 }
 
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {

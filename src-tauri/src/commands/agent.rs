@@ -13,8 +13,8 @@ use crate::agent::models::{self, AgentModels};
 use crate::agent::ollama;
 use crate::agent::queue::{RunFilter, log_missing};
 use crate::agent::runs::AgentRun;
-use crate::agent::settings::{AgentSettings, Preset, disabled_by_policy};
-use crate::agent::shell_env::shell_env;
+use crate::agent::settings::{AgentSettings, Preset, check_path, disabled_by_policy};
+use crate::agent::shell_env::{ShellEnv, shell_env};
 use crate::error::AppResult;
 use crate::state::AppState;
 
@@ -57,16 +57,24 @@ pub async fn set_agent_settings(
 /// «Найти»: логин-оболочка, `PATH`, известные места. С `path` — только версия этой программы (путь, исправленный руками).
 #[tauri::command]
 pub async fn detect_agent_cli(preset: Preset, path: Option<String>) -> AppResult<Detected> {
-    blocking(move || {
-        let env = shell_env();
-        Ok(
-            match path.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()) {
-                Some(p) => detect::with_version(preset, Path::new(&p), &env),
-                None => detect::detect(preset, &env),
-            },
-        )
-    })
-    .await
+    blocking(move || detect_cli(preset, path, &shell_env())).await
+}
+
+/// `detect_agent_cli` в окружении `env`. Путь, указанный руками, — как в «Настройках» (`settings::check_path`): не
+/// абсолютный — отказ `pathNotAbsolute`, программа не запускается (иначе имя нашлось бы по `PATH` окружения агента и
+/// показало версию, а «Сохранить» потом отказало бы). Блокирующий вызов.
+pub(crate) fn detect_cli(
+    preset: Preset,
+    path: Option<String>,
+    env: &ShellEnv,
+) -> AppResult<Detected> {
+    match path.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()) {
+        Some(p) => {
+            check_path(&p)?;
+            Ok(detect::with_version(preset, Path::new(&p), env))
+        }
+        None => Ok(detect::detect(preset, env)),
+    }
 }
 
 /// Модели для поля «Модель»: у Qwen Code — из его настроек; у Claude Code «Через Ollama» — `/api/tags` локальной
@@ -169,6 +177,43 @@ mod tests {
             enabled: true,
             ..AgentSettings::default()
         }
+    }
+
+    /// Путь, указанный руками, — только абсолютный, как в «Настройках»: относительное имя не ищется по `PATH` окружения
+    /// агента и не запускается (ревью задачи 5, замечание 3).
+    #[cfg(unix)]
+    #[test]
+    fn detect_with_a_relative_path_is_refused_without_starting_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let started = dir.path().join("started");
+        let qwen = dir.path().join("qwen");
+        std::fs::write(
+            &qwen,
+            format!("#!/bin/sh\n: > '{}'\necho 0.26.5\n", started.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&qwen, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let env = ShellEnv {
+            vars: vec![("PATH".into(), dir.path().display().to_string())],
+            from_shell: true,
+        };
+        for p in ["qwen", " qwen ", "./qwen", "bin/qwen"] {
+            assert_eq!(
+                detect_cli(Preset::Qwen, Some(p.into()), &env)
+                    .unwrap_err()
+                    .key,
+                "errors.agent.pathNotAbsolute",
+                "{p}"
+            );
+        }
+        assert!(!started.exists(), "программа не запускалась");
+        let d = detect_cli(Preset::Qwen, Some(format!(" {} ", qwen.display())), &env).unwrap();
+        assert_eq!(
+            (d.path.as_deref(), d.version.as_deref()),
+            (qwen.to_str(), Some("0.26.5"))
+        );
+        assert!(started.exists());
     }
 
     #[test]

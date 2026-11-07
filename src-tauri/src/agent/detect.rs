@@ -10,12 +10,17 @@ use std::time::Duration;
 use serde::Serialize;
 
 use super::presets::min_version;
+use super::process::strip_ansi;
 use super::settings::Preset;
 use super::shell_env::{
     SHELL_TIMEOUT, ShellEnv, known_dirs, login_shell, run_marked, run_with_timeout,
 };
+use crate::mcp::llm::plain_text;
 
 pub const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
+/// Предел вывода программы (stdout и stderr — каждый) в тексте ошибки `--version`: текст идёт в «Настройки» («Версию не
+/// узнать: …»), а сломанная программа печатает сколько угодно.
+pub const VERSION_OUTPUT_CHARS: usize = 300;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -84,18 +89,39 @@ pub fn version_of(program: &Path, env: &ShellEnv, timeout: Duration) -> Result<S
             "{} --version did not answer within {timeout:?}",
             program.display()
         )),
-        Ok(Some((code, out))) => {
-            let text = String::from_utf8_lossy(&out);
-            match parse_version(&text) {
-                Some((a, b, c)) if code == Some(0) => Ok(format!("{a}.{b}.{c}")),
-                _ => Err(format!(
+        Ok(Some(done)) => match parse_version(&String::from_utf8_lossy(&done.stdout)) {
+            Some((a, b, c)) if done.code == Some(0) => Ok(format!("{a}.{b}.{c}")),
+            _ => {
+                let mut e = format!(
                     "{} --version: exit code {}, output “{}”",
                     program.display(),
-                    code.map_or("none".to_string(), |c| c.to_string()),
-                    text.trim()
-                )),
+                    done.code.map_or("none".to_string(), |c| c.to_string()),
+                    brief(&done.stdout)
+                );
+                // Причину сломанного CLI обычно пишет stderr: `env: node: No such file or directory`.
+                let errors = brief(&done.stderr);
+                if !errors.is_empty() {
+                    e.push_str(&format!(", errors “{errors}”"));
+                }
+                Err(e)
             }
-        }
+        },
+    }
+}
+
+/// Вывод программы одной строкой для текста ошибки: без управляющих последовательностей и пустых строк, строки — через
+/// « / », не длиннее `VERSION_OUTPUT_CHARS` символов (дальше — «…»).
+fn brief(bytes: &[u8]) -> String {
+    let text = plain_text(&strip_ansi(&String::from_utf8_lossy(bytes)));
+    let line = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" / ");
+    match line.char_indices().nth(VERSION_OUTPUT_CHARS) {
+        Some((at, _)) => format!("{}…", &line[..at]),
+        None => line,
     }
 }
 
@@ -277,16 +303,23 @@ mod tests {
         );
         // `PATH` фальшивой оболочки без каталогов пользователя: настоящий `claude` машины не находится.
         assert_eq!(which_login(&shell, "claude", SHELL_TIMEOUT), None);
-        let d = detect_with(
-            Preset::Qwen,
-            &ShellEnv::current_process(),
-            Some(&shell),
-            &[],
-        );
+        // Окружение без каталогов машины: не ответь фальшивая оболочка, запасной поиск по `PATH` процесса тестов нашёл бы
+        // и запустил настоящий `qwen` (`/opt/homebrew/bin/qwen` у разработчика).
+        let env = ShellEnv {
+            vars: vec![("PATH".into(), "/nonexistent".into())],
+            from_shell: true,
+        };
+        let d = detect_with(Preset::Qwen, &env, Some(&shell), &[]);
         assert_eq!(d.path.as_deref(), Some(qwen.to_str().unwrap()));
         assert_eq!(
             (d.version.as_deref(), d.below_minimum, d.error),
             (Some("0.26.5"), false, None)
+        );
+        // Оболочка не ответила — и запасные места пусты: не нашлось.
+        let mute = script(dir.path(), "mute-shell", "exit 1");
+        assert_eq!(
+            detect_with(Preset::Qwen, &env, Some(&mute), &[]),
+            Detected::default()
         );
     }
 
@@ -365,11 +398,40 @@ mod tests {
         let d = with_version(Preset::Qwen, &broken, &ShellEnv::current_process());
         assert_eq!(d.path.as_deref(), Some(broken.to_str().unwrap()));
         assert_eq!(d.version, None);
-        assert!(
-            d.error.as_deref().is_some_and(|e| e.contains("127")),
-            "{:?}",
-            d.error
+        assert_eq!(
+            d.error.as_deref(),
+            Some(
+                format!(
+                    "{} --version: exit code 127, output “”, errors “node: not found”",
+                    broken.display()
+                )
+                .as_str()
+            ),
+            "причина — из stderr"
         );
+        // Сломанная программа печатает много: в тексте ошибки — начало каждого потока, одной строкой.
+        let noisy = script(
+            dir.path(),
+            "noisy",
+            "i=0; while [ $i -lt 400 ]; do printf 'line %s \\033[31mred\\033[0m\\n' $i; printf 'err %s\\n' $i >&2; i=$((i+1)); done; exit 1",
+        );
+        let e = with_version(Preset::Qwen, &noisy, &ShellEnv::current_process())
+            .error
+            .unwrap();
+        let path = noisy.display().to_string();
+        assert!(
+            e.chars().count() < path.chars().count() + 2 * VERSION_OUTPUT_CHARS + 80,
+            "{} символов: {e}",
+            e.chars().count()
+        );
+        assert!(
+            e.starts_with(&format!(
+                "{path} --version: exit code 1, output “line 0 red / line 1 red / "
+            )) && e.contains("…”, errors “err 0 / err 1 / ")
+                && e.ends_with("…”"),
+            "{e}"
+        );
+        assert!(!e.contains('\u{1b}') && !e.contains('\n'), "{e:?}");
         let missing = with_version(
             Preset::Qwen,
             Path::new("/nonexistent/qwen"),

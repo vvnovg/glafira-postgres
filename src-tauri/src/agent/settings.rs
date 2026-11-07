@@ -183,7 +183,8 @@ impl AgentSettings {
 }
 
 /// Путь задан пользователем: абсолютный (GUI-приложение не знает `PATH` оболочки, спец. §4.2), без управляющих символов.
-fn check_path(p: &str) -> AppResult<()> {
+/// Та же проверка — у «Найти» с путём, указанным руками (`commands::agent::detect_cli`).
+pub(crate) fn check_path(p: &str) -> AppResult<()> {
     if p.is_empty() {
         return Ok(());
     }

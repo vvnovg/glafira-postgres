@@ -199,8 +199,17 @@ pub fn build(s: &AgentSettings, i: &RunInputs) -> AppResult<CommandSpec> {
                     .iter()
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect();
-                // Ключ облака из окружения пользователя не должен уйти в Ollama и не должен перебить её адрес.
-                env_remove.push("ANTHROPIC_API_KEY".into());
+                // Окружение — из профиля оболочки пользователя (§4.2), а «через Ollama» — это локально (fail-safe):
+                // - ключ облака не должен уйти в Ollama и не должен перебить её адрес;
+                // - с `CLAUDE_CODE_USE_BEDROCK` / `CLAUDE_CODE_USE_VERTEX` Claude Code идёт в Bedrock / Vertex мимо
+                //   `ANTHROPIC_BASE_URL` — запуск ушёл бы в платное облако;
+                // - `ANTHROPIC_CUSTOM_HEADERS` (бывает, с токеном шлюза) ушли бы на адрес Ollama, в том числе удалённый.
+                env_remove.extend(strings(&[
+                    "ANTHROPIC_API_KEY",
+                    "CLAUDE_CODE_USE_BEDROCK",
+                    "CLAUDE_CODE_USE_VERTEX",
+                    "ANTHROPIC_CUSTOM_HEADERS",
+                ]));
             } else if let Some(b) = s.claude.budget_usd {
                 // Только без Ollama: через Ollama Claude Code считает стоимость по ценам своей модели (§4.1).
                 args.extend(["--max-budget-usd".to_string(), format!("{b}")]);
@@ -481,7 +490,15 @@ mod tests {
                 ("CLAUDE_CODE_SUBAGENT_MODEL", m),
             ])
         );
-        assert_eq!(spec.env_remove, v(&["ANTHROPIC_API_KEY"]));
+        assert_eq!(
+            spec.env_remove,
+            v(&[
+                "ANTHROPIC_API_KEY",
+                "CLAUDE_CODE_USE_BEDROCK",
+                "CLAUDE_CODE_USE_VERTEX",
+                "ANTHROPIC_CUSTOM_HEADERS"
+            ])
+        );
         assert_eq!(
             build(&claude(true, None), &inputs(None)).unwrap_err().key,
             "errors.agent.modelRequired"
