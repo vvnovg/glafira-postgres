@@ -381,13 +381,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let shell = fake_shell(dir.path(), "(sleep 5 &)\nshift\neval \"$1\"");
         let started = std::time::Instant::now();
-        let env = capture_with(&shell, Duration::from_secs(1));
+        let env = capture_with(&shell, Duration::from_secs(2));
+        assert!(env.from_shell, "окружение снято, хотя stdout ещё открыт");
         assert!(
-            started.elapsed() < Duration::from_secs(3),
+            started.elapsed() < Duration::from_secs(2),
             "{:?}",
             started.elapsed()
         );
-        let _ = env;
     }
 
     #[test]
