@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use super::models::{AgentModels, ModelsSource, effective_model};
+use super::models::effective_model;
 use super::presets::valid_model;
 use super::settings::{AgentSettings, Preset, parse_ollama_url};
 use super::warmth::ModelWarmth;
@@ -330,30 +330,33 @@ impl ModelWarmth for OllamaWarmth {
             end_of_run(&s, model.as_deref()).await;
         })
     }
+
+    /// `/api/tags` локальной Ollama из настроек; запуск ждёт ответа не дольше `RESPONSE_TIMEOUT`.
+    fn has_local_model<'a>(&'a self, model: &'a str) -> BoxFuture<'a, bool> {
+        Box::pin(async move {
+            let s = self.settings.agent();
+            let m = model.trim();
+            if m.is_empty() {
+                return false;
+            }
+            tokio::time::timeout(RESPONSE_TIMEOUT, local_tags(&s))
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|tags| tags.iter().any(|t| same_model(t, m)))
+        })
+    }
 }
 
-/// Модели для поля «Модель» у Claude Code «Через Ollama» (`/api/tags` локальной Ollama, по алфавиту). Без Ollama, у
-/// удалённой Ollama или при ошибке — свободный ввод.
-pub async fn list_models(s: &AgentSettings) -> AgentModels {
-    if !s.claude.via_ollama {
-        return AgentModels::none();
-    }
-    let Some(client) = OllamaClient::new(&s.ollama_url) else {
-        return AgentModels::none();
-    };
-    match logged("/api/tags", client.tags().await) {
-        Some(mut ids) => {
-            ids.sort();
-            ids.dedup();
-            AgentModels {
-                ids,
-                default: None,
-                source: ModelsSource::Ollama,
-                cloud: Vec::new(),
-            }
-        }
-        None => AgentModels::none(),
-    }
+/// Модели локальной Ollama (`/api/tags`, по алфавиту, без повторов) для поля «Модель» (у Claude Code — список, у Qwen Code
+/// — группа «Ollama») и для выбора маршрута Qwen Code. Удалённая Ollama или ошибка — `None` (ошибка — в журнал
+/// приложения). «Через Ollama» не проверяется: список у Claude Code интерфейс показывает по черновику.
+pub async fn local_tags(s: &AgentSettings) -> Option<Vec<String>> {
+    let client = OllamaClient::new(&s.ollama_url)?;
+    let mut ids = logged("/api/tags", client.tags().await)?;
+    ids.sort();
+    ids.dedup();
+    Some(ids)
 }
 
 /// «Выгрузить модель» (§6.2): модель фонового ассистента — `keep_alive: 0`. Неактивна, пока идёт запуск, и когда Glafira
@@ -1054,15 +1057,12 @@ mod tests {
         unload_model(&st, &s, None).await.unwrap();
         assert_eq!(fake.seen.calls(), ["GET /api/ps"]);
 
-        let m = list_models(&s).await;
         assert_eq!(
-            (m.ids, m.default, m.source),
-            (
-                vec![MODEL.to_string(), OTHER.to_string()],
-                None,
-                ModelsSource::Ollama
-            )
+            local_tags(&s).await,
+            Some(vec![MODEL.to_string(), OTHER.to_string()])
         );
+        // Сохранённое «Через Ollama» список не прячет: у Claude Code его показывает интерфейс по черновику (итоговая волна
+        // правок смоука P4c), у Qwen Code это группа «Ollama».
         let direct = AgentSettings {
             claude: ClaudeSettings {
                 via_ollama: false,
@@ -1070,12 +1070,17 @@ mod tests {
             },
             ..s.clone()
         };
-        assert_eq!(list_models(&direct).await.source, ModelsSource::None);
+        assert_eq!(local_tags(&direct).await.map(|t| t.len()), Some(2));
+        let qwen = AgentSettings {
+            preset: Preset::Qwen,
+            ..direct.clone()
+        };
+        assert_eq!(local_tags(&qwen).await.map(|t| t.len()), Some(2));
         let remote = AgentSettings {
             ollama_url: "http://192.168.1.10:11434".into(),
             ..s.clone()
         };
-        assert_eq!(list_models(&remote).await.source, ModelsSource::None);
+        assert_eq!(local_tags(&remote).await, None);
         // Glafira моделью не управляет (0 минут, Claude Code без Ollama, удалённый адрес) — отказ без запросов к Ollama,
         // как и у тёплой модели (`manages`).
         fake.seen.clear();
@@ -1111,11 +1116,51 @@ mod tests {
             .unwrap_err();
         assert_eq!(e.key, "errors.agent.ollamaUnavailable");
         assert!(e.params["error"].contains("127.0.0.1:9"), "{e:?}");
-        assert_eq!(
-            within_real_limit("refused", list_models(&down))
-                .await
-                .source,
-            ModelsSource::None
+        assert_eq!(within_real_limit("refused", local_tags(&down)).await, None);
+    }
+    /// Итоговая волна правок смоука P4c: Qwen Code с моделью не из своих настроек идёт к Ollama, если модель скачана в
+    /// локальную Ollama (`/api/tags`; имя без тега — это `:latest`). Не скачана, Ollama молчит, не запущена или адрес не
+    /// локальный — нет; у удалённой Ollama сети не нужно.
+    #[tokio::test(start_paused = true)]
+    async fn a_local_model_is_one_from_the_tags_of_a_local_ollama() {
+        let silent = fake(|_, _| Reply::Silent).await;
+        let ollama = fake(|req, _| match req {
+            "GET /api/tags" => {
+                ok(json!({ "models": [{ "name": MODEL }, { "name": "gemma3:latest" }] }))
+            }
+            _ => ok(json!({})),
+        })
+        .await;
+        let (_d, settings) = settings_with(&ollama.url, |s| s.keep_warm_min = 0);
+        let w = OllamaWarmth::new(settings);
+        for (m, want) in [
+            (MODEL, true),
+            (" gemma3 ", true),
+            ("gemma3:latest", true),
+            (OTHER, false),
+            ("", false),
+        ] {
+            assert_eq!(w.has_local_model(m).await, want, "{m}");
+        }
+        // «Держать модель» 0 маршруту не мешает: он про адрес, а не про тёплую модель.
+        assert!(ollama.seen.called("GET /api/tags"));
+        let (_d, s) = settings_with(&silent.url, |_| {});
+        let w = Arc::new(OllamaWarmth::new(s));
+        let ask = tokio::spawn({
+            let w = w.clone();
+            async move { w.has_local_model(MODEL).await }
+        });
+        silent
+            .seen
+            .wait("tags", |s| s.called("GET /api/tags").then_some(()))
+            .await;
+        tokio::time::advance(RESPONSE_TIMEOUT + Duration::from_secs(1)).await;
+        assert!(!within_real_limit("silent", ask).await.unwrap());
+        let (_d, down) = settings_with("http://127.0.0.1:9", |_| {});
+        assert!(
+            !within_real_limit("refused", OllamaWarmth::new(down).has_local_model(MODEL)).await
         );
+        let (_d, remote) = settings_with("http://10.0.0.5:11434", |_| {});
+        assert!(!OllamaWarmth::new(remote).has_local_model(MODEL).await);
     }
 }

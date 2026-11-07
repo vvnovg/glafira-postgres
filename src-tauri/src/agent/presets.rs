@@ -89,8 +89,8 @@ pub struct RunInputs {
     pub timeout_s: u64,
     /// Адрес Ollama (Claude Code «Через Ollama»; Qwen Code с `qwen_via_ollama`).
     pub ollama_url: String,
-    /// Qwen Code: модель — облачная модель Ollama, которой нет в его настройках (`models::qwen_cloud_via_ollama`).
-    /// Адрес Ollama и ключ — окружением процесса, протокол OpenAI — флагом.
+    /// Qwen Code: модель — модель Ollama (облачная или из `/api/tags` локальной Ollama), которой нет в его настройках
+    /// (`models::qwen_knows`, очередь). Адрес Ollama и ключ — окружением процесса, протокол OpenAI — флагом.
     pub qwen_via_ollama: bool,
 }
 
@@ -165,7 +165,7 @@ pub fn build(s: &AgentSettings, i: &RunInputs) -> AppResult<CommandSpec> {
             ]);
             args.extend(strings(&["--chat-recording", "false", "-o", "stream-json"]));
             if i.qwen_via_ollama {
-                // Облачная модель Ollama не из настроек Qwen Code (смоук P4c: «Missing API key»): у модели без
+                // Модель Ollama не из настроек Qwen Code (смоук P4c: «Missing API key»): у модели без
                 // `modelProviders` Qwen Code берёт ключ и адрес из `--openai-api-key` / `--openai-base-url`, затем из
                 // `OPENAI_API_KEY` / `OPENAI_BASE_URL`, затем из `security.auth` своих настроек (Qwen Code 0.26.5).
                 // Окружение процесса перекрывает и настройки, и ключ облака из профиля оболочки (он не уйдёт в Ollama);

@@ -78,10 +78,11 @@ pub(crate) fn detect_cli(
     }
 }
 
-/// Модели для поля «Модель»: у Qwen Code — из его настроек; у Claude Code «Через Ollama» — `/api/tags` локальной
-/// Ollama (по сохранённым «Через Ollama» и адресу); иначе — свободный ввод. У Qwen Code и Claude Code «Через Ollama» —
-/// ещё группа «Ollama Cloud»: облачные модели действующей таблицы цен (встроенной или загруженной «Обновить цены») с
-/// ценами, без повторов с найденными (смоук P4c, sf-T7).
+/// Модели для поля «Модель»: у Qwen Code — из его настроек и группа «Ollama» (модели локальной Ollama, которых в них нет);
+/// у Claude Code — `/api/tags` локальной Ollama (по сохранённому адресу). У обоих — группа «Ollama Cloud»: облачные модели
+/// действующей таблицы цен (встроенной или загруженной «Обновить цены») с ценами, без повторов с найденными (смоук P4c, sf-T7).
+/// Списки Ollama отдаются всегда, без оглядки на сохранённое «Через Ollama»: у Claude Code интерфейс показывает их по
+/// черновику (итоговая волна правок). Удалённая или выключенная Ollama — найденных моделей Ollama нет, облачная группа есть.
 #[tauri::command]
 pub async fn list_agent_models(
     state: State<'_, AppState>,
@@ -92,21 +93,22 @@ pub async fn list_agent_models(
         let st = st.clone();
         blocking(move || Ok(st.settings.agent())).await?
     };
-    let found = match preset {
-        Preset::Qwen => {
-            blocking(|| {
-                Ok(dirs::home_dir().map_or_else(AgentModels::none, |home| {
-                    AgentModels::from_qwen(models::qwen_models(&home))
-                }))
-            })
-            .await?
-        }
-        Preset::Claude => ollama::list_models(&s).await,
-    };
-    if !models::cloud_offered(preset, &s) {
-        return Ok(found);
-    }
-    blocking(move || Ok(found.with_cloud(&pricing::table(st.mcp.data_dir())))).await
+    let tags = ollama::local_tags(&s).await;
+    blocking(move || {
+        let table = pricing::table(st.mcp.data_dir());
+        Ok(match preset {
+            Preset::Qwen => {
+                let q = dirs::home_dir()
+                    .map(|home| models::qwen_models(&home))
+                    .unwrap_or_default();
+                AgentModels::from_qwen(q)
+                    .with_cloud(&table)
+                    .with_ollama(tags.unwrap_or_default())
+            }
+            Preset::Claude => AgentModels::from_ollama(tags).with_cloud(&table),
+        })
+    })
+    .await
 }
 
 /// «Выгрузить модель» в подразделе «Фоновый ассистент» (спец. §6.2): модель сохранённых настроек, только у локальной

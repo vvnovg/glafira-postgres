@@ -1307,7 +1307,9 @@ export interface AgentModels {
   /** Модель по умолчанию (у Qwen Code — `model.name` его настроек). */
   default?: string | null;
   source: "qwen" | "ollama" | "none";
-  /** Группа «Ollama Cloud»: облачные модели таблицы цен, которых нет в `ids`; у Claude Code без Ollama — пусто. */
+  /** Группа «Ollama» у Qwen Code: модели локальной Ollama (`/api/tags`), которых нет в его настройках и в `cloud`. */
+  ollama?: string[];
+  /** Группа «Ollama Cloud»: облачные модели таблицы цен, которых нет в `ids` (у Claude Code — и без «Через Ollama»: интерфейс прячет её по черновику). */
   cloud?: CloudModel[];
 }
 /** Запись журнала для EXPLAIN ANALYZE яруса записи (`ActionRecord.explain`). */

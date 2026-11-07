@@ -132,11 +132,12 @@ export function AgentSection({ status }: { status: McpStatus }) {
  * «Передать» смотрит на `agent.enabled` и `agent.configured`. Поля не зависят от выключателя и политики: путь и модель можно
  * готовить заранее, а запрет политикой Rust применяет только к включению. «Найти» подставляет путь и показывает версию.
  * Путь, указанный руками, при уходе из поля проверяется так же (`detect_agent_cli` с `path` — версия этой программы).
- * Список моделей — по сохранённым «Через Ollama» и адресу; перечитывается при входе в поле «Модель» и после «Найти»
- * (модель могли добавить в настройки клиента при открытых «Настройках», смоук P4c R10), прежний список виден, пока читается
- * новый. После найденных моделей — группа «Ollama Cloud»: облачные модели таблицы цен с ценой в подписи пункта (`cloudLabel`),
- * без повторов с найденными; у Claude Code — только «Через Ollama» (по черновику: без Ollama облачные модели Ollama ему не
- * годятся). Список — подсказка, имя можно ввести руками. Что значит пустое поле «Модель» (модель по умолчанию или обязательная модель Ollama), написано текстом под полем.
+ * Список моделей — по сохранённому адресу Ollama; перечитывается при входе в поле «Модель» и после «Найти» (модель могли
+ * добавить в настройки клиента при открытых «Настройках», смоук P4c R10), прежний список виден, пока читается новый. У Qwen
+ * Code после моделей из его настроек — группа «Ollama»: модели локальной Ollama без цены (итоговая волна правок смоука P4c),
+ * затем у обоих — группа «Ollama Cloud»: облачные модели таблицы цен с ценой в подписи пункта (`cloudLabel`); без повторов.
+ * У Claude Code модели Ollama и облачные — только при «Через Ollama» в черновике (без Ollama они ему не годятся), сразу, без
+ * «Сохранить». Список — подсказка, имя можно ввести руками. Что значит пустое поле «Модель» (модель по умолчанию или обязательная модель Ollama), написано текстом под полем.
  * «Проверить» — по сохранённым настройкам: итог приходит событием запуска и убирается, когда в сохранённых настройках
  * сменились агент, программа или модель (`checkKey`, R14). «Выгрузить модель» неактивна, пока идёт запуск, и когда Glafira
  * моделью не управляет (`unloadOff`). Запись настроек — одна за раз: пока пишется выключатель, «Сохранить» ждёт, и
@@ -198,8 +199,10 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
       setSavedNote(true);
     },
   });
+  // Списки Ollama бэкенд отдаёт всегда (у Claude Code их показывает «Через Ollama» черновика): от сохранённого флажка
+  // список не зависит, от адреса Ollama — да.
   const models = useQuery({
-    queryKey: ["agentModels", draft.preset, saved.claude.viaOllama, saved.ollamaUrl],
+    queryKey: ["agentModels", draft.preset, saved.ollamaUrl],
     queryFn: () => api.listAgentModels(draft.preset),
     retry: false,
   });
@@ -238,8 +241,12 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
     if (savedNote && (active === document.body || active === saveRef.current)) linesRef.current?.focus();
   }, [savedNote]);
 
-  const found = models.data?.ids ?? [];
-  const cloud = qwen || draft.viaOllama ? (models.data?.cloud ?? []).filter((m) => !found.includes(m.id)) : [];
+  // У Claude Code все модели списка — модели Ollama: без «Через Ollama» в черновике их нет (облако Anthropic). У Qwen Code
+  // найденные — из его настроек, за ними группа «Ollama» (локальная Ollama, без цены), потом «Ollama Cloud» (с ценой).
+  const viaOllama = qwen || draft.viaOllama;
+  const found = viaOllama ? (models.data?.ids ?? []) : [];
+  const cloud = viaOllama ? (models.data?.cloud ?? []).filter((m) => !found.includes(m.id)) : [];
+  const local = qwen ? (models.data?.ollama ?? []).filter((m) => !found.includes(m) && !cloud.some((c) => c.id === m)) : [];
   const det = detected?.preset === draft.preset ? detected.result : null;
   // Что значит пустое поле «Модель» — видимым текстом под полем (у плейсхолдера контраст ниже AA).
   const modelEmptyNote = models.data?.default
@@ -392,10 +399,13 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
               onFocus={refreshModels}
               onClick={refreshModels}
             />
-            {/* datalist не рисует групп: группа «Ollama Cloud» — пунктами после найденных, её имя и цены — в подписи пункта. */}
+            {/* datalist не рисует групп: группы «Ollama» и «Ollama Cloud» — пунктами после найденных, имя группы (и цены) — в подписи пункта. */}
             <datalist id={modelsId}>
               {found.map((m) => (
                 <option key={m} value={m} />
+              ))}
+              {local.map((m) => (
+                <option key={m} value={m} label={t("settings.mcp.agent.ollamaModel")} />
               ))}
               {cloud.map((m) => (
                 <option key={m.id} value={m.id} label={cloudLabel(m, t)} />

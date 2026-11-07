@@ -255,7 +255,7 @@ describe("AgentSection", () => {
       vi.mocked(api.getAgentSettings).mockResolvedValue(
         agentSettings({ preset: "claude", claude: { path: "/Users/me/.local/bin/claude", model: "", viaOllama: true, budgetUsd: 1 } }),
       );
-      vi.mocked(api.listAgentModels).mockResolvedValue({ ids: ["qwen3.6-64k:35b-a3b"], default: null, source: "ollama", cloud: CLOUD.slice(1, 2) });
+      vi.mocked(api.listAgentModels).mockResolvedValue({ ids: ["qwen3.6-64k:35b-a3b"], default: null, source: "ollama", ollama: [], cloud: CLOUD.slice(1, 2) });
       const user = userEvent.setup();
       const { container } = renderWithClient(<AgentSection status={mcpStatus()} />);
       await screen.findByRole("combobox", { name: "Model" });
@@ -265,12 +265,52 @@ describe("AgentSection", () => {
           ["gpt-oss:120b-cloud", "Ollama Cloud · ≈ $0.15 / $0.60 per 1M tokens, input / output"],
         ]),
       );
-      // «Через Ollama» сняли — облачные модели Ollama Claude Code не годятся, ещё до «Сохранить».
+      // «Через Ollama» сняли — модели Ollama (и локальные, и облачные) Claude Code не годятся, ещё до «Сохранить».
       await user.click(screen.getByRole("checkbox", { name: "Via Ollama" }));
-      expect(modelOptions(container)).toEqual([["qwen3.6-64k:35b-a3b", null]]);
+      expect(modelOptions(container)).toEqual([]);
     } finally {
       await act(() => i18n.changeLanguage("ru"));
     }
+  });
+
+  it("Claude Code без сохранённого «Через Ollama»: флажок в черновике сразу показывает модели Ollama и облачные, без «Сохранить» и нового чтения", async () => {
+    vi.mocked(api.getAgentSettings).mockResolvedValue(
+      agentSettings({ preset: "claude", claude: { path: "/Users/me/.local/bin/claude", model: "claude-sonnet-5", viaOllama: false, budgetUsd: 1 } }),
+    );
+    vi.mocked(api.listAgentModels).mockResolvedValue({ ids: ["qwen3.6-64k:35b-a3b"], default: null, source: "ollama", ollama: [], cloud: CLOUD.slice(1, 2) });
+    const user = userEvent.setup();
+    const { container } = renderWithClient(<AgentSection status={mcpStatus()} />);
+    await screen.findByRole("combobox", { name: "Модель" });
+    await waitFor(() => expect(api.listAgentModels).toHaveBeenCalledWith("claude"));
+    expect(modelOptions(container)).toEqual([]);
+    const calls = vi.mocked(api.listAgentModels).mock.calls.length;
+    await user.click(screen.getByRole("checkbox", { name: "Через Ollama" }));
+    expect(modelOptions(container)).toEqual([
+      ["qwen3.6-64k:35b-a3b", null],
+      ["gpt-oss:120b-cloud", "Ollama Cloud · ≈ 0,15 $ / 0,60 $ за 1 млн токенов, вход / выход"],
+    ]);
+    expect(api.listAgentModels).toHaveBeenCalledTimes(calls);
+  });
+
+  it("Qwen Code: модели локальной Ollama — группой «Ollama» без цены после моделей из настроек и до «Ollama Cloud», без повторов", async () => {
+    vi.mocked(api.listAgentModels).mockResolvedValue({
+      ids: ["glm-5.3-flash:cloud", "qwen3.8:27b"],
+      default: null,
+      source: "qwen",
+      ollama: ["gemma3:4b", "qwen3.8:27b", "gpt-oss:120b-cloud", "qwen3.6-64k:35b-a3b"],
+      cloud: CLOUD.slice(0, 2),
+    });
+    const { container } = renderWithClient(<AgentSection status={mcpStatus()} />);
+    await screen.findByRole("combobox", { name: "Модель" });
+    await waitFor(() =>
+      expect(modelOptions(container)).toEqual([
+        ["glm-5.3-flash:cloud", null],
+        ["qwen3.8:27b", null],
+        ["gemma3:4b", "Ollama"],
+        ["qwen3.6-64k:35b-a3b", "Ollama"],
+        ["gpt-oss:120b-cloud", "Ollama Cloud · ≈ 0,15 $ / 0,60 $ за 1 млн токенов, вход / выход"],
+      ]),
+    );
   });
 
   it("список моделей не прочитан — свободный ввод с пояснением", async () => {

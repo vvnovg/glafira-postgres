@@ -35,7 +35,7 @@ use glafira_pg_lib::agent::runs::{
 };
 use glafira_pg_lib::agent::settings::{AgentSettings, ClaudeSettings, Preset, QwenSettings};
 use glafira_pg_lib::agent::shell_env::ShellEnv;
-use glafira_pg_lib::agent::warmth::NoWarmth;
+use glafira_pg_lib::agent::warmth::{ModelWarmth, NoWarmth};
 use glafira_pg_lib::conn::profile::LlmAccess;
 use glafira_pg_lib::mcp::backend::AppBackend;
 use glafira_pg_lib::mcp::controller::McpServerState;
@@ -404,10 +404,14 @@ fn agent_settings(preset: Preset) -> AgentSettings {
     }
 }
 
-fn runtime(spawner: &Arc<TestSpawner>, run_timeout: Option<Duration>) -> AgentRuntime {
+fn runtime(
+    spawner: &Arc<TestSpawner>,
+    run_timeout: Option<Duration>,
+    warmth: Arc<dyn ModelWarmth>,
+) -> AgentRuntime {
     AgentRuntime {
         spawner: spawner.clone(),
-        warmth: Arc::new(NoWarmth),
+        warmth,
         shim_exe: PathBuf::from(SHIM),
         run_timeout,
         // Настройки Qwen Code владельца тест не читает: домашнего каталога нет — облачную модель Qwen Code «не знает».
@@ -418,12 +422,21 @@ fn runtime(spawner: &Arc<TestSpawner>, run_timeout: Option<Duration>) -> AgentRu
 /// Приложение с подключениями `it` и `other` (уровень «Диагностика», соединения не открываются), MCP-сервером на обёртке
 /// `NoServerCheck` и фоновым ассистентом на фальшивом агенте.
 async fn env(preset: Preset, run_timeout: Option<Duration>) -> Env {
+    env_with(preset, run_timeout, Arc::new(NoWarmth)).await
+}
+
+/// `env` со своей тёплой моделью (и ответом «модель есть в локальной Ollama»).
+async fn env_with(
+    preset: Preset,
+    run_timeout: Option<Duration>,
+    warmth: Arc<dyn ModelWarmth>,
+) -> Env {
     let tmp = data_dir();
     let dir = tmp.path().to_path_buf();
     let spawner = TestSpawner::new(&dir);
     let st = AppState::new(&dir, Arc::new(MemoryStore::default()))
         .unwrap()
-        .with_agent(runtime(&spawner, run_timeout));
+        .with_agent(runtime(&spawner, run_timeout, warmth));
     for id in ["it", "other"] {
         // Порт 9: соединение не открывается — тест не трогает базу.
         let mut p = common::server_profile(id, "127.0.0.1:9");
@@ -1255,6 +1268,65 @@ async fn check_run_of_qwen_code_with_a_cloud_model_sees_the_ollama_address() {
     e.finish().await;
 }
 
+/// «Локальная Ollama» теста: знает одну модель, в сеть не ходит, тёплой моделью не управляет.
+struct LocalOllama(&'static str);
+
+impl ModelWarmth for LocalOllama {
+    fn before_run(&self, _model: Option<&str>) -> BoxFuture<'_, Vec<String>> {
+        Box::pin(async { Vec::new() })
+    }
+
+    fn after_run(&self, _model: Option<&str>) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+
+    fn has_local_model<'a>(&'a self, model: &'a str) -> BoxFuture<'a, bool> {
+        Box::pin(async move { model == self.0 })
+    }
+}
+
+/// «Проверить» с моделью локальной Ollama, которой нет в настройках Qwen Code (итоговая волна правок смоука P4c): агент
+/// видит адрес Ollama с `/v1`, ключ `ollama` и `--auth-type openai`, как у облачной модели; модель, которой нет и в Ollama,
+/// — без них.
+#[tokio::test]
+async fn check_run_of_qwen_code_with_a_local_ollama_model_sees_the_ollama_address() {
+    let e = env_with(Preset::Qwen, None, Arc::new(LocalOllama("qwen3.8:27b"))).await;
+    let mut a = e.st.settings.agent();
+    a.qwen.model = "qwen3.8:27b".into();
+    a.ollama_url = "http://127.0.0.1:11999/".into();
+    e.st.settings.set_agent(a).unwrap();
+    e.spawner.push("check", &[]);
+    let id = e.st.agent.check().unwrap().id;
+    let run = wait_end(&e.st, &id).await;
+    let notes = read_notes(&e.dir, &id);
+    assert_eq!(run.status, RunStatus::Done, "{run:?}\n{notes}");
+    assert_eq!(
+        noted(&notes, "openai_base_url").as_deref(),
+        Some("http://127.0.0.1:11999/v1"),
+        "{notes}"
+    );
+    assert_eq!(
+        noted(&notes, "openai_api_key").as_deref(),
+        Some("ollama"),
+        "{notes}"
+    );
+    assert_eq!(
+        noted(&notes, "auth_type").as_deref(),
+        Some("openai"),
+        "{notes}"
+    );
+    let mut a = e.st.settings.agent();
+    a.qwen.model = "fake-model".into();
+    e.st.settings.set_agent(a).unwrap();
+    e.spawner.push("check", &[]);
+    let id = e.st.agent.check().unwrap().id;
+    let run = wait_end(&e.st, &id).await;
+    let notes = read_notes(&e.dir, &id);
+    assert_eq!(run.status, RunStatus::Done, "{run:?}\n{notes}");
+    assert_eq!(noted(&notes, "auth_type").as_deref(), Some("-"), "{notes}");
+    e.finish().await;
+}
+
 /// Программы нет (спец. §3.2): `failed` / `cliNotFound`, запрос ждёт дальше.
 #[tokio::test]
 async fn missing_program_is_cli_not_found() {
@@ -1480,7 +1552,7 @@ async fn propose_on_the_perf_stand() {
     let (tmp, st) = common::open_server_in(&perf, "perf").await;
     let dir = tmp.path().to_path_buf();
     let spawner = TestSpawner::new(&dir);
-    let st = st.with_agent(runtime(&spawner, None));
+    let st = st.with_agent(runtime(&spawner, None, Arc::new(NoWarmth)));
     set_access(&st, "it", LlmAccess::Diagnostics);
     st.settings
         .set_agent(agent_settings(Preset::Claude))

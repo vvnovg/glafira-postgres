@@ -668,6 +668,7 @@
         "modelsFailed": "Список моделей не прочитан: введите имя вручную",
         "cloudModel": "Ollama Cloud · ≈ {{input}} / {{output}} за 1 млн токенов, вход / выход",
         "cloudModelOffPeak": "Ollama Cloud · ≈ {{input}} / {{output}} за 1 млн токенов, вход / выход; вне пика — {{offInput}} / {{offOutput}}",
+        "ollamaModel": "Ollama",
         "viaOllama": "Через Ollama",
         "budget": "Предел расходов на запуск, $",
         "budgetEmpty": "Пусто — без предела",
@@ -2452,7 +2453,7 @@
         "agent": {
           "enable": "Кнопка «Передать LLM-ассистенту» ставит запрос в очередь Glafira, а Glafira запускает агента без окна, по одному запросу за раз. По умолчанию выключено.",
           "path": "Абсолютный путь к программе. «Найти» спрашивает логин-оболочку (<code>command -v</code>) и смотрит обычные места установки.",
-          "model": "Qwen Code — модели из ~/.qwen/settings.json; Claude Code через Ollama — модели Ollama, модель обязательна. У обоих — облачные модели Ollama с ценами. Пусто — модель клиента по умолчанию.",
+          "model": "Qwen Code — модели из ~/.qwen/settings.json и Ollama; Claude Code через Ollama — модели Ollama, модель обязательна. У обоих — облачные модели Ollama с ценами. Пусто — модель клиента по умолчанию.",
           "viaOllama": "Claude Code обращается к Ollama по её Anthropic-совместимому API по «Адресу Ollama». Без Ollama — ваша подписка или ключ Claude Code.",
           "budget": "Передаётся Claude Code как <code>--max-budget-usd</code>. Пусто — без предела.",
           "timeout": "От 2 до 60 минут с начала запуска; дальше Glafira останавливает агента.",
