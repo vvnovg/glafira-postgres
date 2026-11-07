@@ -60,7 +60,8 @@ pub trait AgentProcess: Send {
     /// не прошла, первый ход модели продолжаться не должен (§4.1 «сразу останавливает»). Итог потом — `wait`.
     fn kill(&mut self) -> BoxFuture<'_, ()>;
     /// Что поток stdout сказал об инструментах модели до первого хода (§4.1 «Проверка инструментов»): первое событие
-    /// `{"type": "system", "subtype": "init", "tools": […]}`, событие без списка, строка не JSON до него или конец потока.
+    /// `{"type": "system", "subtype": "init", "tools": […]}`, событие без списка, ход модели (событие не `system`) или
+    /// строка не JSON до него, конец потока.
     /// Срок ожидания задаёт вызывающий (`INIT_TIMEOUT`).
     fn init_tools(&mut self) -> BoxFuture<'_, InitTools>;
 }
@@ -70,7 +71,8 @@ pub trait AgentProcess: Send {
 pub enum InitTools {
     /// Событие `init` со списком инструментов.
     Listed(Vec<String>),
-    /// Событие `init` без списка `tools`: проверить нечего, а модель уже делает первый ход.
+    /// Событие `init` без списка `tools` или событие не `system` до него (ход модели `assistant` / `user` и прочее):
+    /// проверить нечего, а модель уже делает первый ход.
     NoList,
     /// До события `init` пришла строка не JSON, или вывод не `stream-json` вовсе: поток не тот, проверить нечем.
     NotStreamJson,
@@ -174,7 +176,10 @@ impl InitScan {
 }
 
 /// Строка потока до события `init`: само событие (имя инструмента — строка; объект с `name` — его имя; прочее — JSON
-/// текстом, такое имя проверку не пройдёт), строка не JSON (`NotStreamJson`) или другое событие (`None`).
+/// текстом, такое имя проверку не пройдёт), строка не JSON (`NotStreamJson`), другое системное событие (`None`, у Claude
+/// Code до `init` идут `hook_started` и `hook_response`) или событие не `system` (`NoList`): ход модели (`assistant`,
+/// `user`) или незнакомое событие до списка инструментов — модель уже работает, а проверить нечем (повторное ревью
+/// задачи 6, замечание 1).
 fn init_of(line: &[u8]) -> Option<InitTools> {
     let t = line.trim_ascii();
     if t.is_empty() {
@@ -183,9 +188,11 @@ fn init_of(line: &[u8]) -> Option<InitTools> {
     let Ok(v) = serde_json::from_slice::<Value>(t) else {
         return Some(InitTools::NotStreamJson);
     };
-    let is_init = v.get("type").and_then(Value::as_str) == Some("system")
-        && v.get("subtype").and_then(Value::as_str) == Some("init");
-    if !is_init {
+    let system = v.get("type").and_then(Value::as_str) == Some("system");
+    if !system {
+        return Some(InitTools::NoList);
+    }
+    if v.get("subtype").and_then(Value::as_str) != Some("init") {
         return None;
     }
     Some(match v.get("tools").and_then(Value::as_array) {
@@ -1066,6 +1073,29 @@ mod tests {
             scan.feed(b"\x1b[32m{\"type\":\"system\"}\n"),
             Some(InitTools::NotStreamJson)
         );
+        // До `init` — только системные события: ход модели или другое событие — остановка сразу, без списка.
+        for before in [
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Looking"}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"[]"}]}}"#,
+            r#"{"type":"result","subtype":"success","result":"done"}"#,
+            r#"{"type":"stream_event","event":{}}"#,
+            r#"{"subtype":"init","tools":[]}"#,
+            "[]",
+            "7",
+        ] {
+            let mut scan = InitScan::default();
+            assert_eq!(
+                scan.feed(
+                    format!(
+                        "{}\n{before}\n{INIT}\n",
+                        r#"{"type":"system","subtype":"hook_response"}"#
+                    )
+                    .as_bytes()
+                ),
+                Some(InitTools::NoList),
+                "{before}"
+            );
+        }
         // Слишком длинная строка пропускается целиком, следующая разбирается.
         let mut scan = InitScan::default();
         let long = format!("{{\"x\":\"{}\"}}", "z".repeat(MAX_INIT_LINE));
@@ -1286,7 +1316,7 @@ mod tests {
             exit.stdout_tail.contains("\"subtype\":\"init\""),
             "строки init остаются в выводе"
         );
-        // Событие `init` без списка и строка не JSON до него — ответ сразу, процесс ещё работает.
+        // Событие `init` без списка, строка не JSON и ход модели до него — ответ сразу, процесс ещё работает.
         for (name, lines, want) in [
             (
                 "b.log",
@@ -1301,6 +1331,14 @@ mod tests {
                 ],
                 InitTools::NotStreamJson,
             ),
+            (
+                "f.log",
+                [
+                    r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Looking"}]}}"#,
+                    r#"{"type":"system","subtype":"init","tools":[]}"#,
+                ],
+                InitTools::NoList,
+            ),
         ] {
             let mut p = live(name, &lines);
             let got = tokio::time::timeout(Duration::from_secs(5), p.init_tools())
@@ -1311,7 +1349,11 @@ mod tests {
             assert_eq!(p.wait().await.code, None);
         }
         // Поток кончился без события init.
-        let mut spec = sh(dir.path(), "echo '{\"type\":\"result\"}'", &[]);
+        let mut spec = sh(
+            dir.path(),
+            "echo '{\"type\":\"system\",\"subtype\":\"hook_started\"}'",
+            &[],
+        );
         spec.output = OutputFormat::StreamJson;
         let mut p = spawner()
             .spawn(&spec, String::new(), dir.path().join("d.log"))
