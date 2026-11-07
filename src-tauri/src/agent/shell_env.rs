@@ -23,6 +23,10 @@ const SKIP_VARS: [&str; 4] = ["_", "SHLVL", "PWD", "OLDPWD"];
 const DRAIN_GRACE: Duration = Duration::from_millis(500);
 /// Сколько stderr хранить (начало): он нужен только для текста ошибки (`detect::version_of`).
 const STDERR_KEEP: usize = 16 * 1024;
+/// Сколько stdout хранить (начало): окружение `env -0` в него помещается с большим запасом, `--version` хватает начала.
+/// Сломанная программа за срок могла бы вывести сотни мегабайт — они не ложатся в память; окружение сверх предела не
+/// снимается (`run_marked` — `None`, запасное окружение процесса).
+pub(crate) const STDOUT_KEEP: usize = 4 * 1024 * 1024;
 
 /// Окружение процесса агента. `Debug` показывает только имена переменных: в значениях бывают ключи API и токены.
 #[derive(Clone, PartialEq, Eq, Default)]
@@ -210,26 +214,55 @@ pub(crate) fn run_marked(shell: &Path, script: &str, timeout: Duration) -> Optio
     let mut cmd = Command::new(shell);
     cmd.arg("-ilc").arg(full);
     let done = run_with_timeout(cmd, timeout).ok()??;
+    if done.stdout_cut {
+        tracing::warn!(
+            "login shell {} printed more than {STDOUT_KEEP} bytes",
+            shell.display()
+        );
+        return None;
+    }
     between(&done.stdout, BEGIN.as_bytes(), END.as_bytes())
 }
 
 /// Процесс `run_with_timeout`, закончившийся сам.
-#[derive(Debug)]
 pub(crate) struct Finished {
     pub code: Option<i32>,
+    /// Начало stdout, до `STDOUT_KEEP`.
     pub stdout: Vec<u8>,
+    /// stdout длиннее `STDOUT_KEEP`: дальше прочитано и отброшено.
+    pub stdout_cut: bool,
     /// Начало stderr, до `STDERR_KEEP`.
     pub stderr: Vec<u8>,
 }
 
-/// Читатель потока процесса в своём потоке ОС: в `buf` — не больше `keep` байт (остальное читается и отбрасывается, чтобы
-/// процесс не встал на полном pipe), в конце — сигнал `done`.
+/// `Debug` — только код и длины потоков: в stdout логин-оболочки — вывод `env -0` с ключами API и токенами (как у
+/// `ShellEnv`, значения в журналы не попадают).
+impl std::fmt::Debug for Finished {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Finished")
+            .field("code", &self.code)
+            .field("stdout_bytes", &self.stdout.len())
+            .field("stdout_cut", &self.stdout_cut)
+            .field("stderr_bytes", &self.stderr.len())
+            .finish()
+    }
+}
+
+/// Прочитанное из потока: начало (до `keep`) и признак, что было больше.
+#[derive(Default)]
+struct Captured {
+    bytes: Vec<u8>,
+    cut: bool,
+}
+
+/// Читатель потока процесса в своём потоке ОС: в буфере — не больше `keep` байт (остальное читается и отбрасывается,
+/// чтобы процесс не встал на полном pipe), в конце — сигнал `done`.
 fn read_all(
     mut from: impl Read + Send + 'static,
     keep: usize,
     done: mpsc::Sender<()>,
-) -> Arc<Mutex<Vec<u8>>> {
-    let buf = Arc::new(Mutex::new(Vec::new()));
+) -> Arc<Mutex<Captured>> {
+    let buf = Arc::new(Mutex::new(Captured::default()));
     let sink = buf.clone();
     std::thread::spawn(move || {
         let mut chunk = [0u8; 8192];
@@ -238,8 +271,9 @@ fn read_all(
                 Ok(0) => break,
                 Ok(n) => {
                     let mut b = sink.lock_safe();
-                    let room = keep.saturating_sub(b.len()).min(n);
-                    b.extend_from_slice(&chunk[..room]);
+                    let room = keep.saturating_sub(b.bytes.len()).min(n);
+                    b.bytes.extend_from_slice(&chunk[..room]);
+                    b.cut |= room < n;
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(_) => break,
@@ -250,7 +284,7 @@ fn read_all(
     buf
 }
 
-/// Процесс без stdin, stdout — в память, начало stderr — тоже; срок — на процесс. На Unix процесс — в новой сессии
+/// Процесс без stdin, начало stdout (до `STDOUT_KEEP`) и stderr (до `STDERR_KEEP`) — в память; срок — на процесс. На Unix процесс — в новой сессии
 /// (`setsid`): интерактивная оболочка (`-i`) не берёт терминал, из которого запущена Glafira (`pnpm tauri dev`, тесты), а
 /// по сроку SIGKILL получает вся её группа (`killpg`), а не только сама оболочка. После выхода процесса конец stdout и
 /// stderr ждётся не дольше `DRAIN_GRACE` (фоновый процесс профиля может их держать), отдаётся прочитанное. `Err` —
@@ -287,7 +321,7 @@ pub(crate) fn run_with_timeout(
         return Ok(None);
     };
     let (done_tx, done_rx) = mpsc::channel::<()>();
-    let stdout = read_all(out, usize::MAX, done_tx.clone());
+    let stdout = read_all(out, STDOUT_KEEP, done_tx.clone());
     let stderr = read_all(err, STDERR_KEEP, done_tx);
     let deadline = Instant::now() + timeout;
     let status = loop {
@@ -309,11 +343,13 @@ pub(crate) fn run_with_timeout(
             break;
         }
     }
-    let take = |b: &Arc<Mutex<Vec<u8>>>| std::mem::take(&mut *b.lock_safe());
+    let take = |b: &Arc<Mutex<Captured>>| std::mem::take(&mut *b.lock_safe());
+    let (out, err) = (take(&stdout), take(&stderr));
     Ok(Some(Finished {
         code: status.code(),
-        stdout: take(&stdout),
-        stderr: take(&stderr),
+        stdout: out.bytes,
+        stdout_cut: out.cut,
+        stderr: err.bytes,
     }))
 }
 
@@ -509,6 +545,57 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(!alive(), "фоновый процесс оболочки остановлен вместе с ней");
+    }
+
+    /// `Debug` итога процесса — без вывода: в stdout логин-оболочки — `env -0` с ключами API.
+    #[test]
+    fn finished_debug_shows_no_output() {
+        let done = Finished {
+            code: Some(0),
+            stdout: b"OPENAI_API_KEY=sk-secret\0".to_vec(),
+            stdout_cut: false,
+            stderr: b"oops".to_vec(),
+        };
+        assert_eq!(
+            format!("{done:?}"),
+            "Finished { code: Some(0), stdout_bytes: 25, stdout_cut: false, stderr_bytes: 4 }"
+        );
+    }
+
+    /// stdout — не больше `STDOUT_KEEP` в памяти, остальное читается и отбрасывается (процесс не встаёт на полном pipe);
+    /// окружение сверх предела не снимается — запасное окружение процесса.
+    #[cfg(unix)]
+    #[test]
+    fn stdout_beyond_the_limit_is_dropped_and_such_an_environment_is_not_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = STDOUT_KEEP + 100 * 1024;
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg(format!("head -c {big} /dev/zero; echo done >&2"));
+        let done = run_with_timeout(cmd, Duration::from_secs(20))
+            .unwrap()
+            .expect("процесс закончился сам");
+        assert_eq!(done.code, Some(0));
+        assert_eq!(done.stdout.len(), STDOUT_KEEP);
+        assert!(done.stdout_cut);
+        assert_eq!(done.stderr, b"done\n");
+        let mut small = Command::new("/bin/sh");
+        small.arg("-c").arg("printf 1.2.3");
+        let done = run_with_timeout(small, Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (done.stdout.as_slice(), done.stdout_cut),
+            (&b"1.2.3"[..], false)
+        );
+        // Профиль печатает больше предела до меток: окружение оболочки не снимается.
+        let noisy = fake_shell(
+            dir.path(),
+            &format!("head -c {big} /dev/zero\nexport FROM_PROFILE=yes\nshift\neval \"$1\""),
+        );
+        let env = capture_with(&noisy, Duration::from_secs(20));
+        assert!(!env.from_shell, "сверх предела — запасное окружение");
+        assert!(env == ShellEnv::current_process());
     }
 
     #[test]
