@@ -2,6 +2,7 @@ import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { connection } from "../../../test/fixtures";
+import { i18n } from "../../../i18n";
 import { agentRun } from "../../../test/llm";
 import { renderWithClient } from "../../../test/render";
 
@@ -45,7 +46,7 @@ describe("AgentRuns", () => {
     expect(rows[1]).toHaveTextContent("предложений: 2");
     expect(rows[1]).toHaveTextContent("1 мин 23 с");
     expect(rows[1]).toHaveTextContent("12");
-    expect(rows[1]).toHaveTextContent("$0,42");
+    expect(rows[1]).toHaveTextContent("0,42 $");
     expect(rows[2]).toHaveTextContent("без предложений");
     expect(rows[3]).toHaveTextContent("ошибка: превышен срок 15 мин");
     expect(rows[4]).toHaveTextContent("Проверка");
@@ -131,5 +132,22 @@ describe("AgentRuns", () => {
     first.unmount();
     renderWithClient(<AgentRuns runs={[]} onShowLog={onShowLog} />);
     expect(screen.getByText("Запусков пока нет")).toBeInTheDocument();
+  });
+
+  it("стоимость — валютой по правилам языка: «0,42 $» в ru, «$0.42» в en", async () => {
+    const runs = [agentRun({ id: "a0000a2", preset: "claude", status: "done", startedAtMs: 0, endedAtMs: 1_000, costUsd: 0.42 })];
+    const ru = renderWithClient(<AgentRuns runs={runs} onShowLog={onShowLog} />);
+    const row = () => within(screen.getByRole("table")).getAllByRole("row")[1];
+    // Между числом и знаком — неразрывный пробел (toHaveTextContent сводит его к обычному).
+    expect(row().cells[7]).toHaveTextContent(/^0,42 \$$/);
+    expect(row().cells[7].textContent).toBe("0,42\u00a0$");
+    ru.unmount();
+    try {
+      await act(() => i18n.changeLanguage("en"));
+      renderWithClient(<AgentRuns runs={runs} onShowLog={onShowLog} />);
+      expect(row().cells[7]).toHaveTextContent(/^\$0\.42$/);
+    } finally {
+      await act(() => i18n.changeLanguage("ru"));
+    }
   });
 });

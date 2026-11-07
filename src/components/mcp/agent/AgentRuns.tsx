@@ -12,9 +12,9 @@ import { agentLabel, runResultText, runSeconds } from "./agentText";
 /** Сколько последних запусков показывает подраздел (спец. P4c §8.3). */
 export const RUNS_SHOWN = 20;
 
-/** Стоимость запуска, как её сообщил CLI: доллары с двумя знаками. */
+/** Стоимость запуска, как её сообщил CLI: доллары с двумя знаками, знак — по правилам языка (`$0.42`, `0,42 $`). */
 function cost(usd: number): string {
-  return `$${usd.toLocaleString(currentLocale(), { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return new Intl.NumberFormat(currentLocale(), { style: "currency", currency: "USD" }).format(usd);
 }
 
 /**
