@@ -109,6 +109,7 @@
     "readiness.pgssTrackPlanning.title",
     "readiness.trackActivityQuerySize.title",
     "readiness.trackIoTiming.title",
+    "settings.mcp.agent.groupCloud",
     "settings.mcp.agent.ollamaModel",
     "settings.mcp.agent.runs.costEstimateLabel",
     "sidebar.timeline",

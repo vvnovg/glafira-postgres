@@ -2,37 +2,56 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../../../api/client";
+import type { OllamaPrices as Prices } from "../../../api/types";
 import { formatDay } from "../../../lib/format";
 import { ErrorBanner } from "../../common/ErrorBanner";
 import { Hint } from "../../common/Hint";
 
 /** Действующая таблица цен Ollama Cloud в кэше запросов. */
 export const OLLAMA_PRICES_KEY = ["ollamaPrices"] as const;
-/** Сколько видно «Цены обновлены: моделей N». */
+/** Сколько видно итог «Обновить модели и цены». */
 export const UPDATED_NOTE_MS = 5000;
 
+/** Итог последнего нажатия: перечитан ли список моделей и сколько моделей в загруженной таблице цен (null — цены не загружались). */
+interface Updated {
+  models: boolean;
+  prices: number | null;
+}
+
 /**
- * Цены Ollama Cloud, по которым «Запуски» оценивают облачные запуски через Ollama (смоук P4c, sf-T6): день цен действующей
- * таблицы (встроенной или загруженной) и «Обновить цены». Glafira загружает ollama.com/pricing только по этой кнопке; пока
- * загрузка идёт, кнопка `aria-disabled` (фокус остаётся). Политика без обновлений (`updatesEnabled = false`) — кнопка
- * неактивна с пояснением. Итог — в живой области рядом с кнопкой: «Цены обновлены: моделей N» видно `UPDATED_NOTE_MS` и до
- * следующей правки в разделе (`changed` — снимок черновика раздела), как «Сохранено». Ошибка — под кнопкой; прежняя
- * таблица при ошибке остаётся. Рисуется внутри блока «Запусков» (`settings-block`) соседними элементами.
+ * «Обновить модели и цены» — сразу под полем «Модель» (смоук P4c, R25, решение владельца): одно нажатие загружает цены Ollama
+ * Cloud (ollama.com/pricing, только по этой кнопке) и перечитывает список моделей (`refreshModels`: настройки Qwen Code,
+ * `/api/tags` Ollama) — после цен, потому что подписи группы «Ollama Cloud» берут цены из действующей таблицы. Рядом — день
+ * цен действующей таблицы (встроенной или загруженной), по которой «Запуски» оценивают облачные запуски через Ollama.
+ * Политика без обновлений (`updatesEnabled = false`) цены не загружает: кнопка перечитывает только список, пояснение связано с
+ * ней `aria-describedby`. Пока идёт обновление, кнопка `aria-disabled` (фокус остаётся). Итог — в живой области рядом с кнопкой,
+ * виден `UPDATED_NOTE_MS` и до следующей правки в разделе (`changed` — снимок черновика), как «Сохранено». Ошибка загрузки
+ * цен — под кнопкой; прежняя таблица остаётся, а список всё равно перечитывается.
  */
-export function OllamaPrices({ changed }: { changed?: string }) {
+export function OllamaPrices({ changed, refreshModels }: { changed?: string; refreshModels: () => Promise<{ isError: boolean }> }) {
   const { t } = useTranslation();
   const qc = useQueryClient();
   const noteId = useId();
-  // Итог последнего «Обновить цены»: объект — чтобы срок показа шёл заново и при том же числе моделей.
-  const [updated, setUpdated] = useState<{ models: number } | null>(null);
+  // Объект — чтобы срок показа шёл заново и при том же итоге.
+  const [updated, setUpdated] = useState<Updated | null>(null);
   const prices = useQuery({ queryKey: OLLAMA_PRICES_KEY, queryFn: () => api.getOllamaPrices() });
+  const allowed = prices.data?.refreshAllowed === true;
   const refresh = useMutation({
-    mutationFn: () => api.refreshOllamaPrices(),
-    onMutate: () => setUpdated(null),
-    onSuccess: (next) => {
-      qc.setQueryData(OLLAMA_PRICES_KEY, next);
-      setUpdated({ models: next.models });
+    mutationFn: async (): Promise<Updated> => {
+      let next: Prices | null = null;
+      let models = false;
+      try {
+        if (allowed) {
+          next = await api.refreshOllamaPrices();
+          qc.setQueryData(OLLAMA_PRICES_KEY, next);
+        }
+      } finally {
+        models = !(await refreshModels()).isError;
+      }
+      return { models, prices: next?.models ?? null };
     },
+    onMutate: () => setUpdated(null),
+    onSuccess: setUpdated,
   });
   useEffect(() => {
     if (updated === null) return;
@@ -40,30 +59,37 @@ export function OllamaPrices({ changed }: { changed?: string }) {
     return () => window.clearTimeout(id);
   }, [updated]);
   useEffect(() => setUpdated(null), [changed]);
-  if (prices.isPending) return <p className="muted">{t("common.loading")}</p>;
-  if (prices.isError) return <ErrorBanner error={prices.error} onRetry={() => void prices.refetch()} />;
+  const label = t("settings.mcp.agent.refresh");
   const p = prices.data;
-  const date = formatDay(p.date);
-  const label = t("settings.mcp.agent.prices.refresh");
+  const done = updated
+    ? [updated.models ? t("settings.mcp.agent.modelsUpdated") : "", updated.prices !== null ? t("settings.mcp.agent.prices.updated", { n: updated.prices }) : ""]
+        .filter((x) => x !== "")
+        .join(" · ")
+    : "";
   return (
     <>
-      <p className="muted agent-note">{p.saved ? t("settings.mcp.agent.prices.saved", { date }) : t("settings.mcp.agent.prices.builtin", { date })}</p>
-      <div className="toolbar">
+      <div className="toolbar agent-refresh">
         <button
           type="button"
-          disabled={!p.refreshAllowed}
           aria-disabled={refresh.isPending || undefined}
-          aria-describedby={p.refreshAllowed ? undefined : noteId}
+          aria-describedby={p && !p.refreshAllowed ? noteId : undefined}
           onClick={() => !refresh.isPending && refresh.mutate()}
         >
-          {refresh.isPending ? t("settings.mcp.agent.prices.refreshing") : label}
+          {refresh.isPending ? t("settings.mcp.agent.refreshing") : label}
         </button>
-        <Hint k="hints.settings.mcp.agent.prices" label={label} />
+        <Hint k="hints.settings.mcp.agent.refresh" label={label} />
         <span role="status" className="muted">
-          {updated && t("settings.mcp.agent.prices.updated", { n: updated.models })}
+          {done}
         </span>
       </div>
-      {!p.refreshAllowed && (
+      {prices.isError ? (
+        <ErrorBanner error={prices.error} onRetry={() => void prices.refetch()} />
+      ) : !p ? (
+        <p className="muted agent-note">{t("common.loading")}</p>
+      ) : (
+        <p className="muted agent-note">{t(p.saved ? "settings.mcp.agent.prices.saved" : "settings.mcp.agent.prices.builtin", { date: formatDay(p.date) })}</p>
+      )}
+      {p && !p.refreshAllowed && (
         <p id={noteId} className="muted agent-note">
           {t("settings.mcp.agent.prices.policy")}
         </p>

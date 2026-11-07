@@ -662,9 +662,19 @@
         "modelClientDefault": "Empty: the client's default model",
         "modelOllama": "Required: an Ollama model",
         "modelsFailed": "The model list could not be read: enter the name manually",
-        "cloudModel": "Ollama Cloud · ≈ {{input}} / {{output}} per 1M tokens, input / output",
-        "cloudModelOffPeak": "Ollama Cloud · ≈ {{input}} / {{output}} per 1M tokens, input / output; off-peak {{offInput}} / {{offOutput}}",
+        "modelDefaultOption": "Default ({{model}})",
+        "modelClientDefaultOption": "Default (the client's model)",
+        "modelOllamaOption": "Not chosen: an Ollama model is required",
+        "modelOther": "Other model…",
+        "modelName": "Model name",
+        "groupQwen": "Qwen Code settings",
+        "groupCloud": "Ollama Cloud",
+        "cloudModel": "{{model}} · ≈ {{input}} / {{output}} per 1M tokens, input / output",
+        "cloudModelOffPeak": "{{model}} · ≈ {{input}} / {{output}} per 1M tokens, input / output; off-peak {{offInput}} / {{offOutput}}",
         "ollamaModel": "Ollama",
+        "refresh": "Update models and prices",
+        "refreshing": "Updating models and prices…",
+        "modelsUpdated": "The model list is updated",
         "viaOllama": "Via Ollama",
         "budget": "Spending limit per run, $",
         "budgetEmpty": "Empty: no limit",
@@ -731,8 +741,6 @@
         "prices": {
           "builtin": "Cloud runs via Ollama are estimated at Ollama Cloud prices as of {{date}}, built into Glafira",
           "saved": "Cloud runs via Ollama are estimated at Ollama Cloud prices as of {{date}}, loaded from ollama.com/pricing",
-          "refresh": "Update prices",
-          "refreshing": "Loading prices…",
           "updated": "Prices updated: {{n}} models",
           "policy": "Your organization does not allow loading prices: estimates use this table"
         }
@@ -2419,7 +2427,7 @@
           "keepWarm": "Glafira keeps the local Ollama model loaded this many minutes after a run, so the next request starts faster. 0: do not manage.",
           "ollamaUrl": "A remote address is allowed: Claude Code via Ollama talks to it itself. Glafira talks to Ollama and manages the model only at localhost, 127.0.0.1 or ::1.",
           "check": "A short run without a connection: the agent calls list_connections and answers OK. Checks the program, the model, the MCP configuration and the run ticket.",
-          "prices": "Loaded from ollama.com/pricing only by “Update prices”; until then, prices built into this version. Estimate: agent tokens × model prices; off-peak: weekdays outside 12–18 UTC, weekends."
+          "refresh": "Re-reads the models (Qwen Code settings, Ollama) and loads prices from ollama.com/pricing, only by this button. Estimate: agent tokens × model prices; off-peak: weekdays outside 12–18 UTC, weekends."
         }
       }
     },

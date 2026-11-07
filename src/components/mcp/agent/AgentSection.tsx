@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useEffect, useId, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../../../api/client";
 import type { TFunction } from "i18next";
@@ -60,12 +60,15 @@ function checkKey(s: AgentSettings): string {
   return JSON.stringify(s.preset === "qwen" ? ["qwen", s.qwen.path, s.qwen.model] : ["claude", s.claude.path, s.claude.model, s.claude.viaOllama]);
 }
 
+/** Пункт «Другая модель…» списка «Модель»: в имени модели `*` не бывает (`agentForm.ts`, `MODEL_RE`). */
+export const OTHER_MODEL = "*other";
+
 /**
- * Подпись облачной модели Ollama в списке «Модель» (группа «Ollama Cloud», смоук P4c, sf-T7): цены входа и выхода за 1 млн
- * токенов по действующей таблице, у модели с ценами «вне пика» — и они.
+ * Пункт облачной модели Ollama в списке «Модель» (группа «Ollama Cloud», смоук P4c, sf-T7, R19): имя и цены входа и выхода за
+ * 1 млн токенов по действующей таблице, у модели с ценами «вне пика» — и они.
  */
 function cloudLabel(m: CloudModel, t: TFunction): string {
-  const prices = { input: formatUsd(m.prices.input, "price"), output: formatUsd(m.prices.output, "price") };
+  const prices = { model: m.id, input: formatUsd(m.prices.input, "price"), output: formatUsd(m.prices.output, "price") };
   return m.offPeak
     ? t("settings.mcp.agent.cloudModelOffPeak", { ...prices, offInput: formatUsd(m.offPeak.input, "price"), offOutput: formatUsd(m.offPeak.output, "price") })
     : t("settings.mcp.agent.cloudModel", prices);
@@ -132,12 +135,15 @@ export function AgentSection({ status }: { status: McpStatus }) {
  * «Передать» смотрит на `agent.enabled` и `agent.configured`. Поля не зависят от выключателя и политики: путь и модель можно
  * готовить заранее, а запрет политикой Rust применяет только к включению. «Найти» подставляет путь и показывает версию.
  * Путь, указанный руками, при уходе из поля проверяется так же (`detect_agent_cli` с `path` — версия этой программы).
- * Список моделей — по сохранённому адресу Ollama; перечитывается при входе в поле «Модель» и после «Найти» (модель могли
- * добавить в настройки клиента при открытых «Настройках», смоук P4c R10), прежний список виден, пока читается новый. У Qwen
- * Code после моделей из его настроек — группа «Ollama»: модели локальной Ollama без цены (итоговая волна правок смоука P4c),
- * затем у обоих — группа «Ollama Cloud»: облачные модели таблицы цен с ценой в подписи пункта (`cloudLabel`); без повторов.
- * У Claude Code модели Ollama и облачные — только при «Через Ollama» в черновике (без Ollama они ему не годятся), сразу, без
- * «Сохранить». Список — подсказка, имя можно ввести руками. Что значит пустое поле «Модель» (модель по умолчанию или обязательная модель Ollama), написано текстом под полем.
+ * «Модель» — выпадающий список (смоук P4c, R19): пустое значение — пункт «По умолчанию (…)» (у Claude Code через Ollama — «Не
+ * выбрана: нужна модель Ollama»), затем группы `<optgroup>`: у Qwen Code — «Настройки Qwen Code» (его `modelProviders`) и
+ * «Ollama» (модели локальной Ollama без цены, итоговая волна правок смоука P4c), у Claude Code через Ollama — «Ollama» (`/api/tags`);
+ * у обоих — «Ollama Cloud»: облачные модели таблицы цен с ценой в тексте пункта (`cloudLabel`); без повторов. Модель, которой в
+ * списке нет, — отдельным пунктом сверху. Последний пункт «Другая модель…» открывает поле «Имя модели» (проверка имени та же);
+ * выбор пункта фокус не переносит (смена значения не меняет контекст). У Claude Code модели Ollama и облачные — только при
+ * «Через Ollama» в черновике (без Ollama они ему не годятся), сразу, без «Сохранить». Список — по сохранённому адресу Ollama;
+ * перечитывается при входе в поле, после «Найти» (R10) и кнопкой «Обновить модели и цены» сразу под полем (R25, `OllamaPrices`:
+ * ещё и цены Ollama Cloud); прежний список виден, пока читается новый.
  * «Проверить» — по сохранённым настройкам: итог приходит событием запуска и убирается, когда в сохранённых настройках
  * сменились агент, программа или модель (`checkKey`, R14). «Выгрузить модель» неактивна, пока идёт запуск, и когда Glafira
  * моделью не управляет (`unloadOff`). Запись настроек — одна за раз: пока пишется выключатель, «Сохранить» ждёт, и
@@ -154,7 +160,8 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
   const [checkOf, setCheckOf] = useState<{ key: string; runId: string | null } | null>(null);
   const [logRun, setLogRun] = useState<string | null>(null);
   const [savedNote, setSavedNote] = useState(false);
-  const modelsId = useId();
+  // «Другая модель…» выбрана у этого агента: имя модели — в поле ручного ввода.
+  const [customFor, setCustomFor] = useState<AgentPreset | null>(null);
   const saveRef = useRef<HTMLButtonElement>(null);
   // Путь правили руками: при уходе из поля — версия этой программы (`pathNow` — путь в поле сейчас).
   const pathEdited = useRef(false);
@@ -208,6 +215,8 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
   });
   // Перечитать список, не дожидаясь смены ключа; чтение, которое уже идёт, не перезапускается.
   const refreshModels = () => void models.refetch({ cancelRefetch: false });
+  // «Обновить модели и цены»: новое чтение после загрузки цен (подписи «Ollama Cloud» — по новой таблице).
+  const reloadModels = () => models.refetch();
   // «Найти»: поиск программы, найденный путь подставляется в поле; список моделей перечитывается.
   const detect = useMutation({
     mutationFn: (preset: AgentPreset) => api.detectAgentCli(preset),
@@ -248,12 +257,24 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
   const cloud = viaOllama ? (models.data?.cloud ?? []).filter((m) => !found.includes(m.id)) : [];
   const local = qwen ? (models.data?.ollama ?? []).filter((m) => !found.includes(m) && !cloud.some((c) => c.id === m)) : [];
   const det = detected?.preset === draft.preset ? detected.result : null;
-  // Что значит пустое поле «Модель» — видимым текстом под полем (у плейсхолдера контраст ниже AA).
-  const modelEmptyNote = models.data?.default
-    ? t("settings.mcp.agent.modelDefault", { model: models.data.default })
-    : !qwen && draft.viaOllama
+  const custom = customFor === draft.preset;
+  const modelName = model.trim();
+  const unlisted = modelName !== "" && !found.includes(modelName) && !local.includes(modelName) && !cloud.some((m) => m.id === modelName);
+  // Пустая модель — пунктом списка «По умолчанию (…)»; в поле ручного ввода — текстом под полем (у плейсхолдера контраст ниже AA).
+  const ollamaRequired = !qwen && draft.viaOllama;
+  const modelDefault = models.data?.default;
+  const emptyOption = modelDefault
+    ? t("settings.mcp.agent.modelDefaultOption", { model: modelDefault })
+    : ollamaRequired
+      ? t("settings.mcp.agent.modelOllamaOption")
+      : t("settings.mcp.agent.modelClientDefaultOption");
+  const modelEmptyNote = modelDefault
+    ? t("settings.mcp.agent.modelDefault", { model: modelDefault })
+    : ollamaRequired
       ? t("settings.mcp.agent.modelOllama")
       : t("settings.mcp.agent.modelClientDefault");
+  const setModel = (v: string) => update(qwen ? { qwenModel: v } : { claudeModel: v });
+  const modelNotes = [...(custom && modelName === "" ? ["agent-model-note"] : []), ...(models.error ? ["agent-models-failed"] : [])];
   const writing = toggle.isPending || save.isPending;
   const runActive = status.agent.running != null;
   const checkRun = checkId === null ? null : (runs.find((r) => r.id === checkId) ?? (check.data?.id === checkId ? check.data : null));
@@ -369,10 +390,29 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
             id="agent-model"
             label={t("settings.mcp.agent.model")}
             hint="hints.settings.mcp.agent.model"
-            error={modelError}
             below={
               <>
-                {model.trim() === "" && (
+                {custom && (
+                  <span className="agent-field">
+                    <input
+                      id="agent-model-name"
+                      type="text"
+                      className="mono"
+                      spellCheck={false}
+                      autoComplete="off"
+                      aria-label={t("settings.mcp.agent.modelName")}
+                      value={model}
+                      {...invalid("agent-model", modelError, modelNotes)}
+                      onChange={(e) => setModel(e.target.value)}
+                    />
+                  </span>
+                )}
+                {modelError && (
+                  <p id="agent-model-error" className="agent-error">
+                    {t(modelError.key)}
+                  </p>
+                )}
+                {custom && modelName === "" && (
                   <p id="agent-model-note" className="muted agent-note">
                     {modelEmptyNote}
                   </p>
@@ -382,34 +422,53 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
                     {t("settings.mcp.agent.modelsFailed")}
                   </p>
                 )}
+                <OllamaPrices changed={JSON.stringify(draft)} refreshModels={reloadModels} />
               </>
             }
           >
-            <input
+            <select
               id="agent-model"
-              type="text"
-              className="mono"
-              spellCheck={false}
-              autoComplete="off"
-              list={modelsId}
-              value={model}
-              {...invalid("agent-model", modelError, [...(model.trim() === "" ? ["agent-model-note"] : []), ...(models.error ? ["agent-models-failed"] : [])])}
-              onChange={(e) => update(qwen ? { qwenModel: e.target.value } : { claudeModel: e.target.value })}
-              // Вход в поле — список перечитывается; щелчки по полю в фокусе (правка мышью) — нет (итоговое ревью фронтенда).
+              value={custom ? OTHER_MODEL : modelName}
+              {...(custom ? (models.error ? { "aria-describedby": "agent-models-failed" } : {}) : invalid("agent-model", modelError, modelNotes))}
+              onChange={(e) => {
+                if (e.target.value === OTHER_MODEL) return setCustomFor(draft.preset);
+                setCustomFor(null);
+                setModel(e.target.value);
+              }}
+              // Вход в поле — список перечитывается; щелчки по полю в фокусе — нет (итоговое ревью фронтенда).
               onFocus={refreshModels}
-            />
-            {/* datalist не рисует групп: группы «Ollama» и «Ollama Cloud» — пунктами после найденных, имя группы (и цены) — в подписи пункта. */}
-            <datalist id={modelsId}>
-              {found.map((m) => (
-                <option key={m} value={m} />
-              ))}
-              {local.map((m) => (
-                <option key={m} value={m} label={t("settings.mcp.agent.ollamaModel")} />
-              ))}
-              {cloud.map((m) => (
-                <option key={m.id} value={m.id} label={cloudLabel(m, t)} />
-              ))}
-            </datalist>
+            >
+              {unlisted && !custom && <option value={modelName}>{modelName}</option>}
+              <option value="">{emptyOption}</option>
+              {found.length > 0 && (
+                <optgroup label={qwen ? t("settings.mcp.agent.groupQwen") : t("settings.mcp.agent.ollamaModel")}>
+                  {found.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              {local.length > 0 && (
+                <optgroup label={t("settings.mcp.agent.ollamaModel")}>
+                  {local.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              {cloud.length > 0 && (
+                <optgroup label={t("settings.mcp.agent.groupCloud")}>
+                  {cloud.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {cloudLabel(m, t)}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              <option value={OTHER_MODEL}>{t("settings.mcp.agent.modelOther")}</option>
+            </select>
           </Field>
 
           {!qwen && (
@@ -536,7 +595,6 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
       </div>
       <div className="settings-block">
         <AgentRuns runs={runs} state={runsState} error={runsError} onRetry={refreshRuns} onShowLog={setLogRun} />
-        <OllamaPrices changed={JSON.stringify(draft)} />
       </div>
       {logRun && <AgentLogDialog runId={logRun} onClose={() => setLogRun(null)} />}
     </>

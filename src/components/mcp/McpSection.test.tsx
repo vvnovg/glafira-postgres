@@ -201,16 +201,17 @@ describe("McpSection", () => {
     expect(rows[1]).toHaveTextContent(/^Фоновый ассистент\d/);
   });
 
-  it("раздел «Фоновый ассистент»: форма и «Запуски» — отдельными блоками; цены Ollama Cloud — в блоке «Запусков»", async () => {
+  it("раздел «Фоновый ассистент»: форма и «Запуски» — отдельными блоками; «Обновить модели и цены» и день цен — в блоке формы (R25)", async () => {
     vi.mocked(api.getMcpStatus).mockResolvedValue(mcpStatus());
     const { container } = renderWithClient(<McpAgentSection />);
     expect(await screen.findByRole("checkbox", { name: "Запускать ассистента в фоне" })).toBeInTheDocument();
     const blocks = container.querySelectorAll(".settings-block");
     expect(blocks).toHaveLength(2);
     expect(within(blocks[0] as HTMLElement).getByRole("button", { name: "Проверить" })).toBeInTheDocument();
+    expect(await within(blocks[0] as HTMLElement).findByRole("button", { name: "Обновить модели и цены" })).toBeEnabled();
+    expect(await within(blocks[0] as HTMLElement).findByText(/оценка по ценам Ollama Cloud на 07.11.2026, встроенным в Glafira/)).toBeInTheDocument();
     expect(within(blocks[1] as HTMLElement).getByRole("heading", { level: 4, name: "Запуски" })).toBeInTheDocument();
-    expect(await within(blocks[1] as HTMLElement).findByRole("button", { name: "Обновить цены" })).toBeEnabled();
-    expect(blocks[1]).toHaveTextContent("оценка по ценам Ollama Cloud на 07.11.2026, встроенным в Glafira");
+    expect(within(blocks[1] as HTMLElement).queryByRole("button", { name: /Обновить/ })).toBeNull();
   });
 
   it("политика запрещает MCP: раздел «Фоновый ассистент» есть, его выключатель неактивен с пометкой", async () => {

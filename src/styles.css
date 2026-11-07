@@ -656,6 +656,11 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .agent-field > input:not([type="checkbox"]) { flex: 1; min-width: 0; }
 .agent-field > input.agent-num { flex: 0 1 8em; }
 .agent-field > input.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+/* «Модель» — выпадающий список во всю ширину поля (смоук P4c, R19); под ним — поле «Имя модели» («Другая модель…») и ряд
+   «Обновить модели и цены» с днём цен (R25). */
+.agent-field > select { flex: 1; min-width: 0; max-width: 100%; text-overflow: ellipsis; }
+.agent-control > .agent-field:not(:first-child) { margin-top: 4px; }
+.agent-control > .agent-refresh { margin-top: 6px; }
 .agent-check { display: flex; align-items: center; }
 .agent-presets { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
 .agent-error { margin: 0; color: var(--danger-text); overflow-wrap: anywhere; }
