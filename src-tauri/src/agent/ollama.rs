@@ -349,6 +349,7 @@ pub async fn list_models(s: &AgentSettings) -> AgentModels {
                 ids,
                 default: None,
                 source: ModelsSource::Ollama,
+                cloud: Vec::new(),
             }
         }
         None => AgentModels::none(),

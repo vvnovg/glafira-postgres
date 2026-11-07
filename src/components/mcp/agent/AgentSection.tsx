@@ -2,8 +2,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../../../api/client";
-import type { AgentDetected, AgentPreset, AgentSettings, McpStatus } from "../../../api/types";
-import { formatCount } from "../../../lib/format";
+import type { TFunction } from "i18next";
+import type { AgentDetected, AgentPreset, AgentSettings, CloudModel, McpStatus } from "../../../api/types";
+import { formatCount, formatUsd } from "../../../lib/format";
 import { isActive, PRESET_NAMES, useAgentRuns } from "../../../lib/useAgentRuns";
 import { MCP_STATUS_KEY } from "../../../lib/useMcpStatus";
 import { ErrorBanner } from "../../common/ErrorBanner";
@@ -57,6 +58,17 @@ const UNLOAD_OFF_KEYS = {
  */
 function checkKey(s: AgentSettings): string {
   return JSON.stringify(s.preset === "qwen" ? ["qwen", s.qwen.path, s.qwen.model] : ["claude", s.claude.path, s.claude.model, s.claude.viaOllama]);
+}
+
+/**
+ * Подпись облачной модели Ollama в списке «Модель» (группа «Ollama Cloud», смоук P4c, sf-T7): цены входа и выхода за 1 млн
+ * токенов по действующей таблице, у модели с ценами «вне пика» — и они.
+ */
+function cloudLabel(m: CloudModel, t: TFunction): string {
+  const prices = { input: formatUsd(m.prices.input, "price"), output: formatUsd(m.prices.output, "price") };
+  return m.offPeak
+    ? t("settings.mcp.agent.cloudModelOffPeak", { ...prices, offInput: formatUsd(m.offPeak.input, "price"), offOutput: formatUsd(m.offPeak.output, "price") })
+    : t("settings.mcp.agent.cloudModel", prices);
 }
 
 /** Атрибуты поля с ошибкой: `aria-invalid` и связь с текстом ошибки (и с пояснениями поля `notes` — их id). */
@@ -122,7 +134,9 @@ export function AgentSection({ status }: { status: McpStatus }) {
  * Путь, указанный руками, при уходе из поля проверяется так же (`detect_agent_cli` с `path` — версия этой программы).
  * Список моделей — по сохранённым «Через Ollama» и адресу; перечитывается при входе в поле «Модель» и после «Найти»
  * (модель могли добавить в настройки клиента при открытых «Настройках», смоук P4c R10), прежний список виден, пока читается
- * новый. Что значит пустое поле «Модель» (модель по умолчанию или обязательная модель Ollama), написано текстом под полем.
+ * новый. После найденных моделей — группа «Ollama Cloud»: облачные модели таблицы цен с ценой в подписи пункта (`cloudLabel`),
+ * без повторов с найденными; у Claude Code — только «Через Ollama» (по черновику: без Ollama облачные модели Ollama ему не
+ * годятся). Список — подсказка, имя можно ввести руками. Что значит пустое поле «Модель» (модель по умолчанию или обязательная модель Ollama), написано текстом под полем.
  * «Проверить» — по сохранённым настройкам: итог приходит событием запуска и убирается, когда в сохранённых настройках
  * сменились агент, программа или модель (`checkKey`, R14). «Выгрузить модель» неактивна, пока идёт запуск, и когда Glafira
  * моделью не управляет (`unloadOff`). Запись настроек — одна за раз: пока пишется выключатель, «Сохранить» ждёт, и
@@ -224,6 +238,8 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
     if (savedNote && (active === document.body || active === saveRef.current)) linesRef.current?.focus();
   }, [savedNote]);
 
+  const found = models.data?.ids ?? [];
+  const cloud = qwen || draft.viaOllama ? (models.data?.cloud ?? []).filter((m) => !found.includes(m.id)) : [];
   const det = detected?.preset === draft.preset ? detected.result : null;
   // Что значит пустое поле «Модель» — видимым текстом под полем (у плейсхолдера контраст ниже AA).
   const modelEmptyNote = models.data?.default
@@ -376,9 +392,13 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
               onFocus={refreshModels}
               onClick={refreshModels}
             />
+            {/* datalist не рисует групп: группа «Ollama Cloud» — пунктами после найденных, её имя и цены — в подписи пункта. */}
             <datalist id={modelsId}>
-              {(models.data?.ids ?? []).map((m) => (
+              {found.map((m) => (
                 <option key={m} value={m} />
+              ))}
+              {cloud.map((m) => (
+                <option key={m.id} value={m.id} label={cloudLabel(m, t)} />
               ))}
             </datalist>
           </Field>

@@ -17,7 +17,7 @@ use serde_json::{Map, Value, json};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{oneshot, watch};
 
-use super::models::effective_model;
+use super::models::{self, effective_model};
 use super::presets::{self, RunInputs};
 use super::pricing;
 use super::process::{self, AgentProcess, AgentSpawner, ExitInfo, InitTools, TokioSpawner};
@@ -146,6 +146,9 @@ pub struct AgentRuntime {
     pub shim_exe: PathBuf,
     /// Срок запуска вместо «Срок запуска, мин» — только тесты (минимум настройки — 2 мин).
     pub run_timeout: Option<Duration>,
+    /// Домашний каталог: `~/.qwen/settings.json` — модель Qwen Code по умолчанию и его модели (облачную модель не из них
+    /// Glafira направляет к Ollama). Тесты подставляют свой каталог.
+    pub home: Option<PathBuf>,
 }
 
 impl AgentRuntime {
@@ -160,6 +163,7 @@ impl AgentRuntime {
                 std::env::var_os("APPIMAGE"),
             ),
             run_timeout: None,
+            home: dirs::home_dir(),
         })
     }
 }
@@ -374,7 +378,7 @@ impl RunObserver for ObserverRef {
 
 pub struct AgentQueue {
     d: AgentDeps,
-    /// `~/.qwen/settings.json` — модель Qwen Code по умолчанию.
+    /// `~/.qwen/settings.json` — модель Qwen Code по умолчанию (`AgentRuntime::home`).
     home: Option<PathBuf>,
     runs: RunStore,
     runs_dir: PathBuf,
@@ -409,8 +413,8 @@ impl AgentQueue {
         runs::remove_stale_configs(&runs_dir);
         runs::prune_logs(&runs_dir, &store.recent_ids(runs::MAX_LOGS));
         let q = Arc::new_cyclic(|me| Self {
+            home: d.runtime.home.clone(),
             d,
-            home: dirs::home_dir(),
             runs: store,
             runs_dir,
             work_dir,
@@ -602,12 +606,24 @@ impl AgentQueue {
                 return;
             }
         };
+        let model_arg = Some(s.model().trim().to_string()).filter(|m| !m.is_empty());
+        // Облачная модель Ollama не из настроек Qwen Code — адрес и ключ Ollama (смоук P4c, sf-T7).
+        let qwen_via_ollama = match (s.preset, model_arg.clone()) {
+            (Preset::Qwen, Some(m)) => {
+                let home = self.home.clone();
+                off_thread(move || Ok(models::qwen_cloud_via_ollama(&m, home.as_deref())))
+                    .await
+                    .unwrap_or(false)
+            }
+            _ => false,
+        };
         let inputs = RunInputs {
             mcp_config: config,
             cwd: self.work_dir.clone(),
-            model: Some(s.model().trim().to_string()).filter(|m| !m.is_empty()),
+            model: model_arg,
             timeout_s: timeout.as_secs().max(1),
             ollama_url: s.ollama_url.clone(),
+            qwen_via_ollama,
         };
         let spec = match presets::build(&s, &inputs) {
             Ok(spec) => spec,
@@ -1811,6 +1827,8 @@ mod tests {
                 warmth,
                 shim_exe: PathBuf::from("/opt/glafira/glafira-pg"),
                 run_timeout,
+                // Настройки Qwen Code теста — `<dir>/home/.qwen/settings.json` (`qwen_settings`), не владельца.
+                home: Some(dir.path().join("home")),
             });
         let mut p = sample_profile("c1");
         p.llm_access = LlmAccess::Diagnostics;
@@ -2072,6 +2090,66 @@ mod tests {
             if let (Some(e), Some(usd)) = (got, estimate) {
                 assert!((e.usd - usd).abs() < 1e-12, "{preset:?} {model}: {}", e.usd);
             }
+        }
+    }
+
+    /// Настройки Qwen Code в домашнем каталоге теста.
+    fn qwen_settings(h: &Harness, text: &str) {
+        let dir = h.dir.path().join("home").join(".qwen");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("settings.json"), text).unwrap();
+    }
+
+    /// Смоук P4c, sf-T7: облачная модель Ollama, которой нет в настройках Qwen Code, — «Проверить» и запуск получают адрес
+    /// Ollama и ключ окружением процесса; модель из его настроек и локальная модель — без них, как в чате.
+    #[tokio::test(start_paused = true)]
+    async fn qwen_code_gets_the_ollama_address_for_a_cloud_model_outside_its_settings() {
+        let base = (
+            "OPENAI_BASE_URL".to_string(),
+            "http://127.0.0.1:11434/v1".to_string(),
+        );
+        let key = ("OPENAI_API_KEY".to_string(), "ollama".to_string());
+        for (model, routed) in [
+            ("deepseek-v4.1-flash:cloud", true),
+            ("glm-5.3-flash:cloud", false),
+            (MODEL, false),
+        ] {
+            let h = harness_with(Arc::new(NoWarmth), |a| a.qwen.model = model.into());
+            qwen_settings(
+                &h,
+                r#"{"modelProviders": {"openai": [{"id": "glm-5.3-flash:cloud", "envKey": "OLLAMA_API_KEY"}]}}"#,
+            );
+            h.fake.script(vec![
+                Step::Connect,
+                Step::Call("list_connections"),
+                Step::Out(r#"{"type":"result","subtype":"success","result":"OK"}"#),
+                Step::Exit(0),
+            ]);
+            let check = h.q().check().unwrap();
+            let check = until(&h, &check.id, done).await;
+            assert_eq!(check.status, RunStatus::Done, "{model}: {check:?}");
+            h.fake.script(talk(1));
+            let run = h.q().start(&request(&h)).unwrap();
+            until(&h, &run.id, done).await;
+            for s in h.fake.spawned() {
+                let env = &s.spec.env_set;
+                assert_eq!(
+                    env.contains(&base) && env.contains(&key),
+                    routed,
+                    "{model}: {env:?}"
+                );
+                assert_eq!(
+                    s.spec
+                        .args
+                        .windows(2)
+                        .any(|w| w == ["--auth-type", "openai"]),
+                    routed,
+                    "{model}: {:?}",
+                    s.spec.args
+                );
+                assert_eq!(s.spec.args[s.spec.args.len() - 2..], ["-m", model]);
+            }
+            assert_eq!(h.fake.spawned().len(), 2);
         }
     }
 

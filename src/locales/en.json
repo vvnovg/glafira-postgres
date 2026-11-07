@@ -662,6 +662,8 @@
         "modelClientDefault": "Empty: the client's default model",
         "modelOllama": "Required: an Ollama model",
         "modelsFailed": "The model list could not be read: enter the name manually",
+        "cloudModel": "Ollama Cloud · ≈ {{input}} / {{output}} per 1M tokens, input / output",
+        "cloudModelOffPeak": "Ollama Cloud · ≈ {{input}} / {{output}} per 1M tokens, input / output; off-peak {{offInput}} / {{offOutput}}",
         "viaOllama": "Via Ollama",
         "budget": "Spending limit per run, $",
         "budgetEmpty": "Empty: no limit",
@@ -2407,7 +2409,7 @@
         "agent": {
           "enable": "The “Send to LLM assistant” button queues the request in Glafira, and Glafira runs the agent without a window, one request at a time. Off by default.",
           "path": "An absolute path to the program. “Find” asks your login shell (<code>command -v</code>) and checks the usual install locations.",
-          "model": "Qwen Code: models from ~/.qwen/settings.json; Claude Code via Ollama: Ollama models, a model is required. Empty: the client's default model, as in the chat.",
+          "model": "Qwen Code: models from ~/.qwen/settings.json; Claude Code via Ollama: Ollama models, a model is required. Both: Ollama cloud models with prices. Empty: the client's default model.",
           "viaOllama": "Claude Code talks to Ollama over its Anthropic-compatible API at the Ollama address. Without Ollama it uses your Claude Code subscription or key.",
           "budget": "Passed to Claude Code as <code>--max-budget-usd</code>. Empty: no limit.",
           "timeout": "From 2 to 60 minutes from the start of a run; then Glafira stops the agent.",

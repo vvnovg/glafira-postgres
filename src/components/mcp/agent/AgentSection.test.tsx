@@ -1,7 +1,8 @@
 import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentSettings, AgentStatus, AppInfo, McpStatus } from "../../../api/types";
+import type { AgentSettings, AgentStatus, AppInfo, CloudModel, McpStatus } from "../../../api/types";
+import { i18n } from "../../../i18n";
 import { useWorkspace } from "../../../state/workspace";
 import { emitEvent, listeners, resetEventBus } from "../../../test/events";
 import { connection } from "../../../test/fixtures";
@@ -220,6 +221,56 @@ describe("AgentSection", () => {
     await waitFor(() => expect(options()).toEqual(["qwen3.8:27b", "glm-5.3-flash:cloud", "qwen3.6-64k:35b-a3b"]));
     expect(api.listAgentModels).toHaveBeenCalledTimes(3);
     expect(api.listAgentModels).toHaveBeenLastCalledWith("qwen");
+  });
+
+  /** Облачные модели Ollama из таблицы цен (`list_agent_models`, группа «Ollama Cloud»). */
+  const CLOUD: CloudModel[] = [
+    { id: "glm-5.3-flash:cloud", prices: { input: 0.15, cachedInput: 0.03, output: 0.5 }, offPeak: null },
+    { id: "gpt-oss:120b-cloud", prices: { input: 0.15, cachedInput: 0.014, output: 0.6 }, offPeak: null },
+    { id: "nemotron-3-super:cloud", prices: { input: 0.015, cachedInput: 0.015, output: 0.6 }, offPeak: null },
+    { id: "deepseek-v4.1-flash:cloud", prices: { input: 0.3, cachedInput: 0.006, output: 1.2 }, offPeak: { input: 0.15, cachedInput: 0.003, output: 0.6 } },
+  ];
+  /** Пункты списка «Модель»: имя и подпись (пробелы Intl — обычными). */
+  const modelOptions = (container: HTMLElement) =>
+    Array.from(container.querySelectorAll("datalist option")).map((o) => [o.getAttribute("value"), o.getAttribute("label")?.replace(/\s/g, " ") ?? null]);
+
+  it("облачные модели Ollama из таблицы цен — группой «Ollama Cloud» после найденных, с ценой в подписи и без повторов", async () => {
+    vi.mocked(api.listAgentModels).mockResolvedValue({ ids: ["glm-5.3-flash:cloud", "qwen3.8:27b"], default: null, source: "qwen", cloud: CLOUD });
+    const { container } = renderWithClient(<AgentSection status={mcpStatus()} />);
+    await screen.findByRole("combobox", { name: "Модель" });
+    await waitFor(() =>
+      expect(modelOptions(container)).toEqual([
+        ["glm-5.3-flash:cloud", null],
+        ["qwen3.8:27b", null],
+        ["gpt-oss:120b-cloud", "Ollama Cloud · ≈ 0,15 $ / 0,60 $ за 1 млн токенов, вход / выход"],
+        ["nemotron-3-super:cloud", "Ollama Cloud · ≈ 0,015 $ / 0,60 $ за 1 млн токенов, вход / выход"],
+        ["deepseek-v4.1-flash:cloud", "Ollama Cloud · ≈ 0,30 $ / 1,20 $ за 1 млн токенов, вход / выход; вне пика — 0,15 $ / 0,60 $"],
+      ]),
+    );
+  });
+
+  it("облачные модели Ollama — у Claude Code через Ollama; без Ollama группы нет; по-английски — своя подпись", async () => {
+    await act(() => i18n.changeLanguage("en"));
+    try {
+      vi.mocked(api.getAgentSettings).mockResolvedValue(
+        agentSettings({ preset: "claude", claude: { path: "/Users/me/.local/bin/claude", model: "", viaOllama: true, budgetUsd: 1 } }),
+      );
+      vi.mocked(api.listAgentModels).mockResolvedValue({ ids: ["qwen3.6-64k:35b-a3b"], default: null, source: "ollama", cloud: CLOUD.slice(1, 2) });
+      const user = userEvent.setup();
+      const { container } = renderWithClient(<AgentSection status={mcpStatus()} />);
+      await screen.findByRole("combobox", { name: "Model" });
+      await waitFor(() =>
+        expect(modelOptions(container)).toEqual([
+          ["qwen3.6-64k:35b-a3b", null],
+          ["gpt-oss:120b-cloud", "Ollama Cloud · ≈ $0.15 / $0.60 per 1M tokens, input / output"],
+        ]),
+      );
+      // «Через Ollama» сняли — облачные модели Ollama Claude Code не годятся, ещё до «Сохранить».
+      await user.click(screen.getByRole("checkbox", { name: "Via Ollama" }));
+      expect(modelOptions(container)).toEqual([["qwen3.6-64k:35b-a3b", null]]);
+    } finally {
+      await act(() => i18n.changeLanguage("ru"));
+    }
   });
 
   it("список моделей не прочитан — свободный ввод с пояснением", async () => {

@@ -27,7 +27,8 @@
 //!   заканчивается сам; вызов через первую не доходит, через вторую — проходит.
 //!
 //! Для теста агент пишет в stderr (оно попадает в журнал запуска) строки `FAKE_AGENT ключ=значение` и их копию — в файл
-//! `FAKE_AGENT_NOTES`; билет — только длиной. Без `GLAFIRA_TEST_DATA_DIR` агент шим не запускает: иначе шим искал бы
+//! `FAKE_AGENT_NOTES`; билет — только длиной, провайдер модели (`OPENAI_BASE_URL`, ключ `ollama`, `--auth-type`) —
+//! `provider_line`. Без `GLAFIRA_TEST_DATA_DIR` агент шим не запускает: иначе шим искал бы
 //! Glafira владельца в обычном каталоге данных. `<путь> --version` печатает версию (поиск программы в «Настройках»).
 //! Только для тестов: бинарь собирается с feature `fake-agent` и в установщики не попадает.
 
@@ -94,6 +95,27 @@ fn emit(v: &Value) {
     let _ = out.flush();
 }
 
+/// Провайдер модели, как его видит CLI (Qwen Code с облачной моделью Ollama не из своих настроек, смоук P4c, sf-T7):
+/// адрес `OPENAI_BASE_URL` и `--auth-type` — как есть, ключ `OPENAI_API_KEY` — только `ollama` (не секрет), другой ключ —
+/// `other`, без значения: в журнал запуска чужой ключ из окружения разработчика не попадает. Нет — `-`.
+fn provider_line(args: &[String]) -> String {
+    let base = std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "-".into());
+    let key = match std::env::var("OPENAI_API_KEY") {
+        Ok(k) if k == "ollama" => "ollama",
+        Ok(_) => "other",
+        Err(_) => "-",
+    };
+    let auth = args
+        .windows(2)
+        .find(|w| w[0] == "--auth-type")
+        .map_or("-", |w| w[1].as_str());
+    format!(
+        "openai_base_url={} openai_api_key={key} auth_type={}",
+        one_line(&base).replace(' ', "%20"),
+        one_line(auth).replace(' ', "%20")
+    )
+}
+
 fn one_line(s: &str) -> String {
     s.replace(['\r', '\n'], " ")
 }
@@ -142,6 +164,7 @@ async fn run(args: &[String]) -> Result<(), String> {
     if let Ok(dir) = std::env::current_dir() {
         note(format!("cwd={}", dir.display()));
     }
+    note(provider_line(args));
     if std::env::var_os(TEST_DATA_DIR_ENV).is_none_or(|d| d.is_empty()) {
         return Err(format!(
             "{TEST_DATA_DIR_ENV} is not set: the fake agent runs only in tests"

@@ -49,6 +49,11 @@ fn effective(data_dir: &Path) -> pricing::Effective {
     e
 }
 
+/// Действующая таблица цен (`ollama-prices.json` или встроенная): облачные модели для поля «Модель». Блокирующий вызов.
+pub fn table(data_dir: &Path) -> pricing::PriceTable {
+    effective(data_dir).table
+}
+
 /// Оценка запуска облачной модели Ollama `model` по `usage` итога агента и времени начала. Нет оценки, если модель не
 /// облачная или её нет в таблице, нет `usage` или начала. Блокирующий вызов: читает файл таблицы.
 pub fn estimate_run(

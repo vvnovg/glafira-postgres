@@ -3,8 +3,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../../../api/client";
 import type { AgentRun } from "../../../api/types";
-import { currentLocale } from "../../../i18n";
-import { formatDay, formatDuration, formatTimestamp } from "../../../lib/format";
+import { formatDay, formatDuration, formatTimestamp, formatUsd } from "../../../lib/format";
 import { AGENT_RUNS_KEY, isActive, type RunsState } from "../../../lib/useAgentRuns";
 import { ErrorBanner } from "../../common/ErrorBanner";
 import { AgentSummary } from "./AgentSummary";
@@ -14,25 +13,16 @@ import { agentLabel, runResultText, runSeconds } from "./agentText";
 export const RUNS_SHOWN = 20;
 
 /**
- * Доллары по правилам языка (`$0.42`, `0,42 $`): два знака; у оценки меньше цента — одна значащая цифра (`0,006 $`), а не
- * «0,00 $».
- */
-function usd(v: number, estimate = false): string {
-  const small = estimate && v > 0 && v < 0.01;
-  return new Intl.NumberFormat(currentLocale(), { style: "currency", currency: "USD", ...(small ? { maximumSignificantDigits: 1 } : {}) }).format(v);
-}
-
-/**
  * Стоимость запуска: точная, как её сообщил CLI (Claude Code без Ollama), — как есть; оценка облачного запуска через Ollama
  * по ценам Ollama Cloud (смоук P4c, sf-T6) — «≈ 0,01 $» с подсказкой о дне цен таблицы (и «вне пика»).
  */
 function RunCost({ run }: { run: AgentRun }) {
   const { t } = useTranslation();
-  if (run.costUsd != null) return <>{usd(run.costUsd)}</>;
+  if (run.costUsd != null) return <>{formatUsd(run.costUsd)}</>;
   const e = run.costEstimate;
   if (!e) return null;
   const hint = e.offPeak ? "settings.mcp.agent.runs.costEstimateHintOffPeak" : "settings.mcp.agent.runs.costEstimateHint";
-  return <span title={t(hint, { date: formatDay(e.pricesDate) })}>{t("settings.mcp.agent.runs.costEstimate", { cost: usd(e.usd, true) })}</span>;
+  return <span title={t(hint, { date: formatDay(e.pricesDate) })}>{t("settings.mcp.agent.runs.costEstimate", { cost: formatUsd(e.usd, "estimate") })}</span>;
 }
 
 /**

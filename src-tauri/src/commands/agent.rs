@@ -79,27 +79,34 @@ pub(crate) fn detect_cli(
 }
 
 /// Модели для поля «Модель»: у Qwen Code — из его настроек; у Claude Code «Через Ollama» — `/api/tags` локальной
-/// Ollama (по сохранённым «Через Ollama» и адресу); иначе — свободный ввод.
+/// Ollama (по сохранённым «Через Ollama» и адресу); иначе — свободный ввод. У Qwen Code и Claude Code «Через Ollama» —
+/// ещё группа «Ollama Cloud»: облачные модели действующей таблицы цен (встроенной или загруженной «Обновить цены») с
+/// ценами, без повторов с найденными (смоук P4c, sf-T7).
 #[tauri::command]
 pub async fn list_agent_models(
     state: State<'_, AppState>,
     preset: Preset,
 ) -> AppResult<AgentModels> {
-    match preset {
+    let st = state.inner().clone();
+    let s = {
+        let st = st.clone();
+        blocking(move || Ok(st.settings.agent())).await?
+    };
+    let found = match preset {
         Preset::Qwen => {
             blocking(|| {
                 Ok(dirs::home_dir().map_or_else(AgentModels::none, |home| {
                     AgentModels::from_qwen(models::qwen_models(&home))
                 }))
             })
-            .await
+            .await?
         }
-        Preset::Claude => {
-            let st = state.inner().clone();
-            let s = blocking(move || Ok(st.settings.agent())).await?;
-            Ok(ollama::list_models(&s).await)
-        }
+        Preset::Claude => ollama::list_models(&s).await,
+    };
+    if !models::cloud_offered(preset, &s) {
+        return Ok(found);
     }
+    blocking(move || Ok(found.with_cloud(&pricing::table(st.mcp.data_dir())))).await
 }
 
 /// «Выгрузить модель» в подразделе «Фоновый ассистент» (спец. §6.2): модель сохранённых настроек, только у локальной

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { i18n } from "../i18n";
-import { formatAas, formatBytes, formatCount, formatDay, formatDuration, formatInt64, formatMs, formatPercent, formatScheduled, formatShortTimestamp, formatTimestamp } from "./format";
+import { formatAas, formatBytes, formatCount, formatDay, formatDuration, formatInt64, formatMs, formatPercent, formatScheduled, formatShortTimestamp, formatTimestamp, formatUsd } from "./format";
 
 describe("format", () => {
   it("timestamp в UTC с миллисекундами", () => {
@@ -206,5 +206,25 @@ describe("formatMs", () => {
     expect(formatMs(59_994)).toBe("59,99 с");
     expect(formatMs(59_999.9)).toBe("1 мин");
     expect(formatMs(90_600)).toBe("1 мин 31 с");
+  });
+});
+
+describe("formatUsd", () => {
+  afterEach(() => i18n.changeLanguage("ru"));
+  /** Неразрывный пробел Intl — обычным. */
+  const usd = (...a: Parameters<typeof formatUsd>) => formatUsd(...a).replace(/\s/g, " ");
+
+  it("точная стоимость — два знака; оценка меньше цента — одна значащая цифра; цена за 1 млн токенов — до четырёх знаков", async () => {
+    await i18n.changeLanguage("ru");
+    expect(usd(0.42)).toBe("0,42 $");
+    expect(usd(0.0061, "estimate")).toBe("0,006 $");
+    expect(usd(0.0148, "estimate")).toBe("0,01 $");
+    expect(usd(0.15, "price")).toBe("0,15 $");
+    expect(usd(0.015, "price")).toBe("0,015 $");
+    expect(usd(0.435, "price")).toBe("0,435 $");
+    expect(usd(10, "price")).toBe("10,00 $");
+    await i18n.changeLanguage("en");
+    expect(usd(0.015, "price")).toBe("$0.015");
+    expect(usd(0.0061, "estimate")).toBe("$0.006");
   });
 });

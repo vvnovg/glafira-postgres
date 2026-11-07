@@ -87,9 +87,16 @@ pub struct RunInputs {
     pub model: Option<String>,
     /// Срок запуска Glafira, с.
     pub timeout_s: u64,
-    /// Адрес Ollama (Claude Code «Через Ollama»).
+    /// Адрес Ollama (Claude Code «Через Ollama»; Qwen Code с `qwen_via_ollama`).
     pub ollama_url: String,
+    /// Qwen Code: модель — облачная модель Ollama, которой нет в его настройках (`models::qwen_cloud_via_ollama`).
+    /// Адрес Ollama и ключ — окружением процесса, протокол OpenAI — флагом.
+    pub qwen_via_ollama: bool,
 }
+
+/// Ключ, который Ollama принимает от клиентов OpenAI и Anthropic API: не секрет, но в аргументы процесса не идёт —
+/// окружением, как у Claude Code «Через Ollama».
+pub const OLLAMA_KEY: &str = "ollama";
 
 /// Минимальная версия CLI (спец. §4.1): ниже — предупреждение в «Настройках».
 pub fn min_version(p: Preset) -> (u32, u32) {
@@ -157,6 +164,22 @@ pub fn build(s: &AgentSettings, i: &RunInputs) -> AppResult<CommandSpec> {
                 MAX_RUN_CALLS.to_string(),
             ]);
             args.extend(strings(&["--chat-recording", "false", "-o", "stream-json"]));
+            if i.qwen_via_ollama {
+                // Облачная модель Ollama не из настроек Qwen Code (смоук P4c: «Missing API key»): у модели без
+                // `modelProviders` Qwen Code берёт ключ и адрес из `--openai-api-key` / `--openai-base-url`, затем из
+                // `OPENAI_API_KEY` / `OPENAI_BASE_URL`, затем из `security.auth` своих настроек (Qwen Code 0.26.5).
+                // Окружение процесса перекрывает и настройки, и ключ облака из профиля оболочки (он не уйдёт в Ollama);
+                // ключ — не в аргументах. `--auth-type openai` — протокол Ollama `/v1`, даже если в Qwen Code выбран
+                // другой провайдер (Qwen OAuth подменил бы модель своей). Файлы Qwen Code не меняются.
+                args.extend(strings(&["--auth-type", "openai"]));
+                env_set = vec![
+                    (
+                        "OPENAI_BASE_URL".to_string(),
+                        format!("{}/v1", i.ollama_url.trim().trim_end_matches('/')),
+                    ),
+                    ("OPENAI_API_KEY".to_string(), OLLAMA_KEY.to_string()),
+                ];
+            }
             if let Some(m) = &i.model {
                 args.extend(["-m".to_string(), m.clone()]);
             }
@@ -189,7 +212,7 @@ pub fn build(s: &AgentSettings, i: &RunInputs) -> AppResult<CommandSpec> {
                 let m = i.model.clone().ok_or_else(model_required)?;
                 let pairs = [
                     ("ANTHROPIC_BASE_URL", i.ollama_url.as_str()),
-                    ("ANTHROPIC_AUTH_TOKEN", "ollama"),
+                    ("ANTHROPIC_AUTH_TOKEN", OLLAMA_KEY),
                     ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
                     ("ANTHROPIC_MODEL", m.as_str()),
                     ("ANTHROPIC_DEFAULT_OPUS_MODEL", m.as_str()),
@@ -241,6 +264,7 @@ mod tests {
             model: model.map(String::from),
             timeout_s: 900,
             ollama_url: "http://127.0.0.1:11434".into(),
+            qwen_via_ollama: false,
         }
     }
 
@@ -364,6 +388,59 @@ mod tests {
             want,
             "модель — только в конце"
         );
+    }
+
+    /// Смоук P4c, sf-T7: облачная модель Ollama, которой нет в настройках Qwen Code, — адрес Ollama (настройка «Адрес
+    /// Ollama» + `/v1`) и ключ `ollama` окружением процесса (не аргументами), протокол OpenAI — флагом `--auth-type`,
+    /// чтобы выбранный в Qwen Code провайдер (Qwen OAuth, Anthropic) не увёл модель мимо Ollama. Модель из настроек Qwen
+    /// Code — как в чате, без окружения и флага.
+    #[test]
+    fn qwen_with_a_cloud_model_outside_its_settings_gets_the_ollama_address_and_key() {
+        let m = "glm-5.3-flash:cloud";
+        let plain = build(&qwen(), &inputs(Some(m))).unwrap();
+        let mut i = inputs(Some(m));
+        i.qwen_via_ollama = true;
+        let spec = build(&qwen(), &i).unwrap();
+        let pairs = |items: &[(&str, &str)]| -> Vec<(String, String)> {
+            items
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        assert_eq!(
+            spec.env_set,
+            pairs(&[
+                ("OPENAI_BASE_URL", "http://127.0.0.1:11434/v1"),
+                ("OPENAI_API_KEY", "ollama"),
+            ])
+        );
+        assert!(spec.env_remove.is_empty(), "{:?}", spec.env_remove);
+        let mut want = plain.args[..plain.args.len() - 2].to_vec();
+        want.extend(v(&["--auth-type", "openai", "-m", m]));
+        assert_eq!(spec.args, want, "модель — по-прежнему в конце");
+        for a in &spec.args {
+            assert!(
+                a != "ollama" && !a.starts_with("--openai-"),
+                "ключ и адрес — не в аргументах: {a}"
+            );
+        }
+        // Удалённая Ollama — её адрес; косая черта в конце не удваивается.
+        i.ollama_url = "http://192.168.1.10:11434/".into();
+        assert_eq!(
+            build(&qwen(), &i).unwrap().env_set[0],
+            (
+                "OPENAI_BASE_URL".to_string(),
+                "http://192.168.1.10:11434/v1".to_string()
+            )
+        );
+        // Модель из настроек Qwen Code (`qwen_via_ollama: false`) — как в чате.
+        assert!(plain.env_set.is_empty() && plain.env_remove.is_empty());
+        assert!(!plain.args.iter().any(|a| a == "--auth-type"));
+        // У Claude Code признака нет: «Через Ollama» — свои переменные.
+        let mut c = inputs(Some(m));
+        c.qwen_via_ollama = true;
+        let claude = build(&claude(false, None), &c).unwrap();
+        assert!(claude.env_set.is_empty() && !claude.args.iter().any(|a| a == "--auth-type"));
     }
 
     #[test]

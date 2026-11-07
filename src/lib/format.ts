@@ -50,6 +50,17 @@ export function formatDay(ymd: string): string {
   return new Intl.DateTimeFormat(currentLocale(), { day: "2-digit", month: "2-digit", year: "numeric", timeZone: "UTC" }).format(day);
 }
 
+/**
+ * Доллары по правилам языка интерфейса (`$0.42`, `0,42 $`), два знака:
+ * - `estimate` — оценка стоимости: меньше цента — одна значащая цифра (`0,006 $`), а не «0,00 $»;
+ * - `price` — цена за 1 млн токенов: до четырёх знаков, чтобы не округлять дешёвые цены (`0,015 $`, `0,435 $`).
+ */
+export function formatUsd(v: number, kind: "exact" | "estimate" | "price" = "exact"): string {
+  const small = kind === "estimate" && v > 0 && v < 0.01;
+  const digits = small ? { maximumSignificantDigits: 1 } : kind === "price" ? { minimumFractionDigits: 2, maximumFractionDigits: 4 } : {};
+  return new Intl.NumberFormat(currentLocale(), { style: "currency", currency: "USD", ...digits }).format(v);
+}
+
 const num = (n: number, digits = 0) =>
   n.toLocaleString(currentLocale(), { minimumFractionDigits: digits, maximumFractionDigits: digits });
 

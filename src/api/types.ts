@@ -1287,12 +1287,28 @@ export interface AgentDetected {
    */
   error?: string | null;
 }
+/** Цены модели за 1 млн токенов, $ (`glafira_llm_pricing::Prices`): `cachedInput` — `null`, если своей цены кэша нет. */
+export interface ModelPrices {
+  input: number;
+  cachedInput: number | null;
+  output: number;
+}
+/** Облачная модель Ollama из действующей таблицы цен (`agent::models::CloudModel`): группа «Ollama Cloud» поля «Модель». */
+export interface CloudModel {
+  /** Имя модели Ollama: `glm-5.3-flash:cloud`, `gpt-oss:120b-cloud`. */
+  id: string;
+  prices: ModelPrices;
+  /** Цены «вне пика», если у модели они свои. */
+  offPeak: ModelPrices | null;
+}
 /** Модели для поля «Модель» (`agent::models::AgentModels`): `source` — откуда список (`none` — только свободный ввод). */
 export interface AgentModels {
   ids: string[];
   /** Модель по умолчанию (у Qwen Code — `model.name` его настроек). */
   default?: string | null;
   source: "qwen" | "ollama" | "none";
+  /** Группа «Ollama Cloud»: облачные модели таблицы цен, которых нет в `ids`; у Claude Code без Ollama — пусто. */
+  cloud?: CloudModel[];
 }
 /** Запись журнала для EXPLAIN ANALYZE яруса записи (`ActionRecord.explain`). */
 export interface ExplainRecord {

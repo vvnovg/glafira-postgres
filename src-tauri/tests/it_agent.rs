@@ -410,6 +410,8 @@ fn runtime(spawner: &Arc<TestSpawner>, run_timeout: Option<Duration>) -> AgentRu
         warmth: Arc::new(NoWarmth),
         shim_exe: PathBuf::from(SHIM),
         run_timeout,
+        // Настройки Qwen Code владельца тест не читает: домашнего каталога нет — облачную модель Qwen Code «не знает».
+        home: None,
     }
 }
 
@@ -1197,6 +1199,59 @@ async fn check_run_with_the_qwen_preset_answers_ok() {
         "{:?}",
         spec.args
     );
+    e.finish().await;
+}
+
+/// «Проверить» с облачной моделью Ollama из таблицы цен, которой нет в настройках Qwen Code (смоук P4c, sf-T7): агент
+/// видит адрес Ollama из настроек ассистента с `/v1`, ключ `ollama` и `--auth-type openai`; ключа нет в аргументах.
+/// Локальная модель — без них (окружение агента — как у процесса теста).
+#[tokio::test]
+async fn check_run_of_qwen_code_with_a_cloud_model_sees_the_ollama_address() {
+    let e = env(Preset::Qwen, None).await;
+    let mut a = e.st.settings.agent();
+    a.qwen.model = "deepseek-v4.1-flash:cloud".into();
+    a.ollama_url = "http://127.0.0.1:11999".into();
+    e.st.settings.set_agent(a).unwrap();
+    e.spawner.push("check", &[]);
+    let id = e.st.agent.check().unwrap().id;
+    let run = wait_end(&e.st, &id).await;
+    let notes = read_notes(&e.dir, &id);
+    assert_eq!(run.status, RunStatus::Done, "{run:?}\n{notes}");
+    assert_eq!(run.model.as_deref(), Some("deepseek-v4.1-flash:cloud"));
+    assert_eq!(
+        noted(&notes, "openai_base_url").as_deref(),
+        Some("http://127.0.0.1:11999/v1"),
+        "{notes}"
+    );
+    assert_eq!(
+        noted(&notes, "openai_api_key").as_deref(),
+        Some("ollama"),
+        "{notes}"
+    );
+    assert_eq!(
+        noted(&notes, "auth_type").as_deref(),
+        Some("openai"),
+        "{notes}"
+    );
+    let spec = e.spawner.last_spec();
+    assert!(!spec.args.iter().any(|a| a == "ollama"), "{:?}", spec.args);
+
+    // Локальная модель — провайдер из настроек Qwen Code, Glafira ничего не подставляет.
+    let mut a = e.st.settings.agent();
+    a.qwen.model = "fake-model".into();
+    e.st.settings.set_agent(a).unwrap();
+    e.spawner.push("check", &[]);
+    let id = e.st.agent.check().unwrap().id;
+    let run = wait_end(&e.st, &id).await;
+    let notes = read_notes(&e.dir, &id);
+    assert_eq!(run.status, RunStatus::Done, "{run:?}\n{notes}");
+    let inherited = std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "-".into());
+    assert_eq!(
+        noted(&notes, "openai_base_url"),
+        Some(inherited.replace(' ', "%20")),
+        "{notes}"
+    );
+    assert_eq!(noted(&notes, "auth_type").as_deref(), Some("-"), "{notes}");
     e.finish().await;
 }
 
