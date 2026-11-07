@@ -291,7 +291,7 @@
     },
     "agent": {
       "pathNotAbsolute": "The program path must be absolute: {{path}}",
-      "badModel": "Invalid model name “{{model}}”: use letters, digits and ._:/@+- (up to 128 characters)",
+      "badModel": "Invalid model name “{{model}}”: a letter or digit first, then letters, digits and ._:/@+- (up to 128 characters)",
       "badTimeout": "The run time limit must be from {{min}} to {{max}} minutes",
       "badKeepWarm": "Keeping the model in memory must be from {{min}} to {{max}} minutes",
       "badBudget": "The spending limit per run must be from {{min}} to {{max}} $",
@@ -675,7 +675,7 @@
         "errors": {
           "range": "A whole number from {{min}} to {{max}}",
           "budget": "A number from {{min}} to {{max}}, or empty",
-          "model": "Latin letters, digits and . _ : / @ + -, up to 128 characters",
+          "model": "A Latin letter or digit first, then Latin letters, digits and . _ : / @ + -, up to 128 characters",
           "path": "An absolute path is required",
           "url": "An address like http://127.0.0.1:11434",
           "hidden": "There is an error in the {{agent}} settings: select that agent and fix it"

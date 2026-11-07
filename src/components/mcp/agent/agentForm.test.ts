@@ -77,6 +77,14 @@ describe("agentForm", () => {
     expect(check({ ...base, claudeModel: "x".repeat(129) }).claudeModel).toBeDefined();
   });
 
+  it("модель — первым символом латинская буква или цифра, как presets::valid_model: имя на «-» CLI прочёл бы флагом", () => {
+    for (const ok of ["7b-model", "Q", "hf.co/org/model:Q4_K_M", "user@host/m+x"]) expect(check({ ...base, qwenModel: ok }).qwenModel, ok).toBeUndefined();
+    for (const bad of ["--yolo", "-y", " --yolo", "--mcp-config=/tmp/x.json", "-", ".hidden", "/abs", ":tag", "@x", "+x", "_x"]) {
+      expect(check({ ...base, qwenModel: bad }).qwenModel, bad).toEqual({ key: "settings.mcp.agent.errors.model" });
+      expect(check({ ...base, claudeModel: bad }).claudeModel, bad).toEqual({ key: "settings.mcp.agent.errors.model" });
+    }
+  });
+
   it("адрес Ollama — как settings::parse_ollama_url в Rust: только http(s)://хост[:порт], до 256 байт; локальный — localhost, 127.0.0.1, ::1", () => {
     expect(check({ ...base, ollamaUrl: "127.0.0.1:11434" }).ollamaUrl).toEqual({ key: "settings.mcp.agent.errors.url" });
     // Те же адреса, что в тесте Rust the_ollama_address_is_only_a_scheme_a_host_and_a_port.

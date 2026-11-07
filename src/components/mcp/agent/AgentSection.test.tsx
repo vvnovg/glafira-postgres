@@ -175,8 +175,8 @@ describe("AgentSection", () => {
     expect(Array.from(container.querySelectorAll("datalist option")).map((o) => o.getAttribute("value"))).toEqual(["qwen3.6-64k:35b-a3b", "qwen3.8:27b"]);
     await user.type(model, "bad model");
     expect(model).toHaveAttribute("aria-invalid", "true");
-    expect(screen.getByText("Латиница, цифры и . _ : / @ + -, до 128 символов")).toBeInTheDocument();
-    expect(model).toHaveAccessibleDescription("Латиница, цифры и . _ : / @ + -, до 128 символов");
+    expect(screen.getByText("Сначала латинская буква или цифра, дальше латиница, цифры и . _ : / @ + -, до 128 символов")).toBeInTheDocument();
+    expect(model).toHaveAccessibleDescription("Сначала латинская буква или цифра, дальше латиница, цифры и . _ : / @ + -, до 128 символов");
     expect(screen.getByRole("button", { name: "Сохранить" })).toBeDisabled();
   });
 

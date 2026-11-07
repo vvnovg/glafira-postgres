@@ -7,8 +7,11 @@ import type { AgentPreset, AgentSettings } from "../../../api/types";
 export const TIMEOUT_RANGE = { min: 2, max: 60 } as const;
 export const KEEP_WARM_RANGE = { min: 0, max: 120 } as const;
 export const BUDGET_RANGE = { min: 0.01, max: 100 } as const;
-/** Имя модели (спец. P4c §4.1, `presets::valid_model`): одна строка без пробелов, до 128 символов. */
-export const MODEL_RE = /^[A-Za-z0-9._:/@+-]{1,128}$/;
+/**
+ * Имя модели (спец. P4c §4.1, `presets::valid_model`): одна строка без пробелов, до 128 символов, первый символ — латинская
+ * буква или цифра (имя на `-` CLI прочёл бы флагом: `-m --yolo`).
+ */
+export const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/;
 /** Путь программы — до 1024 символов, адрес Ollama — до 256 байт (`settings.rs`: `MAX_PATH_CHARS`, `MAX_URL_CHARS`). */
 const MAX_PATH_CHARS = 1024;
 const MAX_URL_BYTES = 256;
@@ -179,7 +182,7 @@ export type UnloadOff = "noLocalModel" | "keepWarmOff" | "remote";
 
 /**
  * Glafira управляет моделью только у локальной Ollama, при «Держать модель в памяти» больше 0 (0 — Glafira в Ollama не
- * ходит) и не у Claude Code без Ollama (у него локальной модели нет) — как `ollama::managed` в Rust. Иначе — причина.
+ * ходит) и не у Claude Code без Ollama (у него локальной модели нет) — как `ollama::manages` в Rust. Иначе — причина.
  */
 export function unloadOff(s: AgentSettings): UnloadOff | null {
   if (s.preset === "claude" && !s.claude.viaOllama) return "noLocalModel";

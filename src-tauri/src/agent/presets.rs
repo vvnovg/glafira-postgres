@@ -99,10 +99,11 @@ pub fn min_version(p: Preset) -> (u32, u32) {
     }
 }
 
-/// Имя модели — одна строка из `[A-Za-z0-9._:/@+-]`, до 128 символов: в аргументах процесса нет ничего, кроме того, что
-/// собрала Glafira.
+/// Имя модели — одна строка из `[A-Za-z0-9._:/@+-]`, до 128 символов, первый символ — латинская буква или цифра: в
+/// аргументах процесса нет ничего, кроме того, что собрала Glafira. Имя на `-` CLI прочёл бы флагом, а не значением
+/// `-m` / `--model` (`-m --yolo` у Qwen Code — флаг `--yolo`).
 pub fn valid_model(m: &str) -> bool {
-    !m.is_empty()
+    m.starts_with(|c: char| c.is_ascii_alphanumeric())
         && m.chars().count() <= MAX_MODEL_CHARS
         && m.chars()
             .all(|c| c.is_ascii_alphanumeric() || "._:/@+-".contains(c))
@@ -522,10 +523,36 @@ mod tests {
         for bad in ["", "two words", "a;b", "x\ny", "модель", long.as_str()] {
             assert!(!valid_model(bad), "{bad}");
         }
-        assert_eq!(
-            build(&qwen(), &inputs(Some("two words"))).unwrap_err().key,
-            "errors.agent.badModel"
-        );
+        // Первый символ — буква или цифра: имя на `-` CLI прочёл бы флагом (`-m --yolo`), а не значением модели.
+        for flag in [
+            "--yolo",
+            "-y",
+            "--mcp-config=/tmp/x.json",
+            "-",
+            ".hidden",
+            "/abs",
+            ":tag",
+            "@x",
+            "+x",
+            "_x",
+        ] {
+            assert!(!valid_model(flag), "{flag}");
+        }
+        assert!(valid_model("7b-model") && valid_model("Q"));
+        for model in ["two words", "--yolo"] {
+            assert_eq!(
+                build(&qwen(), &inputs(Some(model))).unwrap_err().key,
+                "errors.agent.badModel",
+                "{model}"
+            );
+            assert_eq!(
+                build(&claude(true, None), &inputs(Some(model)))
+                    .unwrap_err()
+                    .key,
+                "errors.agent.badModel",
+                "{model}"
+            );
+        }
         let mut empty = qwen();
         empty.qwen.path = "  ".into();
         assert_eq!(

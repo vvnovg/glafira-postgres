@@ -240,7 +240,7 @@ pub fn bad_model(m: &str) -> AppError {
     app_err!(
         ErrorCode::InvalidInput,
         "errors.agent.badModel",
-        "Invalid model name “{{model}}”: use letters, digits and ._:/@+- (up to 128 characters)",
+        "Invalid model name “{{model}}”: a letter or digit first, then letters, digits and ._:/@+- (up to 128 characters)",
         model = m
     )
 }
@@ -381,6 +381,15 @@ mod tests {
         );
         assert_eq!(
             bad(&|s| s.claude.model = "two words".into()),
+            "errors.agent.badModel"
+        );
+        // Имя на `-` — флаг CLI, а не модель (`-m --yolo`); пробелы по краям убираются до проверки.
+        assert_eq!(
+            bad(&|s| s.qwen.model = " --yolo".into()),
+            "errors.agent.badModel"
+        );
+        assert_eq!(
+            bad(&|s| s.claude.model = "-p".into()),
             "errors.agent.badModel"
         );
         assert_eq!(bad(&|s| s.timeout_min = 1), "errors.agent.badTimeout");
