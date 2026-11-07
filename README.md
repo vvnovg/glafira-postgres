@@ -60,7 +60,9 @@ LLM-ассистент подключается к Glafira по MCP через �
 
 Разработка: из `pnpm tauri dev` шим приложение не запускает — сначала `pnpm tauri dev` и включённый MCP, фрагменты в «Настройках»
 тогда указывают на `src-tauri/target/debug/glafira-pg`. Крейты шлюза — `crates/glafira-mcp-core` (транспорт, рукопожатие, сессии,
-подтверждение, журнал, лимиты) и `crates/glafira-pg-mcp` (инструменты PostgreSQL и Patroni, контракт ответов).
+подтверждение, журнал, лимиты) и `crates/glafira-pg-mcp` (инструменты PostgreSQL и Patroni, контракт ответов). Оценка стоимости
+облачных запусков через Ollama — крейт `crates/glafira-llm-pricing` (цены Ollama Cloud, без зависимостей от приложения; его
+README — как подключить в другом инструменте и как обновлять встроенную таблицу).
 
 ## Лицензия и поддержка проекта
 - Код открыт под [Apache License 2.0](LICENSE). Все функции приложения бесплатны и доступны всем: платных тарифов и лицензионных ключей нет.
@@ -144,12 +146,14 @@ pnpm test:scripts && pnpm i18n:check                     # скрипты, сл�
 cargo test --manifest-path crates/pg-advisor/Cargo.toml  # правила
 cargo test --manifest-path crates/glafira-mcp-core/Cargo.toml  # ядро MCP-шлюза
 cargo test --manifest-path crates/glafira-pg-mcp/Cargo.toml    # инструменты MCP
+cargo test --manifest-path crates/glafira-llm-pricing/Cargo.toml  # цены Ollama Cloud
 cargo test --manifest-path src-tauri/Cargo.toml --lib    # Rust unit
 cargo test --manifest-path src-tauri/Cargo.toml --features fake-agent --test it_agent   # фоновый ассистент (без стенда)
 cargo deny --manifest-path src-tauri/Cargo.toml --config deny.toml check licenses   # лицензии зависимостей
 cargo deny --manifest-path crates/pg-advisor/Cargo.toml --config deny.toml check licenses
 cargo deny --manifest-path crates/glafira-mcp-core/Cargo.toml --config deny.toml check licenses
 cargo deny --manifest-path crates/glafira-pg-mcp/Cargo.toml --config deny.toml check licenses
+cargo deny --manifest-path crates/glafira-llm-pricing/Cargo.toml --config deny.toml check licenses
 GPG_IT_SINGLE=localhost:5460 GPG_IT_PRIMARY=localhost:5451 GPG_IT_REPLICA=localhost:5452 \
 GPG_IT_PATRONI=http://localhost:8011,http://localhost:8012,http://localhost:8013 GPG_IT_LAB=localhost:5470 GPG_IT_PERF=localhost:5471 GPG_IT_DOCKER=1 \
 GPG_IT_BASTION=localhost:2222 GPG_IT_SSH_KEYS=$PWD/dev/ssh/keys \

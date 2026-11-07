@@ -1,0 +1,395 @@
+<!doctype html>
+<!-- Образец https://ollama.com/pricing от 2026-11-07, урезан: начало тарифов, таблица цен моделей целиком, начало FAQ. -->
+<html lang="en"><head><meta charset="utf-8"><title>Pricing · Ollama</title>
+<script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "Organization",
+            "@id": "https://ollama.com/#organization",
+            "name": "Ollama",
+            "legalName": "Ollama Inc.",
+            "url": "https://ollama.com",
+            "logo": "https://ollama.com/public/ollama.png",
+            "sameAs": ["https://github.com/ollama/ollama", "https://twitter.com/ollama"]
+          },
+          {
+            "@type": "WebSite",
+            "@id": "https://ollama.com/#website",
+            "name": "Ollama",
+            "url": "https://ollama.com",
+            "publisher": { "@id": "https://ollama.com/#organization" }
+          }
+        ]
+      }
+    </script>
+</head><body>
+<main>
+<section class="mb-12">
+    <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+
+      <div class="flex flex-col border border-neutral-200 rounded-2xl p-6">
+        <div>
+          <div class="flex h-9 items-center">
+            <h2 class="text-xl font-medium">Pay as you go</h2>
+          </div>
+          <div class="mt-2 text-3xl font-semibold font-rounded">$0</div>
+          <p class="mt-2 min-h-8 text-xs text-neutral-500">Pay per token for every cloud model.</p>
+        </div>
+        <p class="mt-6 text-sm text-neutral-500 mb-4">Includes:</p>
+        <ul class="flex-1 space-y-3">
+          <li class="text-sm flex items-start gap-2">
+            <svg class="w-4 h-4 text-black flex-shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
+            <span>Run models locally</span>
+          </li>
+          
+          <li class="text-sm flex items-start gap-2">
+            <svg class="w-4 h-4 text-black flex-shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
+            <span>No subscription</span>
+          </li>
+          <li class="text-sm flex items-start gap-2">
+            <svg class="w-4 h-4 text-black flex-shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
+            <span>3 concurrent requests</span>
+          </li>
+          
+          <li class="text-sm flex items-start gap-2">
+            <svg class="w-4 h-4 text-black flex-shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
+            <span>No service fees</span>
+          </li>
+        </ul>
+        <div class="mt-8">
+          <a href="/signup" class="inline-flex items-center justify-center rounded-full bg-neutral-900 hover:bg-black text-white font-medium text-base px-6 py-2.5">Get started</a>
+        </div>
+      </div>
+
+      <div class="flex flex-col border border-neutral-200 rounded-2xl p-6">
+        <div class="flex h-9 items-center justify-between gap-2">
+          <h2 id="plan-title-pro" class="text-xl font-medium">Pro</h2>
+          <h2 id="plan-title-max" class="text-xl font-medium hidden">Max</h2>
+          <div class="inline-flex gap-1 rounded-full bg-black/5 p-1" role="tablist" aria-label="Individual plans">
+            <button
+              type="button"
+              id="plan-pro-tab"
+              role="tab"
+              aria-selected="true"
+              aria-controls="plan-title-pro plan-header-pro plan-body-pro"
+              data-plan-tab="pro"
+              class="rounded-full bg-black/10 px-4 py-1 text-sm font-medium text-black focus:outline-hidden focus-visible:ring-2 focus-visible:ring-neutral-400"
+            >
+              Pro
+            </button>
+            <button
+              type="button"
+              id="plan-max-tab"
+              role="tab"
+              aria-selected="false"
+              aria-controls="plan-title-max plan-header-max plan-body-max"
+              data-plan-tab="max"
+              tabindex="-1"
+              class="rounded-full px-4 py-1 text-sm font-medium text-neutral-500 hover:text-black focus:outline-hidden focus-visible:ring-2 focus-visible:ring-neutral-400"
+            >
+              Max
+            </button>
+          </div>
+        </div>
+        <div>
+          <div id="plan-header-pro">
+            <div class="mt-2 text-3xl font-semibold font-rounded">
+              <span data-billing="month">$20 <span class="text-sm font-normal text-neutral-400">/ mo. or $200/yr billed <a href="/upgrade?plan=pro&amp;interval=year" class="underline">annually</a></span></span>
+              <span data-billing="year" class="hidden">$16.67 <span class="text-sm font-normal text-neutral-400">/ mo. billed annually</span></span>
+            </div>
+            <p class="mt-2 min-h-8 text-xs text-neutral-500">For shorter, well-defined day-to-day tasks</p>
+          </div>
+          <div id="plan-header-max" class="hidden">
+            <div class="mt-2 text-3xl font-semibold font-rounded">$100 <span class="text-sm font-normal text-neutral-400">/ mo.</span></div>
+            <p class="mt-2 min-h-8 text-xs text-neutral-500">For power users who run multiple agents simultaneously</p>
+          </div>
+        </div>
+        <div id="plan-body-pro" class="flex-1 flex flex-col">
+          <p class="mt-6 text-sm text-neutral-500 mb-4">Everything in Pay as you go, plus:</p>
+          <ul class="flex-1 space-y-3">
+            <li class="text-sm flex items-start gap-2">
+              <svg class="w-4 h-4 text-black flex-shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
+              <span>$60 of usage credits per month</span>
+            </li>
+            <li class="text-sm flex items-start gap-2">
+              <svg class="w-4 h-4 text-black flex-shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
+              <span>Access to larger pro models</span>
+            </li>
+            
+            <li class="text-sm flex items-start gap-2">
+</div></div></section>
+<section id="model-pricing" class="flex flex-col w-full max-w-xl mx-auto mt-16 scroll-mt-24">
+    <h2 class="text-2xl font-semibold mb-3">Model pricing</h2>
+    
+    
+    <p class="text-sm text-neutral-500 mb-6">
+        Pay as you go with usage credits. Prices are per million tokens.
+         Off-peak pricing apply outside 12:00 and 18:00 UTC on weekdays and all day on weekends.</p>
+    <div class="overflow-x-auto rounded-2xl border border-neutral-200 mb-6">
+      <table class="w-full text-sm border-separate border-spacing-0">
+        <thead>
+          <tr>
+            <th class="px-4 py-3 text-left font-semibold">Model</th>
+            <th class="border-l border-neutral-200 px-4 py-3 text-right font-semibold">Input</th>
+            <th class="border-l border-neutral-200 px-4 py-3 text-right font-semibold">Cached input</th>
+            <th class="border-l border-neutral-200 px-4 py-3 text-right font-semibold">Output</th>
+          </tr>
+        </thead>
+        <tbody>
+          
+          <tr>
+            <td class="border-t border-neutral-200 px-4 py-3"><a href="/library/beam" class="hover:underline">beam</a></td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.125</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.015</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.40</td>
+          </tr>
+          
+          
+          <tr>
+            <td class="border-t border-neutral-200 px-4 py-3"><a href="/library/clef" class="hover:underline">clef</a></td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.24</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">-</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">-</td>
+          </tr>
+          
+          
+          <tr>
+            <td class="border-t border-neutral-200 px-4 py-3"><a href="/library/deepseek-v4.1-flash" class="hover:underline">deepseek-v4.1-flash</a></td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.30</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.006</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$1.20</td>
+          </tr>
+          
+          <tr>
+            <td class="border-t border-neutral-200 px-4 py-3"><a href="/library/deepseek-v4.1-flash" class="hover:underline">deepseek-v4.1-flash (Off-Peak)</a></td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.15</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.003</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.60</td>
+          </tr>
+          
+          
+          <tr>
+            <td class="border-t border-neutral-200 px-4 py-3"><a href="/library/deepseek-v4-pro" class="hover:underline">deepseek-v4-pro</a></td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$1.32</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.044</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$3.96</td>
+          </tr>
+          
+          <tr>
+            <td class="border-t border-neutral-200 px-4 py-3"><a href="/library/deepseek-v4-pro" class="hover:underline">deepseek-v4-pro (Off-Peak)</a></td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.66</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.022</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$1.98</td>
+          </tr>
+          
+          
+          <tr>
+            <td class="border-t border-neutral-200 px-4 py-3"><a href="/library/gemma4" class="hover:underline">gemma4</a></td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.14</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.05</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.40</td>
+          </tr>
+          
+          
+          <tr>
+            <td class="border-t border-neutral-200 px-4 py-3"><a href="/library/glm-5.3" class="hover:underline">glm-5.3</a></td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$1.40</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.26</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$4.40</td>
+          </tr>
+          
+          
+          <tr>
+            <td class="border-t border-neutral-200 px-4 py-3"><a href="/library/glm-5.3-flash" class="hover:underline">glm-5.3-flash</a></td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.15</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.03</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.50</td>
+          </tr>
+          
+          
+          <tr>
+            <td class="border-t border-neutral-200 px-4 py-3"><a href="/library/glm-5.2" class="hover:underline">glm-5.2</a></td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$1.40</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.26</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$4.40</td>
+          </tr>
+          
+          
+          <tr>
+            <td class="border-t border-neutral-200 px-4 py-3"><a href="/library/gpt-oss" class="hover:underline">gpt-oss:120b</a></td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.15</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.014</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.60</td>
+          </tr>
+          
+          
+          <tr>
+            <td class="border-t border-neutral-200 px-4 py-3"><a href="/library/gpt-oss" class="hover:underline">gpt-oss:20b</a></td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.07</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.035</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.30</td>
+          </tr>
+          
+          
+          <tr>
+            <td class="border-t border-neutral-200 px-4 py-3"><a href="/library/kimi-k3.1-pro" class="hover:underline">kimi-k3.1-pro</a></td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$2.00</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.20</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$10.00</td>
+          </tr>
+          
+          
+          <tr>
+            <td class="border-t border-neutral-200 px-4 py-3"><a href="/library/kimi-k3" class="hover:underline">kimi-k3</a></td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$3.00</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.30</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$15.00</td>
+          </tr>
+          
+          
+          <tr>
+            <td class="border-t border-neutral-200 px-4 py-3"><a href="/library/kimi-k2.7-code" class="hover:underline">kimi-k2.7-code</a></td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.95</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.19</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$4.00</td>
+          </tr>
+          
+          
+          <tr>
+            <td class="border-t border-neutral-200 px-4 py-3"><a href="/library/kimi-k2.6" class="hover:underline">kimi-k2.6</a></td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.95</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.16</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$4.00</td>
+          </tr>
+          
+          
+          <tr>
+            <td class="border-t border-neutral-200 px-4 py-3"><a href="/library/mimo-v2.6-flash" class="hover:underline">mimo-v2.6-flash</a></td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.14</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.0028</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.28</td>
+          </tr>
+          
+          
+          <tr>
+            <td class="border-t border-neutral-200 px-4 py-3"><a href="/library/mimo-v2.6-pro" class="hover:underline">mimo-v2.6-pro</a></td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.435</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.0036</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.87</td>
+          </tr>
+          
+          
+          <tr>
+            <td class="border-t border-neutral-200 px-4 py-3"><a href="/library/minimax-m3.1-flash" class="hover:underline">minimax-m3.1-flash</a></td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.15</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.015</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.60</td>
+          </tr>
+          
+          
+          <tr>
+            <td class="border-t border-neutral-200 px-4 py-3"><a href="/library/minimax-m3" class="hover:underline">minimax-m3</a></td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.60</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.12</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$2.40</td>
+          </tr>
+          
+          
+          <tr>
+            <td class="border-t border-neutral-200 px-4 py-3"><a href="/library/minimax-m2.7" class="hover:underline">minimax-m2.7</a></td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.30</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.06</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$1.20</td>
+          </tr>
+          
+          
+          <tr>
+            <td class="border-t border-neutral-200 px-4 py-3"><a href="/library/mistral-large-4" class="hover:underline">mistral-large-4</a></td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.70</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.07</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$2.10</td>
+          </tr>
+          
+          
+          <tr>
+            <td class="border-t border-neutral-200 px-4 py-3"><a href="/library/mistral-large-3" class="hover:underline">mistral-large-3</a></td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.50</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">-</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$1.50</td>
+          </tr>
+          
+          
+          <tr>
+            <td class="border-t border-neutral-200 px-4 py-3"><a href="/library/muse-spark-open" class="hover:underline">muse-spark-open</a></td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$1.25</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.15</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$4.25</td>
+          </tr>
+          
+          
+          <tr>
+            <td class="border-t border-neutral-200 px-4 py-3"><a href="/library/nemotron-3-nano" class="hover:underline">nemotron-3-nano</a></td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.06</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">-</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.24</td>
+          </tr>
+          
+          
+          <tr>
+            <td class="border-t border-neutral-200 px-4 py-3"><a href="/library/nemotron-3-super" class="hover:underline">nemotron-3-super</a></td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.015</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.015</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.60</td>
+          </tr>
+          
+          
+          <tr>
+            <td class="border-t border-neutral-200 px-4 py-3"><a href="/library/nemotron-3-ultra" class="hover:underline">nemotron-3-ultra</a></td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.10</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$0.10</td>
+            <td class="border-l border-t border-neutral-200 px-4 py-3 text-right">$3.00</td>
+          </tr>
+          
+          
+        </tbody>
+      </table>
+    </div>
+    </div>
+  </section>
+
+  
+<section class="flex flex-col w-full max-w-xl mx-auto mt-8">
+    <h2 class="text-2xl font-semibold mb-6">Frequently asked questions</h2>
+    <div class="space-y-10">
+      <div id="pricing-teams-faq">
+        <h3 class="text-xl font-semibold mb-4">Team</h3>
+        <ul class="space-y-5">
+          <li>
+            <h4 class="text-base font-semibold mb-1">Who is the Team plan for?</h4>
+            <p class="text-sm">The Team plan is for teams that want shared usage, billing, and administration across the whole team.</p>
+          </li>
+          <li>
+            <h4 class="text-base font-semibold mb-1">How does Team billing work?</h4>
+            <p class="text-sm">Team starts at $500 per month with unlimited users and $1,000 of usage credits included each month, shared across the team.</p>
+            <p class="text-sm mt-2">Usage beyond the included credits draws from a shared team balance billed as you go. You can add a set amount to the balance and turn off automatic usage billing.</p>
+          </li>
+          <li>
+            <h4 class="text-base font-semibold mb-1">Does joining a team change my personal account?</h4>
+            <p class="text-sm">Ollama creates a separate team account for you when you join. You can switch between your team and personal accounts with the same login.</p>
+          </li>
+        </ul>
+      </div>
+
+      <div>
+        <h3 class="text-xl font-semibold mb-4">Models</h3>
+        <ul class="space-y-5">
+          <li>
+            <h4 class="text-base font-semibold mb-1">Which models are available?</h4>
+            <p class="text-sm">See the full list of cloud-enabled models <a href="/search?c=cloud" class="underline">here</a>.</p>
+          </li>
+          <li>
+            <h4 class="text-base font-semibold mb-1">
+</div></section>
+</main></body></html>

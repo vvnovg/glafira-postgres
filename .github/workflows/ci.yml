@@ -42,6 +42,7 @@ jobs:
             crates/pg-advisor -> target
             crates/glafira-mcp-core -> target
             crates/glafira-pg-mcp -> target
+            crates/glafira-llm-pricing -> target
       - name: Системные зависимости Tauri и libclang
         # cmake не нужен: aws-lc-sys собирается крейтом cc, а vendored OpenSSL — Perl и make из образа раннера.
         # libclang-dev — для bindgen: pg_query (pg-advisor) генерирует привязки к libpg_query во время сборки.
@@ -68,6 +69,11 @@ jobs:
           cargo fmt --manifest-path crates/glafira-pg-mcp/Cargo.toml --check
           cargo clippy --manifest-path crates/glafira-pg-mcp/Cargo.toml --all-targets -- -D warnings
           cargo test --manifest-path crates/glafira-pg-mcp/Cargo.toml
+      - name: Цены Ollama Cloud (glafira-llm-pricing)
+        run: |
+          cargo fmt --manifest-path crates/glafira-llm-pricing/Cargo.toml --check
+          cargo clippy --manifest-path crates/glafira-llm-pricing/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path crates/glafira-llm-pricing/Cargo.toml
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       # Фальшивый агент и it_agent собираются только с feature fake-agent (фоновый ассистент P4c).
@@ -79,6 +85,7 @@ jobs:
           cargo deny --manifest-path crates/pg-advisor/Cargo.toml --config deny.toml check licenses
           cargo deny --manifest-path crates/glafira-mcp-core/Cargo.toml --config deny.toml check licenses
           cargo deny --manifest-path crates/glafira-pg-mcp/Cargo.toml --config deny.toml check licenses
+          cargo deny --manifest-path crates/glafira-llm-pricing/Cargo.toml --config deny.toml check licenses
       - name: Ключи bastion
         run: dev/ssh/gen-keys.sh
       - name: Стенд
@@ -137,6 +144,7 @@ jobs:
             src-tauri -> target
             crates/pg-advisor -> target
             crates/glafira-mcp-core -> target
+            crates/glafira-llm-pricing -> target
       # bindgen (pg_query в pg-advisor) грузит libclang во время сборки. macOS — libclang из Xcode образа раннера;
       # windows-2022 — LLVM в C:\Program Files\LLVM (есть в образе): путь задаётся явно, чтобы clang-sys не взял копию
       # из Visual Studio. Установки из сети нет намеренно: пропадёт LLVM из образа — шаг упадёт с понятной ошибкой.
@@ -159,4 +167,7 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml --features fake-agent --lib --test it_agent
       - name: MCP-шлюз — ядро (Unix socket / named pipe, stdio GUI-процесса)
         run: cargo test --manifest-path crates/glafira-mcp-core/Cargo.toml
+      # Файл таблицы цен: атомарная замена (rename поверх файла) и права на каждой ОС.
+      - name: Цены Ollama Cloud (glafira-llm-pricing)
+        run: cargo test --manifest-path crates/glafira-llm-pricing/Cargo.toml
       - run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets

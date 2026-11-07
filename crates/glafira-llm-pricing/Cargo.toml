@@ -1,0 +1,21 @@
+[package]
+name = "glafira-llm-pricing"
+version = "0.1.0"
+edition = "2024"
+description = "Цены облачных моделей Ollama Cloud для инструментов семейства Glafira: встроенная таблица, ключ модели, оценка стоимости запуска по usage, разбор страницы цен, файл таблицы"
+license = "Apache-2.0"
+repository = "https://github.com/vvnovg/glafira-postgres"
+publish = false
+
+# Крейт ничего не знает о приложении и не ходит в сеть сам: страницу цен загружает приложение своим HTTP-клиентом (с его
+# прокси и политикой) и передаёт замыканием или текстом. Зависимости — только те, что уже есть в дереве Glafira
+# (проверяет tests/manifest.rs).
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+time = { version = "0.3", features = ["formatting", "parsing"] }
+
+[dev-dependencies]
+tempfile = "3"
+# Литералы времени в тестах (`datetime!`).
+time = { version = "0.3", features = ["macros"] }
