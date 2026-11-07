@@ -28,7 +28,7 @@ describe("AgentRuns", () => {
     const runs = [
       agentRun({ id: "a0000a1", status: "running", startedAtMs: 1, calls: 3, queuedAtMs: 6 }),
       agentRun({ id: "a0000a2", preset: "claude", model: null, status: "done", proposalIds: ["p1", "p2"], startedAtMs: 0, endedAtMs: 83_000, calls: 12, costUsd: 0.42, queuedAtMs: 5 }),
-      agentRun({ id: "a0000a3", status: "done", summary: "План уже хороший: индекс по status есть", startedAtMs: 0, endedAtMs: 30_000, queuedAtMs: 4 }),
+      agentRun({ id: "a0000a3", status: "done", summary: "**План уже хороший**: индекс по `status` есть", startedAtMs: 0, endedAtMs: 30_000, queuedAtMs: 4 }),
       agentRun({ id: "a0000a4", status: "failed", reason: "timeout", startedAtMs: 0, endedAtMs: 15 * 60_000 + 3_000, queuedAtMs: 3 }),
       agentRun({ id: "a0000a5", kind: "check", requestId: null, connectionId: null, status: "done", startedAtMs: 0, endedAtMs: 23_000, queuedAtMs: 2 }),
       agentRun({ id: "a0000a6", status: "interrupted", queuedAtMs: 1 }),
@@ -68,6 +68,7 @@ describe("AgentRuns", () => {
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     await user.click(toggle);
     expect(toggle).toHaveAttribute("aria-expanded", "true");
+    // Итог — без разметки модели (смоук P4c, R16).
     expect(within(table).getByText("План уже хороший: индекс по status есть")).toBeInTheDocument();
     await user.click(toggle);
     expect(within(table).queryByText("План уже хороший: индекс по status есть")).toBeNull();

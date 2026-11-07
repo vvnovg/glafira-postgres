@@ -7,6 +7,7 @@ import { currentLocale } from "../../../i18n";
 import { formatDuration, formatTimestamp } from "../../../lib/format";
 import { AGENT_RUNS_KEY, isActive, type RunsState } from "../../../lib/useAgentRuns";
 import { ErrorBanner } from "../../common/ErrorBanner";
+import { AgentSummary } from "./AgentSummary";
 import { agentLabel, runResultText, runSeconds } from "./agentText";
 
 /** Сколько последних запусков показывает подраздел (спец. P4c §8.3). */
@@ -20,7 +21,8 @@ function cost(usd: number): string {
 /**
  * «Запуски» подраздела «Фоновый ассистент» (спец. P4c §8.3): последние 20 запусков всех подключений, новые первыми —
  * время постановки в очередь, подключение, запрос (у «Проверить» — «Проверка»), агент и модель, итог, длительность, вызовы,
- * стоимость (если CLI её сообщил). «Ответ ассистента» раскрывает итоговый текст простым текстом, «Показать журнал» — у
+ * стоимость (если CLI её сообщил). «Ответ ассистента» раскрывает итог (`AgentSummary`: без разметки, свёрнут до пяти
+ * строк), «Показать журнал» — у
  * начавшихся запусков, «Остановить» — у ждущего и идущего (запрос остаётся ждущим; итог `cancelled` приходит событием).
  * Подписи кнопок с id запуска — для скринридера. Пока список читается — «Загрузка…», не прочитался — ошибка с «Повторить»
  * (`state`, `error`, `onRetry` — из `useAgentRuns`), а не «Запусков пока нет». «Остановить» во время записи — `aria-disabled`;
@@ -163,7 +165,7 @@ export function AgentRuns({
                     {expanded && (
                       <tr id={summaryId}>
                         <td colSpan={9}>
-                          <p className="llm-text agent-run-summary">{run.summary}</p>
+                          <AgentSummary text={run.summary ?? ""} />
                         </td>
                       </tr>
                     )}

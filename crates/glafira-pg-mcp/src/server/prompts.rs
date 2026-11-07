@@ -164,7 +164,10 @@ pub fn optimize_query_text(request_id: Option<&str>) -> String {
 /// - После шагов — абзац о `requestId` (смоук P4b M5/M6, итог задачи 1 P4c): модели путали id запроса с `queryId` и
 ///   слали в `propose_query_rewrite` лишние поля.
 /// - Чата нет: агент не задаёт вопросов; если улучшить нечего, ничего не предлагает.
-/// - Итог — до 5 строк на языке интерфейса Glafira (`language`: `Russian` / `English`), простым текстом.
+/// - Последнее сообщение — только итог (смоук 2026-11-07, R16): первая строка ровно `SUMMARY` (по ней Glafira отделяет
+///   итог от рассуждений, `agent::process::summary_part` приложения), дальше до 5 коротких строк на языке интерфейса
+///   Glafira (`language`: `Russian` / `English`) простым текстом: id предложений или почему их нет и следующий шаг
+///   пользователя (подписи экранов в “…” — для глоссария R8).
 pub fn optimize_query_run_text(request_id: &str, language: &str) -> String {
     let steps = optimize_steps(&format!(
         "get_optimization_request with requestId \"{request_id}\""
@@ -178,8 +181,12 @@ pub fn optimize_query_run_text(request_id: &str, language: &str) -> String {
          requestId. propose_query_rewrite with the requestId needs only rewrittenSql, indexes, rationale and \
          expectedEffect.\n\n\
          If the query cannot be improved, propose nothing: a proposal that is not better wastes the user's time.\n\n\
-         Finish with a summary of at most 5 lines in {language}: what you proposed and why, or why there are no \
-         proposals. The user reads it in Glafira as plain text: no Markdown, no tables, no code blocks.\n\n\
+         Your last message is only the summary for the user (Glafira shows it as the assistant's answer), and its \
+         first line is exactly SUMMARY. Then at most 5 short lines in {language}, plain text without Markdown (no **, \
+         no backticks, no headings, no tables, no code blocks): the ids of the proposals you made and what each one \
+         changes, or why there is no proposal; and the next step for the user, for example: compare the plans in the \
+         “LLM proposals” panel of the “EXPLAIN console” with “Compare plans” and accept or reject the proposal. Do not \
+         put your reasoning in the last message.\n\n\
          Glafira never runs the proposed SQL or creates the indexes, and nothing in the database can be changed \
          through this gateway."
     )
@@ -510,6 +517,8 @@ mod tests {
     /// Промпт фонового запуска (спец. P4c §4.3): шаги 1–4 — те же, что у `optimize_query`, с явным `requestId`.
     /// Чата нет. Итог — на языке интерфейса Glafira. Абзац о `requestId` (смоук P4b M5/M6, итог задачи 1): модели
     /// путали id запроса с `queryId` и слали лишние поля. «Проверить» (§8.3) — `list_connections` и ответ `OK`.
+    /// Последнее сообщение — только итог (смоук 2026-11-07, R16): первая строка `SUMMARY`, до 5 коротких строк простым
+    /// текстом — id предложений или почему их нет и следующий шаг пользователя; рассуждения — не в нём.
     #[test]
     fn background_run_prompts() {
         let steps = optimize_steps("get_optimization_request with requestId \"r3a9f1c\"");
@@ -527,10 +536,19 @@ mod tests {
             "propose nothing",
             "never the requestId",
             "needs only rewrittenSql",
-            "at most 5 lines in Russian",
-            "plain text",
+            "Your last message is only the summary",
+            "its first line is exactly SUMMARY",
+            "at most 5 short lines in Russian",
+            "plain text without Markdown",
+            "the ids of the proposals",
+            "the next step for the user",
+            "Do not put your reasoning in the last message",
         ] {
             assert!(t.contains(phrase), "{phrase}: {t}");
+        }
+        // Следующий шаг называет экраны, где пользователь сравнивает планы: подписи — в глоссарии (R8).
+        for label in ["LLM proposals", "EXPLAIN console", "Compare plans"] {
+            assert!(quoted(&t).contains(&label), "{label}: {t}");
         }
         for phrase in ["never the requestId", "needs only rewrittenSql"] {
             assert!(
@@ -543,7 +561,8 @@ mod tests {
         assert!(!t.contains(ANSWER_BUDGET), "объём итога задан явно");
         assert!(quoted(&t).contains(&"Send to LLM assistant"), "{t}");
         assert!(
-            optimize_query_run_text("r3a9f1c", "English").contains("at most 5 lines in English")
+            optimize_query_run_text("r3a9f1c", "English")
+                .contains("at most 5 short lines in English")
         );
         let c = check_run_text();
         assert!(c.contains("list_connections") && c.contains("OK"), "{c}");

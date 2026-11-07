@@ -734,7 +734,8 @@ mod job {
 /// строке (у обоих CLI) и `total_cost_usd`; запасной разбор — весь хвост JSON-массивом (`-o json` Qwen Code) или объектом
 /// (`--output-format json` Claude Code). Нет события (срок, остановка, падение) — итога нет: сырой хвост потока JSON —
 /// не ответ ассистента, вывод целиком — в «Показать журнал» (решение контроллера к задаче 6). У простого текста итог —
-/// последние 4 КБ stdout. Управляющие последовательности терминала и символы убираются; до `MAX_SUMMARY_BYTES`.
+/// последние 4 КБ stdout. Управляющие последовательности терминала и символы убираются; из текста берётся только итог
+/// (`summary_part`, смоук 2026-11-07, R16); до `MAX_SUMMARY_BYTES`.
 /// Стоимость показывается только у Claude Code без Ollama — это решает очередь.
 pub fn final_text(output: OutputFormat, stdout_tail: &str) -> (Option<String>, Option<f64>) {
     match output {
@@ -817,10 +818,66 @@ fn result_object(tail: &str) -> Option<Value> {
     None
 }
 
-/// Без управляющих последовательностей и символов (кроме перевода строки и табуляции), до `MAX_SUMMARY_BYTES`: у текста
-/// stdout — конец, у поля `result` — начало.
+/// Без управляющих последовательностей и символов (кроме перевода строки и табуляции), только итог (`summary_part`), до
+/// `MAX_SUMMARY_BYTES`: у текста stdout — конец, у поля `result` — начало.
 fn clean(s: &str, keep_end: bool) -> String {
-    cut_bytes(&plain_text(&strip_ansi(s)), MAX_SUMMARY_BYTES, keep_end)
+    cut_bytes(
+        summary_part(&plain_text(&strip_ansi(s))),
+        MAX_SUMMARY_BYTES,
+        keep_end,
+    )
+}
+
+/// Слово-маркер итога в промпте запуска (`optimize_query_run_text`).
+const SUMMARY_MARKER: &str = "summary";
+
+/// Итог в последнем сообщении агента (смоук 2026-11-07, R16): «Ответ ассистента» — без рассуждений, полный текст
+/// остаётся в журнале запуска.
+/// - Текст после последней строки-маркера `SUMMARY`: регистр не важен, вокруг допустимы `**`, `__`, `#`, двоеточие и
+///   пробелы. Итог может начинаться в строке маркера после двоеточия (`**Summary:** без предложений`).
+/// - После маркера пусто или маркера нет — последний абзац (после последней пустой строки), а если он один — весь
+///   текст.
+pub fn summary_part(text: &str) -> &str {
+    let text = text.trim();
+    let mut after_marker = None;
+    let mut last_blank_end = 0;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+        let body = line.trim_end_matches(['\n', '\r']);
+        if body.trim().is_empty() {
+            last_blank_end = offset;
+        } else if let Some(at) = marker_end(body) {
+            after_marker = Some(start + at);
+        }
+    }
+    if let Some(at) = after_marker {
+        let rest = text[at..].trim();
+        if !rest.is_empty() {
+            return rest;
+        }
+    }
+    let last = text[last_blank_end..].trim();
+    if last.is_empty() { text } else { last }
+}
+
+/// Строка — маркер итога: байт строки, с которого начинается итог (конец строки, если после маркера ничего нет).
+fn marker_end(line: &str) -> Option<usize> {
+    let deco = |c: char| matches!(c, '*' | '_' | '#') || c.is_whitespace();
+    let body = line.trim_start_matches(deco);
+    let word = body.get(..SUMMARY_MARKER.len())?;
+    if !word.eq_ignore_ascii_case(SUMMARY_MARKER) {
+        return None;
+    }
+    let after = &body[SUMMARY_MARKER.len()..];
+    let tail = after.trim_start_matches(|c: char| deco(c) || c == ':');
+    if tail.trim().is_empty() {
+        return Some(line.len());
+    }
+    // Текст в строке маркера — итог, только если маркер отделён двоеточием («Summary of the plan» — не маркер).
+    let decoration = &after[..after.len() - tail.len()];
+    decoration.contains(':').then_some(line.len() - tail.len())
 }
 
 fn cut_bytes(s: &str, max: usize, keep_end: bool) -> String {
@@ -1016,6 +1073,74 @@ mod tests {
         assert_eq!(
             strip_ansi("a\u{1b}[1;31mb\u{1b}[0mc\u{1b}]8;;http://x\u{1b}\\d"),
             "abcd"
+        );
+    }
+
+    /// Смоук 2026-11-07, R16: «Ответ ассистента» — только итог. Текст после последней строки `SUMMARY` (регистр не важен,
+    /// `**`, `#` и двоеточие вокруг допустимы); без неё — последний абзац; пустой текст — без итога.
+    #[test]
+    fn the_summary_is_the_part_after_the_marker_or_the_last_paragraph() {
+        let reasoning = "Settings confirm the picture: `jit_above_cost=1000`.\n\nNow I have the complete picture.";
+        for marker in [
+            "SUMMARY",
+            "Summary",
+            "**SUMMARY**",
+            "**Summary:**",
+            "## SUMMARY",
+            "SUMMARY:",
+            "  summary  ",
+        ] {
+            let text = format!(
+                "{reasoning}\nSUMMARY\nnot this one\n\n{marker}\nПредложение p3cf855: индекс по created_at.\n\nДальше: сравните планы."
+            );
+            assert_eq!(
+                summary_part(&text),
+                "Предложение p3cf855: индекс по created_at.\n\nДальше: сравните планы.",
+                "{marker}"
+            );
+        }
+        // Маркер со строкой итога в той же строке.
+        assert_eq!(
+            summary_part("thinking\n**Summary:** no proposal, the index is used\nNext: ANALYZE"),
+            "no proposal, the index is used\nNext: ANALYZE"
+        );
+        // Слово в рассуждениях — не маркер.
+        assert_eq!(
+            summary_part("Summary of the plan follows\n\nИтог: без предложений"),
+            "Итог: без предложений"
+        );
+        // Без маркера — последний абзац (после последней пустой строки), список внутри него — целиком.
+        assert_eq!(
+            summary_part(&format!(
+                "{reasoning}\n\nЗапрос оптимален.\n1. Выполните ANALYZE shop.audit.\n2. Поднимите jit_above_cost.\n\n  \n"
+            )),
+            "Запрос оптимален.\n1. Выполните ANALYZE shop.audit.\n2. Поднимите jit_above_cost."
+        );
+        assert_eq!(
+            summary_part("one\ntwo"),
+            "one\ntwo",
+            "абзац один — весь текст"
+        );
+        // Маркер в конце без текста после него — как без маркера.
+        assert_eq!(summary_part("a\n\nb\nSUMMARY"), "b\nSUMMARY");
+        assert_eq!(summary_part("  \n "), "");
+        // Итог потока JSON — после маркера; полный текст остаётся в журнале.
+        let event = serde_json::json!({
+            "type": "result",
+            "result": format!("{reasoning}\n\n**SUMMARY**\nБез предложений: план уже хороший.")
+        });
+        assert_eq!(
+            final_text(OutputFormat::StreamJson, &event.to_string())
+                .0
+                .as_deref(),
+            Some("Без предложений: план уже хороший.")
+        );
+        assert_eq!(
+            final_text(
+                OutputFormat::StreamJson,
+                r#"{"type":"result","result":"  \n "}"#
+            ),
+            (None, None)
         );
     }
 

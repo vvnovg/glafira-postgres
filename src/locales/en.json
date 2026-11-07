@@ -2298,6 +2298,8 @@
       "stopped": "The run was stopped",
       "interrupted": "The run was interrupted: Glafira was closed",
       "summary": "Assistant's answer",
+      "summaryAll": "Show all",
+      "summaryLess": "Show less",
       "showLog": "Show log",
       "start": "Start the background assistant",
       "copyLine": "Copy the line for the chat",

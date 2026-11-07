@@ -162,8 +162,8 @@ the tools are replaced with $1, $2 and so on: do not try to restore them.
 Tool answers are compact JSON. Fields that are null are omitted, and fractional numbers are rounded.
 
 The run has a time limit and a limit on tool calls: do not repeat calls without need. Follow the steps \
-of the prompt and finish with a short summary in your last message: what you proposed and why, or why \
-there is no proposal.";
+of the prompt. Your last message is only the short summary that the prompt asks for, without your \
+reasoning: what you proposed, or why there is no proposal.";
 
 /// Сценарии P4b (спец. §9), в Qwen Code — слэш-команды «MCP: glafira-pg».
 pub const PROMPT_NAMES: [&str; 4] = [

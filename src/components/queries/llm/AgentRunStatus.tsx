@@ -5,6 +5,7 @@ import type { AgentRun, OptimizationRequest } from "../../../api/types";
 import { elapsedText, isActive } from "../../../lib/useAgentRuns";
 import { useShownProposals } from "../../../state/shownProposals";
 import { AgentLogDialog } from "../../mcp/agent/AgentLogDialog";
+import { AgentSummary } from "../../mcp/agent/AgentSummary";
 import { failReasonText, warningText } from "../../mcp/agent/agentText";
 
 export interface AgentRunStatusProps {
@@ -92,7 +93,8 @@ function progressText(run: AgentRun, now: number, t: TFunction): string {
  * сообщение — своей строкой (смоук P4b, Z1): фаза, предупреждения Ollama, «Ассистент прислал N предложений» и итог
  * копирования — в живой области; ход работы (время, вызовы, инструмент) — отдельной строкой вне её, чтобы скринридер не
  * читал его каждую секунду. Действия — ссылками отдельным рядом, вне живой области: «Ответ ассистента» (итог простым
- * текстом, без разметки), «Показать журнал», «Повторить» / «Запустить фонового ассистента», «Скопировать строку для чата»
+ * текстом без разметки, свёрнут до пяти строк, во всю ширину строки — `AgentSummary`, смоук P4c, R16), «Показать журнал»,
+ * «Повторить» / «Запустить фонового ассистента», «Скопировать строку для чата»
  * (видна и во время работы: чат и фон работают с одним запросом), «Отменить запрос» (после ошибки, остановки или прерывания
  * запуска — «Закрыть запрос», `closesAfterFailure`). О присланных предложениях строка
  * пишет, пока панель «Предложения LLM» их не показала (`useShownProposals`); дальше у отвеченного запроса — обычное
@@ -190,7 +192,11 @@ export function AgentRunStatus({ request, run, ahead, chatLine, busy, onRetry, o
           </button>
         </div>
       )}
-      {summary && <div id={summaryId}>{summaryOpen && <p className="llm-text agent-run-summary">{summary}</p>}</div>}
+      {summary && (
+        <div id={summaryId} className="agent-run-answer">
+          {summaryOpen && <AgentSummary text={summary} />}
+        </div>
+      )}
       {logOpen && run !== null && <AgentLogDialog runId={run.id} onClose={() => setLogOpen(false)} />}
     </div>
   );

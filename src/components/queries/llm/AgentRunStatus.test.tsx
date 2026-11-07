@@ -80,7 +80,7 @@ describe("AgentRunStatus", () => {
     expect(screen.getByText("0:05 · вызовов: 0")).toBeInTheDocument();
   });
 
-  it("закончил без предложений: «Ответ ассистента» раскрывает итог простым текстом; «Повторить», копирование, отмена", async () => {
+  it("закончил без предложений: «Ответ ассистента» раскрывает итог без разметки; «Повторить», копирование, отмена", async () => {
     const user = userEvent.setup();
     view({ run: agentRun({ status: "done", startedAtMs: NOW - 60_000, endedAtMs: NOW, summary: "**Индекс уже есть**: план не улучшить" }) });
     expect(screen.getByRole("status")).toHaveTextContent(/^Ассистент закончил без предложений$/);
@@ -90,8 +90,9 @@ describe("AgentRunStatus", () => {
     expect(screen.queryByText(/Индекс уже есть/)).toBeNull();
     await user.click(toggle);
     expect(toggle).toHaveAttribute("aria-expanded", "true");
-    // Разметку модели строка не применяет.
-    expect(screen.getByText("**Индекс уже есть**: план не улучшить")).toBeInTheDocument();
+    // Разметка модели не показывается сырыми символами (смоук P4c, R16).
+    expect(screen.getByText("Индекс уже есть: план не улучшить")).toBeInTheDocument();
+    expect(screen.queryByText(/\*\*/)).toBeNull();
     await user.click(screen.getByRole("button", { name: "Повторить" }));
     expect(onRetry).toHaveBeenCalledTimes(1);
     await user.click(screen.getByRole("button", { name: "Скопировать строку для чата" }));
@@ -99,6 +100,18 @@ describe("AgentRunStatus", () => {
     expect(screen.getByRole("status")).toHaveTextContent(`Скопировано: «${LINE}»`);
     await user.click(screen.getByRole("button", { name: "Отменить запрос" }));
     expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("длинный «Ответ ассистента» свёрнут до пяти строк: «Показать всё» внутри строки статуса", async () => {
+    const user = userEvent.setup();
+    const summary = ["SUMMARY 1", "2", "3", "4", "5", "Дальше: сравните планы"].join("\n");
+    view({ run: agentRun({ status: "done", startedAtMs: NOW - 60_000, endedAtMs: NOW, summary }) });
+    await user.click(screen.getByRole("button", { name: "Ответ ассистента" }));
+    expect(screen.queryByText(/Дальше/)).toBeNull();
+    const all = within(group()).getByRole("button", { name: "Показать всё" });
+    await user.click(all);
+    expect(screen.getByText(/Дальше: сравните планы/)).toBeInTheDocument();
+    expect(all).toHaveTextContent("Свернуть");
   });
 
   it("буфер недоступен — строку предлагают набрать руками", async () => {

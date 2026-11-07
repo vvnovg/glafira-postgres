@@ -633,7 +633,10 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .agent-run-lines p, .agent-run-progress { margin: 0; overflow-wrap: anywhere; }
 .agent-run-progress { font-variant-numeric: tabular-nums; }
 .agent-run-actions { display: flex; flex-wrap: wrap; gap: 2px 12px; }
-.agent-run-summary { margin: 2px 0; max-width: 80ch; }
+.agent-run-answer { align-self: stretch; min-width: 0; }
+.agent-run-summary { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; margin: 2px 0; }
+.agent-run-summary .llm-text { align-self: stretch; }
+.agent-run-summary .llm-text.clamped { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 5; line-clamp: 5; overflow: hidden; }
 .agent-log-dialog { width: min(900px, 100%); }
 .agent-log { max-height: 60vh; overflow: auto; margin: 0; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-alt); white-space: pre-wrap; overflow-wrap: anywhere; }
 /* «Фоновый ассистент» в «Настройках» (P4c): поле с кнопкой рядом, под полем — ошибка и пояснения. Подпись строки — по верху
