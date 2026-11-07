@@ -177,7 +177,7 @@ GPG_IT_PATRONI=http://localhost:8011,http://localhost:8012,http://localhost:8013
 
 ## Релиз
 `docs/release-checklist.md`: версии в трёх манифестах, раздел версии в `CHANGELOG.md` (английский) и `docs/changelog/ru.md`, `THIRD_PARTY.md`,
-`node scripts/check-release.mjs vX.Y.Z`, тег `vX.Y.Z` → workflow `release` собирает установщики на трёх ОС,
+сверка встроенных цен Ollama Cloud (`crates/glafira-llm-pricing`), `node scripts/check-release.mjs vX.Y.Z`, тег `vX.Y.Z` → workflow `release` собирает установщики на трёх ОС,
 подписывает macOS-сборки и публикует релиз с `latest.json` в `vvnovg/glafira-postgres-releases`.
 
 ## Где хранятся данные
@@ -188,4 +188,5 @@ GPG_IT_PATRONI=http://localhost:8011,http://localhost:8012,http://localhost:8013
 - Запросы на оптимизацию и предложения LLM: `llm-requests.json`, `llm-proposals.json` (0600) — в каталоге данных.
 - Фоновый ассистент: `agent-runs.json` (запуски), `agent-runs/` (журналы запусков и MCP-конфиги на время запуска, 0600),
   `agent-work/` (пустая рабочая папка агента) — в каталоге данных; настройки — раздел `mcp.agent` в `settings.json`.
+  Таблица цен Ollama Cloud после «Обновить цены» — `ollama-prices.json` (0600); нет её — встроенная.
 - Логи: `RUST_LOG=debug pnpm tauri dev`.
