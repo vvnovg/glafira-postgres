@@ -19,6 +19,9 @@ export interface ExplainPrefill {
   autoPlan?: boolean;
 }
 
+/** Раздел страницы «Настройки» (смоук P4c, R9): «Язык», «Отображение» и разделы группы «LLM-ассистенты (MCP)». */
+export type SettingsSection = "language" | "display" | "mcp" | "agent" | "sessions" | "audit";
+
 export type TabSpec =
   /** folderId — папка нового подключения («Новое подключение здесь»); copyOf — id подключения, копия которого создаётся. */
   | { kind: "connection-form"; connectionId: string | null; folderId?: string | null; copyOf?: string }
@@ -28,10 +31,10 @@ export type TabSpec =
   /** Справка: глава и раздел руководства (F1, ссылки). */
   | { kind: "help"; chapter?: string; anchor?: string }
   /**
-   * Настройки; section — раздел, к которому прокрутить: MCP (индикатор LLM) или его подраздел «Фоновый ассистент»
-   * (индикатор во время фонового запуска). Вкладка одна.
+   * Настройки; section — выбранный раздел страницы (нет — «Язык»). Индикатор LLM открывает «Сервер и подключение
+   * клиентов» (`mcp`), а во время фонового запуска — «Фоновый ассистент» (`agent`). Вкладка одна.
    */
-  | { kind: "settings"; section?: "mcp" | "agent" }
+  | { kind: "settings"; section?: SettingsSection }
   /** Объекты базы из дерева каталога. Таблица, представление и последовательность — по схеме и имени, функция — по oid (имена перегружены). */
   | { kind: "table"; connectionId: string; database: string; schema: string; name: string }
   | { kind: "view"; connectionId: string; database: string; schema: string; name: string; matview: boolean }

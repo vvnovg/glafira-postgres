@@ -74,9 +74,9 @@ export function AgentRuns({
   };
   return (
     <>
-      <h5 ref={headingRef} tabIndex={-1}>
+      <h4 ref={headingRef} tabIndex={-1}>
         {t("settings.mcp.agent.runs.title")}
-      </h5>
+      </h4>
       {state === "loading" ? (
         <p className="muted">{t("common.loading")}</p>
       ) : state === "failed" ? (

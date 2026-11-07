@@ -62,9 +62,9 @@ function detailsText(e: McpAuditEntry, t: TFunction): string {
 }
 
 /**
- * Журнал MCP (спец. P4 §10.3, §11): последние записи `mcp-audit.jsonl`, «Обновить» и «Показать файл». У успешных
- * `explain_query` (и `run_select` P4b) — «Открыть в консоли EXPLAIN», если раздел передал `onOpenInConsole`;
- * неактивная кнопка называет причину в подсказке.
+ * Журнал MCP (спец. P4 §10.3, §11): последние записи `mcp-audit.jsonl`, «Обновить» и «Показать файл»; заголовок — у раздела
+ * «Журнал» «Настроек». У успешных `explain_query` (и `run_select` P4b) — «Открыть в консоли EXPLAIN», если раздел передал
+ * `onOpenInConsole`; неактивная кнопка называет причину в подсказке.
  */
 export function McpAudit({ status, onOpenInConsole }: { status: McpStatus; onOpenInConsole?: (entry: McpAuditEntry) => void }) {
   const { t } = useTranslation();
@@ -75,7 +75,6 @@ export function McpAudit({ status, onOpenInConsole }: { status: McpStatus; onOpe
   return (
     <>
       <div className="toolbar">
-        <h4>{t("settings.mcp.audit.title")}</h4>
         <button type="button" onClick={() => void audit.refetch()}>
           {t("settings.mcp.audit.refresh")}
         </button>

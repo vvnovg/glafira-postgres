@@ -192,6 +192,33 @@ describe("AgentSection", () => {
     expect(screen.getByRole("button", { name: "Сохранить" })).toBeDisabled();
   });
 
+  it("список моделей перечитывается при входе в поле «Модель» и после «Найти»; пока читается новый, виден прежний", async () => {
+    /** Ответ, который тест отдаёт сам: список, который «читается». */
+    let answer: (v: { ids: string[]; default: string | null; source: "qwen" }) => void = () => {};
+    vi.mocked(api.listAgentModels)
+      .mockResolvedValueOnce({ ids: ["qwen3.8:27b"], default: null, source: "qwen" })
+      .mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)))
+      .mockResolvedValue({ ids: ["qwen3.8:27b", "glm-5.3-flash:cloud", "qwen3.6-64k:35b-a3b"], default: null, source: "qwen" });
+    vi.mocked(api.detectAgentCli).mockResolvedValue({ path: "/opt/homebrew/bin/qwen", version: "0.26.5", belowMinimum: false, error: null });
+    const user = userEvent.setup();
+    const { container } = renderWithClient(<AgentSection status={mcpStatus()} />);
+    const options = () => Array.from(container.querySelectorAll("datalist option")).map((o) => o.getAttribute("value"));
+    const model = await screen.findByRole("combobox", { name: "Модель" });
+    await waitFor(() => expect(options()).toEqual(["qwen3.8:27b"]));
+    expect(api.listAgentModels).toHaveBeenCalledTimes(1);
+    // Модель добавили в ~/.qwen/settings.json при открытых «Настройках»: вход в поле перечитывает список.
+    await user.click(model);
+    expect(api.listAgentModels).toHaveBeenCalledTimes(2);
+    expect(options()).toEqual(["qwen3.8:27b"]);
+    act(() => answer({ ids: ["qwen3.8:27b", "glm-5.3-flash:cloud"], default: null, source: "qwen" }));
+    await waitFor(() => expect(options()).toEqual(["qwen3.8:27b", "glm-5.3-flash:cloud"]));
+    // «Найти» — тоже.
+    await user.click(screen.getByRole("button", { name: "Найти" }));
+    await waitFor(() => expect(options()).toEqual(["qwen3.8:27b", "glm-5.3-flash:cloud", "qwen3.6-64k:35b-a3b"]));
+    expect(api.listAgentModels).toHaveBeenCalledTimes(3);
+    expect(api.listAgentModels).toHaveBeenLastCalledWith("qwen");
+  });
+
   it("список моделей не прочитан — свободный ввод с пояснением", async () => {
     vi.mocked(api.listAgentModels).mockRejectedValue({ code: "INTERNAL", message: "boom", retryable: false });
     renderWithClient(<AgentSection status={mcpStatus()} />);
@@ -446,6 +473,63 @@ describe("AgentSection", () => {
     expect(screen.queryByText("Проверка…")).toBeNull();
   });
 
+  it("итог «Проверить» убирается, когда в сохранённых настройках сменились агент, программа или модель; другие поля его не трогают", async () => {
+    vi.mocked(api.getAgentSettings).mockResolvedValue(configured);
+    vi.mocked(api.setAgentSettings).mockImplementation(async (s) => s);
+    const check = agentRun({ id: "a0c0c0c", kind: "check", requestId: null, connectionId: null, queuedAtMs: 10 });
+    vi.mocked(api.checkAgent).mockResolvedValue(check);
+    const user = userEvent.setup();
+    renderWithClient(<AgentSection status={ready()} />);
+    const button = await screen.findByRole("button", { name: "Проверить" });
+    await waitFor(() => expect(button).toBeEnabled());
+    const passed = async (run = check) => {
+      await user.click(screen.getByRole("button", { name: "Проверить" }));
+      await waitFor(() => expect(listeners("agent://runs").length).toBeGreaterThan(0));
+      emitEvent("agent://runs", { ...run, status: "done", startedAtMs: 1_000, endedAtMs: 24_000, calls: 1 });
+      expect(await screen.findByText("Работает: Qwen Code 0.26.5, qwen3.6-64k:35b-a3b, 23 с")).toBeInTheDocument();
+    };
+    const save = async () => {
+      await user.click(screen.getByRole("button", { name: "Сохранить" }));
+      expect(await screen.findByText("Сохранено")).toBeInTheDocument();
+    };
+    await passed();
+    // Срок запуска — не агент, не программа и не модель: итог остаётся.
+    const timeout = screen.getByRole("textbox", { name: "Срок запуска, мин" });
+    await user.clear(timeout);
+    await user.type(timeout, "20");
+    // Несохранённая правка итог не убирает: «Проверить» просит сохранить.
+    expect(screen.getByText("Работает: Qwen Code 0.26.5, qwen3.6-64k:35b-a3b, 23 с")).toBeInTheDocument();
+    await save();
+    expect(screen.getByText("Работает: Qwen Code 0.26.5, qwen3.6-64k:35b-a3b, 23 с")).toBeInTheDocument();
+    // Модель сменилась и сохранена — итог о прежних настройках убран.
+    await user.type(screen.getByRole("combobox", { name: "Модель" }), "glm-5.3-flash:cloud");
+    await save();
+    expect(screen.queryByText(/^Работает:/)).toBeNull();
+    // Вернули прежнюю модель — итог не возвращается: его даёт только новая проверка.
+    await user.clear(screen.getByRole("combobox", { name: "Модель" }));
+    await save();
+    expect(screen.queryByText(/^Работает:/)).toBeNull();
+    // Программа: новая проверка, затем путь сменился — итог убран; «Не работает» с журналом — тоже.
+    vi.mocked(api.checkAgent).mockResolvedValue({ ...check, id: "a0c0c0d", queuedAtMs: 11 });
+    await user.click(screen.getByRole("button", { name: "Проверить" }));
+    emitEvent("agent://runs", { ...check, id: "a0c0c0d", queuedAtMs: 11, status: "failed", reason: "notConnected", startedAtMs: 1_000, endedAtMs: 5_000 });
+    expect(await screen.findByText("Не работает: агент не подключился к Glafira")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Показать журнал проверки" })).toBeInTheDocument();
+    const path = screen.getByRole("textbox", { name: "Программа" });
+    await user.clear(path);
+    await user.type(path, "/usr/local/bin/qwen");
+    await save();
+    expect(screen.queryByText(/^Не работает:/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Показать журнал проверки" })).toBeNull();
+    // Агент: Qwen Code → Claude Code — тоже.
+    vi.mocked(api.checkAgent).mockResolvedValue({ ...check, id: "a0c0c0e", queuedAtMs: 12 });
+    await passed({ ...check, id: "a0c0c0e", queuedAtMs: 12 });
+    await user.click(screen.getByRole("radio", { name: "Claude Code" }));
+    await user.type(screen.getByRole("textbox", { name: "Программа" }), "/Users/me/.local/bin/claude");
+    await save();
+    expect(screen.queryByText(/^Работает:/)).toBeNull();
+  });
+
   it("«Проверить» неактивна, пока программа не задана или есть несохранённые изменения", async () => {
     const user = userEvent.setup();
     const first = renderWithClient(<AgentSection status={mcpStatus()} />);
@@ -490,15 +574,5 @@ describe("AgentSection", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("disk");
     await user.click(screen.getByRole("button", { name: "Повторить" }));
     expect(await screen.findByRole("checkbox", { name: TOGGLE })).toBeInTheDocument();
-  });
-
-  it("открытие подраздела индикатором (`section: \"agent\"`) прокручивает его в видимую часть", async () => {
-    const scroll = vi.fn();
-    Element.prototype.scrollIntoView = scroll;
-    useWorkspace.setState({ tabs: [{ kind: "settings", section: "agent", id: "settings" }], activeId: "settings" });
-    renderWithClient(<AgentSection status={mcpStatus()} />);
-    await waitFor(() => expect(scroll).toHaveBeenCalledTimes(1));
-    expect(scroll.mock.contexts[0]).toBe(screen.getByRole("region", { name: "Фоновый ассистент" }));
-    delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
   });
 });

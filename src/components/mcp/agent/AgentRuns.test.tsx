@@ -108,7 +108,7 @@ describe("AgentRuns", () => {
     vi.mocked(api.stopAgentRun).mockResolvedValue(agentRun({ id: "a0000a2", status: "cancelled" }));
     await user.click(screen.getByRole("button", { name: "Остановить запуск a0000a2" }));
     rerender(<AgentRuns runs={[{ ...running, status: "cancelled", endedAtMs: 2 }, { ...queued, status: "cancelled" }]} onShowLog={onShowLog} />);
-    expect(screen.getByRole("heading", { level: 5, name: "Запуски" })).toHaveFocus();
+    expect(screen.getByRole("heading", { level: 4, name: "Запуски" })).toHaveFocus();
   });
 
   it("список читается — «Загрузка…»; не прочитался — ошибка с «Повторить»; не «Запусков пока нет»", async () => {

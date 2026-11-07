@@ -2,7 +2,7 @@ import { type KeyboardEvent, type PointerEvent, useEffect, useRef, useState } fr
 import { useTranslation } from "react-i18next";
 import { openSupport } from "../lib/links";
 import { clampSidebar, SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, useSidebarWidth } from "../lib/useSidebarWidth";
-import { useWorkspace } from "../state/workspace";
+import { tabId, useWorkspace } from "../state/workspace";
 import { ConnectionTree } from "./connections/tree/ConnectionTree";
 import { LlmIndicator } from "./mcp/LlmIndicator";
 
@@ -84,6 +84,13 @@ function Resizer({
 export function Sidebar() {
   const { t } = useTranslation();
   const open = useWorkspace((s) => s.open);
+  // «Настройки» при открытой вкладке настроек только переключаются на неё: выбранный там раздел (`section`) остаётся.
+  const openSettings = () => {
+    const { tabs, activate } = useWorkspace.getState();
+    const id = tabId({ kind: "settings" });
+    if (tabs.some((x) => x.id === id)) activate(id);
+    else open({ kind: "settings" });
+  };
   const [width, setWidth] = useSidebarWidth();
   const asideRef = useRef<HTMLElement>(null);
   /** Фактическая ширина панели (ResizeObserver); `null` — не измерена. */
@@ -110,7 +117,7 @@ export function Sidebar() {
         <ConnectionTree />
         <div className="sidebar-footer">
           <LlmIndicator />
-          <button type="button" className="link" onClick={() => open({ kind: "settings" })}>
+          <button type="button" className="link" onClick={openSettings}>
             {t("sidebar.settings")}
           </button>
           <button type="button" className="link" onClick={openSupport}>

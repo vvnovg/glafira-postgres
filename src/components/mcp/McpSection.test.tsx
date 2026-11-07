@@ -35,7 +35,7 @@ vi.mock("../../api/client", async (importOriginal) => {
 });
 
 import { api } from "../../api/client";
-import { McpSection } from "./McpSection";
+import { McpAgentSection, McpAuditSection, McpServerSection, McpSessionsSection } from "./McpSection";
 
 const toggleName = "Разрешить MCP-сервер";
 
@@ -55,7 +55,7 @@ describe("McpSection", () => {
     vi.mocked(api.getMcpStatus).mockResolvedValue(mcpStatus({ server: "stopped" }));
     vi.mocked(api.setMcpEnabled).mockResolvedValue(mcpStatus({ server: "running" }));
     const user = userEvent.setup();
-    renderWithClient(<McpSection />);
+    renderWithClient(<McpServerSection />);
     const toggle = await screen.findByRole("checkbox", { name: toggleName });
     expect(toggle).not.toBeChecked();
     expect(screen.getByText("Сервер выключен")).toBeInTheDocument();
@@ -63,15 +63,10 @@ describe("McpSection", () => {
     expect(api.setMcpEnabled).toHaveBeenCalledWith(true);
     await waitFor(() => expect(toggle).toBeChecked());
     expect(screen.getByText("Сервер работает")).toBeInTheDocument();
+    // По умолчанию выбран Qwen Code: команда и файл ~/.qwen/settings.json.
     expect(await screen.findByText(MCP_CONFIGS.qwenCode)).toBeInTheDocument();
     expect(screen.getByText("Qwen Code: команда")).toBeInTheDocument();
     expect(screen.getByText("Qwen Code: файл ~/.qwen/settings.json")).toBeInTheDocument();
-    expect(screen.getByText(MCP_CONFIGS.claudeCode)).toBeInTheDocument();
-    expect(screen.getByText("Claude Desktop: файл claude_desktop_config.json")).toBeInTheDocument();
-    expect(screen.getByText("Cursor: файл ~/.cursor/mcp.json")).toBeInTheDocument();
-    // Любой stdio-клиент: команда и аргументы — JSON.
-    const stdio = JSON.stringify({ command: MCP_CONFIGS.command, args: ["mcp"] }, null, 2);
-    expect(screen.getByText((_, el) => el?.tagName === "PRE" && el.textContent === stdio)).toBeInTheDocument();
     // Буфер обмена — заглушкой, как в TestPanel.test (после userEvent.setup, который ставит свою).
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
@@ -80,20 +75,63 @@ describe("McpSection", () => {
     expect(await screen.findByText("Скопировано")).toBeInTheDocument();
   });
 
+  it("«Подключить клиент»: выбор клиента — фрагменты только выбранного, тексты и «Копировать» прежние", async () => {
+    vi.mocked(api.getMcpStatus).mockResolvedValue(mcpStatus());
+    const user = userEvent.setup();
+    renderWithClient(<McpServerSection />);
+    const group = await screen.findByRole("radiogroup", { name: "Подключить клиент" });
+    expect(within(group).getAllByRole("radio").map((r) => r.parentElement?.textContent)).toEqual([
+      "Qwen Code",
+      "Claude Code",
+      "Claude Desktop",
+      "Cursor",
+      "Другой stdio-клиент",
+    ]);
+    expect(within(group).getByRole("radio", { name: "Qwen Code" })).toBeChecked();
+    await screen.findByText(MCP_CONFIGS.qwenCode);
+    /** Подписи фрагментов на экране. */
+    const labels = () => Array.from(document.querySelectorAll(".mcp-snippet strong")).map((x) => x.textContent);
+    expect(labels()).toEqual(["Qwen Code: команда", "Qwen Code: файл ~/.qwen/settings.json"]);
+
+    await user.click(within(group).getByRole("radio", { name: "Claude Code" }));
+    expect(labels()).toEqual(["Claude Code: команда"]);
+    expect(screen.getByText(MCP_CONFIGS.claudeCode)).toBeInTheDocument();
+    expect(screen.queryByText(MCP_CONFIGS.qwenCode)).toBeNull();
+    expect(screen.getByRole("button", { name: "Копировать: Claude Code: команда" })).toBeInTheDocument();
+
+    await user.click(within(group).getByRole("radio", { name: "Claude Desktop" }));
+    expect(labels()).toEqual(["Claude Desktop: файл claude_desktop_config.json"]);
+    expect(screen.getByRole("button", { name: "Копировать: Claude Desktop: файл claude_desktop_config.json" })).toBeInTheDocument();
+
+    await user.click(within(group).getByRole("radio", { name: "Cursor" }));
+    expect(labels()).toEqual(["Cursor: файл ~/.cursor/mcp.json"]);
+
+    await user.click(within(group).getByRole("radio", { name: "Другой stdio-клиент" }));
+    expect(labels()).toEqual(["Любой stdio-клиент: команда и аргументы"]);
+    // Любой stdio-клиент: команда и аргументы — JSON.
+    const stdio = JSON.stringify({ command: MCP_CONFIGS.command, args: ["mcp"] }, null, 2);
+    expect(screen.getByText((_, el) => el?.tagName === "PRE" && el.textContent === stdio)).toBeInTheDocument();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    await user.click(screen.getByRole("button", { name: "Копировать: Любой stdio-клиент: команда и аргументы" }));
+    expect(writeText).toHaveBeenCalledWith(stdio);
+  });
+
   it("политика запрещает MCP: выключатель неактивен с пометкой, фрагментов нет", async () => {
     vi.mocked(api.getMcpStatus).mockResolvedValue(mcpStatus({ server: "stopped", policyEnabled: false }));
-    renderWithClient(<McpSection />);
+    renderWithClient(<McpServerSection />);
     const toggle = await screen.findByRole("checkbox", { name: toggleName });
     expect(toggle).toBeDisabled();
     expect(toggle).not.toBeChecked();
     expect(screen.getByText("Отключено вашей организацией")).toBeInTheDocument();
     expect(screen.queryByText("Подключить клиент")).not.toBeInTheDocument();
+    expect(screen.queryByRole("radiogroup")).toBeNull();
     expect(api.getMcpClientConfigs).not.toHaveBeenCalled();
   });
 
   it("счётчики подключений, потолок политики, другой экземпляр, ошибка сервера", async () => {
     vi.mocked(api.getMcpStatus).mockResolvedValue(mcpStatus({ openConnections: 3 }));
-    const first = renderWithClient(<McpSection />);
+    const first = renderWithClient(<McpServerSection />);
     expect(await screen.findByText("Открыто для LLM: 3")).toBeInTheDocument();
     expect(screen.queryByText("Доступ к данным ограничен вашей организацией")).not.toBeInTheDocument();
     first.unmount();
@@ -101,7 +139,7 @@ describe("McpSection", () => {
     vi.mocked(api.getMcpStatus).mockResolvedValue(
       mcpStatus({ openConnections: 3, dataConnections: 1, maxAccess: "diagnostics", server: "otherInstance" }),
     );
-    const second = renderWithClient(<McpSection />);
+    const second = renderWithClient(<McpServerSection />);
     expect(await screen.findByText("Открыто для LLM: 3, из них с данными: 1")).toBeInTheDocument();
     expect(screen.getByText("Доступ к данным ограничен вашей организацией")).toBeInTheDocument();
     expect(screen.getByText("Сервер работает в другом окне Glafira")).toBeInTheDocument();
@@ -109,7 +147,7 @@ describe("McpSection", () => {
     second.unmount();
 
     vi.mocked(api.getMcpStatus).mockResolvedValue(mcpStatus({ server: "error", error: "Address already in use" }));
-    renderWithClient(<McpSection />);
+    renderWithClient(<McpServerSection />);
     expect(await screen.findByText("Ошибка сервера: Address already in use")).toBeInTheDocument();
   });
 
@@ -125,7 +163,7 @@ describe("McpSection", () => {
     );
     vi.mocked(api.disconnectMcpSessions).mockResolvedValue(undefined);
     const user = userEvent.setup();
-    renderWithClient(<McpSection />);
+    renderWithClient(<McpSessionsSection />);
     const table = await screen.findByRole("table", { name: "Активные сессии" });
     const rows = within(table).getAllByRole("row").slice(1);
     expect(rows[0]).toHaveTextContent("qwen-code 0.26.7");
@@ -143,7 +181,7 @@ describe("McpSection", () => {
     vi.mocked(api.getMcpStatus).mockResolvedValue(
       mcpStatus({ sessions: [runSession], agent: agentStatus({ enabled: true, configured: true, running: { runId: "a1b2c3d", requestId: "r3a9f1c" } }) }),
     );
-    const first = renderWithClient(<McpSection />);
+    const first = renderWithClient(<McpSessionsSection />);
     const table = await screen.findByRole("table", { name: "Активные сессии" });
     expect(within(table).getAllByRole("row")[1]).toHaveTextContent("Фоновый ассистент · запрос r3a9f1c");
     expect(within(table).getByRole("button", { name: "Отключить сессию клиента Фоновый ассистент · запрос r3a9f1c" })).toBeInTheDocument();
@@ -151,40 +189,39 @@ describe("McpSection", () => {
     vi.mocked(api.getMcpStatus).mockResolvedValue(
       mcpStatus({ sessions: [{ ...runSession, runId: "a0c0c0c" }], agent: agentStatus({ running: { runId: "a0c0c0c", requestId: null } }) }),
     );
-    const second = renderWithClient(<McpSection />);
+    const second = renderWithClient(<McpSessionsSection />);
     expect(await screen.findByText("Фоновый ассистент · проверка")).toBeInTheDocument();
     second.unmount();
     vi.mocked(api.getMcpStatus).mockResolvedValue(mcpStatus({ sessions: [runSession] }));
-    renderWithClient(<McpSection />);
+    renderWithClient(<McpSessionsSection />);
     const rows = within(await screen.findByRole("table", { name: "Активные сессии" })).getAllByRole("row");
     expect(rows[1]).toHaveTextContent(/^Фоновый ассистент\d/);
   });
 
-  it("подраздел «Фоновый ассистент» — после «Подключить клиент», до «Активных сессий»", async () => {
+  it("раздел «Фоновый ассистент»: форма и «Запуски» — отдельными блоками", async () => {
     vi.mocked(api.getMcpStatus).mockResolvedValue(mcpStatus());
-    renderWithClient(<McpSection />);
-    const connect = await screen.findByRole("heading", { level: 4, name: "Подключить клиент" });
-    const agent = await screen.findByRole("region", { name: "Фоновый ассистент" });
-    const sessions = screen.getByRole("heading", { level: 4, name: "Активные сессии" });
-    expect(connect.compareDocumentPosition(agent) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(agent.compareDocumentPosition(sessions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(await within(agent).findByRole("checkbox", { name: "Запускать ассистента в фоне" })).toBeInTheDocument();
+    const { container } = renderWithClient(<McpAgentSection />);
+    expect(await screen.findByRole("checkbox", { name: "Запускать ассистента в фоне" })).toBeInTheDocument();
+    const blocks = container.querySelectorAll(".settings-block");
+    expect(blocks).toHaveLength(2);
+    expect(within(blocks[0] as HTMLElement).getByRole("button", { name: "Проверить" })).toBeInTheDocument();
+    expect(within(blocks[1] as HTMLElement).getByRole("heading", { level: 4, name: "Запуски" })).toBeInTheDocument();
   });
 
-  it("политика запрещает MCP: подраздел «Фоновый ассистент» виден, его выключатель неактивен с пометкой", async () => {
+  it("политика запрещает MCP: раздел «Фоновый ассистент» есть, его выключатель неактивен с пометкой", async () => {
     vi.mocked(api.getMcpStatus).mockResolvedValue(mcpStatus({ server: "stopped", policyEnabled: false, agent: agentStatus({ policyEnabled: false }) }));
-    renderWithClient(<McpSection />);
-    const agent = await screen.findByRole("region", { name: "Фоновый ассистент" });
-    expect(await within(agent).findByRole("checkbox", { name: "Запускать ассистента в фоне" })).toBeDisabled();
-    expect(within(agent).getByText("Отключено вашей организацией")).toBeInTheDocument();
+    renderWithClient(<McpAgentSection />);
+    expect(await screen.findByRole("checkbox", { name: "Запускать ассистента в фоне" })).toBeDisabled();
+    expect(screen.getByText("Отключено вашей организацией")).toBeInTheDocument();
   });
 
-  it("бэкенд без статуса фонового ассистента (до P4c) — раздел без подраздела, а не ошибка", async () => {
+  it("бэкенд без статуса фонового ассистента (до P4c) — раздел пуст, а не ошибка", async () => {
     const { agent: _agent, ...old } = mcpStatus();
     vi.mocked(api.getMcpStatus).mockResolvedValue(old as never);
-    renderWithClient(<McpSection />);
-    expect(await screen.findByRole("heading", { level: 4, name: "Активные сессии" })).toBeInTheDocument();
-    expect(screen.queryByRole("region", { name: "Фоновый ассистент" })).toBeNull();
+    const { container } = renderWithClient(<McpAgentSection />);
+    await waitFor(() => expect(api.getMcpStatus).toHaveBeenCalled());
+    await waitFor(() => expect(screen.queryByText("Загрузка…")).toBeNull());
+    expect(container).toBeEmptyDOMElement();
     expect(api.getAgentSettings).not.toHaveBeenCalled();
   });
 
@@ -194,7 +231,7 @@ describe("McpSection", () => {
     );
     vi.mocked(api.revokeMcpClient).mockResolvedValue(undefined);
     const user = userEvent.setup();
-    renderWithClient(<McpSection />);
+    renderWithClient(<McpSessionsSection />);
     const table = await screen.findByRole("table", { name: "Подтверждённые клиенты" });
     expect(table).toHaveTextContent("qwen-code");
     expect(table).toHaveTextContent("0.26.7");
@@ -205,18 +242,19 @@ describe("McpSection", () => {
   it("статус не загрузился — ошибка с «Повторить»", async () => {
     vi.mocked(api.getMcpStatus).mockRejectedValueOnce({ code: "INTERNAL", message: "boom", retryable: false }).mockResolvedValue(mcpStatus());
     const user = userEvent.setup();
-    renderWithClient(<McpSection />);
+    renderWithClient(<McpServerSection />);
     expect(await screen.findByRole("alert")).toHaveTextContent("boom");
     await user.click(screen.getByRole("button", { name: "Повторить" }));
     expect(await screen.findByRole("checkbox", { name: toggleName })).toBeChecked();
   });
+
   it("«Открыть в консоли EXPLAIN» из журнала открывает консоль подключения с подстановкой", async () => {
     vi.mocked(api.getMcpStatus).mockResolvedValue(mcpStatus());
     vi.mocked(api.listConnections).mockResolvedValue([connection({ id: "c1", name: "perf", llmAccess: "diagnostics" })]);
     vi.mocked(api.getMcpAudit).mockResolvedValue([explainCall()]);
     useWorkspace.setState({ tabs: [], activeId: null });
     const user = userEvent.setup();
-    renderWithClient(<McpSection />);
+    renderWithClient(<McpAuditSection />);
     const button = await screen.findByRole("button", { name: "Открыть в консоли EXPLAIN" });
     await waitFor(() => expect(button).toBeEnabled());
     await user.click(button);

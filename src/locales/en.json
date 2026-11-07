@@ -547,6 +547,11 @@
     "display": {
       "section": "Display"
     },
+    "nav": {
+      "label": "Settings sections",
+      "mcpServer": "Server and client connection",
+      "sessions": "Sessions and clients"
+    },
     "mcp": {
       "section": "LLM assistants (MCP)",
       "intro": "Glafira can give an LLM assistant (Qwen Code, Claude Code, Claude Desktop, Cursor) the diagnostics of the connections you open to it, over MCP. The assistant only reads: it cannot change databases.",
@@ -568,6 +573,7 @@
         "command": "{{client}}: command",
         "file": "{{client}}: file {{file}}",
         "stdio": "Any stdio client: command and arguments",
+        "other": "Other stdio client",
         "copy": "Copy: {{name}}"
       },
       "clients": {

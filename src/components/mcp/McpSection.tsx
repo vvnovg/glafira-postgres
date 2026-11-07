@@ -1,5 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { TFunction } from "i18next";
+import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
 import type { McpAuditEntry, McpStatus } from "../../api/types";
@@ -28,22 +29,34 @@ function stateText(s: McpStatus, t: TFunction): string {
   }
 }
 
-/**
- * «Настройки» → «LLM-ассистенты (MCP)» (спец. P4 §11): выключатель с пометкой политики, статус, счётчики открытых
- * подключений, фрагменты для клиентов, подраздел «Фоновый ассистент» (спец. P4c §8.3), активные сессии, подтверждённые
- * клиенты, журнал. Выключатель включён, пока настройка включена: сервер работает, обслуживается другим окном или упал при
- * запуске (`server` ≠ `stopped`).
- */
 /** «Открыть в консоли EXPLAIN» из журнала (спец. P4 §11): консоль подключения с SQL, базой и узлом вызова, без запуска. */
 function openInConsole(e: McpAuditEntry): void {
   const r = consoleTarget(e);
   if ("target" in r) openExplainWithPrefill(r.target.connectionId, { sql: r.target.sql, database: r.target.database, member: r.target.member });
 }
 
-export function McpSection() {
+/** Раздел группы MCP по статусу шлюза: пока статус читается — «Загрузка…», не прочитался — ошибка с «Повторить». */
+function WithMcpStatus({ children }: { children: (s: McpStatus) => ReactNode }) {
+  const { t } = useTranslation();
+  const { status, error, refetch } = useMcpStatus();
+  if (error) return <ErrorBanner error={error} onRetry={refetch} />;
+  if (!status) return <p className="empty">{t("common.loading")}</p>;
+  return <>{children(status)}</>;
+}
+
+/**
+ * «Настройки» → «LLM-ассистенты (MCP)» → «Сервер и подключение клиентов» (спец. P4 §11, смоук P4c R9): что такое MCP,
+ * блок сервера — выключатель с пометкой политики, статус, счётчики открытых подключений — и блок «Подключить клиент».
+ * Выключатель включён, пока настройка включена: сервер работает, обслуживается другим окном или упал при запуске
+ * (`server` ≠ `stopped`).
+ */
+export function McpServerSection() {
+  return <WithMcpStatus>{(s) => <McpServer status={s} />}</WithMcpStatus>;
+}
+
+function McpServer({ status: s }: { status: McpStatus }) {
   const { t } = useTranslation();
   const qc = useQueryClient();
-  const { status: s, error, refetch } = useMcpStatus();
   const toggle = useMutation({
     mutationFn: (on: boolean) => api.setMcpEnabled(on),
     onSuccess: (st) => {
@@ -52,53 +65,83 @@ export function McpSection() {
     },
   });
   return (
-    <section aria-labelledby="settings-mcp-title" className="mcp-section">
-      <h3 id="settings-mcp-title">{t("settings.mcp.section")}</h3>
+    <>
       <p className="muted">{t("settings.mcp.intro")}</p>
-      {error ? (
-        <ErrorBanner error={error} onRetry={refetch} />
-      ) : !s ? (
-        <p className="empty">{t("common.loading")}</p>
-      ) : (
+      <div className="settings-block">
+        <div className="form">
+          <span className="field-label">
+            <label htmlFor="settings-mcp-enabled">{t("settings.mcp.enable")}</label>
+            <Hint k="hints.settings.mcpEnable" label={t("settings.mcp.enable")} />
+          </span>
+          <span>
+            <input
+              id="settings-mcp-enabled"
+              type="checkbox"
+              checked={s.policyEnabled && s.enabled}
+              disabled={!s.policyEnabled || toggle.isPending}
+              onChange={(e) => toggle.mutate(e.target.checked)}
+            />
+          </span>
+        </div>
+        {!s.policyEnabled && <p className="muted">{t("settings.mcp.policy")}</p>}
+        <p role="status">{stateText(s, t)}</p>
+        {toggle.error && <ErrorBanner error={toggle.error} />}
+        {s.policyEnabled && (
+          <>
+            <p>
+              {s.dataConnections > 0
+                ? t("settings.mcp.openData", { n: s.openConnections, m: s.dataConnections })
+                : t("settings.mcp.open", { n: s.openConnections })}
+            </p>
+            <p className="muted">{t("settings.mcp.openHint")}</p>
+            {s.maxAccess === "diagnostics" && <p className="muted">{t("settings.mcp.dataPolicy")}</p>}
+          </>
+        )}
+      </div>
+      {s.policyEnabled && (
+        <div className="settings-block">
+          <ClientSnippets />
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
+ * «Фоновый ассистент» (спец. P4c §8.3): раздел виден и под запретом политики — выключатель там неактивен с пометкой. Без
+ * `agent` в статусе (бэкенд до P4c) раздел пуст, а пункта навигации нет: ассистенту нечем работать.
+ */
+export function McpAgentSection() {
+  return <WithMcpStatus>{(s) => (s.agent ? <AgentSection status={s} /> : null)}</WithMcpStatus>;
+}
+
+/** «Сессии и клиенты»: активные сессии и подтверждённые клиенты — отдельными блоками. */
+export function McpSessionsSection() {
+  return (
+    <WithMcpStatus>
+      {(s) => (
         <>
-          <div className="form">
-            <span className="field-label">
-              <label htmlFor="settings-mcp-enabled">{t("settings.mcp.enable")}</label>
-              <Hint k="hints.settings.mcpEnable" label={t("settings.mcp.enable")} />
-            </span>
-            <span>
-              <input
-                id="settings-mcp-enabled"
-                type="checkbox"
-                checked={s.policyEnabled && s.enabled}
-                disabled={!s.policyEnabled || toggle.isPending}
-                onChange={(e) => toggle.mutate(e.target.checked)}
-              />
-            </span>
+          <div className="settings-block">
+            <McpSessions status={s} />
           </div>
-          {!s.policyEnabled && <p className="muted">{t("settings.mcp.policy")}</p>}
-          <p role="status">{stateText(s, t)}</p>
-          {toggle.error && <ErrorBanner error={toggle.error} />}
-          {s.policyEnabled && (
-            <>
-              <p>
-                {s.dataConnections > 0
-                  ? t("settings.mcp.openData", { n: s.openConnections, m: s.dataConnections })
-                  : t("settings.mcp.open", { n: s.openConnections })}
-              </p>
-              <p className="muted">{t("settings.mcp.openHint")}</p>
-              {s.maxAccess === "diagnostics" && <p className="muted">{t("settings.mcp.dataPolicy")}</p>}
-              <ClientSnippets />
-            </>
-          )}
-          {/* Подраздел виден и под запретом политики: выключатель там неактивен с пометкой (спец. P4c §8.3). */}
-          {/* Без agent в статусе (бэкенд до P4c) подраздела нет: ему нечем работать. */}
-          {s.agent && <AgentSection status={s} />}
-          <McpSessions status={s} />
-          <ApprovedClients status={s} />
-          <McpAudit status={s} onOpenInConsole={openInConsole} />
+          <div className="settings-block">
+            <ApprovedClients status={s} />
+          </div>
         </>
       )}
-    </section>
+    </WithMcpStatus>
+  );
+}
+
+/** «Журнал»: журнал MCP с «Открыть в консоли EXPLAIN». */
+export function McpAuditSection() {
+  return (
+    <WithMcpStatus>
+      {(s) => (
+        <div className="settings-block">
+          <McpAudit status={s} onOpenInConsole={openInConsole} />
+        </div>
+      )}
+    </WithMcpStatus>
   );
 }

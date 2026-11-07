@@ -1,23 +1,20 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
 import { LANGUAGES } from "../../i18n/languages";
 import { i18n, setLanguage } from "../../i18n";
+import { useMcpStatus } from "../../lib/useMcpStatus";
 import { useHelpChapter } from "../../state/helpContext";
-import { tabId, useWorkspace } from "../../state/workspace";
+import { type SettingsSection, tabId, useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
-import { McpSection } from "../mcp/McpSection";
+import { McpAgentSection, McpAuditSection, McpServerSection, McpSessionsSection } from "../mcp/McpSection";
+import { MCP_SECTIONS, SECTION_HELP, SECTION_LABELS } from "./sections";
 
-/**
- * Раздел главы справки по месту в разделе MCP: ближайший предок с `data-help-anchor` у цели щелчка или элемента в фокусе
- * («Фоновый ассистент» — `background`); вне таких мест — без раздела.
- */
-function helpAnchorOf(target: EventTarget): string | undefined {
-  return target instanceof Element ? (target.closest("[data-help-anchor]")?.getAttribute("data-help-anchor") ?? undefined) : undefined;
-}
+const SETTINGS_TAB = tabId({ kind: "settings" });
 
-export function SettingsPanel() {
+/** «Язык»: язык интерфейса; задан политикой — список неактивен с пометкой. Не прочитался — ошибка с «Повторить». */
+function LanguageSettings() {
   const { t } = useTranslation();
   const qc = useQueryClient();
   const lang = useQuery({ queryKey: ["language"], queryFn: api.getLanguageSettings });
@@ -28,98 +25,153 @@ export function SettingsPanel() {
       void setLanguage(st.effective);
     },
   });
-  // Настройка дерева: системные схемы и роли pg_*. Каталог в дереве перечитывается сам — ключи запросов зависят от значения.
-  const ui = useQuery({ queryKey: ["uiSettings"], queryFn: api.getUiSettings });
-  const changeUi = useMutation({
-    mutationFn: (showSystemObjects: boolean) => api.setUiSettings({ showSystemObjects }),
-    onSuccess: (saved) => qc.setQueryData(["uiSettings"], saved),
-  });
-  // Индикатор LLM внизу боковой панели открывает настройки с разделом MCP (`section: "mcp"`): раздел прокручивается в
-  // видимую часть, когда страница нарисована. Каждое открытие — новый объект спеки вкладки, поэтому повторный щелчок
-  // прокручивает снова. jsdom не знает scrollIntoView — вызов необязательный.
-  // F1 (спец. P4 §11): в разделе MCP — глава «LLM-ассистенты (MCP)», в остальных — «Начало работы» (язык описан там).
-  // Раздел считается текущим, пока фокус в нём, после щелчка в нём или пока вкладку открыл индикатор; фокус или щелчок в
-  // другом разделе это снимает. Щелчок — отдельно от фокуса: в WKWebView щелчок мышью по кнопке или флажку фокус на них не
-  // переносит, а по простому тексту не переносит нигде; pointerdown на фазе захвата видит и то, и другое.
-  // F1 в подразделе «Фоновый ассистент» — раздел `background` главы `llm-mcp` (спец. P4c §8.3): метка `data-help-anchor`
-  // у цели щелчка или элемента в фокусе; во время фонового запуска индикатор открывает подраздел (`section: "agent"`), и
-  // раздел главы — тот же.
-  const spec = useWorkspace((st) => st.tabs.find((x) => x.id === tabId({ kind: "settings" })));
-  const section = spec?.kind === "settings" ? spec.section : undefined;
-  // `section: "agent"` — подраздел того же раздела MCP.
-  const showMcp = section === "mcp" || section === "agent";
-  const loaded = lang.data !== undefined;
-  const mcpRef = useRef<HTMLDivElement>(null);
-  const [mcpFocused, setMcpFocused] = useState(false);
-  const [helpAnchor, setHelpAnchor] = useState<string | undefined>(undefined);
-  useEffect(() => {
-    if (!showMcp) return;
-    setMcpFocused(true);
-    setHelpAnchor(section === "agent" ? "background" : undefined);
-    // Подраздел «Фоновый ассистент» прокручивает себя сам (AgentSection): он появляется позже, после своих настроек.
-    if (loaded && section === "mcp") mcpRef.current?.scrollIntoView?.({ block: "start", behavior: "smooth" });
-  }, [spec, showMcp, section, loaded]);
-  useHelpChapter(tabId({ kind: "settings" }), mcpFocused ? "llm-mcp" : "getting-started", mcpFocused ? helpAnchor : undefined);
-  const enterMcp = (target: EventTarget) => {
-    setMcpFocused(true);
-    setHelpAnchor(helpAnchorOf(target));
-  };
-
-  if (lang.error) return <ErrorBanner error={lang.error} onRetry={() => lang.refetch()} />;
+  if (lang.error) return <ErrorBanner error={lang.error} onRetry={() => void lang.refetch()} />;
   const s = lang.data;
-  if (!s) return <p className="empty">{t("common.loading")}</p>;
+  if (!s) return <p className="muted">{t("common.loading")}</p>;
 
   const byCode = new Map(LANGUAGES.map((l) => [l.code, l]));
   const systemName = s.systemMatch ? byCode.get(s.systemMatch as never)?.nativeName : undefined;
   const byPolicy = s.policy !== null;
   // Псевдоязык — только dev-сборка, без сохранения: выбор не уходит в бэкенд.
   const pseudoOn = import.meta.env.DEV && i18n.language === "x-pseudo";
+  return (
+    <div className="settings-block">
+      <div className="field">
+        <label htmlFor="settings-language">{t("settings.language.label")}</label>
+        <select
+          id="settings-language"
+          value={pseudoOn ? "x-pseudo" : byPolicy ? s.policy ?? "" : s.chosen ?? ""}
+          disabled={byPolicy || change.isPending}
+          onChange={(e) => (e.target.value === "x-pseudo" ? void setLanguage("x-pseudo") : change.mutate(e.target.value))}
+        >
+          <option value="">{systemName ? t("settings.language.system", { name: systemName }) : t("settings.language.systemUnknown")}</option>
+          {LANGUAGES.filter((l) => s.languages.includes(l.code)).map((l) => (
+            <option key={l.code} value={l.code}>
+              {l.nativeName}
+            </option>
+          ))}
+          {import.meta.env.DEV && <option value="x-pseudo">Pseudo (dev)</option>}
+        </select>
+      </div>
+      {byPolicy && <p className="hint">{t("settings.language.policy")}</p>}
+      {change.error && <ErrorBanner error={change.error} />}
+    </div>
+  );
+}
 
+/** «Отображение»: системные схемы и роли pg_* в дереве. Каталог в дереве перечитывается сам — ключи запросов зависят от значения. */
+function DisplaySettings() {
+  const { t } = useTranslation();
+  const qc = useQueryClient();
+  const ui = useQuery({ queryKey: ["uiSettings"], queryFn: api.getUiSettings });
+  const changeUi = useMutation({
+    mutationFn: (showSystemObjects: boolean) => api.setUiSettings({ showSystemObjects }),
+    onSuccess: (saved) => qc.setQueryData(["uiSettings"], saved),
+  });
+  return (
+    <div className="settings-block">
+      <label className="inline wrap">
+        <input
+          type="checkbox"
+          checked={ui.data?.showSystemObjects ?? false}
+          disabled={ui.isPending || changeUi.isPending}
+          onChange={(e) => changeUi.mutate(e.target.checked)}
+        />
+        {t("settings.showSystemObjects")}
+      </label>
+      {ui.error && <ErrorBanner error={ui.error} onRetry={() => void ui.refetch()} />}
+      {changeUi.error && <ErrorBanner error={changeUi.error} />}
+    </div>
+  );
+}
+
+/**
+ * Раздел страницы: заголовок — как пункт навигации; невыбранный скрыт атрибутом `hidden`, но остаётся смонтированным —
+ * черновик «Фонового ассистента», выбор клиента и прочее состояние разделов живут, пока открыта вкладка.
+ */
+function Section({ id, shown, children }: { id: SettingsSection; shown: boolean; children: ReactNode }) {
+  const { t } = useTranslation();
+  return (
+    <section className="settings-section" aria-labelledby={`settings-${id}-title`} hidden={!shown}>
+      <h3 id={`settings-${id}-title`}>{t(SECTION_LABELS[id])}</h3>
+      {children}
+    </section>
+  );
+}
+
+/**
+ * «Настройки» (смоук P4c, R9): слева — разделы («Язык», «Отображение», группа «LLM-ассистенты (MCP)»: сервер и подключение
+ * клиентов, фоновый ассистент, сессии и клиенты, журнал), справа — только выбранный. Выбор хранится в спеке вкладки
+ * (`section`, без него — «Язык»): индикатор LLM открывает «Сервер и подключение клиентов» (`mcp`), а во время фонового
+ * запуска — «Фоновый ассистент» (`agent`). Пункта «Фоновый ассистент» нет, если бэкенд о нём не сообщает (статус MCP без
+ * `agent`); тогда `agent` открывает раздел сервера. F1 — по выбранному разделу (`SECTION_HELP`).
+ */
+export function SettingsPanel() {
+  const { t } = useTranslation();
+  const spec = useWorkspace((st) => st.tabs.find((x) => x.id === SETTINGS_TAB));
+  const open = useWorkspace((st) => st.open);
+  const { status } = useMcpStatus();
+  const asked = spec?.kind === "settings" ? spec.section : undefined;
+  const noAgent = status !== undefined && !status.agent;
+  const selected: SettingsSection = asked === undefined ? "language" : asked === "agent" && noAgent ? "mcp" : asked;
+  const help = SECTION_HELP[selected];
+  useHelpChapter(SETTINGS_TAB, help.chapter, help.anchor);
+  // Выбор раздела и каждое открытие индикатором (новый объект спеки): заголовок раздела — в видимую часть, если страница
+  // прокручена ниже него. jsdom не знает scrollIntoView — вызов необязательный.
+  const contentRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    contentRef.current?.querySelector(`#settings-${selected}-title`)?.scrollIntoView?.({ block: "nearest" });
+  }, [spec, selected]);
+
+  const item = (id: SettingsSection) => (
+    <li key={id}>
+      <button type="button" aria-current={id === selected ? "page" : undefined} onClick={() => open({ kind: "settings", section: id })}>
+        {t(SECTION_LABELS[id])}
+      </button>
+    </li>
+  );
+  // Раздел «Фоновый ассистент» есть, пока статус не сказал, что ассистента нет (до ответа — «Загрузка…» в разделе).
+  const showAgent = status?.agent != null || (selected === "agent" && !noAgent);
   return (
     <div className="page">
       <div className="toolbar">
         <h2>{t("settings.title")}</h2>
       </div>
-      <section onFocusCapture={() => setMcpFocused(false)} onPointerDownCapture={() => setMcpFocused(false)}>
-        <h3>{t("settings.language.section")}</h3>
-        <div className="field">
-          <label htmlFor="settings-language">{t("settings.language.label")}</label>
-          <select
-            id="settings-language"
-            value={pseudoOn ? "x-pseudo" : byPolicy ? s.policy ?? "" : s.chosen ?? ""}
-            disabled={byPolicy || change.isPending}
-            onChange={(e) => (e.target.value === "x-pseudo" ? void setLanguage("x-pseudo") : change.mutate(e.target.value))}
-          >
-            <option value="">
-              {systemName ? t("settings.language.system", { name: systemName }) : t("settings.language.systemUnknown")}
-            </option>
-            {LANGUAGES.filter((l) => s.languages.includes(l.code)).map((l) => (
-              <option key={l.code} value={l.code}>
-                {l.nativeName}
-              </option>
-            ))}
-            {import.meta.env.DEV && <option value="x-pseudo">Pseudo (dev)</option>}
-          </select>
+      <div className="settings-layout">
+        <nav className="settings-nav" aria-label={t("settings.nav.label")}>
+          <ul>
+            {item("language")}
+            {item("display")}
+            <li>
+              <span id="settings-nav-mcp" className="settings-nav-group">
+                {t("settings.mcp.section")}
+              </span>
+              <ul aria-labelledby="settings-nav-mcp">{MCP_SECTIONS.filter((x) => x !== "agent" || status?.agent != null).map(item)}</ul>
+            </li>
+          </ul>
+        </nav>
+        <div className="settings-content" ref={contentRef}>
+          <Section id="language" shown={selected === "language"}>
+            <LanguageSettings />
+          </Section>
+          <Section id="display" shown={selected === "display"}>
+            <DisplaySettings />
+          </Section>
+          <Section id="mcp" shown={selected === "mcp"}>
+            <McpServerSection />
+          </Section>
+          {showAgent && (
+            <Section id="agent" shown={selected === "agent"}>
+              <McpAgentSection />
+            </Section>
+          )}
+          <Section id="sessions" shown={selected === "sessions"}>
+            <McpSessionsSection />
+          </Section>
+          <Section id="audit" shown={selected === "audit"}>
+            <McpAuditSection />
+          </Section>
         </div>
-        {byPolicy && <p className="hint">{t("settings.language.policy")}</p>}
-        {change.error && <ErrorBanner error={change.error} />}
-      </section>
-      <section onFocusCapture={() => setMcpFocused(false)} onPointerDownCapture={() => setMcpFocused(false)}>
-        <h3>{t("settings.display.section")}</h3>
-        <label className="inline wrap">
-          <input
-            type="checkbox"
-            checked={ui.data?.showSystemObjects ?? false}
-            disabled={ui.isPending || changeUi.isPending}
-            onChange={(e) => changeUi.mutate(e.target.checked)}
-          />
-          {t("settings.showSystemObjects")}
-        </label>
-        {ui.error && <ErrorBanner error={ui.error} onRetry={() => void ui.refetch()} />}
-        {changeUi.error && <ErrorBanner error={changeUi.error} />}
-      </section>
-      <div ref={mcpRef} onFocusCapture={(e) => enterMcp(e.target)} onPointerDownCapture={(e) => enterMcp(e.target)}>
-        <McpSection />
       </div>
     </div>
   );

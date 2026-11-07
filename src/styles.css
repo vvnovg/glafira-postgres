@@ -512,9 +512,31 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .choice legend { padding: 0; margin-bottom: 2px; color: var(--muted); }
 .choice label { display: flex; flex-wrap: wrap; gap: 0 6px; align-items: baseline; margin: 3px 0; }
 
+/* «Настройки» (смоук P4c, R9): слева — разделы, справа — выбранный раздел с заголовком и блоками в рамке. Узкое окно:
+   колонки не помещаются (220 + 24 + 440 px) — навигация переносится над разделом (flex-wrap), без горизонтальной прокрутки. */
+.settings-layout { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px 24px; }
+.settings-nav { flex: 0 1 220px; min-width: 0; }
+.settings-nav ul { list-style: none; margin: 0; padding: 0; }
+.settings-nav button { display: block; width: 100%; padding: 4px 8px; border: none; border-left: 3px solid transparent; border-radius: 0 4px 4px 0; background: none; text-align: left; overflow-wrap: anywhere; }
+.settings-nav button:hover { background: var(--bg-alt); }
+.settings-nav button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.settings-nav button[aria-current="page"] { border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, transparent); font-weight: 600; }
+.settings-nav-group { display: block; margin: 12px 0 2px; padding: 0 8px 0 11px; color: var(--muted); font-size: 12px; }
+.settings-nav-group + ul button { padding-left: 19px; }
+.settings-content { flex: 1 1 440px; min-width: 0; }
+.settings-section { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.settings-section[hidden] { display: none; }
+.settings-section > h3 { margin: 0; font-size: 14px; }
+.settings-section > p, .agent-section > p { margin: 0; }
+.settings-block { min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; display: flex; flex-direction: column; gap: 8px; }
+.settings-block > * { margin-top: 0; margin-bottom: 0; }
+.settings-block h4 { margin: 0; font-size: 13px; }
+.settings-block > button { align-self: flex-start; }
+.agent-section { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+
 /* MCP (спец. P4 §11): индикатор сессий внизу боковой панели и фрагменты конфигураций клиентов в «Настройках». */
 .llm-indicator.active::before { content: "● "; color: var(--accent); }
-.mcp-section h4 { margin: 16px 0 4px; }
+.mcp-clients { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; }
 .mcp-snippet pre { margin: 4px 0 8px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-alt); white-space: pre-wrap; word-break: break-all; font-size: 12px; }
 /* Значок «LLM» в дереве и группа «Доступ для LLM» в форме подключения (спец. P4 §11). */
 .llm-badge { font-size: 10px; padding: 0 3px; border: 1px solid var(--accent); border-radius: 3px; color: var(--accent); }
@@ -612,9 +634,8 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 /* «Фоновый ассистент» в «Настройках» (P4c): поле с кнопкой рядом, под полем — ошибка и пояснения. Подпись строки — по верху
    поля (высота строки поля — 24px), чтобы не съезжала, когда под полем появляется текст. Числа — узкими полями. Ошибки полей —
    --danger-text, как у других ошибок; путь, модель и адрес — моноширинным шрифтом (общее правило полей задаёт font: inherit). */
-.agent-section .form { align-items: start; margin: 8px 0; }
+.agent-section .form { align-items: start; }
 .agent-section .form > .field-label, .agent-check, .agent-presets { min-height: 24px; }
-.agent-section h5 { margin: 12px 0 4px; font-size: 1em; }
 .agent-control { display: flex; flex-direction: column; align-items: stretch; min-width: 0; }
 .agent-field { display: flex; gap: 6px; align-items: center; min-width: 0; }
 .agent-field > input:not([type="checkbox"]) { flex: 1; min-width: 0; }
@@ -625,5 +646,4 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .agent-error { margin: 0; color: var(--danger-text); overflow-wrap: anywhere; }
 .agent-lines p, .agent-note { margin: 0; overflow-wrap: anywhere; }
 .agent-control > .agent-error, .agent-control > .agent-note, .agent-control .agent-lines p, .agent-control > .error-banner { margin-top: 4px; }
-.agent-actions { margin: 4px 0; }
 .agent-run-when span { white-space: nowrap; }

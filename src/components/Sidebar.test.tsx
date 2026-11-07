@@ -53,6 +53,15 @@ describe("Sidebar", () => {
     expect(useWorkspace.getState().activeId).toBe("settings");
   });
 
+  it("«Настройки» при открытой вкладке настроек переключается на неё и не сбрасывает выбранный раздел", async () => {
+    const user = userEvent.setup();
+    useWorkspace.setState({ tabs: [{ kind: "settings", section: "audit", id: "settings" }, { kind: "about", id: "about" }], activeId: "about" });
+    renderWithClient(<Sidebar />);
+    await user.click(await screen.findByRole("button", { name: "Настройки" }));
+    expect(useWorkspace.getState().activeId).toBe("settings");
+    expect(useWorkspace.getState().tabs[0]).toEqual({ kind: "settings", section: "audit", id: "settings" });
+  });
+
   it("«Поддержать проект» открывает страницу поддержки в браузере, вкладку не открывает", async () => {
     const user = userEvent.setup();
     renderWithClient(<Sidebar />);
