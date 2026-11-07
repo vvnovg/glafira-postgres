@@ -40,7 +40,8 @@
 3. Цены Ollama Cloud (оценка стоимости облачных запусков фонового ассистента через Ollama): сверить встроенную таблицу с
    https://ollama.com/pricing по README крейта `crates/glafira-llm-pricing` — свежий образец страницы в `testdata/`,
    тест `the_builtin_table_is_the_sample_page` показывает разницу, таблица и день сверки — в `src/builtin.rs`; правило
-   «вне пика» (будни вне 12:00–18:00 UTC и выходные) — тоже по странице.
+   «вне пика» (будни вне 12:00–18:00 UTC и выходные) — тоже по странице. Таблицу цен быстрых моделей в главе «Локальные
+  модели» (`docs/guide/{ru,en}/local-llm.md`, раздел «Сервер модели») — по той же странице, с датой сверки.
 4. `node scripts/check-release.mjs vX.Y.Z` → «можно выпускать» (в том числе раздел версии на обоих языках).
 5. `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z` → workflow `release`. Релиз создаётся черновиком со всеми ассетами
    и публикуется атомарно (`--draft=false --latest`); updater читает `releases/latest/download/latest.json`
