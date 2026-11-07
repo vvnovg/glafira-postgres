@@ -21,16 +21,16 @@ Tested on a Mac mini with an M4 Pro and 48 GB of memory, models in Ollama quanti
 5. The plan of a query when no database is named.
 6. Would an index help — a hypothesis check with hypopg without creating the index.
 
-Results of the models quantized to 4 bits:
-
-- **Qwen3.6-35B-A3B**: 17 of 18 correct answers; generation 50–80 tokens/s; tasks 1–3, 5 and 6 in 6–24 s; top over 15 minutes in 1.2–1.4 min.
-- **Gemma 4 26B**: 18 of 18 correct answers; generation 30–50 tokens/s; tasks 1–3, 5 and 6 in 7–42 s; top over 15 minutes in 1.1–1.3 min.
-- **Qwen3.8-27B**: 18 of 18 correct answers; generation 15–20 tokens/s; tasks 1–3, 5 and 6 in 23–121 s; top over 15 minutes in 6.3–7.5 min.
-- **Gemma 4 31B**: 17 of 18 correct answers; generation 7–14 tokens/s; tasks 1–3, 5 and 6 in 42–119 s; top over 15 minutes in 5.2–6.6 min.
+| Model (4-bit) | Correct answers | Generation, typically | Tasks 1–3, 5, 6 | Top over 15 minutes |
+|---|---|---|---|---|
+| Qwen3.6-35B-A3B | 17 of 18 | 50–80 tokens/s | 6–24 s | 1.2–1.4 min |
+| Gemma 4 26B | 18 of 18 | 30–50 tokens/s | 7–42 s | 1.1–1.3 min |
+| Qwen3.8-27B | 18 of 18 | 15–20 tokens/s | 23–121 s | 6.3–7.5 min |
+| Gemma 4 31B | 17 of 18 | 7–14 tokens/s | 42–119 s | 5.2–6.6 min |
 
 Generation is the number of answer tokens per second of model time, including reading the context; the first question after the model is loaded into memory is slower. Qwen3.6-35B-A3B and Gemma 4 26B answer ordinary questions in tens of seconds. The dense Qwen3.8-27B and Gemma 4 31B use all of their parameters for every token and answer in half a minute to two minutes, and up to 7.5 minutes on a task with several large tool answers. For everyday work on a Mac, Qwen3.6-35B-A3B and Gemma 4 26B fit: Gemma made no mistakes, Qwen made one in the hardest task and generates faster.
 
-Tasks 4–6 were run twice: after the first run, Glafira was fixed where the models stumbled. A `windowS` window without a mode now means a window, not totals since the reset. An empty string in an optional parameter means "not given". If the database of the top filter does not exist on the server, Glafira answers with an error listing the databases instead of an empty top: before, Qwen3.6 once used another connection's database and decided that the server was idle. A name for a hypothetical index is dropped. A query from pg_stat_statements that cannot be planned as is (`interval $3`, `timestamptz $1`) started to get a hint to pass the SQL with values; now Glafira plans such queries with common types itself (as `$3::interval`). The results above are tasks 1–3 from the first run and tasks 4–6 from the second.
+Tasks 4–6 were run twice: after the first run, Glafira was fixed where the models stumbled. A `windowS` window without a mode now means a window, not totals since the reset. An empty string in an optional parameter means "not given". If the database of the top filter does not exist on the server, Glafira answers with an error listing the databases instead of an empty top: before, Qwen3.6 once used another connection's database and decided that the server was idle. A name for a hypothetical index is dropped. A query from pg_stat_statements that cannot be planned as is (`interval $3`, `timestamptz $1`) started to get a hint to pass the SQL with values; now Glafira plans such queries with common types itself (as `$3::interval`). The table shows tasks 1–3 from the first run and tasks 4–6 from the second.
 
 The models made mistakes only in the fourth task, Qwen3.6 and Gemma 4 31B once each: Glafira answered that it had no 15-minute history, and the model took the statistics since the reset and presented them without saying that this was not 15 minutes. In several accepted answers, a heading "over the last 15 minutes" stands next to a note about the real period, for example "from 50 seconds of observation". The models fixed the remaining wrong tool arguments themselves on the next attempt (observing for longer than 50 seconds, another connection's database for a query plan, a parameter value for a query without parameters): Glafira answers with a clear error, but this costs an extra step. A script checked the answers by key signs; disputed ones were reread by hand.
 
@@ -40,11 +40,13 @@ No answer revealed the original values of masked literals, and no model changed 
 
 On ordinary hardware, MoE models with few active parameters (3–4 billion, for example Qwen3.6-35B-A3B) work best: they are several times faster than dense models of the same size. The context should be at least 32K tokens, better 64K.
 
-- **macOS, Apple Silicon, 48 GB or more**: the Ollama model server; Qwen3.6-35B-A3B and Gemma 4 26B fit (tested).
-- **macOS, Apple Silicon, 32 GB**: Ollama; models of about 20 billion parameters, 35B-A3B is at the limit.
-- **Linux, NVIDIA with 24 GB of video memory**: vLLM; 35B-A3B in 4 bits with a smaller context.
-- **Windows, NVIDIA**: Ollama, vLLM only in WSL2; the same fits as on Linux.
-- **x86 without a GPU, 32–64 GB DDR5**: Ollama; MoE models only, slowly.
+| Platform | Model server | What fits |
+|---|---|---|
+| macOS, Apple Silicon, 48 GB or more | Ollama | Qwen3.6-35B-A3B, Gemma 4 26B (tested) |
+| macOS, Apple Silicon, 32 GB | Ollama | models of about 20 billion parameters; 35B-A3B is at the limit |
+| Linux, NVIDIA with 24 GB of video memory | vLLM | 35B-A3B in 4 bits with a smaller context |
+| Windows, NVIDIA | Ollama; vLLM only in WSL2 | as on Linux |
+| x86 without a GPU, 32–64 GB DDR5 | Ollama | MoE models only, slowly |
 
 A Mac with an Intel processor is not suitable for local models.
 
@@ -64,7 +66,20 @@ After 5 minutes of idling Ollama unloads the model from memory, and the next que
 
 The background assistant of Glafira manages this itself (see [Local model for the background assistant](llm-mcp.md#background-ollama)): it loads the run's model at the start of a run and keeps it in memory for 10 minutes after the run (the [[ui:settings.mcp.agent.keepWarm]] field), without shortening a longer `OLLAMA_KEEP_ALIVE`. All that time the model takes as much memory as during a run; [[ui:settings.mcp.agent.unload]] frees it at once. If another model is loaded, Ollama may unload it to load the run's model, and Glafira warns about it.
 
-If the cloud is allowed but your hardware falls short, a cheap option is the Ollama cloud models (`glm-5.3-flash:cloud`, `deepseek-v4.1-flash:cloud`, `gpt-oss:120b-cloud` and others; you need to sign in to your ollama.com account). The model runs in the Ollama cloud, and the client reaches it at the same address as a local model, without `ollama pull`. Fast models cost about $0.15 per 1M input tokens and $0.50–0.60 per 1M output tokens, some of them less off-peak; the prices are on https://ollama.com/pricing. A background assistant run with such a model costs about a cent. The data leaves for the cloud then: this is the first option of [Where the model runs](local-llm.md#where), not the third. In the background assistant the Ollama cloud models are in the [[ui:settings.mcp.agent.model]] list with their prices, Qwen Code works with them without editing its settings, and Glafira estimates the cost of each run (see [Background assistant](llm-mcp.md#background)).
+If the cloud is allowed but your hardware falls short, a cheap option is the Ollama cloud models (`glm-5.3-flash:cloud`, `deepseek-v4.1-flash:cloud`, `gpt-oss:120b-cloud` and others; you need to sign in to your ollama.com account). The model runs in the Ollama cloud, and the client reaches it at the same address as a local model, without `ollama pull`. The data leaves for the cloud then: this is the first option of [Where the model runs](local-llm.md#where), not the third. The prices of fast models as of 2026-11-07, $ per 1M tokens (current ones are on https://ollama.com/pricing):
+
+| Model | Input | Cached input | Output |
+|---|---|---|---|
+| glm-5.3-flash | 0.15 | 0.03 | 0.50 |
+| deepseek-v4.1-flash | 0.30, off-peak 0.15 | 0.006, off-peak 0.003 | 1.20, off-peak 0.60 |
+| mimo-v2.6-flash | 0.14 | 0.0028 | 0.28 |
+| minimax-m3.1-flash | 0.15 | 0.015 | 0.60 |
+| gpt-oss:120b | 0.15 | 0.014 | 0.60 |
+| gpt-oss:20b | 0.07 | 0.035 | 0.30 |
+| gemma4 | 0.14 | 0.05 | 0.40 |
+| nemotron-3-super | 0.015 | 0.015 | 0.60 |
+
+Off-peak is weekdays outside 12:00–18:00 UTC and weekends. Strong models (glm-5.3, deepseek-v4-pro, kimi-k3.1-pro) cost 5–20 times more. A background assistant run with a fast model costs about a cent: on the smoke test, optimizing a query cost $0.006–0.015. In the background assistant the Ollama cloud models are in the [[ui:settings.mcp.agent.model]] list with their prices, Qwen Code works with them without editing its settings, and Glafira estimates the cost of each run (see [Background assistant](llm-mcp.md#background)).
 
 ## Clients {#clients}
 
@@ -115,8 +130,10 @@ claude --disallowedTools "Bash Edit Write WebFetch WebSearch Task Read Glob Grep
 
 Both clients were tested on three tasks from the [list above](local-llm.md#capabilities) — the cluster, the xmin horizon and the query plan — with the `qwen3.6-64k:35b-a3b` model in Ollama, three runs each. The clients ran without a window, and the same built-in tools were turned off with command-line flags rather than the settings file: Qwen Code with calls approved automatically (`--approval-mode yolo`), Claude Code with Glafira's tools allowed (`--allowedTools`):
 
-- **Qwen Code 0.26.5**: 9 of 9 correct answers; cluster 35–62 s, xmin horizon 28–47 s, query plan 23–28 s.
-- **Claude Code 2.1.318**: 9 of 9 correct answers; cluster 20–48 s, xmin horizon 27–72 s, query plan 18–32 s.
+| Client | Correct answers | Cluster | xmin horizon | Query plan |
+|---|---|---|---|---|
+| Qwen Code 0.26.5 | 9 of 9 | 35–62 s | 28–47 s | 23–28 s |
+| Claude Code 2.1.318 | 9 of 9 | 20–48 s | 27–72 s | 18–32 s |
 
 In all runs Claude Code called only Glafira's tools and its own tool search. In the first check its file reading and search were not turned off, and in one run out of nine the model spent 25 minutes searching its own conversation log for earlier answers instead of calling Glafira, until the run was stopped. If the client stays silent for a long time, stop the question and ask it again.
 
@@ -139,6 +156,6 @@ In all runs Claude Code called only Glafira's tools and its own tool search. In 
 
 ## Limitations {#limits}
 
-- A local model answers several times slower than a cloud one, and dense models on a Mac are slower still (see the [results](local-llm.md#capabilities)).
+- A local model answers several times slower than a cloud one, and dense models on a Mac are slower still (see the [table](local-llm.md#capabilities)).
 - While the model runs, the computer has less memory left: on a Mac with 48 GB, a 35-billion-parameter model with a 64K context takes about 30 GB in Ollama, and Glafira, a browser and Docker next to it can push the system into swap.
 - The model can be wrong in its conclusions. Glafira does not let it change anything in the databases, but the decisions are yours.

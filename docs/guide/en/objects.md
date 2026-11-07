@@ -30,6 +30,8 @@ Click the name of a table, view, function or sequence in the tree (not the arrow
 
 The active tab is highlighted with the content background and an accent-colored bar on top; the others are muted. When there are more tabs than fit in the row, the row scrolls (with the mouse wheel too), and the active tab scrolls into view by itself on switching. To the right of the row there is a “» N” button with the number of tabs that are not fully visible: it opens a menu of those tabs (arrows and Enter to choose, Esc closes the menu). A tab title longer than 32 characters is cut with “…”, the full one is in the tooltip.
 
+Open tabs survive a restart: on the next start Glafira opens them again, in the same order and with the same active tab, and the [EXPLAIN console](queries.md#console) with its text, database and node. The tabs read their data anew. Connection forms (unsaved input in them is lost) and the tabs of deleted connections are not restored; if the connection of the active tab was deleted, the first tab becomes active.
+
 Everything on the tabs is read-only. Data is read when the tab opens; [[ui:object.refresh]] reads it again. If the connection is lost and comes back, open tabs reload by themselves. If the object was dropped or renamed in the meantime, the tab says that it was not found.
 
 **Table.** A comment on the table, if there is one, is shown above the sections. An unlogged table is marked [[ui:object.unlogged]]: it is not written to WAL, so it is not replicated to standbys and is emptied after a crash. The sections:
