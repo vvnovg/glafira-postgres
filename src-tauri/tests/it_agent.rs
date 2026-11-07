@@ -897,6 +897,84 @@ async fn stop_kills_the_process_group_and_the_queue_moves_on() {
     e.finish().await;
 }
 
+/// Сколько приложение ждёт остановки фонового ассистента при выходе (`AGENT_EXIT_GRACE` в `lib.rs`).
+const AGENT_EXIT_GRACE: Duration = Duration::from_secs(8);
+
+/// Выход из Glafira при живом агенте (спец. §4.4, §17.4): `shutdown` очереди, как при выходе приложения (`shutdown_agent`
+/// до `shutdown_mcp`), — процессов агента и шима нет (агент `hang` перехватывает SIGTERM: группу добивает SIGKILL; на
+/// Windows закрывается Job Object), запуск и запуск в очереди — `interrupted`, запрос ждёт, MCP-конфиг удалён, билет
+/// отозван, сессий запуска нет.
+#[tokio::test]
+async fn shutdown_stops_the_running_agent() {
+    let e = env(Preset::Qwen, None).await;
+    let req = new_request(&e.st, "it");
+    let next = new_request(&e.st, "it");
+    e.spawner.push("hang", &[]);
+    let id = e.st.agent.start(&req.id).unwrap().id;
+    let queued = e.st.agent.start(&next.id).unwrap().id;
+    wait_run(&e.st, &id, "запуск работает", |r| {
+        r.status == RunStatus::Running
+    })
+    .await;
+    let pids = run_pids(&e.dir, &id).await;
+    wait_noted(&e.dir, &id, "hanging").await;
+    let cfg = e.dir.join("agent-runs").join(format!("{id}.mcp.json"));
+    let config: Value = serde_json::from_slice(&std::fs::read(&cfg).unwrap()).unwrap();
+    let ticket = config["mcpServers"]["glafira-pg"]["env"]["GLAFIRA_AGENT_TICKET"]
+        .as_str()
+        .expect("билет в MCP-конфиге")
+        .to_string();
+    assert_eq!(e.st.tickets.resolve(&ticket).as_deref(), Some(id.as_str()));
+    assert!(
+        e.st.mcp
+            .status()
+            .sessions
+            .iter()
+            .any(|s| s.run_id.as_deref() == Some(id.as_str())),
+        "сессия запуска подключена"
+    );
+    assert!(pids.iter().all(|&p| alive(p)), "{pids:?}");
+
+    let started = Instant::now();
+    let stopped = tokio::time::timeout(AGENT_EXIT_GRACE, e.st.agent.shutdown()).await;
+    let took = started.elapsed();
+    e.st.mcp.shutdown().await;
+    wait_gone(&pids).await;
+    assert!(
+        stopped.is_ok(),
+        "очередь остановилась за {AGENT_EXIT_GRACE:?}, как ждёт приложение: {took:?}"
+    );
+    let run = run_of(&e.st, &id);
+    assert_eq!(run.status, RunStatus::Interrupted, "{run:?}");
+    assert_eq!(
+        (run.reason, run.summary.as_deref()),
+        (None, None),
+        "{run:?}"
+    );
+    assert!(
+        run.started_at_ms.is_some() && run.ended_at_ms.is_some(),
+        "{run:?}"
+    );
+    let q = run_of(&e.st, &queued);
+    assert_eq!(q.status, RunStatus::Interrupted, "{q:?}");
+    assert_eq!(e.spawner.spawned(), 1, "запуск из очереди не стартовал");
+    for r in [&req, &next] {
+        assert_eq!(request_status(&e.st, &r.id), RequestStatus::Waiting);
+    }
+    assert!(!cfg.exists(), "MCP-конфиг удалён");
+    assert_eq!(e.st.tickets.resolve(&ticket), None, "билет отозван");
+    assert!(e.st.tickets.scope(&id).is_none());
+    let f = finished_record(&e.st, &id).await;
+    assert_eq!(f["status"].as_str(), Some("interrupted"), "{f}");
+    common::wait_until(
+        "сессий запуска после выхода нет",
+        Duration::from_secs(10),
+        async || e.st.mcp.status().sessions.is_empty(),
+    )
+    .await;
+    e.finish().await;
+}
+
 /// Срок запуска (спец. §4.4): по сроку — остановка группы и `failed` / `timeout`; запрос ждёт дальше. Срок теста — 8 с
 /// (`AgentRuntime.run_timeout`): минимум настройки — 2 минуты.
 #[tokio::test]
