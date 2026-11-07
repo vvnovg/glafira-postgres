@@ -10,6 +10,7 @@ use tauri::State;
 use super::blocking;
 use crate::agent::detect::{self, Detected};
 use crate::agent::models::{self, AgentModels};
+use crate::agent::ollama;
 use crate::agent::queue::{RunFilter, log_missing};
 use crate::agent::runs::AgentRun;
 use crate::agent::settings::{AgentSettings, Preset, disabled_by_policy};
@@ -68,16 +69,40 @@ pub async fn detect_agent_cli(preset: Preset, path: Option<String>) -> AppResult
     .await
 }
 
-/// Модели для поля «Модель»: у Qwen Code — из его настроек; у Claude Code — свободный ввод (Ollama — задача 7).
+/// Модели для поля «Модель»: у Qwen Code — из его настроек; у Claude Code «Через Ollama» — `/api/tags` локальной
+/// Ollama (по сохранённым «Через Ollama» и адресу); иначе — свободный ввод.
 #[tauri::command]
-pub async fn list_agent_models(preset: Preset) -> AppResult<AgentModels> {
-    blocking(move || {
-        Ok(match (preset, dirs::home_dir()) {
-            (Preset::Qwen, Some(home)) => AgentModels::from_qwen(models::qwen_models(&home)),
-            _ => AgentModels::none(),
-        })
-    })
-    .await
+pub async fn list_agent_models(
+    state: State<'_, AppState>,
+    preset: Preset,
+) -> AppResult<AgentModels> {
+    match preset {
+        Preset::Qwen => {
+            blocking(|| {
+                Ok(dirs::home_dir().map_or_else(AgentModels::none, |home| {
+                    AgentModels::from_qwen(models::qwen_models(&home))
+                }))
+            })
+            .await
+        }
+        Preset::Claude => {
+            let st = state.inner().clone();
+            let s = blocking(move || Ok(st.settings.agent())).await?;
+            Ok(ollama::list_models(&s).await)
+        }
+    }
+}
+
+/// «Выгрузить модель» в подразделе «Фоновый ассистент» (спец. §6.2): модель сохранённых настроек, только у локальной
+/// Ollama; пока идёт запуск — ошибка.
+#[tauri::command]
+pub async fn unload_agent_model(state: State<'_, AppState>) -> AppResult<()> {
+    let st = state.inner().clone();
+    let s = {
+        let st = st.clone();
+        blocking(move || Ok(st.settings.agent())).await?
+    };
+    ollama::unload_model(&st, &s, dirs::home_dir().as_deref()).await
 }
 
 /// «Передать LLM-ассистенту» в режиме фона и «Повторить».

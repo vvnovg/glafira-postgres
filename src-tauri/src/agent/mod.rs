@@ -4,6 +4,7 @@
 
 pub mod detect;
 pub mod models;
+pub mod ollama;
 pub mod presets;
 pub mod process;
 pub mod prompt;

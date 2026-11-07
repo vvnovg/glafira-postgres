@@ -130,6 +130,12 @@ pub fn run() {
                 Arc::new(KeyringStore::default()),
             )?
             .with_policy(policy);
+            // Тёплая модель Ollama фонового ассистента (спец. P4c §6); unit-тесты и интеграция остаются на `NoWarmth`.
+            let warmth = Arc::new(crate::agent::ollama::OllamaWarmth::new(st.settings.clone()));
+            let st = st.with_agent(crate::agent::queue::AgentRuntime {
+                warmth,
+                ..crate::agent::queue::AgentRuntime::app()?
+            });
             // Шим `glafira-pg mcp` ищет `mcp.json` без Tauri (`dirs::data_dir()` + идентификатор): расхождение с
             // каталогом приложения — предупреждение в журнал (спец. P4 §3.3).
             let shim_dir = crate::mcp::files::data_dir();
@@ -245,6 +251,7 @@ pub fn run() {
             commands::agent::read_agent_log,
             commands::agent::reveal_agent_log,
             commands::agent::check_agent,
+            commands::agent::unload_agent_model,
             commands::topology::connect,
             commands::topology::disconnect,
             commands::topology::reconnect,

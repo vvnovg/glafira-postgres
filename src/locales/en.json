@@ -303,7 +303,11 @@
       "queueFull": "The background assistant queue is full",
       "requestNotWaiting": "Optimization request {{id}} is not waiting for an answer",
       "runNotFound": "Background run {{id}} not found",
-      "logMissing": "The log of background run {{id}} is not available"
+      "logMissing": "The log of background run {{id}} is not available",
+      "busy": "Wait for the background run to finish",
+      "noModel": "No model to unload: choose the model of the background assistant",
+      "ollamaNotLocal": "Glafira manages only a local Ollama (localhost, 127.0.0.1 or ::1)",
+      "ollamaUnavailable": "Ollama did not answer: {{error}}"
     }
   },
   "connections": {
