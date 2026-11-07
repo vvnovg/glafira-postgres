@@ -373,7 +373,20 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
               <input id="agent-via-ollama" type="checkbox" checked={draft.viaOllama} onChange={(e) => update({ viaOllama: e.target.checked })} />
             </span>
             {!draft.viaOllama && (
-              <Field id="agent-budget" label={t("settings.mcp.agent.budget")} hint="hints.settings.mcp.agent.budget" error={errors.budget}>
+              <Field
+                id="agent-budget"
+                label={t("settings.mcp.agent.budget")}
+                hint="hints.settings.mcp.agent.budget"
+                error={errors.budget}
+                below={
+                  // Что значит пустое поле — видимым текстом под полем, как у «Модели»: плейсхолдер ниже контраста AA.
+                  draft.budget.trim() === "" && (
+                    <p id="agent-budget-note" className="muted agent-note">
+                      {t("settings.mcp.agent.budgetEmpty")}
+                    </p>
+                  )
+                }
+              >
                 <input
                   id="agent-budget"
                   type="text"
@@ -381,8 +394,7 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
                   inputMode="decimal"
                   autoComplete="off"
                   value={draft.budget}
-                  placeholder={t("settings.mcp.agent.budgetEmpty")}
-                  {...invalid("agent-budget", errors.budget)}
+                  {...invalid("agent-budget", errors.budget, draft.budget.trim() === "" ? ["agent-budget-note"] : [])}
                   onChange={(e) => update({ budget: e.target.value })}
                 />
               </Field>

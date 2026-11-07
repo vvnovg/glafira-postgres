@@ -122,6 +122,18 @@ describe("AgentSection", () => {
     // Что значит пустое поле «Модель» — видимым текстом под полем, а не плейсхолдером (контраст AA).
     expect(screen.getByText("Пусто — модель клиента по умолчанию")).toHaveClass("muted");
     expect(screen.getByRole("combobox", { name: "Модель" })).not.toHaveAttribute("placeholder");
+    // То же у пустого «Предела расходов»: строка .muted под полем, в описании поля.
+    const budget = screen.getByRole("textbox", { name: "Предел расходов на запуск, $" });
+    expect(screen.queryByText("Пусто — без предела")).toBeNull();
+    expect(budget).not.toHaveAccessibleDescription();
+    await user.clear(budget);
+    expect(screen.getByText("Пусто — без предела")).toHaveClass("muted");
+    expect(budget).toHaveAccessibleDescription("Пусто — без предела");
+    expect(budget).not.toHaveAttribute("placeholder");
+    await user.type(budget, "0");
+    expect(budget).toHaveAccessibleDescription("Число от 0,01 до 100 или пусто");
+    await user.clear(budget);
+    await user.type(budget, "1");
     await user.click(screen.getByRole("checkbox", { name: "Через Ollama" }));
     expect(screen.queryByRole("textbox", { name: "Предел расходов на запуск, $" })).toBeNull();
     expect(screen.getByRole("combobox", { name: "Модель" })).toHaveAccessibleDescription("Нужна модель Ollama");
