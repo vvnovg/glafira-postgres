@@ -30,7 +30,6 @@ export function PlanView({
   raw,
   elapsedMs,
   member,
-  extraActions,
   afterSummary,
 }: {
   tree: PlanTree;
@@ -40,7 +39,6 @@ export function PlanView({
   raw?: unknown;
   elapsedMs?: number;
   member?: string;
-  extraActions?: ReactNode;
   afterSummary?: (showNode: (ids: number[]) => void) => ReactNode;
 }) {
   // `reveal` — выбор пришёл не кликом по строке (а «Показать узел»): дерево раскроет предков и прокрутит к узлу.
@@ -51,7 +49,7 @@ export function PlanView({
   const node = findNode(tree.root, selectedId);
   return (
     <>
-      <PlanSummary tree={tree} tier={tier} mode={mode} warnings={warnings} raw={raw} elapsedMs={elapsedMs} member={member} extraActions={extraActions} />
+      <PlanSummary tree={tree} tier={tier} mode={mode} warnings={warnings} raw={raw} elapsedMs={elapsedMs} member={member} />
       {afterSummary?.((ids) => {
         if (ids.length > 0) setPick({ tree, id: ids[0], reveal: true, related: new Set(ids) });
       })}

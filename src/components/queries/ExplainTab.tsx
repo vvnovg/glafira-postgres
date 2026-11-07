@@ -1,8 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../api/client";
 import type { AppError, ExplainParams, ParsedPlan, PlanTree, RequestSource } from "../../api/types";
+import { formatShortTimestamp, formatTimestamp } from "../../lib/format";
 import { useConnectionProfile } from "../../lib/useConnectionProfile";
 import { useTopology } from "../../lib/useConnectionEvents";
 import { type ExplainPrefill, tabId, useWorkspace } from "../../state/workspace";
@@ -11,7 +12,7 @@ import { ErrorBanner } from "../common/ErrorBanner";
 import { CopyLlmButton } from "./CopyLlmButton";
 import { ProposalsPanel } from "./llm/ProposalsPanel";
 import { AskLlmButton, type SentNotice } from "./llm/AskLlmButton";
-import { PlanRunner } from "./plan/PlanRunner";
+import { PlanRunner, type Substitution } from "./plan/PlanRunner";
 import { PlanView } from "./plan/PlanView";
 import { Recommendations } from "./plan/Recommendations";
 
@@ -35,8 +36,34 @@ const CONSOLE_SOURCE: RequestSource = { kind: "console" };
 const NO_PARAMS: (string | null)[] = [];
 /** Сколько заменённых текстов помнит консоль. */
 const REPLACED_MAX = 10;
-/** Начало текста для списка: первая непустая строка, до 80 символов. */
-const head = (sql: string) => (sql.split("\n").find((l) => l.trim() !== "") ?? "").trim().slice(0, 80);
+/** Подпись заменённого текста — не длиннее (полный текст — в подсказке кнопки). */
+const HEAD_MAX = 80;
+
+/** Заменённый текст и когда его заменили. */
+interface Replaced {
+  text: string;
+  at: number;
+}
+
+/** Непустые строки текста без отступов. */
+const lines = (sql: string) =>
+  sql
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l !== "");
+
+/**
+ * Подпись заменённого текста (смоук P4b, R4): первая непустая строка; если она та же, что у текста редактора (предложение
+ * модели обычно начинается так же), — первая строка, которой тексты расходятся, с «…» впереди.
+ */
+function replacedHead(text: string, current: string): string {
+  const own = lines(text);
+  const now = lines(current);
+  if (own.length === 0) return "";
+  if (own[0] !== now[0]) return own[0].slice(0, HEAD_MAX);
+  const i = own.findIndex((l, k) => l !== now[k]);
+  return i < 0 ? own[0].slice(0, HEAD_MAX) : `… ${own[i]}`.slice(0, HEAD_MAX);
+}
 
 /**
  * Номер версии для `PlanRunner` из `Member.serverVersion` ("16.4", "17beta1"): мажорная × 10 000 + минорная. Нужна одна
@@ -54,7 +81,12 @@ function versionNum(text: string | null | undefined): number {
  * active — вкладка сейчас видна: скрытая список баз не читает, а при возвращении читает заново. Список нужен только режиму
  * «Запрос» и только пока база не известна (спека или выбор): «Вставить план» от него не зависит.
  * prefill — подстановка «Открыть в консоли EXPLAIN» из журнала MCP: применяется один раз на nonce.
- * Под редактором — панель «Предложения LLM» (P4b): `prefill.proposalId` выбирает в ней предложение.
+ * Порядок режима «Запрос» (смоук P4b, R1b): редактор → «Заменённые тексты» → форма запуска (`PlanRunner`: параметры, ряд
+ * кнопок с «Скопировать для LLM» и «Передать LLM-ассистенту» и их строками статуса, результат плана, «История») → панель
+ * «Предложения LLM» (P4b): `prefill.proposalId` выбирает в ней предложение, а предложение на запрос, переданный отсюда,
+ * выбирается само (R2).
+ * Подстановка текста (`prefill`, «Вернуть») сразу убирает план прежнего текста (R6); «Вернуть» и подстановка предложения
+ * (`prefill.autoPlan`) сразу строят «План» по новому тексту (R11), подстановка из журнала MCP — нет.
  * «Скопировать для LLM» получает план последнего запуска, пока SQL, узел и база не менялись, иначе Rust строит пробный план сам;
  * «Передать LLM-ассистенту» — тот же план и значения параметров последнего запуска (спец. P4 §8.1).
  */
@@ -87,11 +119,20 @@ export function ExplainTab({
   // Разобранный план хранится одним объектом: дерево плана сбрасывает развёртку при смене объекта.
   const [parsed, setParsed] = useState<ParsedPlan | null>(null);
   const [last, setLast] = useState<LastRun | null>(null);
-  // Уведомление «строка скопирована» живёт здесь: кнопка перемонтируется, когда появляется первый результат плана.
+  // Уведомление «строка скопирована» живёт здесь: кнопка перемонтируется вместе с запуском при смене узла или базы. Его
+  // запрос — «свой» для панели предложений: первое предложение на него она выберет сама.
   const [sentNotice, setSentNotice] = useState<SentNotice | null>(null);
   // Тексты, которые подстановка («Открыть в консоли») заменила: запуски в истории хранят планы, а не текст редактора, и
   // при смене узла или базы история уходит вместе с запуском, поэтому прежний текст остаётся здесь и возвращается кнопкой.
-  const [replaced, setReplaced] = useState<string[]>([]);
+  const [replaced, setReplaced] = useState<Replaced[]>([]);
+  // Подстановка текста, которую запуск ещё не принял: он убирает прежний результат и, если нужно, строит «План».
+  const [substitution, setSubstitution] = useState<Substitution | null>(null);
+  const substitutions = useRef(0);
+  const substitute = (plan: boolean) => {
+    substitutions.current += 1;
+    setSubstitution({ nonce: substitutions.current, plan });
+  };
+  const substituted = useCallback(() => setSubstitution(null), []);
   const [parsing, setParsing] = useState(false);
   const [parseError, setParseError] = useState<AppError | null>(null);
   // Повторное «Открыть в консоли» меняет спеку вкладки (при том же тексте — только её объект): новые узел, база и текст подставляются.
@@ -102,14 +143,16 @@ export function ExplainTab({
     if (initialSql !== undefined) setSql(initialSql);
   }, [spec, member, database, initialSql]);
   // Подстановка из журнала MCP (и панели предложений P4b): SQL, база и узел ставятся один раз на nonce — перерисовка с той
-  // же подстановкой правку пользователя не затирает; консоль переходит на «Запрос» и ничего не запускает. Узла нет — лидер.
+  // же подстановкой правку пользователя не затирает; консоль переходит на «Запрос», план прежнего текста убирается, а
+  // «План» строится только для предложения (`autoPlan`). Узла нет — лидер.
   useEffect(() => {
     if (!prefill) return;
-    if (sql.trim() !== "" && sql !== prefill.sql) setReplaced((r) => [sql, ...r.filter((x) => x !== sql)].slice(0, REPLACED_MAX));
+    if (sql.trim() !== "" && sql !== prefill.sql) setReplaced((r) => [{ text: sql, at: Date.now() }, ...r.filter((x) => x.text !== sql)].slice(0, REPLACED_MAX));
     setSql(prefill.sql);
     setDb(prefill.database ?? null);
     setNode(prefill.member ?? null);
     setSource("sql");
+    substitute(prefill.autoPlan === true);
   }, [prefill?.nonce]);
 
   if (view.data === undefined) {
@@ -197,22 +240,26 @@ export function ExplainTab({
             {/* Обе панели остаются смонтированными: переключение на «Вставить план» не стирает историю и значения параметров запуска. */}
             <div className="explain-panel" hidden={s !== "sql"}>
               <textarea className="mono explain-sql" aria-label="SQL" rows={8} value={sql} onChange={(e) => setSql(e.target.value)} placeholder={t("diag.explain.placeholder")} />
-              {/* Предложения LLM — под редактором (спец. P4 §8.4); ссылка карточки выбирает своё предложение по nonce подстановки. */}
-              <ProposalsPanel
-                connectionId={connectionId}
-                database={dbName}
-                active={active}
-                tabId={tabId({ kind: "explain", connectionId })}
-                focus={prefill?.proposalId ? { id: prefill.proposalId, nonce: prefill.nonce } : null}
-              />
+              {/* «Вернуть» — сразу под редактором (смоук P4b, R1a); подпись различает тексты с одинаковым началом (R4). */}
               {replaced.length > 0 && (
                 <section className="llm-replaced" aria-label={t("diag.explain.replaced.title")}>
                   <h4>{t("diag.explain.replaced.title")}</h4>
                   <ul className="plain-list">
-                    {replaced.map((text, i) => (
-                      <li key={`${i}:${text}`}>
-                        <button type="button" className="link" onClick={() => setSql(text)}>
-                          {t("diag.explain.replaced.restore", { head: head(text) })}
+                    {replaced.map((r, i) => (
+                      <li key={`${i}:${r.text}`}>
+                        <span className="muted llm-replaced-time" title={formatTimestamp(r.at).slice(0, 19)}>
+                          {formatShortTimestamp(r.at)}
+                        </span>{" "}
+                        <button
+                          type="button"
+                          className="link"
+                          title={r.text}
+                          onClick={() => {
+                            setSql(r.text);
+                            substitute(true);
+                          }}
+                        >
+                          {t("diag.explain.replaced.restore", { head: replacedHead(r.text, sql) })}
                         </button>
                       </li>
                     ))}
@@ -220,28 +267,38 @@ export function ExplainTab({
                 </section>
               )}
               {nodeName && dbName ? (
-                <>
-                  <PlanRunner
-                    key={`${nodeName}:${dbName}`}
-                    connectionId={connectionId}
-                    member={nodeName}
-                    database={dbName}
-                    sql={sql}
-                    serverVersionNum={serverVersionNum}
-                    inRecovery={inRecovery}
-                    onResult={(r, on, req) => setLast({ plan: r.plan, sql, node: on, db: dbName, params: req.params })}
-                    extraActions={
-                      <>
-                        {sql.trim() !== "" && <CopyLlmButton connectionId={connectionId} member={nodeName} database={dbName} source={{ kind: "sql", sql }} plan={lastPlan} />}
-                        <AskLlmButton connectionId={connectionId} member={nodeName} database={dbName} source={CONSOLE_SOURCE} sql={sql} params={lastParams} plan={lastPlan} sent={sentNotice} onSent={setSentNotice} />
-                      </>
-                    }
-                  />
-                </>
+                <PlanRunner
+                  key={`${nodeName}:${dbName}`}
+                  connectionId={connectionId}
+                  member={nodeName}
+                  database={dbName}
+                  sql={sql}
+                  serverVersionNum={serverVersionNum}
+                  inRecovery={inRecovery}
+                  onResult={(r, on, req) => setLast({ plan: r.plan, sql, node: on, db: dbName, params: req.params })}
+                  substitution={substitution}
+                  onSubstitution={substituted}
+                  extraActions={
+                    <>
+                      {sql.trim() !== "" && <CopyLlmButton connectionId={connectionId} member={nodeName} database={dbName} source={{ kind: "sql", sql }} plan={lastPlan} />}
+                      <AskLlmButton connectionId={connectionId} member={nodeName} database={dbName} source={CONSOLE_SOURCE} sql={sql} params={lastParams} plan={lastPlan} sent={sentNotice} onSent={setSentNotice} />
+                    </>
+                  }
+                />
               ) : (
                 // Базы ещё не знаем (список читается): запуску нужна база, режиму «Вставить план» — нет.
                 dbs.isPending && <p className="empty">{t("common.loading")}</p>
               )}
+              {/* Предложения LLM — после плана и истории (смоук P4b, R1b). */}
+              {/* Ссылка карточки выбирает своё предложение по nonce подстановки; ответ на запрос отсюда выбирается сам (R2). */}
+              <ProposalsPanel
+                connectionId={connectionId}
+                database={dbName}
+                active={active}
+                tabId={tabId({ kind: "explain", connectionId })}
+                focus={prefill?.proposalId ? { id: prefill.proposalId, nonce: prefill.nonce } : null}
+                follow={sentNotice?.id ?? null}
+              />
             </div>
             <div className="explain-panel" hidden={s !== "paste"}>
               <p className="diag-note">{t("diag.explain.pasteHint")}</p>

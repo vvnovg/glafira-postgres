@@ -449,6 +449,8 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .query-head .query-head-id { flex: 1 1 12ch; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .query-head > button { flex: none; }
 .query-overview, .plan-runner, .query-plan { display: flex; flex-direction: column; gap: 12px; }
+/* Обзор карточки: текст запроса и ряд кнопок под ним — с тем же промежутком, что форма консоли (ряд не прилипает к тексту). */
+.query-overview-head { display: flex; flex-direction: column; gap: 12px; }
 /* Подпись флажка GENERIC_PLAN — обычным цветом: от него зависит, что делает «План». */
 .params-form label.generic { color: var(--fg); font-weight: 600; }
 .params-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
@@ -523,13 +525,15 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .llm-levels [role="radiogroup"] { display: inline-flex; gap: 12px; }
 
 
-/* Панель «Предложения LLM» (P4b): ограниченный блок на --bg-alt (видно, где панель кончается и начинаются «Заменённые тексты»
-   и запуск плана); слева список — карточки в две строки, справа выбранное предложение — карточка на --bg. */
+/* Панель «Предложения LLM» (P4b): ограниченный блок на --bg-alt после плана и «Истории» консоли (видно, где панель
+   начинается); слева список — карточки в две строки, справа выбранное предложение — карточка на --bg. Колонка списка — до
+   320 px: короткое время умещается в строку статуса, а первая строка SQL — не короче ~40 символов (смоук P4b, R3); в узком
+   окне колонка сжимается до 180 px и строки переносятся. */
 .llm-proposals { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 8px; padding: 8px 12px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-alt); }
 .llm-proposals-toggle { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; padding: 2px 0; border: none; background: none; font-weight: 600; }
 .llm-proposals-region:empty { display: none; }
 .llm-proposals-empty { margin: 0; }
-.llm-proposals-body { display: grid; grid-template-columns: minmax(180px, 32ch) minmax(0, 1fr); gap: 12px; align-items: start; }
+.llm-proposals-body { display: grid; grid-template-columns: minmax(180px, 320px) minmax(0, 1fr); gap: 12px; align-items: start; }
 .llm-proposals-list { display: flex; flex-direction: column; gap: 4px; }
 /* Пункт списка — не ссылка: строка «статус · клиент · время» и начало текста; выбранный — фоном карточки и полосой акцента
    слева (и aria-current), а не одной жирностью. */
@@ -581,8 +585,13 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .llm-compare-side + .llm-compare-side { padding-left: 12px; border-left: 1px solid var(--border); }
 .llm-compare-side h5 { margin: 0 0 4px; font-size: 13px; }
 .llm-compare-side p { margin: 4px 0 2px; }
+/* «Заменённые тексты» консоли: время замены (цифрами одной ширины) и «Вернуть: …» в строку; длинная подпись переносится. */
+.llm-replaced h4 { margin: 0 0 4px; font-size: 13px; }
+.llm-replaced li { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.llm-replaced-time { flex: none; font-variant-numeric: tabular-nums; }
+.llm-replaced li .link { min-width: 0; overflow-wrap: anywhere; text-align: left; }
 /* «Передать LLM-ассистенту»: строки ожидания (с «Отменить запрос») и уведомления — под кнопками своим рядом, каждая своей
-   строкой; пустой блок ряд не занимает. */
+   строкой; пустой блок ряд не занимает. В консоли и на «Плане» карточки кнопки запроса стоят в ряду формы запуска. */
 .llm-ask-notes { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .llm-ask-notes.shown { flex-basis: 100%; }
 .llm-ask-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }

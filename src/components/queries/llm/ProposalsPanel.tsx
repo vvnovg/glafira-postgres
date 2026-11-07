@@ -4,7 +4,7 @@ import { flushSync } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../../api/client";
 import type { AgentRun, AppError, LlmProposal, ProposalComparison, ProposalStatus } from "../../../api/types";
-import { formatTimestamp } from "../../../lib/format";
+import { formatShortTimestamp, formatTimestamp } from "../../../lib/format";
 import { type DiffCell, type DiffRow, lineDiff, sideBySide } from "../../../lib/lineDiff";
 import { useAgentRuns } from "../../../lib/useAgentRuns";
 import { consoleProposals, useLlmProposals } from "../../../lib/useLlmProposals";
@@ -33,7 +33,7 @@ export interface ProposalFocus {
   nonce: number;
 }
 
-/** Время без миллисекунд: «2026-11-04 12:03:04». */
+/** Время без миллисекунд: «2026-11-04 12:03:04» (шапка выбранного и подсказка у времени пункта списка). */
 const when = (ms: number) => formatTimestamp(ms).slice(0, 19);
 /** Начало переписанного текста для списка: первая непустая строка, до 80 символов (дальше обрезает «…» стиля). */
 const head = (sql: string) => (sql.split("\n").find((l) => l.trim() !== "") ?? "").trim().slice(0, 80);
@@ -65,20 +65,42 @@ function StatusChip({ status }: { status: ProposalStatus }) {
 }
 
 /**
- * «Предложения LLM» под редактором консоли EXPLAIN (спец. P4 §8.4): предложения на запросы этой консоли и предложения без
+ * «Предложения LLM» в консоли EXPLAIN после плана (спец. P4 §8.4, смоук P4b R1b): предложения на запросы этой консоли и предложения без
  * запроса для её базы (`consoleProposals`); `focus` — предложение, выбранное ссылкой карточки: оно закрепляется в списке и
  * выбирается один раз на `nonce`. Свёрнута, пока предложений нет, если пользователь не раскрыл её сам. Новое предложение
  * приходит по событию `mcp://proposals`; пока консоль в фоне (`active = false`), предложения, которых она ещё не показала,
  * ставят пометку её вкладке (`tabId`) — строка вкладок рисует точку. Предложения фонового запуска подписаны «От фонового
  * ассистента (агент, модель)» (спец. P4c §7); показанные (консоль активна, панель раскрыта) отмечаются в
  * `useShownProposals` — строка статуса фонового ассистента о них больше не пишет.
+ * `follow` — запрос, отправленный из этой консоли (смоук P4b, R2): первое пришедшее на него предложение выбирается само и
+ * раскрывает панель, если пользователь после отправки не выбирал пункт сам; следующие предложения выбор не перехватывают.
+ * Ручной выбор (и выбор ссылкой карточки) отменяет автовыбор до следующей отправки — нового `follow`.
+ * Время в пункте списка — коротко (`formatShortTimestamp`), полное — в подсказке.
  */
-export function ProposalsPanel({ connectionId, database, active, tabId, focus }: { connectionId: string; database: string | null; active: boolean; tabId: string; focus: ProposalFocus | null }) {
+export function ProposalsPanel({
+  connectionId,
+  database,
+  active,
+  tabId,
+  focus,
+  follow = null,
+}: {
+  connectionId: string;
+  database: string | null;
+  active: boolean;
+  tabId: string;
+  focus: ProposalFocus | null;
+  follow?: string | null;
+}) {
   const { t } = useTranslation();
   const { requests, proposals, ready, refresh } = useLlmProposals(connectionId, { connectionId });
   const [pinned, setPinned] = useState<string[]>([]);
   const [open, setOpen] = useState<boolean | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  // Автовыбор ответа на свой запрос: `done` — уже выбрано или пользователь выбрал сам. Новый `follow` — новая отправка.
+  const [auto, setAuto] = useState<{ requestId: string; done: boolean } | null>(follow === null ? null : { requestId: follow, done: false });
+  if ((auto?.requestId ?? null) !== follow) setAuto(follow === null ? null : { requestId: follow, done: false });
+  const stopAuto = () => setAuto((a) => (a === null || a.done ? a : { ...a, done: true }));
   const appliedNonce = useRef<number | null>(null);
   const focusId = focus?.id;
   const focusNonce = focus?.nonce;
@@ -88,13 +110,25 @@ export function ProposalsPanel({ connectionId, database, active, tabId, focus }:
     setPinned((p) => (p.includes(focusId) ? p : [...p, focusId]));
     setSelected(focusId);
     setOpen(true);
+    stopAuto();
   }, [focusId, focusNonce]);
   const list = useMemo(() => consoleProposals(proposals, requests, database, pinned), [proposals, requests, database, pinned]);
+  // Первое пришедшее предложение на свой запрос (самое раннее, если пришло сразу несколько) — выбрано, панель раскрыта.
+  useEffect(() => {
+    if (auto === null || auto.done) return;
+    let first: LlmProposal | null = null;
+    for (const p of list) if (p.requestId === auto.requestId && (first === null || p.createdAtMs < first.createdAtMs)) first = p;
+    if (first === null) return;
+    setSelected(first.id);
+    setOpen(true);
+    setAuto({ ...auto, done: true });
+  }, [auto, list]);
   // Запуски нужны только для подписи фоновых предложений.
   const { all: runs } = useAgentRuns(null, { enabled: list.some((p) => !!p.runId) });
   // Выбор держится за id: ответ или новое предложение пересортируют список, а показанное предложение остаётся.
+  // Функцией: автовыбор своего запроса в том же проходе эффектов уже мог выбрать пункт.
   useEffect(() => {
-    if (selected === null && list.length > 0) setSelected(list[0].id);
+    if (selected === null && list.length > 0) setSelected((s) => s ?? list[0].id);
   }, [selected, list]);
   // Всё, что консоль показала активной, увидено; пометка — для пришедших, пока она в фоне. Первый прочитанный список —
   // уже существовавшие предложения: их консоль, смонтированная в фоне, новыми не считает.
@@ -135,11 +169,21 @@ export function ProposalsPanel({ connectionId, database, active, tabId, focus }:
               <ul className="plain-list llm-proposals-list" aria-label={t("llmAssist.panel.list")}>
                 {list.map((p) => (
                   <li key={p.id}>
-                    {/* Пункт — карточка в две строки: статус, клиент и время; начало предложенного текста. */}
-                    <button type="button" className="llm-item" aria-current={p.id === current?.id} onClick={() => setSelected(p.id)}>
+                    {/* Пункт — карточка в две строки: статус, клиент и короткое время (полное — в подсказке); начало предложенного текста. */}
+                    <button
+                      type="button"
+                      className="llm-item"
+                      aria-current={p.id === current?.id}
+                      onClick={() => {
+                        setSelected(p.id);
+                        stopAuto();
+                      }}
+                    >
                       <span className="llm-item-meta">
                         <StatusChip status={p.status} /> <span className="llm-item-client">{clientName(p, runs, t)}</span>{" "}
-                        <span className="llm-item-time">{when(p.createdAtMs)}</span>
+                        <span className="llm-item-time" title={when(p.createdAtMs)}>
+                          {formatShortTimestamp(p.createdAtMs)}
+                        </span>
                       </span>{" "}
                       <code className="llm-item-sql">{head(p.rewrittenSql)}</code>
                     </button>
@@ -269,9 +313,10 @@ function ProposalView({ proposal: p, runs, connectionId, onChanged }: { proposal
       setBusy(false);
     }
   };
-  // Текст консоли заменяется предложенным (прежние запуски остаются в истории), узел и база — предложения.
+  // Текст консоли заменяется предложенным (прежние запуски остаются в истории), узел и база — предложения; консоль сразу
+  // строит по нему «План» (смоук P4b, R11).
   const openInConsole = () =>
-    openExplainWithPrefill(connectionId, { sql: p.rewrittenSql, database: p.database, member: p.member ?? undefined });
+    openExplainWithPrefill(connectionId, { sql: p.rewrittenSql, database: p.database, member: p.member ?? undefined, autoPlan: true });
 
   return (
     <div className="llm-proposal">

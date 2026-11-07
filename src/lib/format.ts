@@ -27,6 +27,21 @@ export function formatTime(ms: number): string {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
+/**
+ * Короткое время для списков (смоук P4b, R3/R4): сегодня — «12:20», раньше в этом году — «07.11 01:53», в другом году —
+ * «07.11.2025 01:53». День и месяц — по правилам языка интерфейса (en — «11/07 01:53»), часы — 24-часовые, как у остальных
+ * меток. Полное время показывают в подсказке (`formatTimestamp`). `now` — «сегодня» для тестов.
+ */
+export function formatShortTimestamp(ms: number, now = Date.now()): string {
+  const d = new Date(ms);
+  const today = new Date(now);
+  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const sameYear = d.getFullYear() === today.getFullYear();
+  if (sameYear && d.getMonth() === today.getMonth() && d.getDate() === today.getDate()) return time;
+  const day = new Intl.DateTimeFormat(currentLocale(), sameYear ? { day: "2-digit", month: "2-digit" } : { day: "2-digit", month: "2-digit", year: "numeric" });
+  return `${day.format(d)} ${time}`;
+}
+
 const num = (n: number, digits = 0) =>
   n.toLocaleString(currentLocale(), { minimumFractionDigits: digits, maximumFractionDigits: digits });
 

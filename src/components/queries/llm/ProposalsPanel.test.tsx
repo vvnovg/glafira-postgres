@@ -55,8 +55,8 @@ describe("ProposalsPanel", () => {
     expect(await screen.findByRole("button", { name: "Предложения LLM (2)" })).toHaveAttribute("aria-expanded", "true");
     const items = within(screen.getByRole("list", { name: "Список предложений" })).getAllByRole("button");
     expect(items.map((b) => b.textContent)).toEqual([
-      expect.stringMatching(/^Новое qwen-code \d{4}-\d\d-\d\d \d\d:\d\d:\d\d SELECT 1 AS free$/),
-      expect.stringMatching(/^Принято qwen-code \d{4}-\d\d-\d\d \d\d:\d\d:\d\d SELECT 1 AS accepted$/),
+      expect.stringMatching(/^Новое qwen-code (\d\d\.\d\d(\.\d{4})? )?\d\d:\d\d SELECT 1 AS free$/),
+      expect.stringMatching(/^Принято qwen-code (\d\d\.\d\d(\.\d{4})? )?\d\d:\d\d SELECT 1 AS accepted$/),
     ]);
   });
 
@@ -84,6 +84,115 @@ describe("ProposalsPanel", () => {
     expect(sql).toHaveClass("llm-item-sql");
     expect(fresh).toHaveAttribute("aria-current", "true");
     expect(accepted).toHaveAttribute("aria-current", "false");
+  });
+
+  it("R3: время в пункте — коротко (сегодня — часы и минуты, раньше — день и месяц), полное — в подсказке", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(2026, 10, 7, 14, 0));
+    try {
+      vi.mocked(api.listLlmProposals).mockResolvedValue([
+        llmProposal({ id: "pa", createdAtMs: new Date(2026, 10, 7, 12, 20, 5).getTime(), rewrittenSql: "SELECT 1" }),
+        llmProposal({ id: "pb", createdAtMs: new Date(2026, 10, 6, 1, 53, 17).getTime(), rewrittenSql: "SELECT 2" }),
+      ]);
+      renderWithClient(panel());
+      await screen.findByRole("button", { name: "Предложения LLM (2)" });
+      const [today, earlier] = within(screen.getByRole("list", { name: "Список предложений" })).getAllByRole("button");
+      expect(within(today).getByText("12:20")).toHaveAttribute("title", "2026-11-07 12:20:05");
+      expect(within(earlier).getByText("06.11 01:53")).toHaveAttribute("title", "2026-11-06 01:53:17");
+      // В шапке выбранного — полное время.
+      expect(within(cardHead()).getByText("От qwen-code, 2026-11-07 12:20:05")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  describe("R2: предложение на свой запрос (`follow`) выбирается само", () => {
+    const requests = (...extra: ReturnType<typeof optimizationRequest>[]) =>
+      vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest({ id: "r1", status: "answered" }), ...extra]);
+    const items = () => within(screen.getByRole("list", { name: "Список предложений" })).getAllByRole("button");
+    const current = () => items().find((b) => b.getAttribute("aria-current") === "true")?.textContent ?? "";
+
+    it("панель раскрывается и выбирает первое пришедшее; следующие выбор не перехватывают; чужие и без запроса — без автовыбора", async () => {
+      requests(optimizationRequest({ id: "rnew" }));
+      vi.mocked(api.listLlmProposals).mockResolvedValue([llmProposal({ id: "pold", requestId: "r1", createdAtMs: 10, rewrittenSql: "SELECT 0 AS old" })]);
+      const user = userEvent.setup();
+      renderWithClient(panel({ follow: "rnew" }));
+      const toggle = await screen.findByRole("button", { name: "Предложения LLM (1)" });
+      expect(current()).toMatch(/SELECT 0 AS old$/);
+      // Пользователь свернул панель — автовыбор её раскроет.
+      await user.click(toggle);
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      await waitFor(() => expect(eventBus.handlers.length).toBeGreaterThan(0));
+      // Без запроса и на другой запрос — пункт появляется, но выбор не меняется, панель не раскрывается.
+      vi.mocked(api.listLlmProposals).mockResolvedValue([
+        llmProposal({ id: "pfree", requestId: null, createdAtMs: 20, rewrittenSql: "SELECT 1 AS free" }),
+        llmProposal({ id: "pold", requestId: "r1", createdAtMs: 10, rewrittenSql: "SELECT 0 AS old" }),
+      ]);
+      emit({ kind: "proposal", connectionId: "c", proposalId: "pfree" });
+      await screen.findByRole("button", { name: "Предложения LLM (2)" });
+      expect(screen.getByRole("button", { name: "Предложения LLM (2)" })).toHaveAttribute("aria-expanded", "false");
+      // Ответ на свой запрос: панель раскрыта, выбран он.
+      vi.mocked(api.listLlmProposals).mockResolvedValue([
+        llmProposal({ id: "pn1", requestId: "rnew", createdAtMs: 30, rewrittenSql: "SELECT 2 AS mine" }),
+        llmProposal({ id: "pfree", requestId: null, createdAtMs: 20, rewrittenSql: "SELECT 1 AS free" }),
+        llmProposal({ id: "pold", requestId: "r1", createdAtMs: 10, rewrittenSql: "SELECT 0 AS old" }),
+      ]);
+      emit({ kind: "proposal", connectionId: "c", proposalId: "pn1" });
+      await waitFor(() => expect(screen.getByRole("button", { name: "Предложения LLM (3)" })).toHaveAttribute("aria-expanded", "true"));
+      expect(current()).toMatch(/SELECT 2 AS mine$/);
+      expect(within(screen.getByRole("table", { name: "Исходный и предложенный текст" })).getByText("SELECT 2 AS mine")).toBeInTheDocument();
+      // Второе предложение на тот же запрос выбор не перехватывает.
+      vi.mocked(api.listLlmProposals).mockResolvedValue([
+        llmProposal({ id: "pn2", requestId: "rnew", createdAtMs: 40, rewrittenSql: "SELECT 3 AS mine_too" }),
+        llmProposal({ id: "pn1", requestId: "rnew", createdAtMs: 30, rewrittenSql: "SELECT 2 AS mine" }),
+      ]);
+      emit({ kind: "proposal", connectionId: "c", proposalId: "pn2" });
+      await waitFor(() => expect(items().map((b) => b.textContent)).toEqual([expect.stringMatching(/mine_too$/), expect.stringMatching(/AS mine$/)]));
+      expect(current()).toMatch(/SELECT 2 AS mine$/);
+    });
+
+    it("несколько предложений в одном ответе — выбирается первое пришедшее", async () => {
+      requests(optimizationRequest({ id: "rnew" }));
+      vi.mocked(api.listLlmProposals).mockResolvedValue([
+        llmProposal({ id: "pn2", requestId: "rnew", createdAtMs: 40, rewrittenSql: "SELECT 3 AS second" }),
+        llmProposal({ id: "pn1", requestId: "rnew", createdAtMs: 30, rewrittenSql: "SELECT 2 AS first" }),
+      ]);
+      renderWithClient(panel({ follow: "rnew" }));
+      await screen.findByRole("button", { name: "Предложения LLM (2)" });
+      await waitFor(() => expect(current()).toMatch(/SELECT 2 AS first$/));
+    });
+
+    it("ручной выбор после отправки отменяет автовыбор до следующей отправки", async () => {
+      requests(optimizationRequest({ id: "rnew" }), optimizationRequest({ id: "rnext" }));
+      vi.mocked(api.listLlmProposals).mockResolvedValue([
+        llmProposal({ id: "pa", requestId: "r1", createdAtMs: 20, rewrittenSql: "SELECT 1 AS a" }),
+        llmProposal({ id: "pb", requestId: "r1", createdAtMs: 10, rewrittenSql: "SELECT 1 AS b" }),
+      ]);
+      const user = userEvent.setup();
+      const { rerender } = renderWithClient(panel({ follow: "rnew" }));
+      await screen.findByRole("button", { name: "Предложения LLM (2)" });
+      await user.click(items()[1]);
+      expect(current()).toMatch(/AS b$/);
+      await waitFor(() => expect(eventBus.handlers.length).toBeGreaterThan(0));
+      vi.mocked(api.listLlmProposals).mockResolvedValue([
+        llmProposal({ id: "pn", requestId: "rnew", createdAtMs: 30, rewrittenSql: "SELECT 2 AS mine" }),
+        llmProposal({ id: "pa", requestId: "r1", createdAtMs: 20, rewrittenSql: "SELECT 1 AS a" }),
+        llmProposal({ id: "pb", requestId: "r1", createdAtMs: 10, rewrittenSql: "SELECT 1 AS b" }),
+      ]);
+      emit({ kind: "proposal", connectionId: "c", proposalId: "pn" });
+      await screen.findByRole("button", { name: "Предложения LLM (3)" });
+      expect(current()).toMatch(/AS b$/);
+      // Следующая отправка — автовыбор снова включён.
+      rerender(panel({ follow: "rnext" }));
+      vi.mocked(api.listLlmProposals).mockResolvedValue([
+        llmProposal({ id: "pnext", requestId: "rnext", createdAtMs: 40, rewrittenSql: "SELECT 3 AS next" }),
+        llmProposal({ id: "pn", requestId: "rnew", createdAtMs: 30, rewrittenSql: "SELECT 2 AS mine" }),
+        llmProposal({ id: "pa", requestId: "r1", createdAtMs: 20, rewrittenSql: "SELECT 1 AS a" }),
+        llmProposal({ id: "pb", requestId: "r1", createdAtMs: 10, rewrittenSql: "SELECT 1 AS b" }),
+      ]);
+      emit({ kind: "proposal", connectionId: "c", proposalId: "pnext" });
+      await waitFor(() => expect(current()).toMatch(/SELECT 3 AS next$/));
+    });
   });
 
   it("Z4/Z6: шапка карточки — чип статуса и «От клиента, время»; «Принять» — основная, «Отклонить» рядом; «Сравнить планы», «Открыть в консоли», «Копировать» — в шапке, до текстов и разделов", async () => {
@@ -114,7 +223,7 @@ describe("ProposalsPanel", () => {
     const from = await screen.findByText(/^От фонового ассистента \(Qwen Code, qwen3\.6-64k:35b-a3b\), \d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/);
     expect(cardHead()).toContainElement(from);
     const items = within(screen.getByRole("list", { name: "Список предложений" })).getAllByRole("button");
-    expect(items[0]).toHaveTextContent(/^Новое фоновый ассистент \(Qwen Code, qwen3\.6-64k:35b-a3b\) \d{4}-/);
+    expect(items[0]).toHaveTextContent(/^Новое фоновый ассистент \(Qwen Code, qwen3\.6-64k:35b-a3b\) (\d\d\.\d\d(\.\d{4})? )?\d\d:\d\d /);
     expect(api.listAgentRuns).toHaveBeenCalledWith({});
     expect(useShownProposals.getState().shown).toEqual({ p1b2c3d: true });
   });
@@ -125,7 +234,7 @@ describe("ProposalsPanel", () => {
     renderWithClient(panel({ active: false }));
     expect(await screen.findByText(/^От фонового ассистента, /)).toBeInTheDocument();
     const items = within(screen.getByRole("list", { name: "Список предложений" })).getAllByRole("button");
-    expect(items[0]).toHaveTextContent(/^Новое фоновый ассистент \d{4}-/);
+    expect(items[0]).toHaveTextContent(/^Новое фоновый ассистент (\d\d\.\d\d(\.\d{4})? )?\d\d:\d\d /);
     expect(useShownProposals.getState().shown).toEqual({});
   });
 

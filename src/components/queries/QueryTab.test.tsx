@@ -7,6 +7,7 @@ import { resetEventBus } from "../../test/events";
 import { connection, member, topology, topologyView } from "../../test/fixtures";
 import { llmProposal, optimizationRequest } from "../../test/llm";
 import { mcpStatus } from "../../test/mcp";
+import { planTree } from "../../test/plans";
 import { renderWithClient } from "../../test/render";
 import en from "../../locales/en.json";
 import ru from "../../locales/ru.json";
@@ -227,20 +228,31 @@ describe("QueryTab", () => {
     const text = screen.getByRole("group", { name: "Текст запроса" });
     const row = text.nextElementSibling as HTMLElement;
     expect(within(row).getAllByRole("button").map((b) => b.textContent)).toEqual(["Получить план", "Открыть в консоли", "Копировать запрос", "Скопировать для LLM", "?", "Передать LLM-ассистенту", "?"]);
+    // Ряд отделён от текста запроса отступом, как тулбары консоли (смоук P4b, R5): текст и ряд — в блоке с промежутком.
+    expect(row).toHaveClass("toolbar");
+    expect(row.parentElement).toHaveClass("query-overview-head");
     expect(within(text.closest(".query-tab")!.querySelector(".toolbar") as HTMLElement).queryByRole("button", { name: "Скопировать для LLM" })).toBeNull();
     // Старой кнопки «План» под текстом нет: «План» — только подвкладка.
     expect(screen.queryByRole("button", { name: "План" })).toBeNull();
   });
 
-  it("подвкладка «План»: подсказка о выполняющемся экземпляре переключает источник; «Скопировать для LLM» и там", async () => {
+  it("подвкладка «План»: подсказка о выполняющемся экземпляре переключает источник; «Скопировать для LLM» и там — в ряду кнопок запуска, не в ряду копирования плана", async () => {
     vi.mocked(api.queryDetail).mockResolvedValue(detail());
+    vi.mocked(api.explain).mockResolvedValue({ mode: "plan", tier: "read", plan: planTree(), raw: [], relations: [], elapsedMs: 3, warnings: [], recommendations: [], recommendationsSkipped: [] });
     const user = userEvent.setup();
     renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
     await screen.findByText("SELECT * FROM shop.customers WHERE id = $1");
     await user.click(screen.getByRole("tab", { name: "План" }));
     // Подсказка обновляется с карточкой — без живой области, чтобы скринридер не повторял её на каждом обновлении.
     expect(screen.getByText(/Выполняется экземпляр \(PID 42\)/).closest("[role=status]")).toBeNull();
-    expect(screen.getByRole("button", { name: "Скопировать для LLM" })).toBeInTheDocument();
+    const llm = screen.getByRole("button", { name: "Скопировать для LLM" });
+    const formRow = screen.getByRole("button", { name: "План (общий)" }).closest(".toolbar") as HTMLElement;
+    expect(formRow).toContainElement(llm);
+    await user.click(screen.getByRole("button", { name: "План (общий)" }));
+    await screen.findByRole("treegrid", { name: "Дерево плана" });
+    expect(screen.getAllByRole("button", { name: "Скопировать для LLM" })).toEqual([llm]);
+    expect(formRow).toContainElement(llm);
+    expect(screen.getByRole("button", { name: "Копировать как текст" }).closest(".toolbar")).not.toContainElement(llm);
     await user.click(screen.getByRole("button", { name: "Взять его текст" }));
     expect(screen.getByRole("combobox", { name: "Текст запроса" })).toHaveValue("running:42");
     expect(screen.queryByText(/Выполняется экземпляр \(PID 42\)/)).toBeNull();

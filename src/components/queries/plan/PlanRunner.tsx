@@ -38,6 +38,14 @@ interface Run {
   request: ExplainRequest;
 }
 
+/**
+ * Подстановка текста в консоли (смоук P4b, R6/R11): `nonce` — номер подстановки, `plan` — построить «План» по новому тексту.
+ */
+export interface Substitution {
+  nonce: number;
+  plan: boolean;
+}
+
 /** Подсказка у кнопок: `force` — после `EXPLAIN_WRITES` можно выполнить как запись; остальные закрывают ярус записи. */
 type WriteHint = "force" | "replica" | "readOnly";
 
@@ -110,6 +118,14 @@ function errorPlace(sql: string, error: AppError | null): ErrorPlace | null {
  * Значения параметров: свыше `PARAM_FIELDS_LIMIT` полей нет, и запуски, которым нужны значения, закрыты; GENERIC_PLAN
  * влияет только на «План», поля значений для «Плана с выполнением» видны и при нём.
  * Ярус записи пишет журнал действий — после него список журнала перечитывается, как после диалогов P2.
+ * `extraActions` — кнопки запроса («Скопировать для LLM», «Передать LLM-ассистенту» с их строками статуса) в конце ряда
+ * формы, до результата и после него: они действуют над запросом, а не над планом, поэтому не в ряду копирования плана
+ * (смоук P4b, R1b).
+ * `substitution` — подстановка текста в консоли (смоук P4b, R6/R11): новый `nonce` сразу убирает показанный результат
+ * (ошибку, подсказки и открытое подтверждение тоже), а запуски, начатые до подстановки, попадают только в историю. С `plan`
+ * — как только запуск доступен, «План» по новому тексту, как кнопкой (никогда не «План с выполнением»); текст с `$N` —
+ * только общим планом: GENERIC_PLAN снова включается, а без него (сервер до 16) результат только убирается.
+ * `onSubstitution` — подстановка принята: родитель снимает её, чтобы новый запуск (смена узла или базы) её не повторил.
  */
 export function PlanRunner({
   connectionId,
@@ -123,6 +139,8 @@ export function PlanRunner({
   autoRun,
   onAutoRun,
   extraActions,
+  substitution = null,
+  onSubstitution,
 }: {
   connectionId: string;
   member: string;
@@ -134,8 +152,10 @@ export function PlanRunner({
   onResult?: (r: ExplainResult, member: string, request: ExplainRequest) => void;
   autoRun?: boolean;
   onAutoRun?: () => void;
-  /** Кнопки в ряду копирования результата (рядом с «JSON» и «Как текст»); без результата — отдельным рядом. */
+  /** Кнопки запроса в конце ряда формы (после search_path). */
   extraActions?: ReactNode;
+  substitution?: Substitution | null;
+  onSubstitution?: () => void;
 }) {
   const { t } = useTranslation();
   const qc = useQueryClient();
@@ -174,6 +194,22 @@ export function PlanRunner({
   // Запуск из двух вызовов (пробный план и ANALYZE) — одна операция: кнопки ждут её целиком.
   const [running, setRunning] = useState(false);
   const explain = useExplain(connectionId);
+  // Подстановка текста: прошлый результат, ошибка, подсказки и подтверждение относятся к прежнему тексту — сброс при
+  // отрисовке, без эффекта (ни кадра с прежним планом под новым текстом). У текста с `$N` снова включается GENERIC_PLAN:
+  // «План» подстановки — общий.
+  const [substSeen, setSubstSeen] = useState<number | null>(null);
+  if (substitution !== null && substitution.nonce !== substSeen) {
+    setSubstSeen(substitution.nonce);
+    setResultHidden(true);
+    setFailed(null);
+    setWriteHint(null);
+    setConfirm(null);
+    setForceFrom(null);
+    if (canGeneric) setGeneric(true);
+  }
+  // Номер подстановки, при котором начат запуск: ответ запуска, начатого до неё, — только в историю.
+  const substNow = useRef(substSeen);
+  substNow.current = substSeen;
   const seq = useRef(0);
   const alive = useRef(true);
   useEffect(() => {
@@ -196,7 +232,8 @@ export function PlanRunner({
     setForceFrom(null);
     setFailed(null);
   }, [key]);
-  const stale = (from: Inputs) => !alive.current || inputsKey(from) !== liveKey.current;
+  // Вход устарел: правка текста, значений или search_path — или подстановка текста после начала запуска (`since`).
+  const stale = (from: Inputs, since: number | null) => !alive.current || inputsKey(from) !== liveKey.current || since !== substNow.current;
 
   const leader = !inRecovery && members?.find((m) => m.name === member)?.role === "primary";
   const replicas = leader ? (members ?? []).filter((m) => m.name !== member && m.reachable && isStandby(m.role)) : [];
@@ -226,17 +263,19 @@ export function PlanRunner({
   });
 
   /** Запуск запроса `req` и запоминание результата (после размонтирования — никуда). */
-  const runAndRemember = async (req: ExplainRequest) => {
+  const runAndRemember = async (req: ExplainRequest, since: number | null) => {
     const result = await explain.mutateAsync(req);
-    remember(result, req);
+    remember(result, req, since);
     return result;
   };
-  const remember = (result: ExplainResult, req: ExplainRequest) => {
+  /** `since` — номер подстановки на начало запуска: после новой подстановки результат прежнего текста не показывается. */
+  const remember = (result: ExplainResult, req: ExplainRequest, since: number | null) => {
     if (!alive.current) return;
     seq.current += 1;
     const on = req.member;
     const run: Run = { id: seq.current, at: Date.now(), result, member: on, request: req };
     setRuns((r) => [run, ...r].slice(0, HISTORY));
+    if (since !== substNow.current) return;
     setShown(run.id);
     setResultHidden(false);
     onResult?.(result, on, req);
@@ -244,13 +283,15 @@ export function PlanRunner({
 
   /** Запуск входа `from`: прошлые ошибка и подсказка снимаются, новая ошибка — баннером (после размонтирования — никуда). */
   const guarded = async (from: Inputs, step: () => Promise<void>) => {
+    const since = substNow.current;
     setFailed(null);
     setWriteHint(null);
     setRunning(true);
     try {
       await step();
     } catch (e) {
-      if (alive.current) {
+      // Ошибка запуска, начатого до подстановки текста, к новому тексту не относится.
+      if (alive.current && since === substNow.current) {
         setFailed({ error: toAppError(e), sql: from.sql });
         setResultHidden(true);
       }
@@ -268,19 +309,20 @@ export function PlanRunner({
   };
 
   /** `EXPLAIN_WRITES`: повтор «как запись» пойдёт ярусом записи с подтверждением (таблицы — какие известны). */
-  const offerForce = (e: unknown, relations: RelationRef[], from: Inputs) => {
-    if (toAppError(e).code !== "EXPLAIN_WRITES" || stale(from)) return;
+  const offerForce = (e: unknown, relations: RelationRef[], from: Inputs, since: number | null) => {
+    if (toAppError(e).code !== "EXPLAIN_WRITES" || stale(from, since)) return;
     setForceFrom({ relations, inputs: from });
     setWriteHint("force");
   };
 
   const runPlan = () => {
     const from = inputs;
+    const since = substNow.current;
     return guarded(from, async () => {
       const req = request("plan", NO_CONFIRMATION, false, from);
       const r = await explain.mutateAsync(req);
       if (alive.current) setReadProbe(r.tier === "read" ? inputsKey(from) : null);
-      remember(r, req);
+      remember(r, req, since);
     });
   };
 
@@ -291,17 +333,18 @@ export function PlanRunner({
   const runAnalyze = () => {
     const from = inputs;
     const on = analyzeTarget;
+    const since = substNow.current;
     return guarded(from, async () => {
       let probe: ExplainResult;
       try {
         probe = await explain.mutateAsync(request("plan", NO_CONFIRMATION, false, from));
       } catch (e) {
         // Побочный эффект уже при планировании: проба отказала в READ ONLY, таблиц не знаем.
-        offerForce(e, [], from);
+        offerForce(e, [], from, since);
         throw e;
       }
       // Вход изменился, пока шла проба (или запуск размонтирован): ни подтверждения, ни ANALYZE прежнего текста.
-      if (stale(from)) return;
+      if (stale(from, since)) return;
       if (probe.tier === "write") {
         setReadProbe(null);
         openWrite(probe.relations, false, from, probe.warnings.includes("adminFunction"));
@@ -309,10 +352,10 @@ export function PlanRunner({
       }
       setReadProbe(inputsKey(from));
       try {
-        await runAndRemember(request("analyze", NO_CONFIRMATION, false, from, on));
+        await runAndRemember(request("analyze", NO_CONFIRMATION, false, from, on), since);
       } catch (e) {
         // Чтение записало (volatile-функция, триггер).
-        offerForce(e, probe.relations, from);
+        offerForce(e, probe.relations, from, since);
         throw e;
       }
     });
@@ -328,12 +371,13 @@ export function PlanRunner({
   const confirmed = (c: Confirmation) => {
     if (!confirm) return;
     const { force, inputs: from } = confirm;
+    const since = substNow.current;
     // Подтверждение остаётся открытым (кнопки ждут), пока ANALYZE идёт; закрывается итогом — результатом или ошибкой.
     // Запрос — из входа пробы: подтверждали именно его (`writeConfirmed` — без него Rust откажет записи). Ярус записи — на
     // узле вкладки; журнал действий перечитывается.
     return guarded(from, async () => {
       try {
-        await runAndRemember({ ...request("analyze", c, force, from), writeConfirmed: true });
+        await runAndRemember({ ...request("analyze", c, force, from), writeConfirmed: true }, since);
       } finally {
         void qc.invalidateQueries({ queryKey: ["actions", connectionId] });
         if (alive.current) setConfirm(null);
@@ -368,6 +412,20 @@ export function PlanRunner({
     onAutoRun?.();
     if (!planBlocked) void runPlanRef.current();
   }, [autoRun, idle, onAutoRun, planBlocked]);
+
+  // «План» подстановки: один на номер, как только запуск доступен; текст с `$N` без GENERIC_PLAN — без запуска (результат
+  // уже убран). Принятую подстановку родитель снимает (`onSubstitution`).
+  const substTaken = useRef<number | null>(null);
+  const substNonce = substitution?.nonce ?? null;
+  const substPlan = substitution?.plan ?? false;
+  useEffect(() => {
+    if (substNonce === null || substTaken.current === substNonce) return;
+    const run = substPlan && (count === 0 || genericOn);
+    if (run && !idle) return;
+    substTaken.current = substNonce;
+    onSubstitution?.();
+    if (run) void runPlanRef.current();
+  }, [substNonce, substPlan, count, genericOn, idle, onSubstitution]);
 
   return (
     <div className="plan-runner">
@@ -407,6 +465,7 @@ export function PlanRunner({
           <summary>search_path</summary>
           <input type="text" aria-label="search_path" value={searchPath} placeholder={t("diag.plan.run.searchPathDefault")} onChange={(e) => setSearchPath(e.target.value)} />
         </details>
+        {extraActions}
       </div>
       {error && <ErrorBanner error={error} />}
       {/* «Нет такой таблицы или схемы» чаще всего значит, что запрос ушёл не в ту базу: называем её. */}
@@ -458,7 +517,6 @@ export function PlanRunner({
           raw={current.result.raw}
           elapsedMs={current.result.elapsedMs}
           member={current.member !== member ? current.member : undefined}
-          extraActions={extraActions}
           afterSummary={(showNode) => (
             <Recommendations
               target={{
@@ -475,7 +533,6 @@ export function PlanRunner({
           )}
         />
       )}
-      {(!current || refused) && extraActions && <div className="toolbar">{extraActions}</div>}
       {runs.length > 1 && (
         <section className="plan-history">
           <h3>{t("diag.plan.history.title")}</h3>

@@ -449,6 +449,135 @@ describe("PlanRunner: отказы и режим", () => {
   });
 });
 
+describe("PlanRunner: кнопки запроса в ряду формы и подстановка текста (смоук P4b R1b, R6, R11)", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(api.listConnections).mockResolvedValue([connection({ id: "c", environment: "dev", readOnly: false })]);
+  });
+
+  const runner = (sql: string, extra: Partial<Parameters<typeof PlanRunner>[0]> = {}) => (
+    <PlanRunner connectionId="c" member="pg-1" database="perf" sql={sql} serverVersionNum={170_000} inRecovery={false} {...extra} />
+  );
+  const tree = () => screen.queryByRole("treegrid", { name: "Дерево плана" });
+  /** Ответ, который приходит, когда тест скажет. */
+  const pending = () => {
+    let finish: (v: ExplainResult) => void = () => {};
+    vi.mocked(api.explain).mockReturnValueOnce(new Promise((r) => { finish = r; }));
+    return (v = result()) => act(async () => finish(v));
+  };
+
+  it("`extraActions` — в ряду формы рядом с «План» и до, и после результата; в ряду копирования плана их нет", async () => {
+    vi.mocked(api.explain).mockResolvedValue(result());
+    const user = userEvent.setup();
+    renderWithClient(runner("SELECT 1", { extraActions: <button type="button">LLM</button> }));
+    const row = () => screen.getByRole("button", { name: "План" }).closest(".toolbar");
+    expect(row()).toContainElement(screen.getByRole("button", { name: "LLM" }));
+    await user.click(screen.getByRole("button", { name: "План" }));
+    await screen.findByRole("treegrid", { name: "Дерево плана" });
+    expect(screen.getAllByRole("button", { name: "LLM" })).toHaveLength(1);
+    expect(row()).toContainElement(screen.getByRole("button", { name: "LLM" }));
+    expect(screen.getByRole("button", { name: "Копировать как текст" }).closest(".toolbar")).not.toContainElement(screen.getByRole("button", { name: "LLM" }));
+  });
+
+  it("подстановка сразу убирает результат и строит «План» по новому тексту, как кнопка; родитель узнаёт, что она принята", async () => {
+    vi.mocked(api.explain).mockResolvedValueOnce(result());
+    const user = userEvent.setup();
+    const onSubstitution = vi.fn();
+    const { rerender } = renderWithClient(runner("SELECT 1"));
+    await user.click(screen.getByRole("button", { name: "План" }));
+    await screen.findByRole("treegrid", { name: "Дерево плана" });
+    const finish = pending();
+    rerender(runner("SELECT 2", { substitution: { nonce: 1, plan: true }, onSubstitution }));
+    // Прежний план к новому тексту не относится — его нет сразу, ещё до ответа.
+    expect(tree()).toBeNull();
+    await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("c", expect.objectContaining({ sql: "SELECT 2", mode: "plan", params: { kind: "none" }, member: "pg-1", database: "perf" })));
+    expect(onSubstitution).toHaveBeenCalledTimes(1);
+    await finish();
+    expect(await screen.findByRole("treegrid", { name: "Дерево плана" })).toBeInTheDocument();
+    // Та же подстановка (снята родителем или нет) второй раз не запускается; «План с выполнением» — никогда.
+    rerender(runner("SELECT 2", { substitution: { nonce: 1, plan: true }, onSubstitution }));
+    rerender(runner("SELECT 2", { substitution: null, onSubstitution }));
+    expect(api.explain).toHaveBeenCalledTimes(2);
+    expect(api.explain).not.toHaveBeenCalledWith("c", expect.objectContaining({ mode: "analyze" }));
+  });
+
+  it("смонтированный заново с уже принятой подстановкой (родитель снял её) — без запуска", async () => {
+    vi.mocked(api.explain).mockResolvedValue(result());
+    renderWithClient(runner("SELECT 2", { substitution: null }));
+    await act(() => new Promise((r) => setTimeout(r, 0)));
+    expect(api.explain).not.toHaveBeenCalled();
+  });
+
+  it("подстановка без «Плана» (журнал MCP) только убирает результат; запуск, начатый до неё, уходит в историю, а не на экран", async () => {
+    vi.mocked(api.explain).mockResolvedValueOnce(result());
+    const user = userEvent.setup();
+    const onSubstitution = vi.fn();
+    const { rerender } = renderWithClient(runner("SELECT 1"));
+    await user.click(screen.getByRole("button", { name: "План" }));
+    await screen.findByRole("treegrid", { name: "Дерево плана" });
+    const finish = pending();
+    await user.click(screen.getByRole("button", { name: "План" }));
+    rerender(runner("SELECT 2", { substitution: { nonce: 7, plan: false }, onSubstitution }));
+    expect(tree()).toBeNull();
+    await waitFor(() => expect(onSubstitution).toHaveBeenCalledTimes(1));
+    await finish();
+    expect(await screen.findByText(/История/)).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /^#\d/ })).toHaveLength(2);
+    expect(tree()).toBeNull();
+    expect(api.explain).toHaveBeenCalledTimes(2);
+    // Из истории запуск прежнего текста можно открыть.
+    await user.click(screen.getAllByRole("button", { name: /^#\d/ })[0]);
+    expect(tree()).not.toBeNull();
+  });
+
+  it("подстановка во время запуска: «План» нового текста — после него; ответ прежнего на экран не попадает", async () => {
+    const user = userEvent.setup();
+    const { rerender } = renderWithClient(runner("SELECT 1"));
+    const finishOld = pending();
+    await user.click(screen.getByRole("button", { name: "План" }));
+    const finishNew = pending();
+    rerender(runner("SELECT 2", { substitution: { nonce: 1, plan: true } }));
+    expect(api.explain).toHaveBeenCalledTimes(1);
+    await finishOld();
+    await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("c", expect.objectContaining({ sql: "SELECT 2", mode: "plan" })));
+    expect(tree()).toBeNull();
+    await finishNew();
+    expect(await screen.findByRole("treegrid", { name: "Дерево плана" })).toBeInTheDocument();
+  });
+
+  it("ошибка запуска, начатого до подстановки, баннером под новым текстом не встаёт", async () => {
+    let fail: (e: unknown) => void = () => {};
+    vi.mocked(api.explain).mockReturnValueOnce(new Promise((_r, j) => { fail = j; }));
+    const user = userEvent.setup();
+    const { rerender } = renderWithClient(runner("SELECT 1"));
+    await user.click(screen.getByRole("button", { name: "План" }));
+    rerender(runner("SELECT 2", { substitution: { nonce: 1, plan: false } }));
+    await act(async () => fail({ code: "INVALID_INPUT", message: "x", retryable: false, key: "errors.explain.oneStatement" }));
+    expect(screen.queryByRole("alert")).toBeNull();
+    await waitFor(() => expect(screen.getByRole("button", { name: "План" })).toBeEnabled());
+  });
+
+  it("текст с $N: на 16+ — общий план, GENERIC_PLAN снова включается; без него (15) — только очистка", async () => {
+    vi.mocked(api.explain).mockResolvedValue(result());
+    const user = userEvent.setup();
+    const onSubstitution = vi.fn();
+    const first = renderWithClient(runner("SELECT $1"));
+    await user.click(screen.getByRole("checkbox", { name: "GENERIC_PLAN (без значений)" }));
+    first.rerender(runner("SELECT $1 + $2", { substitution: { nonce: 1, plan: true }, onSubstitution }));
+    await waitFor(() => expect(api.explain).toHaveBeenCalledWith("c", expect.objectContaining({ sql: "SELECT $1 + $2", mode: "plan", params: { kind: "generic" } })));
+    expect(screen.getByRole("checkbox", { name: "GENERIC_PLAN (без значений)" })).toBeChecked();
+    first.unmount();
+    vi.mocked(api.explain).mockClear();
+    const second = renderWithClient(runner("SELECT 1", { serverVersionNum: 150_000 }));
+    await user.click(screen.getByRole("button", { name: "План" }));
+    await screen.findByRole("treegrid", { name: "Дерево плана" });
+    second.rerender(runner("SELECT $1", { serverVersionNum: 150_000, substitution: { nonce: 2, plan: true }, onSubstitution }));
+    expect(tree()).toBeNull();
+    await waitFor(() => expect(onSubstitution).toHaveBeenCalledTimes(2));
+    expect(api.explain).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("countParams", () => {
   it("наибольший номер $N, как в Rust", () => {
     expect(countParams("SELECT 1")).toBe(0);

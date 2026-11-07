@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { i18n } from "../i18n";
-import { formatAas, formatBytes, formatCount, formatDuration, formatInt64, formatMs, formatPercent, formatScheduled, formatTimestamp } from "./format";
+import { formatAas, formatBytes, formatCount, formatDuration, formatInt64, formatMs, formatPercent, formatScheduled, formatShortTimestamp, formatTimestamp } from "./format";
 
 describe("format", () => {
   it("timestamp в UTC с миллисекундами", () => {
@@ -145,6 +145,23 @@ describe("форматы по языку", () => {
     expect(formatScheduled("2026-10-25T05:00:00+03:00")).toBe(formatScheduled("2026-10-25T02:00:00Z"));
     expect(formatScheduled("завтра")).toBe("завтра");
     expect(formatScheduled("")).toBe("");
+  });
+});
+
+describe("formatShortTimestamp", () => {
+  afterEach(() => i18n.changeLanguage("ru"));
+  const at = (y: number, mo: number, d: number, h: number, mi: number, s = 0) => new Date(y, mo - 1, d, h, mi, s).getTime();
+  const now = at(2026, 11, 7, 14, 30);
+
+  it("сегодня — часы и минуты; раньше в этом году — день и месяц; другой год — с годом (24 часа, по правилам языка)", async () => {
+    await i18n.changeLanguage("ru");
+    expect([formatShortTimestamp(at(2026, 11, 7, 12, 20, 59), now), formatShortTimestamp(at(2026, 11, 7, 0, 5), now)]).toEqual(["12:20", "00:05"]);
+    expect(formatShortTimestamp(at(2026, 11, 6, 23, 53), now)).toBe("06.11 23:53");
+    expect(formatShortTimestamp(at(2025, 11, 7, 1, 53), now)).toBe("07.11.2025 01:53");
+    await i18n.changeLanguage("en");
+    expect(formatShortTimestamp(at(2026, 11, 7, 12, 20), now)).toBe("12:20");
+    expect(formatShortTimestamp(at(2026, 11, 6, 1, 53), now)).toBe("11/06 01:53");
+    expect(formatShortTimestamp(at(2025, 11, 7, 13, 53), now)).toBe("11/07/2025 13:53");
   });
 });
 

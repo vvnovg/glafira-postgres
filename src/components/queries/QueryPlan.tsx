@@ -35,7 +35,7 @@ export function QueryPlan({
   onPlanResult: (r: ExplainResult, member: string) => void;
   autoRun?: boolean;
   onAutoRun?: () => void;
-  /** Кнопки в ряду копирования результата («Скопировать для LLM» карточки). */
+  /** Кнопки запроса в ряду кнопок запуска («Скопировать для LLM» карточки), не в ряду копирования плана. */
   extraActions?: ReactNode;
 }) {
   const { t } = useTranslation();

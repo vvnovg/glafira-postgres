@@ -2,7 +2,7 @@ import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { openExplainWithPrefill, useWorkspace } from "../../state/workspace";
-import { resetEventBus } from "../../test/events";
+import { emitEvent, eventBus, resetEventBus } from "../../test/events";
 import { connection, member, topology, topologyView } from "../../test/fixtures";
 import { llmProposal, optimizationRequest } from "../../test/llm";
 import { mcpStatus } from "../../test/mcp";
@@ -18,10 +18,14 @@ vi.mock("../../api/client", async (importOriginal) => {
 });
 
 import { api } from "../../api/client";
-import type { ParsedPlan, PlanTree, Recommendation } from "../../api/types";
+import type { ExplainResult, ParsedPlan, PlanTree, Recommendation } from "../../api/types";
 import { ExplainTab } from "./ExplainTab";
 
 const pasted = (plan: PlanTree, recommendations: Recommendation[] = []): ParsedPlan => ({ plan, recommendations, recommendationsSkipped: [] });
+const explained = (plan: PlanTree = planTree()): ExplainResult => ({ mode: "plan", tier: "read", plan, raw: [], relations: [], elapsedMs: 3, warnings: [], recommendations: [], recommendationsSkipped: [] });
+/** `b` идёт в документе после `a`. */
+const follows = (a: Element, b: Element) => expect(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+const tree = () => screen.queryByRole("treegrid", { name: "Дерево плана" });
 
 describe("ExplainTab", () => {
   beforeEach(() => {
@@ -334,18 +338,36 @@ describe("ExplainTab", () => {
     await waitFor(() => expect(api.queryLlmBundle).toHaveBeenCalledWith("c", "pg-1", "perf", { kind: "sql", sql: "SELECT 1 " }, null));
   });
 
-  it("«Скопировать для LLM» после запуска — в ряду копирования результата, рядом с «JSON» и «Как текст»", async () => {
-    vi.mocked(api.explain).mockResolvedValue({ mode: "plan", tier: "read", plan: planTree(), raw: [], relations: [], elapsedMs: 3, warnings: [], recommendations: [], recommendationsSkipped: [] });
+  it("R1b: порядок — редактор, «Заменённые тексты», ряд формы с кнопками LLM (и до плана, и после), план, «История», «Предложения LLM»", async () => {
+    vi.mocked(api.explain).mockResolvedValue(explained());
     const user = userEvent.setup();
-    renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql="SELECT 1" active />);
-    await screen.findByRole("combobox", { name: "База" });
-    await user.click(screen.getByRole("button", { name: "План" }));
+    const { rerender } = renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql="SELECT 1 -- mine" active />);
+    const editor = await screen.findByRole("textbox", { name: "SQL" });
+    // Подстановка из журнала MCP (без «Плана»): прежний текст — в «Заменённых текстах».
+    rerender(<ExplainTab connectionId="c" member="pg-1" database="perf" sql={undefined} prefill={{ sql: "SELECT 2", database: "perf", member: "pg-1", nonce: 1 }} active />);
+    const replaced = screen.getByRole("region", { name: "Заменённые тексты" });
+    const plan = screen.getByRole("button", { name: "План" });
+    const formRow = plan.closest(".toolbar") as HTMLElement;
+    const llmButtons = () => [screen.getByRole("button", { name: "Скопировать для LLM" }), screen.getByRole("button", { name: "Передать LLM-ассистенту" })];
+    for (const b of llmButtons()) expect(formRow).toContainElement(b);
+    await user.click(plan);
     await screen.findByRole("treegrid", { name: "Дерево плана" });
-    const llm = screen.getByRole("button", { name: "Скопировать для LLM" });
-    const row = screen.getByRole("button", { name: "Копировать как текст" }).closest(".toolbar");
-    expect(row).not.toBeNull();
-    expect(row!.contains(llm)).toBe(true);
+    await user.click(screen.getByRole("button", { name: "План" }));
+    const history = await screen.findByRole("heading", { name: "История" });
+    const panel = screen.getByRole("region", { name: "Предложения LLM" });
+    follows(editor, replaced);
+    follows(replaced, formRow);
+    follows(formRow, tree()!);
+    follows(tree()!, history);
+    follows(history, panel);
+    // После плана кнопки LLM — те же, в ряду формы; в ряд копирования плана они не переезжают.
     expect(screen.getAllByRole("button", { name: "Скопировать для LLM" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Передать LLM-ассистенту" })).toHaveLength(1);
+    const copyRow = screen.getByRole("button", { name: "Копировать как текст" }).closest(".toolbar") as HTMLElement;
+    for (const b of llmButtons()) {
+      expect(formRow).toContainElement(b);
+      expect(copyRow).not.toContainElement(b);
+    }
   });
   it("подстановка из журнала MCP: SQL, база и узел ставятся один раз на nonce, план не строится", async () => {
     const user = userEvent.setup();
@@ -403,7 +425,7 @@ describe("ExplainTab", () => {
     expect(api.createOptimizationRequest).toHaveBeenLastCalledWith("c", { member: "pg-1", database: "perf", source: { kind: "console" }, sql: `${sql} `, params: [], plan: null });
   });
 
-  it("«Предложения LLM» — сразу под редактором; подстановка по ссылке карточки выбирает её предложение", async () => {
+  it("«Предложения LLM» — после формы и плана; подстановка по ссылке карточки выбирает её предложение", async () => {
     vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest({ id: "r9", source: { kind: "query", queryId: "7" }, status: "answered" })]);
     vi.mocked(api.listLlmProposals).mockResolvedValue([llmProposal({ id: "p9", requestId: "r9", rewrittenSql: "SELECT 9 AS from_card" })]);
     renderWithClient(
@@ -411,14 +433,15 @@ describe("ExplainTab", () => {
     );
     const editor = await screen.findByRole("textbox", { name: "SQL" });
     const panel = screen.getByRole("region", { name: "Предложения LLM" });
-    // Под редактором и над кнопками запуска.
+    // В панели запроса консоли, после ряда кнопок запуска (смоук P4b, R1b).
     expect(editor.parentElement).toContainElement(panel);
-    expect(editor.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(panel.compareDocumentPosition(await screen.findByRole("button", { name: "План" })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    follows(editor, panel);
+    follows(await screen.findByRole("button", { name: "План" }), panel);
     expect(await within(panel).findByRole("table", { name: "Исходный и предложенный текст" })).toHaveTextContent("SELECT 9 AS from_card");
   });
 
   it("M6: «Открыть в консоли» не теряет прежний текст — он в списке «Заменённые тексты» и возвращается (тот же узел и другой)", async () => {
+    vi.mocked(api.explain).mockResolvedValue(explained());
     const user = userEvent.setup();
     const view = (p: { sql: string; database?: string; member?: string; nonce: number }) => <ExplainTab connectionId="c" member="pg-1" database="perf" sql={undefined} prefill={p} active />;
     const { rerender } = renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql="SELECT 1 -- mine" active />);
@@ -465,5 +488,130 @@ describe("ExplainTab", () => {
     await waitFor(() => expect(screen.getByRole("combobox", { name: "База" })).toHaveValue("postgres"));
     const list = within(screen.getByRole("region", { name: "Заменённые тексты" }));
     expect(list.getAllByRole("button").map((b) => b.textContent)).toEqual(["Вернуть: SELECT count(*) FROM orders WHERE status = 'new'", "Вернуть: SELECT md5('p4b-smoke')"]);
+  });
+
+  it("R11/R6: «Вернуть» сразу строит «План» по возвращённому тексту на том же узле и базе; прежний результат убран сразу", async () => {
+    vi.mocked(api.explain).mockResolvedValueOnce(explained());
+    const user = userEvent.setup();
+    const { rerender } = renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql="SELECT 1 -- mine" active />);
+    await user.click(await screen.findByRole("button", { name: "План" }));
+    await screen.findByRole("treegrid", { name: "Дерево плана" });
+    // Подстановка из журнала MCP: план прежнего текста убран сразу, новый не строится (спец. P4 §11).
+    rerender(<ExplainTab connectionId="c" member="pg-1" database="perf" sql={undefined} prefill={{ sql: "SELECT 2 -- journal", database: "perf", member: "pg-1", nonce: 1 }} active />);
+    expect(tree()).toBeNull();
+    await act(() => new Promise((r) => setTimeout(r, 0)));
+    expect(api.explain).toHaveBeenCalledTimes(1);
+    let finish: (v: ExplainResult) => void = () => {};
+    vi.mocked(api.explain).mockReturnValueOnce(new Promise((r) => { finish = r; }));
+    await user.click(screen.getByRole("button", { name: "Вернуть: SELECT 1 -- mine" }));
+    expect(screen.getByRole("textbox", { name: "SQL" })).toHaveValue("SELECT 1 -- mine");
+    await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("c", expect.objectContaining({ sql: "SELECT 1 -- mine", mode: "plan", member: "pg-1", database: "perf" })));
+    expect(tree()).toBeNull();
+    await act(async () => finish(explained()));
+    expect(await screen.findByRole("treegrid", { name: "Дерево плана" })).toBeInTheDocument();
+    expect(api.explain).toHaveBeenCalledTimes(2);
+    expect(api.explain).not.toHaveBeenCalledWith("c", expect.objectContaining({ mode: "analyze" }));
+  });
+
+  it("R11/R6: подстановка предложения («Открыть в консоли», ссылка карточки) строит «План» на узле и базе подстановки; прежний результат убран сразу", async () => {
+    vi.mocked(api.explain).mockResolvedValueOnce(explained());
+    const user = userEvent.setup();
+    const view = (p?: { sql: string; database?: string; member?: string; nonce: number; autoPlan?: boolean }) => (
+      <ExplainTab connectionId="c" member={p ? undefined : "pg-1"} database={p ? undefined : "perf"} sql={p ? undefined : "SELECT 1"} prefill={p} active />
+    );
+    const { rerender } = renderWithClient(view());
+    await user.click(await screen.findByRole("button", { name: "План" }));
+    await screen.findByRole("treegrid", { name: "Дерево плана" });
+    let finish: (v: ExplainResult) => void = () => {};
+    vi.mocked(api.explain).mockReturnValueOnce(new Promise((r) => { finish = r; }));
+    // Тот же узел и база.
+    rerender(view({ sql: "SELECT 2 -- proposal", database: "perf", member: "pg-1", nonce: 1, autoPlan: true }));
+    expect(tree()).toBeNull();
+    await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("c", expect.objectContaining({ sql: "SELECT 2 -- proposal", mode: "plan", member: "pg-1", database: "perf", params: { kind: "none" } })));
+    await act(async () => finish(explained()));
+    expect(await screen.findByRole("treegrid", { name: "Дерево плана" })).toBeInTheDocument();
+    // Другой узел и база — «План» там (ссылка карточки).
+    vi.mocked(api.explain).mockResolvedValueOnce(explained());
+    rerender(view({ sql: "SELECT 3 -- card", database: "postgres", member: "pg-2", nonce: 2, autoPlan: true }));
+    await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("c", expect.objectContaining({ sql: "SELECT 3 -- card", mode: "plan", member: "pg-2", database: "postgres" })));
+    expect(await screen.findByRole("treegrid", { name: "Дерево плана" })).toBeInTheDocument();
+    expect(api.explain).toHaveBeenCalledTimes(3);
+    // Смена базы руками после этого «План» не повторяет.
+    await user.selectOptions(screen.getByRole("combobox", { name: "База" }), "perf");
+    await act(() => new Promise((r) => setTimeout(r, 0)));
+    expect(api.explain).toHaveBeenCalledTimes(3);
+  });
+
+  it("R11: текст с $N — общий план на 16+; без GENERIC_PLAN (15) — только очистка", async () => {
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView({ topology: topology({ members: [member("pg-1", { role: "primary", serverVersion: "17.2" }), member("pg-2", { role: "replica", serverVersion: "15.4" })] }) }));
+    vi.mocked(api.explain).mockResolvedValue(explained());
+    const user = userEvent.setup();
+    const view = (on: string, p?: { sql: string; nonce: number }) => (
+      <ExplainTab connectionId="c" member={p ? undefined : on} database={p ? undefined : "perf"} sql={p ? undefined : "SELECT 1"} prefill={p && { ...p, database: "perf", member: on, autoPlan: true }} active />
+    );
+    const first = renderWithClient(view("pg-1"));
+    await user.click(await screen.findByRole("button", { name: "План" }));
+    await screen.findByRole("treegrid", { name: "Дерево плана" });
+    first.rerender(view("pg-1", { sql: "SELECT * FROM shop.orders WHERE status = $1", nonce: 1 }));
+    await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("c", expect.objectContaining({ mode: "plan", params: { kind: "generic" }, member: "pg-1" })));
+    first.unmount();
+    vi.mocked(api.explain).mockClear();
+    const second = renderWithClient(view("pg-2"));
+    await user.click(await screen.findByRole("button", { name: "План" }));
+    await screen.findByRole("treegrid", { name: "Дерево плана" });
+    second.rerender(view("pg-2", { sql: "SELECT * FROM shop.orders WHERE status = $1", nonce: 2 }));
+    expect(tree()).toBeNull();
+    await act(() => new Promise((r) => setTimeout(r, 0)));
+    expect(api.explain).toHaveBeenCalledTimes(1);
+  });
+
+  it("R4: «Заменённые тексты» с тем же началом различимы — время замены и первая отличающаяся строка; полный текст — в подсказке", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date(2026, 10, 7, 12, 20));
+      const mine = "SELECT o.id, o.total,\n  o.status\nFROM shop.orders o\nWHERE o.status = 'new'";
+      const rewritten = "SELECT o.id, o.total,\n  o.status\nFROM shop.orders o\nWHERE o.status = 'new' AND o.created_at > now() - interval '1 day'";
+      const other = "SELECT o.id, o.total,\n  o.status\nFROM shop.orders o\nWHERE o.total > 100";
+      const view = (p?: { sql: string; nonce: number }) => (
+        <ExplainTab connectionId="c" member={p ? undefined : "pg-1"} database={p ? undefined : "perf"} sql={p ? undefined : mine} prefill={p && { ...p, database: "perf", member: "pg-1" }} active />
+      );
+      const { rerender } = renderWithClient(view());
+      await screen.findByRole("textbox", { name: "SQL" });
+      rerender(view({ sql: rewritten, nonce: 1 }));
+      vi.setSystemTime(new Date(2026, 10, 7, 12, 25));
+      rerender(view({ sql: other, nonce: 2 }));
+      const items = within(screen.getByRole("region", { name: "Заменённые тексты" })).getAllByRole("listitem");
+      expect(items.map((li) => li.textContent)).toEqual([
+        "12:25 Вернуть: … WHERE o.status = 'new' AND o.created_at > now() - interval '1 day'",
+        "12:20 Вернуть: … WHERE o.status = 'new'",
+      ]);
+      expect(within(items[0]).getByRole("button")).toHaveAttribute("title", rewritten);
+      expect(within(items[1]).getByRole("button")).toHaveAttribute("title", mine);
+      expect(within(items[1]).getByText("12:20")).toHaveAttribute("title", "2026-11-07 12:20:00");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("R2: предложение на запрос, переданный из консоли, выбирается в панели само", async () => {
+    vi.mocked(api.listConnections).mockResolvedValue([connection({ id: "c", llmAccess: "diagnostics" })]);
+    vi.mocked(api.listLlmProposals).mockResolvedValue([llmProposal({ id: "pold", requestId: null, createdAtMs: 10, rewrittenSql: "SELECT 0 AS old" })]);
+    vi.mocked(api.createOptimizationRequest).mockResolvedValue(optimizationRequest({ id: "rnew" }));
+    const user = userEvent.setup();
+    renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql="SELECT 1" active />);
+    const panel = await screen.findByRole("region", { name: "Предложения LLM" });
+    expect(await within(panel).findByRole("button", { name: /SELECT 0 AS old$/ })).toHaveAttribute("aria-current", "true");
+    const ask = screen.getByRole("button", { name: "Передать LLM-ассистенту" });
+    await waitFor(() => expect(ask).toBeEnabled());
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest({ id: "rnew" })]);
+    await user.click(ask);
+    expect(await screen.findByText(/^Запрос rnew передан\./)).toBeInTheDocument();
+    await waitFor(() => expect(eventBus.handlers.length).toBeGreaterThan(0));
+    vi.mocked(api.listLlmProposals).mockResolvedValue([
+      llmProposal({ id: "pnew", requestId: "rnew", createdAtMs: 20, rewrittenSql: "SELECT 1 AS mine" }),
+      llmProposal({ id: "pold", requestId: null, createdAtMs: 10, rewrittenSql: "SELECT 0 AS old" }),
+    ]);
+    act(() => emitEvent("mcp://proposals", { kind: "proposal", connectionId: "c", proposalId: "pnew" }));
+    await waitFor(() => expect(within(panel).getByRole("button", { name: /SELECT 1 AS mine$/ })).toHaveAttribute("aria-current", "true"));
   });
 });

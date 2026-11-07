@@ -44,9 +44,10 @@ export function QueryTab({ connectionId, member, database, queryId, active }: { 
   // Предложения LLM к этому запросу (спец. P4 §8.4): по queryid и по запросам из карточки.
   const llm = useLlmProposals(connectionId, { connectionId });
   const proposals = queryProposals(llm.proposals, llm.requests, database, queryId);
-  // Ссылка открывает консоль подключения с исходным текстом предложения и выбирает его в панели.
+  // Ссылка открывает консоль подключения с исходным текстом предложения, выбирает его в панели и сразу строит «План»
+  // (смоук P4b, R11).
   const openProposal = (p: LlmProposal) =>
-    openExplainWithPrefill(connectionId, { sql: p.originalSql, database: p.database, member: p.member ?? member, proposalId: p.id });
+    openExplainWithPrefill(connectionId, { sql: p.originalSql, database: p.database, member: p.member ?? member, proposalId: p.id, autoPlan: true });
   const [section, setSection] = useState<Section>("overview");
   const [planOpened, setPlanOpened] = useState(false);
   /** Последний план вкладки и узел, где он получен (ANALYZE чтения с лидера идёт на реплику). */
