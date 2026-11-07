@@ -45,6 +45,8 @@ pub const MAX_QUEUE: usize = 10;
 pub const RUNS_EVENT: &str = "agent://runs";
 /// Ход работы уходит в интерфейс не чаще (§5.4); смена статуса — сразу.
 const PROGRESS_EVERY: Duration = Duration::from_secs(1);
+/// Число вызовов идущего запуска пишется в `agent-runs.json` не чаще (смоук P4c, R12); последнее значение — в итоге.
+const SAVE_EVERY: Duration = Duration::from_secs(2);
 /// Предупреждение запуска: агент не сообщил список своих инструментов (§4.1 «Проверка инструментов»).
 const UNSAFE_NO_INIT: &str = "unsafe no-init";
 /// Поток stdout кончился без события `init`: столько ждать конца процесса, прежде чем остановить его как непроверенный.
@@ -282,7 +284,8 @@ enum InitCheck {
     Stopped(Stopped),
 }
 
-/// Ход работы идущего запуска — в памяти; в файл — в конце.
+/// Ход работы идущего запуска — в памяти. В файл (смоук P4c, R12): `running` — сразу, число вызовов — не чаще
+/// `SAVE_EVERY`, всё — в итоге запуска.
 #[derive(Debug, Clone, Default)]
 struct Live {
     status: Option<RunStatus>,
@@ -292,6 +295,10 @@ struct Live {
     last_call_at_ms: Option<i64>,
     last_emit: Option<tokio::time::Instant>,
     emit_pending: bool,
+    /// Число вызовов, записанное в файл.
+    saved_calls: u32,
+    last_save: Option<tokio::time::Instant>,
+    save_pending: bool,
 }
 
 struct Current {
@@ -700,6 +707,7 @@ impl AgentQueue {
         .await
         {
             InitCheck::Safe => {
+                self.mark_running(&id).await;
                 let ended = {
                     tokio::select! {
                         exit = proc.wait() => Ok(exit),
@@ -1160,6 +1168,62 @@ impl AgentQueue {
         }
     }
 
+    /// Проверка инструментов прошла — агент работает (смоук P4c, R12): `running` сразу в памяти и в файле запусков,
+    /// событие — если статус сменился здесь (первый вызов мог прийти раньше, чем очередь разобрала `init`).
+    async fn mark_running(&self, id: &str) {
+        let changed = {
+            let mut s = self.state.lock_safe();
+            let Some(c) = s.current.as_mut().filter(|c| c.run_id == id) else {
+                return;
+            };
+            let changed = c.live.status != Some(RunStatus::Running);
+            if changed {
+                c.live.status = Some(RunStatus::Running);
+                c.live.last_emit = Some(tokio::time::Instant::now());
+            }
+            changed
+        };
+        self.update(id, |r| {
+            if r.status.is_active() {
+                r.status = RunStatus::Running;
+            }
+        })
+        .await;
+        if changed {
+            self.emit_live(id);
+        }
+    }
+
+    /// Отложенная запись хода работы в файл запусков (R12): статус, вызовы, последний инструмент — какие они сейчас.
+    /// Запуск уже кончился — итог записан, запись не нужна.
+    async fn save_progress(&self, id: &str) {
+        let live = {
+            let mut s = self.state.lock_safe();
+            let Some(c) = s.current.as_mut().filter(|c| c.run_id == id) else {
+                return;
+            };
+            let l = &mut c.live;
+            l.save_pending = false;
+            l.last_save = Some(tokio::time::Instant::now());
+            l.saved_calls = l.calls;
+            l.clone()
+        };
+        if !self.runs.get(id).is_some_and(|r| r.status.is_active()) {
+            return;
+        }
+        self.update(id, move |r| {
+            if r.status.is_active() {
+                if let Some(status) = live.status {
+                    r.status = status;
+                }
+                r.calls = live.calls;
+                r.last_tool = live.last_tool;
+                r.last_call_at_ms = live.last_call_at_ms;
+            }
+        })
+        .await;
+    }
+
     /// Отложенное событие хода работы (не чаще `PROGRESS_EVERY`).
     fn flush_progress(&self, id: &str) {
         if let Some(c) = self
@@ -1262,7 +1326,7 @@ impl RunObserver for AgentQueue {
             No,
         }
         let now = tokio::time::Instant::now();
-        let emit = {
+        let (emit, save) = {
             let mut s = self.state.lock_safe();
             let Some(c) = s.current.as_mut().filter(|c| c.run_id == run_id) else {
                 return;
@@ -1272,8 +1336,17 @@ impl RunObserver for AgentQueue {
             l.calls = l.calls.max(calls);
             l.last_tool = Some(tool.to_string());
             l.last_call_at_ms = Some(now_ms());
-            if l.status != Some(RunStatus::Running) {
-                // Первый вызов переводит запуск в `running` — событие сразу (§5.4).
+            // Запись в файл (R12): первое изменение — сразу, следующие — не чаще `SAVE_EVERY` одной отложенной записью.
+            let save = (l.calls != l.saved_calls && !l.save_pending).then(|| {
+                l.save_pending = true;
+                match l.last_save {
+                    Some(t) if now < t + SAVE_EVERY => t + SAVE_EVERY,
+                    _ => now,
+                }
+            });
+            let emit = if l.status != Some(RunStatus::Running) {
+                // `running` обычно ставит событие `init` (`mark_running`, R12). Вызов, пришедший раньше, чем очередь его
+                // разобрала, переводит запуск в `running` сам — событие сразу (§5.4).
                 l.status = Some(RunStatus::Running);
                 l.last_emit = Some(now);
                 Emit::Now
@@ -1292,8 +1365,18 @@ impl RunObserver for AgentQueue {
                         Emit::Now
                     }
                 }
-            }
+            };
+            (emit, save)
         };
+        if let Some(at) = save
+            && let (Some(me), Ok(rt)) = (self.me.upgrade(), tokio::runtime::Handle::try_current())
+        {
+            let id = run_id.to_string();
+            rt.spawn(async move {
+                tokio::time::sleep_until(at).await;
+                me.save_progress(&id).await;
+            });
+        }
         match emit {
             Emit::Now => self.emit_live(run_id),
             Emit::At(at) => {
@@ -2451,7 +2534,7 @@ mod tests {
             crate::agent::ollama::manages(&s),
             "иначе отказ был бы не busy"
         );
-        // Запуск ждёт событие `init` (`starting`) и запуск работает (`running` — с первого вызова).
+        // Запуск ждёт событие `init` (`starting`) и запуск работает (`running` — с события `init`, R12).
         for (steps, status) in [
             (vec![Step::NoInit, Step::Hang], RunStatus::Starting),
             (
@@ -2970,6 +3053,82 @@ mod tests {
             (RunStatus::Failed, Some(FailReason::AccessOff))
         );
         assert!(h.fake.spawned().is_empty());
+    }
+
+    /// Запуск `id` в файле `agent-runs.json` — то, что видят смоук и следующий старт Glafira, а не запись в памяти.
+    fn on_disk(h: &Harness, id: &str) -> Option<AgentRun> {
+        let bytes = std::fs::read(h.dir.path().join(runs::RUNS_FILE)).ok()?;
+        let v: Value = serde_json::from_slice(&bytes).ok()?;
+        serde_json::from_value::<Vec<AgentRun>>(v["runs"].clone())
+            .ok()?
+            .into_iter()
+            .find(|r| r.id == id)
+    }
+
+    async fn until_on_disk(h: &Harness, id: &str, what: impl Fn(&AgentRun) -> bool) -> AgentRun {
+        for _ in 0..4000 {
+            if let Some(r) = on_disk(h, id)
+                && what(&r)
+            {
+                return r;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("не дождались записи {id}: {:?}", on_disk(h, id));
+    }
+
+    /// Смоук P4c, R12: пока агент работает, файл запусков знает `running` — с события `init`, ещё до первого вызова, — и
+    /// число вызовов: первое изменение пишется сразу, следующие — не чаще раза в `SAVE_EVERY`; последнее значение — в
+    /// итоге. Отложенная запись после конца запуска итог не трогает.
+    #[tokio::test(start_paused = true)]
+    async fn the_runs_file_has_running_and_the_calls_while_the_agent_works() {
+        let h = harness();
+        h.fake.script(vec![
+            Step::Sleep(3),
+            Step::Connect,
+            Step::Call("get_optimization_request"),
+            Step::Sleep(1),
+            Step::Calls(3),
+            Step::Sleep(10),
+            Step::Calls(2),
+            Step::Out(RESULT),
+            Step::Exit(0),
+        ]);
+        let run = h.q().start(&request(&h)).unwrap();
+        let r = until_on_disk(&h, &run.id, |r| {
+            r.status != RunStatus::Queued && r.status != RunStatus::Starting
+        })
+        .await;
+        assert_eq!(
+            (r.status, r.calls),
+            (RunStatus::Running, 0),
+            "running — с события init, до первого вызова"
+        );
+        assert_eq!(h.q().get(&run.id).unwrap().calls, 0);
+        let r = until_on_disk(&h, &run.id, |r| r.calls > 0).await;
+        assert_eq!(
+            (r.status, r.calls, r.last_tool.as_deref()),
+            (RunStatus::Running, 1, Some("get_optimization_request")),
+            "первый вызов — сразу"
+        );
+        // Ещё три вызова через секунду: в памяти — сразу, в файле — через 2 с после прошлой записи.
+        until(&h, &run.id, |r| r.calls == 4).await;
+        assert_eq!(on_disk(&h, &run.id).unwrap().calls, 1, "не чаще раза в 2 с");
+        let r = until_on_disk(&h, &run.id, |r| r.calls == 4).await;
+        assert_eq!(
+            (r.status, r.last_tool.as_deref()),
+            (RunStatus::Running, Some("explain_query"))
+        );
+        // Последние два вызова — перед самым концом: их запись отложена, а итог пишет число вызовов сам.
+        let done_run = until(&h, &run.id, done).await;
+        assert_eq!((done_run.status, done_run.calls), (RunStatus::Done, 6));
+        tokio::time::sleep(SAVE_EVERY * 2).await;
+        let r = on_disk(&h, &run.id).unwrap();
+        assert_eq!(
+            (r.status, r.calls, r.summary.as_deref()),
+            (RunStatus::Done, 6, done_run.summary.as_deref()),
+            "итог не перезаписан"
+        );
     }
 
     #[tokio::test(start_paused = true)]
