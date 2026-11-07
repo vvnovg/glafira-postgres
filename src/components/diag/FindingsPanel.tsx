@@ -9,6 +9,29 @@ import { findingFix, findingTitle } from "./findingText";
 
 /** Сколько знаков текста запроса показывает находка (полный — в подсказке). */
 const QUERY_PREVIEW = 90;
+/** Сколько находок видно, пока список не раскрыт кнопкой «Ещё N» (смоук P4c, R13): таблица инструмента — на первом экране. */
+const FIRST_SHOWN = 3;
+/** Блоки находок, свёрнутые заголовком: список областей (инструмент; у карточки запроса — `query`). */
+const COLLAPSED_KEY = "glafira.findings.collapsed";
+
+function readCollapsed(): string[] {
+  try {
+    const raw = localStorage.getItem(COLLAPSED_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeCollapsed(scope: string, collapsed: boolean) {
+  try {
+    const rest = readCollapsed().filter((x) => x !== scope);
+    localStorage.setItem(COLLAPSED_KEY, JSON.stringify(collapsed ? [...rest, scope] : rest));
+  } catch {
+    // Хранилище недоступно — состояние живёт, пока открыта вкладка.
+  }
+}
 
 type ActionLink = Extract<FindingLink, { kind: "action" }>;
 
@@ -39,9 +62,11 @@ function findingKeys(findings: Finding[]): string[] {
 
 /**
  * Находки отчёта (спец. P2 §7.3): строгость (цвет и текстовая метка), заголовок, «что сделать», команда для копирования
- * и кнопки: переход в другой инструмент, карточка запроса и действия над сессиями (только при `onAction`). Блок сворачивается;
- * без находок — «Проблем не найдено». `showMember` — у отчёта кластера: находки относятся к разным узлам, и узел
- * показывается отдельной меткой.
+ * и кнопки: переход в другой инструмент, карточка запроса и действия над сессиями (только при `onAction`). Без находок —
+ * «Проблем не найдено». `showMember` — у отчёта кластера: находки относятся к разным узлам, и узел показывается отдельной
+ * меткой.
+ * Смоук P4c, R13: видны первые три находки по строгости, остальные — по «Ещё N» («Свернуть» возвращает три). Весь блок
+ * сворачивается заголовком; свёрнутость запоминается для инструмента (`tool`, у карточки запроса — своя) в localStorage.
  */
 export function FindingsPanel({
   connectionId,
@@ -66,24 +91,41 @@ export function FindingsPanel({
   const { t } = useTranslation();
   const open = useWorkspace((s) => s.open);
   const titleId = useId();
-  const [expanded, setExpanded] = useState(true);
+  const scope = tool ?? "query";
+  const [expanded, setExpanded] = useState(() => !readCollapsed().includes(scope));
+  const [showAll, setShowAll] = useState(false);
+  const toggle = () => {
+    const next = !expanded;
+    setExpanded(next);
+    writeCollapsed(scope, !next);
+  };
   const sorted = [...findings].sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
   const keys = findingKeys(sorted);
+  const hidden = sorted.length - FIRST_SHOWN;
+  const shown = showAll || hidden <= 0 ? sorted : sorted.slice(0, FIRST_SHOWN);
   return (
     <section className="findings" aria-labelledby={titleId}>
-      <div className="findings-head">
-        <h3 id={titleId}>
-          {t("diag.findings.title")}
-          {findings.length > 0 && <span className="muted"> ({findings.length})</span>}
-        </h3>
-        <button type="button" className="icon" aria-expanded={expanded} aria-label={expanded ? t("diag.findings.collapse") : t("diag.findings.expand")} onClick={() => setExpanded(!expanded)}>
-          <span aria-hidden="true">{expanded ? "▾" : "▸"}</span>
+      {/* Заголовок — сама кнопка сворачивания: имя — видимый текст с числом находок, состояние — aria-expanded. */}
+      <h3 id={titleId} className="findings-head">
+        <button type="button" className="findings-toggle" aria-expanded={expanded} title={expanded ? t("diag.findings.collapse") : t("diag.findings.expand")} onClick={toggle}>
+          <span className="findings-caret" aria-hidden="true">
+            {expanded ? "▾" : "▸"}
+          </span>
+          <span>
+            {t("diag.findings.title")}
+            {findings.length > 0 && (
+              <>
+                {" "}
+                <span className="muted">({findings.length})</span>
+              </>
+            )}
+          </span>
         </button>
-      </div>
+      </h3>
       {expanded && findings.length === 0 && <p className="muted">{t("diag.findings.none")}</p>}
       {expanded && findings.length > 0 && (
         <ul className="findings-list">
-          {sorted.map((f, i) => {
+          {shown.map((f, i) => {
             const command = typeof f.params.command === "string" ? f.params.command : null;
             // Ссылка без узла ведёт туда же, что и узел отчёта: вкладка инструмента одна на подключение.
             // Ссылки-действия (`kind: "action"`) — кнопки только при `onAction` и известном узле (свой у ссылки или узел отчёта):
@@ -145,6 +187,12 @@ export function FindingsPanel({
             );
           })}
         </ul>
+      )}
+      {/* Одна кнопка «Ещё N» / «Свернуть»: подпись меняется, фокус остаётся на ней. */}
+      {expanded && hidden > 0 && (
+        <button type="button" className="link findings-more" onClick={() => setShowAll(!showAll)}>
+          {showAll ? t("diag.findings.less") : t("diag.findings.more", { count: hidden })}
+        </button>
       )}
     </section>
   );

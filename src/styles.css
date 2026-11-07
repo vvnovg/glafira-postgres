@@ -307,9 +307,11 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .diag-pending { opacity: 0.6; }
 .diag-unavailable p { margin: 0 0 2px; }
 .findings { border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; }
-.findings-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.findings-head h3 { margin: 0; font-size: 13px; }
-.findings-head button.icon { font-size: 16px; line-height: 1; color: var(--muted); }
+/* Заголовок блока — кнопка сворачивания (смоук P4c, R13): выглядит заголовком, стрелка слева. */
+.findings-head { margin: 0; font-size: 13px; }
+.findings-toggle { display: inline-flex; align-items: baseline; gap: 6px; padding: 0; border: none; background: none; font-weight: inherit; text-align: left; }
+.findings-caret { width: 1em; color: var(--muted); }
+.findings-more { margin-top: 6px; }
 .findings > p { margin: 4px 0 0; }
 .findings-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 /* Строгость: цвет полосы слева плюс текстовая метка — смысл не держится на одном цвете. */
@@ -389,6 +391,9 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .diag-table .kind-badge { white-space: nowrap; }
 /* Вторая строка внутри значения карточки (`.stats div` красит любой div, поэтому это span). */
 .diag-sub { display: block; }
+/* Инструмент «Запросы» (смоук P4c, R13): шапка таблицы с поиском прилипает к верху вкладки, пока таблица на экране. */
+.queries-top { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.queries-top-head { position: sticky; top: 0; z-index: 2; background: var(--bg); padding: 6px 0; border-bottom: 1px solid var(--border); }
 /* Инструмент «Запросы»: текст запроса в ячейке — одной строкой, без разрыва таблицы. */
 .diag-query-cell { max-width: 480px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .diag-query-cell button { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }

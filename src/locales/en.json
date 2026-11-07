@@ -1203,7 +1203,9 @@
       "openQuery": "Open query",
       "copy": "Copy command",
       "collapse": "Collapse findings",
-      "expand": "Expand findings"
+      "expand": "Expand findings",
+      "more": "{{count}} more",
+      "less": "Show less"
     },
     "severity": {
       "info": "Info",

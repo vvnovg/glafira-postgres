@@ -58,10 +58,11 @@ const parseMode = (v: string, current: QueriesParams["mode"]): QueriesParams["mo
 };
 
 /**
- * Инструмент «Запросы» (спец. P3 §4.7): общая шапка диагностики, режим и фильтры, таблица топа, находки. Отчёт «за
- * окно» обновляется по тику сэмплера pgss, на который вкладка подписана, пока смонтирована. Тексты строк подгружаются по
- * ключам один раз и хранятся здесь же (по ключу строки), а к строкам отчёта подмешиваются при отрисовке: обновление
- * отчёта, ушедшее раньше ответа с текстами, их не затирает. Список баз копится из всех прочитанных отчётов узла.
+ * Инструмент «Запросы» (спец. P3 §4.7): общая шапка диагностики, режим и фильтры, находки (видны три, смоук P4c, R13) и
+ * таблица топа с поиском в липкой шапке над ней. Отчёт «за окно» обновляется по тику сэмплера pgss, на который вкладка
+ * подписана, пока смонтирована. Тексты строк подгружаются по ключам один раз и хранятся здесь же (по ключу строки), а к
+ * строкам отчёта подмешиваются при отрисовке: обновление отчёта, ушедшее раньше ответа с текстами, их не затирает. Список
+ * баз копится из всех прочитанных отчётов узла.
  *
  * Без подключения (`live === false`, `closed` — уведомление вкладки с кнопкой «Подключиться») доступны только снимки:
  * панель снимков и режим «между снимками», который читается с диска. Живые режимы ждут подключения; обрыв подключения
@@ -241,6 +242,22 @@ export function QueriesView({
     return t("diag.queries.coverage", { have: Math.round(data.coverageS / 60), want: data.mode.s / 60 });
   })();
 
+  // Поиск по тексту запроса — в шапке таблицы (смоук P4c, R13): она липкая в пределах прокрутки вкладки, поле видно и
+  // тогда, когда таблица ушла вверх. Поведение поиска прежнее: серверный, с задержкой ввода.
+  // Шапка не перемонтируется, пока поиск набран или ещё действует (ввод уходит в отчёт с задержкой): отчёт с новой
+  // строкой пришёл, упал или читается — фокус остаётся в поле, и поиск можно снять. Скрыта она, только когда искать негде:
+  // в отчёте нет pg_stat_statements или отчёт без поиска упал.
+  const searching = searchInput !== "" || (params.search ?? "") !== "";
+  const showHead = data ? data.pgss !== null || searching : searching || !q.error;
+  const searchHead = (
+    <div className="toolbar queries-top-head">
+      <label className="inline">
+        <span>{t("diag.queries.search")}</span>
+        <input type="search" aria-label={t("diag.queries.search")} placeholder={t("diag.queries.searchPlaceholder")} value={searchInput} onChange={(e) => setSearchInput(e.target.value)} />
+      </label>
+    </div>
+  );
+
   // Без подключения и вне режима «между снимками» показывать нечего, кроме снимков.
   if (offline && !between) {
     return (
@@ -315,10 +332,6 @@ export function QueriesView({
           </select>
         </label>
         <label className="inline">
-          <span>{t("diag.queries.search")}</span>
-          <input type="search" aria-label={t("diag.queries.search")} placeholder={t("diag.queries.searchPlaceholder")} value={searchInput} onChange={(e) => setSearchInput(e.target.value)} />
-        </label>
-        <label className="inline">
           <input type="checkbox" checked={params.toplevelOnly} onChange={(e) => setParams((p) => ({ ...p, toplevelOnly: e.target.checked }))} />
           <span>{t("diag.queries.toplevelOnly")}</span>
         </label>
@@ -358,10 +371,11 @@ export function QueriesView({
       )}
       {q.error && <ErrorBanner error={q.error} />}
       {sampler.error && <ErrorBanner error={sampler.error} />}
-      {report && data ? (
+      {/* Тело — один и тот же элемент, пока есть отчёт, поиск или идёт чтение: шапка с поиском в нём не перемонтируется. */}
+      {(report || searching || !q.error) && (
         <div className={q.isPlaceholderData ? "diag-body diag-pending" : "diag-body"} aria-busy={q.isPlaceholderData}>
-          <FindingsPanel connectionId={connectionId} findings={report.findings} tool="queries" member={report.member} queryText={queryText} />
-          {report.unavailable.length > 0 && (
+          {report && <FindingsPanel connectionId={connectionId} findings={report.findings} tool="queries" member={report.member} queryText={queryText} />}
+          {report && data && report.unavailable.length > 0 && (
             <div className="diag-unavailable">
               {report.unavailable.map((u, i) => (
                 <p key={`${u.part}:${i}`} className="muted">
@@ -372,77 +386,82 @@ export function QueriesView({
               ))}
             </div>
           )}
-          {data.pgss && (
-            <div className="table-scroll">
-              <table className="diag-table" aria-label={t("diag.tools.queries")}>
-                <thead>
-                  <tr>
-                    <th scope="col">{t("diag.queries.columns.query")}</th>
-                    {cols.map((c) => {
-                      const enabled = c.sort !== null && sortAvailable(c.sort, data.pgss, deltas);
-                      const current = c === activeCol;
-                      // Hit % сортируется по возрастанию (худшие сверху), остальные — по убыванию.
-                      const ascending = params.sort === "hitRatio";
-                      return (
-                        <th key={c.id} scope="col" className="num" aria-sort={current ? (ascending ? "ascending" : "descending") : undefined}>
-                          <button type="button" className="link" disabled={!enabled} title={enabled ? undefined : t("diag.queries.sortUnavailable")} onClick={() => setSort(c)}>
-                            {t(c.labelKey)}
-                            {current ? (ascending ? " ▴" : " ▾") : ""}
-                          </button>
-                          {c.kcache && data.pgss?.kcacheSeparate && (
-                            <span className="muted" title={t("diag.queries.kcacheColumnHint")}>
-                              {" *"}
+          {showHead && (
+            <div className="queries-top">
+              {searchHead}
+              {data?.pgss && (
+                <div className="table-scroll">
+                  <table className="diag-table" aria-label={t("diag.tools.queries")}>
+                    <thead>
+                      <tr>
+                        <th scope="col">{t("diag.queries.columns.query")}</th>
+                        {cols.map((c) => {
+                          const enabled = c.sort !== null && sortAvailable(c.sort, data.pgss, deltas);
+                          const current = c === activeCol;
+                          // Hit % сортируется по возрастанию (худшие сверху), остальные — по убыванию.
+                          const ascending = params.sort === "hitRatio";
+                          return (
+                            <th key={c.id} scope="col" className="num" aria-sort={current ? (ascending ? "ascending" : "descending") : undefined}>
+                              <button type="button" className="link" disabled={!enabled} title={enabled ? undefined : t("diag.queries.sortUnavailable")} onClick={() => setSort(c)}>
+                                {t(c.labelKey)}
+                                {current ? (ascending ? " ▴" : " ▾") : ""}
+                              </button>
+                              {c.kcache && data.pgss?.kcacheSeparate && (
+                                <span className="muted" title={t("diag.queries.kcacheColumnHint")}>
+                                  {" *"}
+                                </span>
+                              )}
+                            </th>
+                          );
+                        })}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.map((r) => (
+                        <tr key={QUERY_KEY_ID(r.key)}>
+                          <td className="diag-query-cell" title={r.text ?? undefined}>
+                            {/* Значок «Глафира» — до текста и не сжимается: «…» получает только текст запроса. */}
+                            <span className="query-cell">
+                              {r.own && (
+                                <span className="kind-badge" title={t("diag.queries.ownHint")}>
+                                  {t("diag.queries.own")}
+                                </span>
+                              )}
+                              <button
+                                type="button"
+                                className="link mono"
+                                onClick={() => openQuery(r)}
+                                disabled={reportMember === null || r.datname === null}
+                                title={r.datname === null ? t("diag.queries.goneHint") : undefined}
+                              >
+                                {queryTitle(r.text, r.key.queryId, 90)}
+                              </button>
+                              {r.textTruncated && <span className="muted">{t("diag.queries.truncated")}</span>}
                             </span>
-                          )}
-                        </th>
-                      );
-                    })}
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map((r) => (
-                    <tr key={QUERY_KEY_ID(r.key)}>
-                      <td className="diag-query-cell" title={r.text ?? undefined}>
-                        {/* Значок «Глафира» — до текста и не сжимается: «…» получает только текст запроса. */}
-                        <span className="query-cell">
-                          {r.own && (
-                            <span className="kind-badge" title={t("diag.queries.ownHint")}>
-                              {t("diag.queries.own")}
-                            </span>
-                          )}
-                          <button
-                            type="button"
-                            className="link mono"
-                            onClick={() => openQuery(r)}
-                            disabled={reportMember === null || r.datname === null}
-                            title={r.datname === null ? t("diag.queries.goneHint") : undefined}
-                          >
-                            {queryTitle(r.text, r.key.queryId, 90)}
-                          </button>
-                          {r.textTruncated && <span className="muted">{t("diag.queries.truncated")}</span>}
-                        </span>
-                      </td>
-                      {cols.map((c) => (
-                        <td key={c.id} className="num">
-                          {c.cell(r, data.pgss?.trackPlanning ?? true)}
-                        </td>
+                          </td>
+                          {cols.map((c) => (
+                            <td key={c.id} className="num">
+                              {c.cell(r, data.pgss?.trackPlanning ?? true)}
+                            </td>
+                          ))}
+                        </tr>
                       ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {data.rows.length === 0 && (
-                <p className="empty">{params.search
-                    ? t("diag.queries.noMatch", { q: params.search })
-                    : between
-                      ? t("diag.queries.emptyBetween")
-                      : byTick
-                        ? t("diag.queries.emptyWindow")
-                        : t("diag.queries.empty")}</p>
+                    </tbody>
+                  </table>
+                  {data.rows.length === 0 && (
+                    <p className="empty">{params.search
+                        ? t("diag.queries.noMatch", { q: params.search })
+                        : between
+                          ? t("diag.queries.emptyBetween")
+                          : byTick
+                            ? t("diag.queries.emptyWindow")
+                            : t("diag.queries.empty")}</p>
+                  )}
+                </div>
               )}
             </div>
           )}
-          {data.pgss && (
+          {data?.pgss && (
             <p className="muted diag-note">
               {data.pgss.hasInfo
                 ? t("diag.queries.pgss", { version: data.pgss.version, reset: data.pgss.statsResetMs === null ? "—" : formatTimestamp(data.pgss.statsResetMs) })
@@ -450,16 +469,15 @@ export function QueriesView({
               {!data.pgss.trackPlanning && ` · ${t("diag.queries.noTrackPlanning")}`}
             </p>
           )}
-          {data.pgss?.kcacheSeparate && (
+          {data?.pgss?.kcacheSeparate && (
             <p className="muted diag-note">
               {"* "}
               {data.pgss.kcacheSinceMs === null ? t("diag.queries.kcacheSeparate") : t("diag.queries.kcacheSince", { since: formatTimestamp(data.pgss.kcacheSinceMs) })}{" "}
               {t("diag.queries.kcacheResetBoth")} <code>SELECT pg_stat_statements_reset(); SELECT pg_stat_kcache_reset();</code>
             </p>
           )}
+          {!report && !q.error && <p className="empty">{t("common.loading")}</p>}
         </div>
-      ) : (
-        !q.error && <p className="empty">{t("common.loading")}</p>
       )}
     </>
   );

@@ -1,12 +1,16 @@
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Finding } from "../../api/types";
 import { renderWithClient } from "../../test/render";
 import { useWorkspace } from "../../state/workspace";
 import { FindingsPanel } from "./FindingsPanel";
 
 describe("FindingsPanel", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
   it("переход в инструмент той же вкладки (тот же или любой узел) не предлагается, в другой — предлагается", () => {
     const idle: Finding = { id: "idleInTransaction", severity: "critical", member: "pg-1", target: null, params: { maxS: 2000, count: 1 }, links: [{ kind: "openTool", tool: "idleTx", member: "pg-1" }] };
     const blocker: Finding = { id: "rootBlocker", severity: "warning", member: "pg-1", target: null, params: { count: 1, maxS: 20 }, links: [{ kind: "openTool", tool: "sessions", member: null }] };
@@ -170,15 +174,98 @@ describe("FindingsPanel", () => {
     ]);
     expect(items[0]).toHaveTextContent("Внимание");
     expect(items[2]).toHaveTextContent("Сведения");
-    await user.click(screen.getByRole("button", { name: "Свернуть находки" }));
+    // Блок сворачивается заголовком (смоук P4c, R13): имя кнопки — видимый заголовок, состояние — в aria-expanded.
+    const head = screen.getByRole("button", { name: "Находки (3)" });
+    expect(head).toHaveAttribute("aria-expanded", "true");
+    expect(head).toHaveAttribute("title", "Свернуть находки");
+    await user.click(head);
     expect(screen.queryAllByRole("listitem")).toHaveLength(0);
-    // Имя кнопки следует за состоянием.
-    const expand = screen.getByRole("button", { name: "Развернуть находки" });
-    expect(expand).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByRole("button", { name: "Свернуть находки" })).not.toBeInTheDocument();
-    await user.click(expand);
+    expect(head).toHaveAttribute("aria-expanded", "false");
+    expect(head).toHaveAttribute("title", "Развернуть находки");
+    await user.click(head);
     expect(screen.getAllByRole("listitem")).toHaveLength(3);
-    expect(screen.getByRole("button", { name: "Свернуть находки" })).toHaveAttribute("aria-expanded", "true");
+    expect(head).toHaveAttribute("aria-expanded", "true");
+  });
+
+  describe("R13: свёрнутые находки", () => {
+    const base = { member: "pg-1", target: null, links: [] };
+    // Пять находок вперемешку по строгости: видны три самые строгие (порядок сервера внутри строгости сохраняется).
+    const five: Finding[] = [
+      { ...base, id: "cacheHitLow", severity: "info", params: { hitPct: 85 } },
+      { ...base, id: "longQuery", severity: "warning", params: { maxS: 1000, count: 1 } },
+      { ...base, id: "idleInTransaction", severity: "critical", params: { maxS: 2000, count: 1 } },
+      { ...base, id: "deadlocks", severity: "warning", params: { count: 2 } },
+      { ...base, id: "tempFiles", severity: "info", params: { count: 3 } },
+    ];
+    const texts = () => screen.getAllByRole("listitem").map((li) => li.querySelector(".finding-title")?.textContent);
+
+    it("видны первые три по строгости и «Ещё N»; «Свернуть» возвращает три, фокус остаётся на кнопке", async () => {
+      const user = userEvent.setup();
+      renderWithClient(<FindingsPanel connectionId="c" findings={five} tool="queries" member="pg-1" />);
+      expect(screen.getByRole("heading", { name: "Находки (5)" })).toBeInTheDocument();
+      expect(texts()).toEqual(["Простой в транзакции 33 мин 20 с", "Запрос выполняется 16 мин 40 с", "Взаимных блокировок за интервал: 2"]);
+      const more = screen.getByRole("button", { name: "Ещё 2" });
+      await user.click(more);
+      expect(screen.getAllByRole("listitem")).toHaveLength(5);
+      expect(more).toHaveTextContent("Свернуть");
+      expect(more).toHaveFocus();
+      await user.click(more);
+      expect(texts()).toHaveLength(3);
+      expect(more).toHaveTextContent("Ещё 2");
+    });
+
+    it("три находки и меньше — без «Ещё»; свёрнутый блок кнопку «Ещё» прячет", async () => {
+      const user = userEvent.setup();
+      const { rerender } = renderWithClient(<FindingsPanel connectionId="c" findings={five.slice(0, 3)} tool="queries" />);
+      expect(screen.getAllByRole("listitem")).toHaveLength(3);
+      expect(screen.queryByRole("button", { name: /^Ещё/ })).toBeNull();
+      rerender(<FindingsPanel connectionId="c" findings={five} tool="queries" />);
+      await user.click(screen.getByRole("button", { name: "Находки (5)" }));
+      expect(screen.queryByRole("button", { name: /^Ещё/ })).toBeNull();
+    });
+
+    it("свёрнутый заголовком блок запоминается для инструмента (localStorage), у другого инструмента — свой", async () => {
+      const user = userEvent.setup();
+      const first = renderWithClient(<FindingsPanel connectionId="c" findings={five} tool="queries" member="pg-1" />);
+      await user.click(screen.getByRole("button", { name: "Находки (5)" }));
+      first.unmount();
+      // Новое открытие «Запросов» (другое подключение тоже) — блок свёрнут.
+      const again = renderWithClient(<FindingsPanel connectionId="d" findings={five} tool="queries" member="pg-1" />);
+      expect(screen.getByRole("button", { name: "Находки (5)" })).toHaveAttribute("aria-expanded", "false");
+      expect(screen.queryAllByRole("listitem")).toHaveLength(0);
+      again.unmount();
+      // «Сессии» — развёрнуты.
+      const other = renderWithClient(<FindingsPanel connectionId="c" findings={five} tool="sessions" member="pg-1" />);
+      expect(screen.getByRole("button", { name: "Находки (5)" })).toHaveAttribute("aria-expanded", "true");
+      other.unmount();
+      // Развернули «Запросы» — запомнилось и это.
+      renderWithClient(<FindingsPanel connectionId="c" findings={five} tool="queries" member="pg-1" />);
+      await user.click(screen.getByRole("button", { name: "Находки (5)" }));
+      expect(JSON.parse(localStorage.getItem("glafira.findings.collapsed") ?? "null")).toEqual([]);
+    });
+
+    it("испорченное или недоступное хранилище — блок развёрнут, без ошибки", async () => {
+      const user = userEvent.setup();
+      localStorage.setItem("glafira.findings.collapsed", "{not json");
+      const { unmount } = renderWithClient(<FindingsPanel connectionId="c" findings={five} tool="queries" />);
+      expect(screen.getByRole("button", { name: "Находки (5)" })).toHaveAttribute("aria-expanded", "true");
+      unmount();
+      const get = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+        throw new Error("denied");
+      });
+      const set = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+        throw new Error("denied");
+      });
+      try {
+        renderWithClient(<FindingsPanel connectionId="c" findings={five} tool="queries" />);
+        const head = screen.getByRole("button", { name: "Находки (5)" });
+        await user.click(head);
+        expect(head).toHaveAttribute("aria-expanded", "false");
+      } finally {
+        get.mockRestore();
+        set.mockRestore();
+      }
+    });
   });
 
   describe("устойчивые ключи находок", () => {

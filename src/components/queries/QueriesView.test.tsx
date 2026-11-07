@@ -35,9 +35,13 @@ function data(patch: Partial<QueriesData> = {}): { kind: "queries" } & QueriesDa
   };
 }
 
+/** `b` идёт в документе после `a`. */
+const follows = (a: Element, b: Element) => expect(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
 describe("QueriesView", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    localStorage.clear();
     useWorkspace.setState({ tabs: [], activeId: null });
     emit = () => {};
     vi.mocked(api.startStatementsSampler).mockImplementation(async (_id, _m, onEvent) => { emit = onEvent; return "s-1"; });
@@ -265,6 +269,54 @@ describe("QueriesView", () => {
     await user.clear(box);
     expect(await screen.findByText("select 2")).toBeInTheDocument();
     expect(vi.mocked(api.runDiagnostic).mock.lastCall![1].queries?.search ?? "").toBe("");
+  });
+
+  it("R13: поиск — в липкой шапке прямо над таблицей, в панели инструмента его нет; находки свёрнуты до трёх", async () => {
+    const finding = (queryId: string): Finding => ({
+      id: "queries_dominant", severity: "warning", member: null, target: { kind: "query", queryId, database: "perf" },
+      params: { sharePct: 40 }, links: [{ kind: "openQuery", queryId, database: "perf", member: null }],
+    });
+    const findings = Array.from({ length: 12 }, (_, i) => finding(String(i + 1)));
+    vi.mocked(api.runDiagnostic).mockResolvedValue(diagReport(data(), { member: "pg-1", findings }));
+    renderWithClient(view());
+    const table = await screen.findByRole("table", { name: "Запросы" });
+    // Поле одно.
+    const box = screen.getByRole("searchbox", { name: "Поиск" });
+    expect(screen.getAllByRole("searchbox")).toHaveLength(1);
+    // Шапка таблицы: поле стоит сразу перед прокруткой таблицы, а не в панели режима и фильтров.
+    const head = box.closest(".queries-top-head")!;
+    expect(head).not.toBeNull();
+    expect(head.nextElementSibling).toContainElement(table);
+    expect(screen.getByRole("combobox", { name: "Режим" }).closest(".toolbar")).not.toContainElement(box);
+    // Находки над таблицей: три из двенадцати и «Ещё 9».
+    const region = screen.getByRole("region", { name: "Находки (12)" });
+    expect(within(region).getAllByRole("listitem")).toHaveLength(3);
+    expect(within(region).getByRole("button", { name: "Ещё 9" })).toBeInTheDocument();
+    follows(region, head);
+  });
+
+  it("R13: поиск, не нашедший ничего, остаётся над таблицей; при ошибке отчёта поле не пропадает и снимает фильтр", async () => {
+    vi.mocked(api.runDiagnostic).mockImplementation(async (_id, req) => {
+      if (req.queries?.search === "boom") throw { code: "INTERNAL", message: "search failed", retryable: false };
+      return diagReport(data({ rows: req.queries?.search ? [] : [row("2", { text: "select 2" })] }), { member: "pg-1" });
+    });
+    const user = userEvent.setup();
+    renderWithClient(view());
+    await screen.findByText("select 2");
+    await user.type(screen.getByRole("searchbox", { name: "Поиск" }), "zzz");
+    expect(await screen.findByText("Ничего не найдено по «zzz»")).toBeInTheDocument();
+    const box = screen.getByRole("searchbox", { name: "Поиск" });
+    expect(box).toHaveFocus();
+    await user.clear(box);
+    await user.type(box, "boom");
+    expect(await screen.findByText("search failed")).toBeInTheDocument();
+    // Таблицы нет, а поле то же самое и в фокусе: поиск можно снять, не теряя места ввода.
+    expect(screen.queryByRole("table", { name: "Запросы" })).toBeNull();
+    expect(screen.getByRole("searchbox", { name: "Поиск" })).toBe(box);
+    expect(box).toHaveFocus();
+    await user.clear(box);
+    expect(await screen.findByText("select 2")).toBeInTheDocument();
+    expect(box).toHaveFocus();
   });
 
   it("pgss без pg_stat_statements_info: подвал без «сброс статистики —»; track_planning выключен — «Планирование» «—»", async () => {
