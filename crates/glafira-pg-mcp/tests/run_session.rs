@@ -214,9 +214,7 @@ async fn the_ui_glossary_goes_into_the_instructions_and_the_prompts() {
         with_glossary(INSTRUCTIONS_RUN.to_string(), Some(&g))
     );
     assert!(
-        instructions.ends_with(
-            "use their interface labels: “Send to LLM assistant” — «Peredat». Answer the user in Russian."
-        ),
+        instructions.ends_with("use their interface labels: “Send to LLM assistant” — «Peredat»."),
         "{instructions}"
     );
     let chat = session(fake(), None).await;
@@ -248,7 +246,7 @@ async fn the_ui_glossary_goes_into_the_instructions_and_the_prompts() {
             .collect();
         assert!(
             text.contains("\n\nThe user's Glafira interface is in Russian.")
-                && text.ends_with("Answer the user in Russian."),
+                && !text.contains("Answer the user in"),
             "{name}: {text}"
         );
         assert!(

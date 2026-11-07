@@ -31,33 +31,30 @@ pub fn quoted_labels(text: &str) -> Vec<&str> {
 }
 
 impl UiGlossary {
-    /// Абзац к тексту `text`: язык интерфейса, пары для подписей, которые называет текст, и просьба отвечать на языке
-    /// интерфейса. Подписи без пары пропускаются: полноту глоссария проверяют тесты приложения.
+    /// Абзац к тексту `text`: язык интерфейса и пары для подписей, которые называет текст. Язык ответа абзац не задаёт:
+    /// тексты сами говорят «отвечай на языке пользователя» (решение владельца, смоук 2026-11-07). Подписи без пары
+    /// пропускаются (полноту глоссария проверяют тесты приложения); нет ни одной пары — абзаца нет (пустая строка).
     pub fn paragraph(&self, text: &str) -> String {
         let pairs: Vec<String> = quoted_labels(text)
             .into_iter()
             .filter_map(|en| self.labels.get(en).map(|ui| format!("“{en}” — «{ui}»")))
             .collect();
-        let language = &self.language;
-        let mut p = format!("The user's Glafira interface is in {language}.");
-        if !pairs.is_empty() {
-            p.push_str(" When you name screens and buttons, use their interface labels: ");
-            p.push_str(&pairs.join(", "));
-            p.push('.');
+        if pairs.is_empty() {
+            return String::new();
         }
-        p.push_str(&format!(" Answer the user in {language}."));
-        p
+        format!(
+            "The user's Glafira interface is in {}. When you name screens and buttons, use their interface labels: {}.",
+            self.language,
+            pairs.join(", ")
+        )
     }
 }
 
-/// Текст для модели с абзацем глоссария в конце; без глоссария (английский интерфейс) — текст как есть.
+/// Текст для модели с абзацем глоссария в конце; без глоссария (английский интерфейс) или без пар — текст как есть.
 pub fn with_glossary(text: String, glossary: Option<&UiGlossary>) -> String {
-    match glossary {
-        Some(g) => {
-            let p = g.paragraph(&text);
-            format!("{text}\n\n{p}")
-        }
-        None => text,
+    match glossary.map(|g| g.paragraph(&text)) {
+        Some(p) if !p.is_empty() => format!("{text}\n\n{p}"),
+        _ => text,
     }
 }
 
@@ -93,16 +90,22 @@ mod tests {
             out,
             format!(
                 "{text}\n\nThe user's Glafira interface is in Russian. When you name screens and buttons, use their \
-                 interface labels: “Wait profile” — «Профиль ожиданий», “Pulse” — «Пульс». Answer the user in Russian."
+                 interface labels: “Wait profile” — «Профиль ожиданий», “Pulse” — «Пульс»."
             )
         );
         assert!(
             !out.contains("Блокировки"),
             "пара только для подписей текста"
         );
+        assert!(
+            !out.contains("Answer the user in"),
+            "язык ответа задают сами тексты"
+        );
+        // Нет пар — нет и абзаца: текст как есть.
+        assert_eq!(glossary().paragraph("nothing quoted"), "");
         assert_eq!(
-            glossary().paragraph("nothing quoted"),
-            "The user's Glafira interface is in Russian. Answer the user in Russian."
+            with_glossary("nothing quoted".into(), Some(&glossary())),
+            "nothing quoted"
         );
     }
 

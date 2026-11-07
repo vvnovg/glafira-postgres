@@ -169,7 +169,7 @@ mod tests {
                 );
                 named.insert(label.to_string());
             }
-            assert!(out.ends_with("Answer the user in Russian."), "{out}");
+            assert!(!out.contains("Answer the user in"), "{out}");
         }
         assert_eq!(
             named.len(),
