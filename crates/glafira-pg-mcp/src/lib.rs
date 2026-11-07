@@ -8,4 +8,4 @@ pub mod server;
 pub mod truncate;
 
 pub use model::{ObserveCtx, PgAnswer, PgBackend, PgObserve, PgOutput, PgRead, ProgressFn};
-pub use server::{INSTRUCTIONS, PgFactory, PgServer, TOOL_NAMES};
+pub use server::{INSTRUCTIONS, INSTRUCTIONS_RUN, PgFactory, PgServer, RUN_TOOL_NAMES, TOOL_NAMES};

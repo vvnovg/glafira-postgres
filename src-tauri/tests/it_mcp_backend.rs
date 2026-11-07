@@ -857,7 +857,7 @@ async fn omitted_database_uses_the_connection_database() {
     };
     let (_dir, st, _m) = open_for_llm(&perf).await;
     let probe = common::superuser(&perf, "perf").await;
-    let a = ok(read_op(&st, PgRead::ListConnections).await);
+    let a = ok(read_op(&st, PgRead::ListConnections { run: None }).await);
     let PgOutput::Connections(list) = a.body else {
         panic!("не список подключений")
     };

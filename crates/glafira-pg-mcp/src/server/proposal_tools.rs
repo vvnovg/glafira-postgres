@@ -1,6 +1,7 @@
 //! Инструменты предложений (спец. P4 §8.2). Базу они не меняют: запрос на оптимизацию — снимок, который отправил
 //! пользователь; предложение пишется в Glafira, и человек сравнивает планы и решает сам. Проверки SQL, доступ и
-//! хранилища — в приложении (`PgBackend::llm`); здесь — параметры, слот базы у предложения и вид ответа.
+//! хранилища — в приложении (`PgBackend::llm`); здесь — параметры, слот базы у предложения и вид ответа. У сессии
+//! фонового запуска (P4c §5.2) в операцию идёт её `run`; область запроса проверяет приложение.
 
 use glafira_mcp_core::{CallMeta, CallOk, ToolError};
 use rmcp::handler::server::wrapper::Parameters;
@@ -41,8 +42,12 @@ impl PgServer {
             member: None,
         };
         let body = async {
-            let p = p.clone().validate()?;
-            llm_ok(self.backend.llm(LlmOp::GetRequest(p)).await?)
+            let params = p.clone().validate()?;
+            let op = LlmOp::GetRequest {
+                params,
+                run: self.run_id(),
+            };
+            llm_ok(self.backend.llm(op).await?)
         };
         Ok(self.ctx.call(&rctx, meta, body).await)
     }
@@ -72,7 +77,12 @@ impl PgServer {
             let params = p.clone().validate()?;
             // Проверка предложения ходит в базу (`prepare` и проба плана на сервере) — слот, как у чтения.
             let _slots = self.ctx.db_slots().await?;
-            llm_ok(self.backend.llm(LlmOp::Propose { params, client }).await?)
+            let op = LlmOp::Propose {
+                params,
+                client,
+                run: self.run_id(),
+            };
+            llm_ok(self.backend.llm(op).await?)
         };
         Ok(self.ctx.call(&rctx, meta, body).await)
     }
@@ -98,8 +108,12 @@ impl PgServer {
             member: None,
         };
         let body = async {
-            let p = p.clone().validate()?;
-            llm_ok(self.backend.llm(LlmOp::ListProposals(p)).await?)
+            let params = p.clone().validate()?;
+            let op = LlmOp::ListProposals {
+                params,
+                run: self.run_id(),
+            };
+            llm_ok(self.backend.llm(op).await?)
         };
         Ok(self.ctx.call(&rctx, meta, body).await)
     }

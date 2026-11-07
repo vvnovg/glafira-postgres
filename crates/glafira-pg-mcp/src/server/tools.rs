@@ -50,7 +50,9 @@ impl PgServer {
         Ok(self
             .ctx
             .call(&ctx, meta, async {
-                let a = self.read_local(PgRead::ListConnections).await?;
+                let a = self
+                    .read_local(PgRead::ListConnections { run: self.run_id() })
+                    .await?;
                 let list = expect!(a.body, Connections)?;
                 Ok(answer(json!({ "connections": list }), a.masked, a.rows))
             })

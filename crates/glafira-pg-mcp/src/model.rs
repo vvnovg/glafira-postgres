@@ -70,7 +70,10 @@ pub trait PgBackend: Gate {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PgRead {
-    ListConnections,
+    /// `list_connections`; `run` — id фонового запуска сессии (P4c §5.2): приложение отдаёт только подключение запуска.
+    ListConnections {
+        run: Option<String>,
+    },
     Topology(ConnectionParams),
     HealthSummary(ConnectionParams),
     ListDiagnostics,
@@ -87,7 +90,7 @@ pub enum PgRead {
 impl PgRead {
     pub fn connection_id(&self) -> Option<&str> {
         match self {
-            PgRead::ListConnections | PgRead::ListDiagnostics => None,
+            PgRead::ListConnections { .. } | PgRead::ListDiagnostics => None,
             PgRead::Topology(p) | PgRead::HealthSummary(p) => Some(&p.connection_id),
             PgRead::RunDiagnostic(p) => Some(&p.connection_id),
             PgRead::Activity(p) => Some(&p.connection_id),
@@ -121,15 +124,23 @@ impl PgObserve {
 pub struct SelectOp(pub RunSelectParams);
 
 /// Операции предложений (P4b, спец. §8.2). `client` — имя клиента MCP сессии (из `initialize`), для панели
-/// «Предложения LLM».
+/// «Предложения LLM». `run` — id фонового запуска сессии (P4c §5.2): приложение ограничивает операцию запросом
+/// запуска; `None` — обычная сессия.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LlmOp {
-    GetRequest(GetRequestParams),
+    GetRequest {
+        params: GetRequestParams,
+        run: Option<String>,
+    },
     Propose {
         params: ProposeParams,
         client: Option<String>,
+        run: Option<String>,
     },
-    ListProposals(ListProposalsParams),
+    ListProposals {
+        params: ListProposalsParams,
+        run: Option<String>,
+    },
 }
 
 /// Ответ `propose_query_rewrite`.

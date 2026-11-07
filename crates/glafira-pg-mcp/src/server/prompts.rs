@@ -124,15 +124,11 @@ fn member_arg(member: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
-pub fn optimize_query_text(request_id: Option<&str>) -> String {
-    let get = match request_id {
-        Some(id) => format!("get_optimization_request with requestId \"{id}\""),
-        None => "get_optimization_request without requestId: it returns the latest waiting request"
-            .to_string(),
-    };
+/// Шаги 1–4 сценария оптимизации — общие для `optimize_query` и промпта фонового запуска (P4c §4.3); `get` — начало
+/// шага 1. Строка заканчивается переводом строки.
+fn optimize_steps(get: &str) -> String {
     format!(
-        "Optimize a PostgreSQL query that the user sent from Glafira with the “Send to LLM assistant” button.\n\n\
-         1. Call {get}. It returns the query text and parameter values, the plan, statistics, the server version and \
+        "1. Call {get}. It returns the query text and parameter values, the plan, statistics, the server version and \
          the DDL of the tables, as the user saw them.\n\
          2. Analyze the plan and the statistics: the most expensive nodes, wrong row estimates, scans and joins, sorts \
          and hashes that spill to disk, missing or unused indexes.\n\
@@ -140,7 +136,20 @@ pub fn optimize_query_text(request_id: Option<&str>) -> String {
          execution, hypothetical_index for up to 5 CREATE INDEX statements via hypopg.\n\
          4. Call propose_query_rewrite with the requestId for each variant worth comparing (one or several): \
          rewrittenSql, indexes if any, rationale and expectedEffect. The rewritten query must return the same rows as \
-         the original: Glafira does not check that.\n\
+         the original: Glafira does not check that.\n"
+    )
+}
+
+pub fn optimize_query_text(request_id: Option<&str>) -> String {
+    let get = match request_id {
+        Some(id) => format!("get_optimization_request with requestId \"{id}\""),
+        None => "get_optimization_request without requestId: it returns the latest waiting request"
+            .to_string(),
+    };
+    let steps = optimize_steps(&get);
+    format!(
+        "Optimize a PostgreSQL query that the user sent from Glafira with the “Send to LLM assistant” button.\n\n\
+         {steps}\
          5. In the chat, briefly explain each variant and ask the user to compare the plans in Glafira (the “LLM \
          proposals” panel of the EXPLAIN console, “Compare plans”) and to accept or reject them. list_proposals shows \
          the decision and the comparison. The user's decisions and comparisons change at any time: when asked about \
@@ -148,6 +157,40 @@ pub fn optimize_query_text(request_id: Option<&str>) -> String {
          Glafira never runs the proposed SQL or creates the indexes, and nothing in the database can be changed through \
          this gateway. {ANSWER_BUDGET} {ANSWER_LANGUAGE}"
     )
+}
+
+/// Промпт фонового запуска (спец. P4c §4.3): Glafira подаёт его агенту через stdin.
+/// - Шаги 1–4 — те же, что у `optimize_query`, с явным `requestId`.
+/// - После шагов — абзац о `requestId` (смоук P4b M5/M6, итог задачи 1 P4c): модели путали id запроса с `queryId` и
+///   слали в `propose_query_rewrite` лишние поля.
+/// - Чата нет: агент не задаёт вопросов; если улучшить нечего, ничего не предлагает.
+/// - Итог — до 5 строк на языке интерфейса Glafira (`language`: `Russian` / `English`), простым текстом.
+pub fn optimize_query_run_text(request_id: &str, language: &str) -> String {
+    let steps = optimize_steps(&format!(
+        "get_optimization_request with requestId \"{request_id}\""
+    ));
+    format!(
+        "Glafira started you in the background: the user pressed “Send to LLM assistant” in Glafira for optimization \
+         request \"{request_id}\". Nobody reads this chat: do not ask questions and do not wait for an answer.\n\n\
+         Optimize the PostgreSQL query of this request.\n\n\
+         {steps}\n\
+         explain_query and hypothetical_index take the query text in sql and its parameter values in params, never the \
+         requestId. propose_query_rewrite with the requestId needs only rewrittenSql, indexes, rationale and \
+         expectedEffect.\n\n\
+         If the query cannot be improved, propose nothing: a proposal that is not better wastes the user's time.\n\n\
+         Finish with a summary of at most 5 lines in {language}: what you proposed and why, or why there are no \
+         proposals. The user reads it in Glafira as plain text: no Markdown, no tables, no code blocks.\n\n\
+         Glafira never runs the proposed SQL or creates the indexes, and nothing in the database can be changed \
+         through this gateway."
+    )
+}
+
+/// Промпт «Проверить» (спец. P4c §8.3): короткий запуск без подключения. Проверяет программу, модель, MCP-конфиг и
+/// билет.
+pub fn check_run_text() -> String {
+    "Glafira started you in the background to check the setup: nobody reads this chat. Call list_connections \
+     once (the list may be empty), then answer with the single word OK. Do not call other tools."
+        .to_string()
 }
 
 pub fn triage_incident_text(connection_id: &str, symptom: Option<&str>) -> String {
@@ -367,10 +410,21 @@ mod tests {
         ] {
             assert!(map.contains(&label), "{label} нет в карте экранов");
         }
+        // Тексты фонового запуска (P4c) — не сценарии `prompts/list` и в `all_texts()` не входят, но их подписи —
+        // тоже строки словаря.
+        let run_texts = [
+            optimize_query_run_text("r3a9f1c", "English"),
+            check_run_text(),
+        ];
         for text in all_texts()
             .iter()
+            .chain(&run_texts)
             .map(String::as_str)
-            .chain([GLAFIRA_SCREENS, crate::server::INSTRUCTIONS])
+            .chain([
+                GLAFIRA_SCREENS,
+                crate::server::INSTRUCTIONS,
+                crate::server::INSTRUCTIONS_RUN,
+            ])
         {
             for label in quoted(text) {
                 assert!(labels.contains(label), "“{label}” нет в en.json");
@@ -414,6 +468,86 @@ mod tests {
             !analyze.contains("3–5"),
             "деталей — не больше трёх запросов: {analyze}"
         );
+    }
+
+    /// Текст `optimize_query` на `feat/p4b` 4068590 — до выноса шагов 1–4 в `optimize_steps` (план P4c, «Сверка с
+    /// `feat/p4b` 4068590», задача 3). `{get}` — начало шага 1.
+    const OPTIMIZE_QUERY_4068590: &str = concat!(
+        "Optimize a PostgreSQL query that the user sent from Glafira with the “Send to LLM assistant” button.\n",
+        "\n",
+        "1. Call {get}. It returns the query text and parameter values, the plan, statistics, the server version and the DDL of the tables, as the user saw them.\n",
+        "2. Analyze the plan and the statistics: the most expensive nodes, wrong row estimates, scans and joins, sorts and hashes that spill to disk, missing or unused indexes.\n",
+        "3. When needed, check hypotheses on the same connection and database: explain_query for plans without execution, hypothetical_index for up to 5 CREATE INDEX statements via hypopg.\n",
+        "4. Call propose_query_rewrite with the requestId for each variant worth comparing (one or several): rewrittenSql, indexes if any, rationale and expectedEffect. The rewritten query must return the same rows as the original: Glafira does not check that.\n",
+        "5. In the chat, briefly explain each variant and ask the user to compare the plans in Glafira (the “LLM proposals” panel of the EXPLAIN console, “Compare plans”) and to accept or reject them. list_proposals shows the decision and the comparison. The user's decisions and comparisons change at any time: when asked about them, call list_proposals again right before answering and never answer from an earlier result.\n",
+        "\n",
+        "Glafira never runs the proposed SQL or creates the indexes, and nothing in the database can be changed through this gateway. ",
+        "Keep the answer short: start with a summary of up to about 10 lines (what is happening or the main problem, the likely cause, the next action) and give details only when the user asks for them. ",
+        "Answer in the language the user writes in.",
+    );
+
+    /// Шаги 1–4 вынесены в `optimize_steps`, а текст `optimize_query` остался байт в байт тем же.
+    #[test]
+    fn optimize_query_text_is_the_same_as_before_the_background_run() {
+        for (id, get) in [
+            (
+                Some("r3a9f1c"),
+                "get_optimization_request with requestId \"r3a9f1c\"",
+            ),
+            (
+                None,
+                "get_optimization_request without requestId: it returns the latest waiting request",
+            ),
+        ] {
+            assert_eq!(
+                optimize_query_text(id),
+                OPTIMIZE_QUERY_4068590.replace("{get}", get)
+            );
+        }
+    }
+
+    /// Промпт фонового запуска (спец. P4c §4.3): шаги 1–4 — те же, что у `optimize_query`, с явным `requestId`.
+    /// Чата нет. Итог — на языке интерфейса Glafira. Абзац о `requestId` (смоук P4b M5/M6, итог задачи 1): модели
+    /// путали id запроса с `queryId` и слали лишние поля. «Проверить» (§8.3) — `list_connections` и ответ `OK`.
+    #[test]
+    fn background_run_prompts() {
+        let steps = optimize_steps("get_optimization_request with requestId \"r3a9f1c\"");
+        let chat = optimize_query_text(Some("r3a9f1c"));
+        assert!(chat.starts_with(
+            "Optimize a PostgreSQL query that the user sent from Glafira with the “Send to LLM assistant” button.\n\n1. Call "
+        ));
+        assert!(chat.contains(&steps), "{chat}");
+        assert!(chat.contains(".\n5. In the chat"), "{chat}");
+        let t = optimize_query_run_text("r3a9f1c", "Russian");
+        assert!(t.contains(&steps), "шаги 1–4 — те же: {t}");
+        for phrase in [
+            "in the background",
+            "do not ask questions",
+            "propose nothing",
+            "never the requestId",
+            "needs only rewrittenSql",
+            "at most 5 lines in Russian",
+            "plain text",
+        ] {
+            assert!(t.contains(phrase), "{phrase}: {t}");
+        }
+        for phrase in ["never the requestId", "needs only rewrittenSql"] {
+            assert!(
+                !chat.contains(phrase),
+                "абзац только у фонового запуска: {phrase}"
+            );
+        }
+        assert!(!t.contains("5. In the chat"), "чат никто не читает");
+        assert!(!t.contains(ANSWER_LANGUAGE), "язык итога задан явно");
+        assert!(!t.contains(ANSWER_BUDGET), "объём итога задан явно");
+        assert!(quoted(&t).contains(&"Send to LLM assistant"), "{t}");
+        assert!(
+            optimize_query_run_text("r3a9f1c", "English").contains("at most 5 lines in English")
+        );
+        let c = check_run_text();
+        assert!(c.contains("list_connections") && c.contains("OK"), "{c}");
+        let cyrillic = |s: &str| s.chars().any(|ch| ('\u{0400}'..='\u{04FF}').contains(&ch));
+        assert!(!cyrillic(&t) && !cyrillic(&c));
     }
 
     #[test]

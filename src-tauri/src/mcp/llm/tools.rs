@@ -42,9 +42,9 @@ const TRUNCATED_MARK: &str = "…[truncated]";
 pub async fn handle(st: &AppState, op: LlmOp) -> Result<PgAnswer, ToolError> {
     // `validate` — и при вызове не через шлюз (тесты, будущие вызовы приложения): пустые строки — «не заданы» (E2).
     let body = match op {
-        LlmOp::GetRequest(p) => get_request(st, p.validate()?)?,
-        LlmOp::Propose { params, client } => propose(st, params.validate()?, client).await?,
-        LlmOp::ListProposals(p) => list(st, p.validate()?)?,
+        LlmOp::GetRequest { params, .. } => get_request(st, params.validate()?)?,
+        LlmOp::Propose { params, client, .. } => propose(st, params.validate()?, client).await?,
+        LlmOp::ListProposals { params, .. } => list(st, params.validate()?)?,
     };
     Ok(PgAnswer::new(body))
 }
@@ -716,9 +716,12 @@ mod tests {
         let get = |id: Option<&str>| {
             handle(
                 &st,
-                LlmOp::GetRequest(GetRequestParams {
-                    request_id: id.map(String::from),
-                }),
+                LlmOp::GetRequest {
+                    params: GetRequestParams {
+                        request_id: id.map(String::from),
+                    },
+                    run: None,
+                },
             )
         };
         let PgOutput::Request(v) = get(Some(&a.id)).await.unwrap().body else {
@@ -777,9 +780,12 @@ mod tests {
         st.llm.requests.attach_proposal(&r.id, &p.id).unwrap();
         let out = handle(
             &st,
-            LlmOp::GetRequest(GetRequestParams {
-                request_id: Some(r.id.clone()),
-            }),
+            LlmOp::GetRequest {
+                params: GetRequestParams {
+                    request_id: Some(r.id.clone()),
+                },
+                run: None,
+            },
         )
         .await
         .unwrap();
@@ -986,6 +992,7 @@ mod tests {
                 LlmOp::Propose {
                     params: p,
                     client: None,
+                    run: None,
                 },
             )
         };
@@ -1084,6 +1091,7 @@ mod tests {
                 LlmOp::Propose {
                     params: p,
                     client: None,
+                    run: None,
                 },
             )
         };
@@ -1156,6 +1164,7 @@ mod tests {
             LlmOp::Propose {
                 params: propose_params(&r.id, "SELECT 1"),
                 client: None,
+                run: None,
             },
         )
         .await
@@ -1326,7 +1335,15 @@ mod tests {
             .proposals
             .answer(&p1.id, ProposalStatus::Rejected, Some("slower".into()))
             .unwrap();
-        let list = |p: ListProposalsParams| handle(&st, LlmOp::ListProposals(p));
+        let list = |p: ListProposalsParams| {
+            handle(
+                &st,
+                LlmOp::ListProposals {
+                    params: p,
+                    run: None,
+                },
+            )
+        };
         let PgOutput::Proposals(items) = list(ListProposalsParams {
             connection_id: None,
             request_id: None,

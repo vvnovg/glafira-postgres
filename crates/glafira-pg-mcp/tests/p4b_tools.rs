@@ -445,9 +445,15 @@ async fn get_optimization_request_returns_the_snapshot_as_is() {
         snapshot
     );
     let ops = fake.llm_ops.lock().unwrap();
-    assert!(matches!(&ops[0], LlmOp::GetRequest(p) if p.request_id.as_deref() == Some("r3a9f1c")));
-    assert!(matches!(&ops[1], LlmOp::GetRequest(p) if p.request_id.is_none()));
-    assert!(matches!(&ops[2], LlmOp::GetRequest(p) if p.request_id.is_none()));
+    assert!(
+        matches!(&ops[0], LlmOp::GetRequest { params: p, run: None } if p.request_id.as_deref() == Some("r3a9f1c"))
+    );
+    assert!(
+        matches!(&ops[1], LlmOp::GetRequest { params: p, run: None } if p.request_id.is_none())
+    );
+    assert!(
+        matches!(&ops[2], LlmOp::GetRequest { params: p, run: None } if p.request_id.is_none())
+    );
 }
 
 #[tokio::test]
@@ -633,9 +639,15 @@ async fn propose_passes_the_client_name_and_answers_id_and_status() {
     let v = ok(call(&c, "propose_query_rewrite", args).await);
     assert_eq!(v, json!({ "proposalId": "p0b12de", "status": "new" }));
     let ops = fake.llm_ops.lock().unwrap();
-    let LlmOp::Propose { params, client } = &ops[0] else {
+    let LlmOp::Propose {
+        params,
+        client,
+        run,
+    } = &ops[0]
+    else {
         panic!("{:?}", ops[0])
     };
+    assert_eq!(run.as_deref(), None, "обычная сессия — без запуска");
     assert_eq!(client.as_deref(), Some("qwen-code"));
     assert_eq!(params.query_id.as_deref(), Some("-42"));
     assert_eq!(params.database.as_deref(), Some("shop"));
@@ -735,11 +747,11 @@ async fn list_proposals_wraps_the_list() {
     let ops = fake.llm_ops.lock().unwrap();
     assert!(matches!(
         &ops[0],
-        LlmOp::ListProposals(p) if p.connection_id.as_deref() == Some("c1") && p.request_id.is_none()
+        LlmOp::ListProposals { params: p, run: None } if p.connection_id.as_deref() == Some("c1") && p.request_id.is_none()
     ));
     assert!(matches!(
         &ops[1],
-        LlmOp::ListProposals(p) if p.connection_id.is_none() && p.request_id.is_none()
+        LlmOp::ListProposals { params: p, run: None } if p.connection_id.is_none() && p.request_id.is_none()
     ));
 }
 

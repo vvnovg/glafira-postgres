@@ -144,7 +144,7 @@ pub const VALUE_STATS_HINT: &str = "Value statistics (mostCommonVals, mostCommon
 /// Операция чтения.
 pub async fn read_op(st: &AppState, op: PgRead) -> Result<PgAnswer, ToolError> {
     match op {
-        PgRead::ListConnections => Ok(answer(PgOutput::Connections(list_connections(st)))),
+        PgRead::ListConnections { .. } => Ok(answer(PgOutput::Connections(list_connections(st)))),
         PgRead::ListDiagnostics => Ok(answer(PgOutput::Diagnostics(diag_catalog()))),
         PgRead::Topology(p) => topology(st, &p.connection_id).await,
         PgRead::HealthSummary(p) => health_summary(st, &p.connection_id).await,
@@ -1686,7 +1686,7 @@ mod tests {
     #[tokio::test]
     async fn only_connections_open_for_llm_are_listed() {
         let (_dir, st) = state_with(vec![member("pg-1", Role::Primary)]);
-        let a = ok(read_op(&st, PgRead::ListConnections).await);
+        let a = ok(read_op(&st, PgRead::ListConnections { run: None }).await);
         let PgOutput::Connections(list) = a.body else {
             panic!("не список подключений")
         };

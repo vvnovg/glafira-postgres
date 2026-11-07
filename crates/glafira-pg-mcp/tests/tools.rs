@@ -173,7 +173,7 @@ impl PgBackend for FakePg {
                 return Err(ToolError::not_allowed());
             }
             Ok(match op {
-                PgRead::ListConnections => PgAnswer::new(PgOutput::Connections(vec![ConnectionInfo {
+                PgRead::ListConnections { .. } => PgAnswer::new(PgOutput::Connections(vec![ConnectionInfo {
                     id: "c1".into(),
                     name: "lab".into(),
                     environment: "dev".into(),

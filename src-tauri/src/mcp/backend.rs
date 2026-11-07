@@ -178,7 +178,7 @@ mod tests {
     async fn data_operations_go_to_mcp_read() {
         let dir = tempfile::tempdir().unwrap();
         let (b, _) = backend(dir.path(), true, true);
-        let a = b.read(PgRead::ListConnections).await.unwrap();
+        let a = b.read(PgRead::ListConnections { run: None }).await.unwrap();
         assert_eq!(a.body, PgOutput::Connections(vec![]));
         let e = b
             .read(PgRead::Topology(
