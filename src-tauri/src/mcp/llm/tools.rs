@@ -1517,6 +1517,68 @@ mod tests {
         );
     }
 
+    /// Источник топологии без стенда: подключение открывается, узлы — заданные.
+    struct Fixed(crate::topology::model::Topology);
+
+    impl crate::topology::runtime::TopologySource for Fixed {
+        fn observe<'a>(
+            &'a self,
+            _profile: &'a crate::conn::profile::ConnectionProfile,
+            _previous: Option<&'a crate::topology::model::Topology>,
+        ) -> crate::topology::BoxFuture<'a, crate::error::AppResult<crate::topology::model::Topology>>
+        {
+            Box::pin(async move { Ok(self.0.clone()) })
+        }
+    }
+
+    /// Узел снимка запроса пропал (смена топологии) — `propose` передаёт в подсказку, чья это сессия: обычной советуют
+    /// прямую форму, сессии фонового запуска — ничего не предлагать (`NOT_IN_A_RUN`, ревью minor-пакета бэкенда,
+    /// замечание 2). Подключение открывается без стенда: в топологии только `pg-2`, у запроса — `pg-1`.
+    #[tokio::test]
+    async fn propose_passes_the_run_session_to_the_missing_member_hint() {
+        use crate::topology::model::{Role, member, topo};
+        let (_d, mut st) = state();
+        st.runtimes = crate::topology::runtime::Runtimes::new(
+            Arc::new(Fixed(topo(vec![member("pg-2", Role::Primary)]))),
+            st.pools.clone(),
+            st.tunnels.clone(),
+        );
+        let r = st.llm.requests.create(new_request("c1")).unwrap();
+        let rewrite = "SELECT * FROM orders WHERE status = $1 LIMIT 100";
+        let propose = |run: Option<&str>| {
+            handle(
+                &st,
+                LlmOp::Propose {
+                    params: propose_params(&r.id, rewrite),
+                    client: None,
+                    run: run.map(String::from),
+                },
+            )
+        };
+        let e = propose(None).await.unwrap_err();
+        assert!(
+            e.message.contains("node pg-1")
+                && e.message.contains(&r.id)
+                && e.message.contains("direct form with connectionId and sql"),
+            "{}",
+            e.message
+        );
+        st.tickets.issue(RunScope {
+            run_id: "a1".into(),
+            connection_id: Some("c1".into()),
+            request_id: Some(r.id.clone()),
+        });
+        let e = propose(Some("a1")).await.unwrap_err();
+        assert!(
+            e.message.contains("node pg-1")
+                && e.message.ends_with(&format!("{NOT_IN_A_RUN})"))
+                && !e.message.contains("connectionId"),
+            "{}",
+            e.message
+        );
+        st.runtimes.shutdown();
+    }
+
     #[test]
     fn rewrite_must_keep_the_statement_kind() {
         let kind = |sql: &str| check_model_sql(sql, Purpose::Explain).unwrap().kind;
