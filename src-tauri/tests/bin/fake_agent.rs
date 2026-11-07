@@ -255,6 +255,13 @@ fn server_config(args: &[String]) -> Result<Server, String> {
                 .collect()
         })
         .unwrap_or_default();
+    // Сервер конфига — шим: `<glafira-pg> mcp`. Без `mcp` тот же бинарь — приложение с настоящим каталогом данных
+    // владельца: сломанный конфиг его не запускает.
+    if server_args != ["mcp"] {
+        return Err(format!(
+            "mcpServers.glafira-pg.args must be [\"mcp\"], got {server_args:?}: {command} is not started"
+        ));
+    }
     let env: Vec<(String, String)> = s["env"]
         .as_object()
         .map(|m| {

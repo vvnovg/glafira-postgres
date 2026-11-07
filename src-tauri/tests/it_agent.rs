@@ -43,7 +43,7 @@ use glafira_pg_lib::mcp::llm::proposals::{NewProposal, ProposalSource};
 use glafira_pg_lib::mcp::llm::requests::{
     NewRequest, OptimizationRequest, RequestSource, RequestStatus,
 };
-use glafira_pg_lib::mcp::llm::tools::store_proposal;
+use glafira_pg_lib::mcp::llm::tools::store_proposal_unchecked;
 use glafira_pg_lib::mcp::llm::{
     CreateRequestArgs, cancel_request, compare_proposal, create_request,
 };
@@ -151,7 +151,7 @@ impl AgentSpawner for TestSpawner {
 
 /// `AppBackend` без проверки предложения на сервере PostgreSQL. Всё остальное — настоящее: `Gate` (подтверждение билетом,
 /// видимость инструментов, подключение запуска, предел вызовов), чтение и запросы на оптимизацию. Предложение на запрос
-/// своего запуска сохраняется тем же `store_proposal`, что после проверки (привязка к запросу, событие, `runId`); прямая
+/// своего запуска сохраняется тем же `store_proposal`, что после проверки (`store_proposal_unchecked`) (привязка к запросу, событие, `runId`); прямая
 /// форма, чужой запрос и обычная сессия идут в приложение и получают его ответ.
 struct NoServerCheck {
     app: AppBackend,
@@ -259,7 +259,7 @@ impl PgBackend for NoServerCheck {
                         expected_effect: params.expected_effect,
                         run_id: run,
                     };
-                    let out = store_proposal(&self.st, new).await?;
+                    let out = store_proposal_unchecked(&self.st, new).await?;
                     Ok(PgAnswer::new(PgOutput::Proposed(out)))
                 })
             }
@@ -268,8 +268,8 @@ impl PgBackend for NoServerCheck {
     }
 }
 
-/// Каталог данных, приложение с MCP-сервером, тестовый спавнер. При сбросе снимает процессы запусков, пережившие тест
-/// (упавший `assert` не должен оставлять зависший агент на машине разработчика).
+/// Каталог данных, приложение с MCP-сервером, тестовый спавнер. Упавший тест (`assert`) при сбросе снимает процессы своих
+/// запусков, пережившие его: зависший агент не должен остаться на машине разработчика.
 struct Env {
     _tmp: tempfile::TempDir,
     dir: PathBuf,
@@ -286,21 +286,76 @@ impl Env {
 
 impl Drop for Env {
     fn drop(&mut self) {
+        // Тест прошёл — его процессы уже закончились (`finish`, `wait_gone`), а их номера могли достаться другим
+        // процессам: снимать нечего.
+        if !std::thread::panicking() {
+            return;
+        }
         let Ok(entries) = std::fs::read_dir(self.dir.join("fake-notes")) else {
             return;
         };
         for e in entries.flatten() {
             let notes = std::fs::read_to_string(e.path()).unwrap_or_default();
             for key in ["pid", "shim_pid", "shim2_pid"] {
-                // Только свой процесс: номер закончившегося мог уже достаться чужому.
+                // Только процесс этого теста: программа — ровно фальшивый агент или шим этой сборки. Не подстрока «glafira»:
+                // под неё попали бы установленная Glafira владельца и бинари других worktree.
                 if let Some(pid) = noted(&notes, key).and_then(|p| p.parse::<u32>().ok())
-                    && process_line(pid).is_some_and(|l| l.contains("glafira"))
+                    && program_of(pid).is_some_and(|p| ours(&p))
                 {
                     force_kill(pid);
                 }
             }
         }
     }
+}
+
+/// Программа — фальшивый агент или шим этой сборки теста: путь целиком, после разрешения ссылок (так его отдаёт ОС); на
+/// Windows — без учёта регистра.
+fn ours(program: &Path) -> bool {
+    [FAKE_AGENT, SHIM].iter().any(|ours| {
+        let ours = std::fs::canonicalize(ours).unwrap_or_else(|_| PathBuf::from(ours));
+        if cfg!(windows) {
+            program
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&ours.to_string_lossy())
+        } else {
+            program == ours
+        }
+    })
+}
+
+/// Путь программы живого процесса `pid`: на macOS — `proc_pidpath` (у `ps -o comm=` — `argv[0]`, его задаёт сам процесс).
+#[cfg(target_os = "macos")]
+fn program_of(pid: u32) -> Option<PathBuf> {
+    let pid = libc::c_int::try_from(pid).ok()?;
+    let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: буфер размера `PROC_PIDPATHINFO_MAXSIZE` — столько `proc_pidpath` и пишет; ответ — длина пути.
+    let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    let n = usize::try_from(n).ok().filter(|n| *n > 0)?;
+    buf.truncate(n);
+    Some(PathBuf::from(String::from_utf8(buf).ok()?))
+}
+
+/// Путь программы живого процесса `pid`: на Linux — `/proc/<pid>/exe`.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn program_of(pid: u32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+/// Путь программы живого процесса `pid`: на Windows — `Get-Process` (у `tasklist` — только имя образа).
+#[cfg(windows)]
+fn program_of(pid: u32) -> Option<PathBuf> {
+    let out = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!("(Get-Process -Id {pid} -ErrorAction SilentlyContinue).Path"),
+        ])
+        .output()
+        .ok()?;
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!path.is_empty()).then(|| PathBuf::from(path))
 }
 
 /// Каталог данных теста: на Unix — короткий путь в `/tmp` (в нём `mcp.sock`, предел пути сокета — 100 байт), на Windows —
@@ -1069,6 +1124,74 @@ async fn missing_program_is_cli_not_found() {
     assert_eq!(run.reason, Some(FailReason::CliNotFound), "{run:?}");
     assert_eq!(request_status(&e.st, &req.id), RequestStatus::Waiting);
     e.finish().await;
+}
+
+/// Сброс упавшего теста снимает только процессы этой сборки (ревью задачи 8, замечание 1): программа процесса сверяется
+/// путём целиком, а не подстрокой «glafira» (под неё попали бы Glafira владельца и бинари других worktree).
+#[cfg(unix)]
+#[test]
+fn only_programs_of_this_test_build_are_ours() {
+    // Фальшивый агент ждёт конца stdin; без каталога данных теста шим он не запускает.
+    let mut agent = std::process::Command::new(FAKE_AGENT)
+        .env_remove(TEST_DATA_DIR_ENV)
+        .env_remove("FAKE_AGENT_NOTES")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let program = program_of(agent.id());
+    drop(agent.stdin.take());
+    let _ = agent.wait();
+    let program = program.expect("путь программы живого процесса");
+    assert!(ours(&program), "{}", program.display());
+    let me = program_of(std::process::id()).unwrap();
+    assert!(!ours(&me), "{}", me.display());
+    assert!(!ours(Path::new(
+        "/Applications/Glafira for PostgreSQL.app/Contents/MacOS/glafira-pg"
+    )));
+}
+
+/// Страховка фальшивого агента (ревью задачи 8, замечание 2): сервер MCP-конфига он запускает только как шим — с
+/// `args: ["mcp"]`. Без `mcp` бинарь Glafira был бы приложением с настоящим каталогом данных владельца, поэтому вместо него
+/// здесь — скрипт, который только оставляет метку.
+#[cfg(unix)]
+#[test]
+fn the_fake_agent_starts_the_server_of_the_config_only_as_the_shim() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let started = dir.path().join("started");
+    let server = dir.path().join("server");
+    std::fs::write(&server, format!("#!/bin/sh\n: > '{}'\n", started.display())).unwrap();
+    std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let agent = |args: Value| {
+        let config = dir.path().join("config.json");
+        let v = json!({ "mcpServers": { "glafira-pg": { "command": server, "args": args } } });
+        std::fs::write(&config, v.to_string()).unwrap();
+        std::process::Command::new(FAKE_AGENT)
+            .args([
+                "--mcp-config",
+                config.to_str().unwrap(),
+                "-o",
+                "stream-json",
+            ])
+            .env(TEST_DATA_DIR_ENV, dir.path())
+            .env("FAKE_AGENT_MODE", "none")
+            .env_remove("FAKE_AGENT_NOTES")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+    };
+    for args in [json!([]), json!(["mcp", "--x"]), json!(["serve"])] {
+        let out = agent(args.clone());
+        assert_eq!(out.status.code(), Some(2), "{args}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("must be [\"mcp\"]"), "{args}: {err}");
+        assert!(!started.exists(), "{args}: сервер запущен");
+    }
+    // С `mcp` сервер запускается (здесь он сразу выходит — сессии нет, агент кончается ошибкой).
+    agent(json!(["mcp"]));
+    assert!(started.exists());
 }
 
 /// Проверка инструментов (спец. §4.1, итог задачи 1): в событии `init` кроме инструментов Glafira есть встроенный
