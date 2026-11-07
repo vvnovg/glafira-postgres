@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useWorkspace } from "../../state/workspace";
 import { connection } from "../../test/fixtures";
-import { explainCall, MCP_CONFIGS, mcpStatus } from "../../test/mcp";
+import { agentStatus, explainCall, MCP_CONFIGS, mcpStatus } from "../../test/mcp";
 import { renderWithClient } from "../../test/render";
 
 vi.mock("../../api/client", async (importOriginal) => {
@@ -121,6 +121,28 @@ describe("McpSection", () => {
     await waitFor(() => expect(api.getMcpStatus).toHaveBeenCalledTimes(2));
     await user.click(screen.getByRole("button", { name: "Отключить всех" }));
     expect(api.disconnectMcpSessions).toHaveBeenLastCalledWith(undefined);
+  });
+
+  it("сессии фонового ассистента: «Фоновый ассистент · запрос r…», «… · проверка»; запуск кончился — без запроса", async () => {
+    const runSession = { id: "s3", clientName: "qwen-cli-mcp-client-glafira-pg", clientVersion: "0.26.5", startedMs: 1_700_000_000_000, calls: 4, active: true, runId: "a1b2c3d" };
+    vi.mocked(api.getMcpStatus).mockResolvedValue(
+      mcpStatus({ sessions: [runSession], agent: agentStatus({ enabled: true, configured: true, running: { runId: "a1b2c3d", requestId: "r3a9f1c" } }) }),
+    );
+    const first = renderWithClient(<McpSection />);
+    const table = await screen.findByRole("table", { name: "Активные сессии" });
+    expect(within(table).getAllByRole("row")[1]).toHaveTextContent("Фоновый ассистент · запрос r3a9f1c");
+    expect(within(table).getByRole("button", { name: "Отключить сессию клиента Фоновый ассистент · запрос r3a9f1c" })).toBeInTheDocument();
+    first.unmount();
+    vi.mocked(api.getMcpStatus).mockResolvedValue(
+      mcpStatus({ sessions: [{ ...runSession, runId: "a0c0c0c" }], agent: agentStatus({ running: { runId: "a0c0c0c", requestId: null } }) }),
+    );
+    const second = renderWithClient(<McpSection />);
+    expect(await screen.findByText("Фоновый ассистент · проверка")).toBeInTheDocument();
+    second.unmount();
+    vi.mocked(api.getMcpStatus).mockResolvedValue(mcpStatus({ sessions: [runSession] }));
+    renderWithClient(<McpSection />);
+    const rows = within(await screen.findByRole("table", { name: "Активные сессии" })).getAllByRole("row");
+    expect(rows[1]).toHaveTextContent(/^Фоновый ассистент\d/);
   });
 
   it("подтверждённые клиенты: «Отозвать»", async () => {

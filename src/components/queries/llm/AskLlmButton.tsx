@@ -1,13 +1,15 @@
 import { type ReactNode, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../../api/client";
-import type { AppError, McpStatus, PlanTree, RequestSource } from "../../../api/types";
+import type { AgentPreset, AppError, McpStatus, OptimizationRequest, PlanTree, RequestSource } from "../../../api/types";
 import { tr } from "../../../i18n/text";
 import { effectiveLlmAccess } from "../../../lib/llmAccess";
+import { isActive, latestRunFor, queueAhead, useAgentRuns } from "../../../lib/useAgentRuns";
 import { useConnectionProfile } from "../../../lib/useConnectionProfile";
-import { useOptimizationRequests, waitingRequest } from "../../../lib/useLlmProposals";
+import { sourceMatches, useOptimizationRequests, waitingRequest } from "../../../lib/useLlmProposals";
 import { useMcpStatus } from "../../../lib/useMcpStatus";
 import { Hint } from "../../common/Hint";
+import { AgentRunStatus } from "./AgentRunStatus";
 
 /** Почему запрос не отправить. Ключи подсказок — литералами (правило словарей и проверка подсказок `i18n:check`). */
 type Off = "policy" | "server" | "otherInstance" | "error" | "access" | "status" | "requests";
@@ -19,6 +21,12 @@ const OFF_HINTS: Record<Off, string> = {
   access: "hints.llmAssist.askAccess",
   status: "hints.llmAssist.askStatus",
   requests: "hints.llmAssist.askRequests",
+};
+
+/** Подсказка активной кнопки в режиме фона называет агента; ключи — литералами (`Hint` не передаёт параметры). */
+const BACKGROUND_HINTS: Record<AgentPreset, string> = {
+  qwen: "hints.llmAssist.askBackgroundQwen",
+  claude: "hints.llmAssist.askBackgroundClaude",
 };
 
 /** Политика → состояние сервера (спец. P4 §11: активна, если MCP включён); `null` — сервер работает и политика разрешает. */
@@ -36,11 +44,29 @@ function serverOff(status: McpStatus): Off | null {
   }
 }
 
+/**
+ * Режим фона (спец. P4c §8.1): политика разрешает фонового ассистента, выключатель «Запускать ассистента в фоне» включён
+ * и путь программы задан. Иначе кнопка работает как в P4b — копирует строку для чата.
+ */
+export function backgroundMode(status: McpStatus | undefined): boolean {
+  const a = status?.agent;
+  return a !== undefined && a.policyEnabled && a.enabled && a.configured;
+}
+
+/** Последний запрос источника в любом статусе или null. */
+function latestRequest(requests: OptimizationRequest[], source: RequestSource, database: string): OptimizationRequest | null {
+  let found: OptimizationRequest | null = null;
+  for (const r of requests) if (sourceMatches(r, source, database) && (found === null || r.createdAtMs > found.createdAtMs)) found = r;
+  return found;
+}
+
 /** Строка для чата последнего созданного запроса и удалось ли её скопировать. */
 export interface SentNotice {
   id: string;
   line: string;
   copied: boolean;
+  /** Запрос ушёл фоновому ассистенту: в буфер ничего не клали (спец. P4c §8.1). */
+  background?: boolean;
 }
 
 export interface AskLlmProps {
@@ -78,12 +104,23 @@ export interface AskLlmProps {
  * Уведомление о скопированной строке по умолчанию живёт в кнопке; в консоли его держит `ExplainTab` (`sent`/`onSent`),
  * потому что кнопка перемонтируется, когда появляется результат плана. Статус ожидания выводится из списка запросов.
  * Между созданием и перечитыванием списка кнопка тоже неактивна: второй быстрый клик дубля не создаёт.
+ *
+ * Режим фона (спец. P4c §8.1, `backgroundMode`): кнопка создаёт запрос и ставит запуск в очередь (`start_agent_run`), в
+ * буфер ничего не кладёт; уведомление — «Запрос r… передан фоновому ассистенту»; вместо строки «Ждёт ответа LLM» — строка
+ * статуса запуска `AgentRunStatus` в том же блоке строк. Запуски читаются в режиме фона и пока у Glafira есть идущий или
+ * ждущий запуск (режим могли выключить во время запуска — он доводится до конца, и его статус виден до конца). После ответа
+ * строка статуса остаётся, пока запуск идёт или его предложения не показаны панелью. Не встал в очередь (очередь полна,
+ * политика) — текст ошибки в уведомлении, запрос ждёт, в строке статуса — «Запустить фонового ассистента».
  */
 export function AskLlmButton({ connectionId, member, database, source, sql, params, plan, sent: sentProp, onSent, extra }: AskLlmProps) {
   const { t } = useTranslation();
   const { status, loading: statusLoading, error: statusError, refetch: refetchStatus } = useMcpStatus();
   const profile = useConnectionProfile(connectionId);
   const { requests, state: requestsState, refresh, retry: retryRequests } = useOptimizationRequests(connectionId);
+  const background = backgroundMode(status);
+  const agent = status?.agent;
+  const runsWanted = background || (agent !== undefined && (agent.running != null || agent.queued > 0));
+  const { all: runs, state: runsState, refresh: refreshRuns } = useAgentRuns(connectionId, { enabled: runsWanted });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<AppError | null>(null);
   const [ownSent, setOwnSent] = useState<SentNotice | null>(null);
@@ -111,12 +148,36 @@ export function AskLlmButton({ connectionId, member, database, source, sql, para
   const justSent = sent !== null && !requests.some((r) => r.id === sent.id);
   const can = ready && off === null && sql.trim() !== "" && !busy && waiting === null && !justSent;
 
+  // Строка статуса запуска. У ждущего запроса — в режиме фона, а без него — пока его запуск ещё идёт (режим выключили во
+  // время запуска); у отвеченного — если у него был запуск (идущий или с непоказанными предложениями — это решает
+  // AgentRunStatus). Пока список запросов не перечитан после создания, прежний запрос источника не показывается.
+  const current = justSent ? null : (waiting ?? latestRequest(requests, source, database));
+  const runsReady = runsWanted && runsState === "ready";
+  const run = current !== null && runsReady ? latestRunFor(runs, current.id) : null;
+  const showRun =
+    current !== null && runsReady && (current.status === "waiting" ? background || (run !== null && isActive(run)) : current.status === "answered" && run !== null);
+
   const ask = async () => {
     setBusy(true);
     setError(null);
     try {
       const r = await api.createOptimizationRequest(connectionId, { member, database, source, sql, params, plan });
       const line = t("llmAssist.ask.chatLine", { id: r.id });
+      if (background) {
+        // Режим фона: запуск — в очередь Glafira, буфер не трогаем. Не встал в очередь — запрос остаётся ждущим: в строке
+        // статуса «Запустить фонового ассистента» и «Скопировать строку для чата».
+        let startError: AppError | null = null;
+        try {
+          await api.startAgentRun(r.id);
+        } catch (e) {
+          startError = toAppError(e);
+        }
+        setSent({ id: r.id, line, copied: false, background: true });
+        setError(startError);
+        refresh();
+        refreshRuns();
+        return;
+      }
       let copied = true;
       try {
         if (!navigator.clipboard) throw new Error("clipboard unavailable");
@@ -133,48 +194,90 @@ export function AskLlmButton({ connectionId, member, database, source, sql, para
     }
   };
 
+  // «Повторить» и «Запустить фонового ассистента»: новый запуск того же запроса (снимок прежний, спец. P4c §7).
+  const startRun = async (id: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.startAgentRun(id);
+      refreshRuns();
+    } catch (e) {
+      setError(toAppError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Отмена запроса останавливает и его запуск (Rust, `cancel_optimization_request`).
   const cancel = async (id: string) => {
     setError(null);
     try {
       await api.cancelOptimizationRequest(id);
       setSent(null);
       refresh();
+      if (runsWanted) refreshRuns();
     } catch (e) {
       setError(toAppError(e));
     }
   };
 
-  // Строка для чата видна, пока её запрос ждёт ответа (или список ещё не перечитан после создания).
+  // Уведомление видно, пока его запрос ждёт ответа (или список ещё не перечитан после создания).
   const fresh = sent !== null && (waiting?.id === sent.id || !requests.some((r) => r.id === sent.id));
-  const notice = sent === null || !fresh ? "" : sent.copied ? t("llmAssist.ask.copied", { id: sent.id }) : t("llmAssist.ask.copyFailed", { id: sent.id, line: sent.line });
-  const unreadable = off === "status" ? t("llmAssist.ask.statusUnavailable") : off === "requests" ? t("llmAssist.ask.requestsFailed") : "";
+  const notice =
+    sent === null || !fresh
+      ? ""
+      : sent.background
+        ? t("llmAssist.ask.queuedNotice", { id: sent.id })
+        : sent.copied
+          ? t("llmAssist.ask.copied", { id: sent.id })
+          : t("llmAssist.ask.copyFailed", { id: sent.id, line: sent.line });
+  // Запуски не прочитались — пояснение, только если от них зависит строка ждущего запроса (иначе ждать нечего).
+  const runsUnreadable = runsWanted && runsState === "failed" && waiting !== null;
+  const unreadable =
+    off === "status" ? t("llmAssist.ask.statusUnavailable") : off === "requests" ? t("llmAssist.ask.requestsFailed") : runsUnreadable ? t("llmAssist.ask.runsFailed") : "";
+  const retryRead = off === "status" ? refetchStatus : off === "requests" ? retryRequests : refreshRuns;
+  const hint = off ? OFF_HINTS[off] : background && agent ? BACKGROUND_HINTS[agent.preset] : "hints.llmAssist.ask";
   const message = error ? tr(error) : notice;
-  const shown = waiting !== null || unreadable !== "" || message !== "";
+  // Строка ожидания P4b — когда строки статуса запуска нет.
+  const plainWaiting = showRun ? null : waiting;
+  const shown = plainWaiting !== null || showRun || unreadable !== "" || message !== "";
   return (
     <>
       <button type="button" disabled={!can} onClick={() => void ask()}>
         {t("llmAssist.ask.button")}
       </button>
-      <Hint k={off ? OFF_HINTS[off] : "hints.llmAssist.ask"} label={t("llmAssist.ask.button")} />
+      <Hint k={hint} label={t("llmAssist.ask.button")} />
       {extra}
       <div className={shown ? "llm-ask-notes shown" : "llm-ask-notes"}>
         <div className="llm-ask-line">
           <span role="status" className="muted">
-            {waiting && <span>{t("llmAssist.ask.waiting", { id: waiting.id })}</span>}
-            {waiting && unreadable && " "}
+            {plainWaiting && <span>{t("llmAssist.ask.waiting", { id: plainWaiting.id })}</span>}
+            {plainWaiting && unreadable && " "}
             {unreadable && <span>{unreadable}</span>}
           </span>
-          {waiting && (
-            <button type="button" className="link" onClick={() => void cancel(waiting.id)}>
+          {plainWaiting && (
+            <button type="button" className="link" onClick={() => void cancel(plainWaiting.id)}>
               {t("llmAssist.ask.cancel")}
             </button>
           )}
           {unreadable && (
-            <button type="button" className="link" onClick={off === "status" ? refetchStatus : retryRequests}>
+            <button type="button" className="link" onClick={retryRead}>
               {t("common.retry")}
             </button>
           )}
         </div>
+        {showRun && current !== null && (
+          <AgentRunStatus
+            key={current.id}
+            request={current}
+            run={run}
+            ahead={run !== null && run.status === "queued" ? queueAhead(runs, run) : 0}
+            chatLine={t("llmAssist.ask.chatLine", { id: current.id })}
+            busy={busy}
+            onRetry={() => void startRun(current.id)}
+            onCancel={() => void cancel(current.id)}
+          />
+        )}
         <p role="status" className="muted llm-ask-notice">
           {message}
         </p>

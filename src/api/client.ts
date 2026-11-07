@@ -2,6 +2,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
   ActionRecord,
   ActionResult,
+  AgentRun,
   AppError,
   AppInfo,
   Confirmation,
@@ -43,6 +44,7 @@ import type {
   QueryKey,
   QueryText,
   RoleInfo,
+  RunFilter,
   SamplerEvent,
   SchemaInfo,
   SecretsInput,
@@ -201,6 +203,16 @@ export const api = {
     call<LlmProposal>("answer_llm_proposal", { id, status, reason }),
   /** «Сравнить планы»: итог записывается в предложение и возвращается в нём. */
   compareLlmProposal: (id: string) => call<LlmProposal>("compare_llm_proposal", { id }),
+  /** Фоновый ассистент (спец. P4c §7): запуск на запрос в очереди Glafira; ответ — запуск `queued`, дальше его ход приходит событиями запусков (`AGENT_RUNS_EVENT`). */
+  startAgentRun: (requestId: string) => call<AgentRun>("start_agent_run", { requestId }),
+  /** «Остановить» в списке запусков: запрос остаётся ждущим. */
+  stopAgentRun: (runId: string) => call<AgentRun>("stop_agent_run", { runId }),
+  /** Запуски по фильтру (последние 50); пустой фильтр — все. */
+  listAgentRuns: (filter: RunFilter = {}) => call<AgentRun[]>("list_agent_runs", { filter }),
+  /** Хвост журнала запуска (до 256 КБ). */
+  readAgentLog: (runId: string) => call<string>("read_agent_log", { runId }),
+  /** Показать файл журнала запуска в файловом менеджере. */
+  revealAgentLog: (runId: string) => call<void>("reveal_agent_log", { runId }),
 
   /** Снимок pgss узла на диск пользователя; второй снимок узла в ту же секунду — `errors.snapshots.exists`. */
   snapshotTake: (id: string, member: string) => call<SnapshotInfo>("snapshot_take", { id, member }),

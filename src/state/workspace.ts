@@ -24,8 +24,11 @@ export type TabSpec =
   | { kind: "about" }
   /** Справка: глава и раздел руководства (F1, ссылки). */
   | { kind: "help"; chapter?: string; anchor?: string }
-  /** Настройки; section — раздел, к которому прокрутить (индикатор LLM открывает раздел MCP). Вкладка одна. */
-  | { kind: "settings"; section?: "mcp" }
+  /**
+   * Настройки; section — раздел, к которому прокрутить: MCP (индикатор LLM) или его подраздел «Фоновый ассистент»
+   * (индикатор во время фонового запуска). Вкладка одна.
+   */
+  | { kind: "settings"; section?: "mcp" | "agent" }
   /** Объекты базы из дерева каталога. Таблица, представление и последовательность — по схеме и имени, функция — по oid (имена перегружены). */
   | { kind: "table"; connectionId: string; database: string; schema: string; name: string }
   | { kind: "view"; connectionId: string; database: string; schema: string; name: string; matview: boolean }

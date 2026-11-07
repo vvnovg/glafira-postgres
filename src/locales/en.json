@@ -589,7 +589,10 @@
         "waiting": "waiting for approval",
         "disconnect": "Disconnect",
         "disconnectAria": "Disconnect the session of client {{client}}",
-        "disconnectAll": "Disconnect all"
+        "disconnectAll": "Disconnect all",
+        "run": "Background assistant · request {{id}}",
+        "runCheck": "Background assistant · check",
+        "runOther": "Background assistant"
       },
       "audit": {
         "title": "Journal",
@@ -2131,7 +2134,9 @@
       "waiting": "Waiting for the LLM: request {{id}}",
       "cancel": "Cancel request",
       "statusUnavailable": "MCP status is unavailable",
-      "requestsFailed": "Could not read the requests of this connection"
+      "requestsFailed": "Could not read the requests of this connection",
+      "queuedNotice": "Request {{id}} sent to the background assistant",
+      "runsFailed": "Could not read the background assistant runs"
     },
     "panel": {
       "title": "LLM proposals",
@@ -2141,6 +2146,10 @@
       "newDot": "New LLM proposal",
       "from": "From {{client}}, {{time}}",
       "unknownClient": "unknown client",
+      "runClient": "background assistant ({{agent}})",
+      "runClientUnknown": "background assistant",
+      "fromRun": "From the background assistant ({{agent}}), {{time}}",
+      "fromRunUnknown": "From the background assistant, {{time}}",
       "original": "Original",
       "rewritten": "Proposed",
       "diff": "Original and proposed text",
@@ -2179,7 +2188,54 @@
       "recs": "Recommendations",
       "noRecs": "No recommendations"
     },
-    "badge": "LLM proposals: {{count}} — open in the console"
+    "badge": "LLM proposals: {{count}} — open in the console",
+    "agent": {
+      "title": "Background assistant: request {{id}}",
+      "queued": "In the background assistant queue, ahead of it: {{n}}",
+      "queuedNext": "In the background assistant queue: next",
+      "starting": "The assistant is starting…",
+      "running": "The assistant is working",
+      "progress": "{{elapsed}} · calls: {{calls}}",
+      "progressTool": "{{elapsed}} · calls: {{calls}} · {{tool}}",
+      "evict": "Ollama may unload {{other}} to load {{model}}",
+      "arrived_one": "The assistant sent {{count}} proposal",
+      "arrived_other": "The assistant sent {{count}} proposals",
+      "noProposals": "The assistant finished without proposals",
+      "failed": "Background assistant error: {{reason}}",
+      "stopped": "The run was stopped",
+      "interrupted": "The run was interrupted: Glafira was closed",
+      "summary": "Assistant's answer",
+      "showLog": "Show log",
+      "start": "Start the background assistant",
+      "copyLine": "Copy the line for the chat",
+      "copied": "Copied: “{{line}}”",
+      "copyFailed": "Could not copy the line, type it in the chat: “{{line}}”",
+      "reason": {
+        "cliNotFound": "program not found: {{path}}",
+        "cliNotFoundPlain": "program not found",
+        "spawnFailed": "could not start the program",
+        "timeout": "the {{min}} min time limit was exceeded",
+        "timeoutPlain": "the run time limit was exceeded",
+        "limit": "the call or spending limit was reached",
+        "exit": "exit code {{code}}",
+        "exitPlain": "the program exited with an error",
+        "notConnected": "the agent did not connect to Glafira",
+        "mcpOff": "the MCP server was turned off during the run",
+        "accessOff": "the connection is closed to LLM assistants",
+        "policy": "forbidden by your organization's policy",
+        "notConfigured": "the background assistant is not set up",
+        "unsafeTools": "the agent can use more than Glafira's tools: {{tools}}; the run was stopped before its first step",
+        "unsafeToolsPlain": "the agent can use more than Glafira's tools; the run was stopped before its first step",
+        "unsafeNoInit": "the agent did not report its tools; the run was stopped",
+        "unknown": "unknown reason"
+      },
+      "log": {
+        "title": "Run log {{id}}",
+        "tail": "The end of the log is shown (up to 256 KB). The log is not passed to the model.",
+        "empty": "The log is empty",
+        "reveal": "Show file"
+      }
+    }
   },
   "mcp": {
     "unknownClient": "Unknown MCP client",
@@ -2197,7 +2253,9 @@
       "one": "LLM: {{client}}",
       "clients_one": "LLM: {{count}} client",
       "clients_other": "LLM: {{count}} clients",
-      "title": "LLM assistant sessions: open the MCP section of Settings"
+      "title": "LLM assistant sessions: open the MCP section of Settings",
+      "agent": "LLM: background assistant",
+      "agentTitle": "The background assistant is at work: open its subsection in Settings"
     }
   },
   "hints": {
@@ -2245,7 +2303,9 @@
       "askStatus": "The MCP status could not be read, so it is unknown whether the server is on. Retry or check Settings → LLM assistants (MCP).",
       "askRequests": "The requests of this connection could not be read, so a duplicate cannot be ruled out. Retry.",
       "askPolicy": "MCP is disabled by your organization's policy.",
-      "askAccess": "The connection is closed to LLM assistants: open it in the connection settings, LLM access → Diagnostics."
+      "askAccess": "The connection is closed to LLM assistants: open it in the connection settings, LLM access → Diagnostics.",
+      "askBackgroundQwen": "Glafira will run Qwen Code in the background; proposals will appear in “LLM proposals”. The snapshot goes to the agent's model without masking.",
+      "askBackgroundClaude": "Glafira will run Claude Code in the background; proposals will appear in “LLM proposals”. The snapshot goes to the agent's model without masking."
     }
   },
   "recommend": {

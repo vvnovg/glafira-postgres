@@ -1115,6 +1115,8 @@ export interface LlmProposal {
   comparison?: ProposalComparison | null;
   createdAtMs: number;
   answeredAtMs?: number | null;
+  /** Предложение фонового запуска (спец. P4c §7): панель пишет «От фонового ассистента (агент, модель)». */
+  runId?: string | null;
 }
 /**
  * Фильтр `list_llm_proposals`. `connectionId` сужает всегда; `requestIds`, `database` и `queryId` объединяются (ИЛИ):
@@ -1135,6 +1137,86 @@ export interface ProposalsEvent {
   connectionId: string;
   requestId?: string | null;
   proposalId?: string | null;
+}
+// Фоновый ассистент (спец. P4c): запуски агентского CLI и их статус.
+/** Пресет агентского CLI (`agent::settings::Preset`): названия программ не переводятся. */
+export type AgentPreset = "qwen" | "claude";
+/** Запуск на запрос на оптимизацию или «Проверить» в «Настройках» (без подключения и запроса). */
+export type RunKind = "optimize" | "check";
+/** Жизненный цикл запуска (спец. P4c §3.2). */
+export type RunStatus = "queued" | "starting" | "running" | "done" | "failed" | "cancelled" | "interrupted" | "skipped";
+/**
+ * Причина `failed` (спец. P4c §3.2). `unsafeTools` — модели доступно что-то кроме инструментов Glafira (§4.1 «Проверка
+ * инструментов»): имена — в предупреждении `unsafe <имена через запятую>` или `unsafe no-init`.
+ */
+export type FailReason =
+  | "cliNotFound"
+  | "spawnFailed"
+  | "timeout"
+  | "limit"
+  | "exit"
+  | "notConnected"
+  | "mcpOff"
+  | "accessOff"
+  | "policy"
+  | "notConfigured"
+  | "unsafeTools";
+/**
+ * Запуск фонового агента (`agent-runs.json`, событие `agent://runs`). Необязательные поля Rust может не прислать:
+ * отсутствие и null равнозначны.
+ */
+export interface AgentRun {
+  /** `a` + 6 hex. */
+  id: string;
+  kind: RunKind;
+  requestId?: string | null;
+  connectionId?: string | null;
+  preset: AgentPreset;
+  /** Модель из настроек пресета; нет — модель клиента по умолчанию. */
+  model?: string | null;
+  cliVersion?: string | null;
+  /** Путь программы запуска (спец. P4c §10). */
+  path?: string | null;
+  status: RunStatus;
+  reason?: FailReason | null;
+  exitCode?: number | null;
+  queuedAtMs: number;
+  startedAtMs?: number | null;
+  endedAtMs?: number | null;
+  /** Вызовов инструментов за запуск (во всех его сессиях). */
+  calls: number;
+  lastTool?: string | null;
+  lastCallAtMs?: number | null;
+  /** Предложения этого запуска. */
+  proposalIds: string[];
+  /** Итоговый текст агента (до 4 КБ): показывается как простой текст. */
+  summary?: string | null;
+  /** Стоимость, если CLI её сообщил (Claude Code без Ollama). */
+  costUsd?: number | null;
+  /**
+   * Предупреждения запуска. `evict <другие модели через запятую> <модель запуска>` — Ollama может выгрузить другую модель;
+   * `unsafe <имена через запятую>` / `unsafe no-init` — проверка инструментов остановила запуск. Прочие — как есть.
+   */
+  warnings: string[];
+}
+/** Фильтр `list_agent_runs`: поля — пересечение; без полей — все запуски (последние 50). */
+export interface RunFilter {
+  connectionId?: string | null;
+  requestIds?: string[] | null;
+}
+/** Фоновый ассистент в статусе MCP (`McpStatus.agent`, спец. P4c §8.4). */
+export interface AgentStatus {
+  /** Политика: `mcpEnabled` и `mcpAgentEnabled`. */
+  policyEnabled: boolean;
+  /** Выключатель «Запускать ассистента в фоне». */
+  enabled: boolean;
+  /** Путь программы выбранного пресета задан. */
+  configured: boolean;
+  preset: AgentPreset;
+  /** Идущий запуск (`starting` или `running`). */
+  running?: { runId: string; requestId?: string | null } | null;
+  /** Запусков в очереди (все подключения). */
+  queued: number;
 }
 /** Запись журнала для EXPLAIN ANALYZE яруса записи (`ActionRecord.explain`). */
 export interface ExplainRecord {
@@ -1784,6 +1866,8 @@ export interface McpSessionSnapshot {
   startedMs: number;
   calls: number;
   active: boolean;
+  /** Сессия фонового запуска, опознанная по билету (спец. P4c §5.1). */
+  runId?: string | null;
 }
 
 /** Сессия ждёт ответа пользователя в диалоге подтверждения; без имени — «Неизвестный MCP-клиент». */
@@ -1820,6 +1904,8 @@ export interface McpStatus {
   policyEnabled: boolean;
   /** Потолок политики `mcpMaxAccess`. */
   maxAccess: PolicyStatus["mcpMaxAccess"];
+  /** Фоновый ассистент (спец. P4c §8.4). */
+  agent: AgentStatus;
 }
 
 /**

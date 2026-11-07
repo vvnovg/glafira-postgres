@@ -3,15 +3,18 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../../api/client";
-import type { AppError, LlmProposal, ProposalComparison, ProposalStatus } from "../../../api/types";
+import type { AgentRun, AppError, LlmProposal, ProposalComparison, ProposalStatus } from "../../../api/types";
 import { formatTimestamp } from "../../../lib/format";
 import { type DiffCell, type DiffRow, lineDiff, sideBySide } from "../../../lib/lineDiff";
+import { useAgentRuns } from "../../../lib/useAgentRuns";
 import { consoleProposals, useLlmProposals } from "../../../lib/useLlmProposals";
+import { useShownProposals } from "../../../state/shownProposals";
 import { useTabMarks } from "../../../state/tabMarks";
 import { openExplainWithPrefill } from "../../../state/workspace";
 import { CopyButton } from "../../common/CopyButton";
 import { ErrorBanner } from "../../common/ErrorBanner";
 import { Glyph } from "../../common/Glyph";
+import { agentLabel } from "../../mcp/agent/agentText";
 import { ProposalCompare } from "./ProposalCompare";
 
 /** Подписи статусов — литералами (правило словарей). */
@@ -34,7 +37,23 @@ export interface ProposalFocus {
 const when = (ms: number) => formatTimestamp(ms).slice(0, 19);
 /** Начало переписанного текста для списка: первая непустая строка, до 80 символов (дальше обрезает «…» стиля). */
 const head = (sql: string) => (sql.split("\n").find((l) => l.trim() !== "") ?? "").trim().slice(0, 80);
-const clientName = (p: LlmProposal, t: TFunction) => p.client ?? t("llmAssist.panel.unknownClient");
+/** Запуск фонового ассистента, приславший предложение (спец. P4c §7), если он ещё в списке запусков (последние 50). */
+const runOf = (p: LlmProposal, runs: AgentRun[]) => (p.runId ? (runs.find((r) => r.id === p.runId) ?? null) : null);
+
+/** Кто прислал (для списка): фоновый ассистент с агентом и моделью запуска или имя MCP-клиента. */
+function clientName(p: LlmProposal, runs: AgentRun[], t: TFunction): string {
+  if (!p.runId) return p.client ?? t("llmAssist.panel.unknownClient");
+  const run = runOf(p, runs);
+  return run ? t("llmAssist.panel.runClient", { agent: agentLabel(run) }) : t("llmAssist.panel.runClientUnknown");
+}
+
+/** «От …, время» в шапке выбранного предложения: у фонового — «От фонового ассистента (Qwen Code, модель)». */
+function fromText(p: LlmProposal, runs: AgentRun[], t: TFunction): string {
+  const time = when(p.createdAtMs);
+  if (!p.runId) return t("llmAssist.panel.from", { client: clientName(p, runs, t), time });
+  const run = runOf(p, runs);
+  return run ? t("llmAssist.panel.fromRun", { agent: agentLabel(run), time }) : t("llmAssist.panel.fromRunUnknown", { time });
+}
 
 /**
  * Чип статуса: цвет (новое — акцент, принято — зелёный, отклонено — красный) и слово — смысл не держится на одном цвете.
@@ -50,7 +69,9 @@ function StatusChip({ status }: { status: ProposalStatus }) {
  * запроса для её базы (`consoleProposals`); `focus` — предложение, выбранное ссылкой карточки: оно закрепляется в списке и
  * выбирается один раз на `nonce`. Свёрнута, пока предложений нет, если пользователь не раскрыл её сам. Новое предложение
  * приходит по событию `mcp://proposals`; пока консоль в фоне (`active = false`), предложения, которых она ещё не показала,
- * ставят пометку её вкладке (`tabId`) — строка вкладок рисует точку.
+ * ставят пометку её вкладке (`tabId`) — строка вкладок рисует точку. Предложения фонового запуска подписаны «От фонового
+ * ассистента (агент, модель)» (спец. P4c §7); показанные (консоль активна, панель раскрыта) отмечаются в
+ * `useShownProposals` — строка статуса фонового ассистента о них больше не пишет.
  */
 export function ProposalsPanel({ connectionId, database, active, tabId, focus }: { connectionId: string; database: string | null; active: boolean; tabId: string; focus: ProposalFocus | null }) {
   const { t } = useTranslation();
@@ -69,6 +90,8 @@ export function ProposalsPanel({ connectionId, database, active, tabId, focus }:
     setOpen(true);
   }, [focusId, focusNonce]);
   const list = useMemo(() => consoleProposals(proposals, requests, database, pinned), [proposals, requests, database, pinned]);
+  // Запуски нужны только для подписи фоновых предложений.
+  const { all: runs } = useAgentRuns(null, { enabled: list.some((p) => !!p.runId) });
   // Выбор держится за id: ответ или новое предложение пересортируют список, а показанное предложение остаётся.
   useEffect(() => {
     if (selected === null && list.length > 0) setSelected(list[0].id);
@@ -89,6 +112,11 @@ export function ProposalsPanel({ connectionId, database, active, tabId, focus }:
 
   const bodyId = useId();
   const isOpen = open ?? list.length > 0;
+  // Видимые предложения (консоль активна, панель раскрыта) — показаны: строка статуса фонового ассистента о них молчит.
+  const markShown = useShownProposals((s) => s.markShown);
+  useEffect(() => {
+    if (active && isOpen) markShown(list.map((p) => p.id));
+  }, [active, isOpen, list, markShown]);
   const current = list.find((p) => p.id === selected) ?? list[0] ?? null;
   return (
     <section className="llm-proposals" aria-label={t("llmAssist.panel.title")}>
@@ -110,7 +138,7 @@ export function ProposalsPanel({ connectionId, database, active, tabId, focus }:
                     {/* Пункт — карточка в две строки: статус, клиент и время; начало предложенного текста. */}
                     <button type="button" className="llm-item" aria-current={p.id === current?.id} onClick={() => setSelected(p.id)}>
                       <span className="llm-item-meta">
-                        <StatusChip status={p.status} /> <span className="llm-item-client">{clientName(p, t)}</span>{" "}
+                        <StatusChip status={p.status} /> <span className="llm-item-client">{clientName(p, runs, t)}</span>{" "}
                         <span className="llm-item-time">{when(p.createdAtMs)}</span>
                       </span>{" "}
                       <code className="llm-item-sql">{head(p.rewrittenSql)}</code>
@@ -118,7 +146,7 @@ export function ProposalsPanel({ connectionId, database, active, tabId, focus }:
                   </li>
                 ))}
               </ul>
-              {current && <ProposalView key={current.id} proposal={current} connectionId={connectionId} onChanged={refresh} />}
+              {current && <ProposalView key={current.id} proposal={current} runs={runs} connectionId={connectionId} onChanged={refresh} />}
             </div>
           ))}
       </div>
@@ -193,7 +221,7 @@ function DiffTable({ rows }: { rows: DiffRow[] }) {
  * списка. Ответ можно изменить (принято ↔ отклонено): у отвеченного — противоположное действие. Статус, причина и кнопки
  * ответа в шапке берутся из ответа команды, пока список его не перечитал: фокус после ответа приходит на новый статус.
  */
-function ProposalView({ proposal: p, connectionId, onChanged }: { proposal: LlmProposal; connectionId: string; onChanged: () => void }) {
+function ProposalView({ proposal: p, runs, connectionId, onChanged }: { proposal: LlmProposal; runs: AgentRun[]; connectionId: string; onChanged: () => void }) {
   const { t } = useTranslation();
   const rows = useMemo(() => sideBySide(lineDiff(p.originalSql, p.rewrittenSql)), [p.originalSql, p.rewrittenSql]);
   const [busy, setBusy] = useState(false);
@@ -250,7 +278,7 @@ function ProposalView({ proposal: p, connectionId, onChanged }: { proposal: LlmP
       <div className="llm-proposal-head">
         <div className="llm-proposal-title">
           <div className="llm-proposal-meta" tabIndex={-1} ref={headRef}>
-            <StatusChip status={status} /> <span className="muted">{t("llmAssist.panel.from", { client: clientName(p, t), time: when(p.createdAtMs) })}</span>
+            <StatusChip status={status} /> <span className="muted">{fromText(p, runs, t)}</span>
           </div>
           <div className="llm-proposal-answer">
             {status !== "accepted" && (

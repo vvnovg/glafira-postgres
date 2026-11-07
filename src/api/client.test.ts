@@ -99,4 +99,23 @@ describe("api client", () => {
     await api.compareLlmProposal("p1");
     expect(invoke).toHaveBeenLastCalledWith("compare_llm_proposal", { id: "p1" });
   });
+
+  it("команды запусков фонового ассистента", async () => {
+    invoke.mockResolvedValue({});
+    await api.startAgentRun("r1");
+    expect(invoke).toHaveBeenLastCalledWith("start_agent_run", { requestId: "r1" });
+    await api.stopAgentRun("a1b2c3d");
+    expect(invoke).toHaveBeenLastCalledWith("stop_agent_run", { runId: "a1b2c3d" });
+    invoke.mockResolvedValue([]);
+    await api.listAgentRuns();
+    expect(invoke).toHaveBeenLastCalledWith("list_agent_runs", { filter: {} });
+    await api.listAgentRuns({ connectionId: "c" });
+    expect(invoke).toHaveBeenLastCalledWith("list_agent_runs", { filter: { connectionId: "c" } });
+    invoke.mockResolvedValue("log");
+    await api.readAgentLog("a1b2c3d");
+    expect(invoke).toHaveBeenLastCalledWith("read_agent_log", { runId: "a1b2c3d" });
+    invoke.mockResolvedValue(undefined);
+    await api.revealAgentLog("a1b2c3d");
+    expect(invoke).toHaveBeenLastCalledWith("reveal_agent_log", { runId: "a1b2c3d" });
+  });
 });

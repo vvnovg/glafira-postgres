@@ -1,8 +1,11 @@
 // Контраст и различимость цветов темы: чистые функции для theme-contrast.test.mjs (`pnpm test:scripts`).
 // Разбирает фоны, текстовые цвета и --wait-* из src/styles.css; считает WCAG-контраст и ΔE в OKLab (формулы CSS Color 4).
 
-/** Переменные с цветом `#rrggbb`, которые разбирает `parseThemeVars`: фоны, приглушённый текст, акцент и его заливка. */
-const THEME_VARS = new Set(["--bg", "--bg-alt", "--muted", "--accent", "--accent-fill"]);
+/**
+ * Переменные с цветом `#rrggbb`, которые разбирает `parseThemeVars`: фоны, текст и приглушённый текст, акцент и его заливка,
+ * предупреждение (`.diag-warn` подмешивает к нему цвет текста).
+ */
+const THEME_VARS = new Set(["--bg", "--bg-alt", "--fg", "--muted", "--accent", "--accent-fill", "--warn"]);
 
 /** Переменные, которые разбирает `parseThemeVars`: `THEME_VARS` и цвета классов ожиданий. */
 const isThemeVar = (name) => THEME_VARS.has(name) || name.startsWith("--wait-");
@@ -69,6 +72,15 @@ export function parseThemeVars(css) {
 function srgb(hex) {
   if (!/^#[0-9a-f]{6}$/i.test(hex)) throw new Error(`«${hex}» — не #rrggbb`);
   return [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+}
+
+/**
+ * `color-mix(in srgb, a p%, b)` → `#rrggbb`: смешение компонентов sRGB (с гаммой, как в CSS) с долей `p` (0…1) цвета `a`;
+ * компоненты округляются до 8 бит.
+ */
+export function mixSrgb(hexA, hexB, p) {
+  const [a, b] = [srgb(hexA), srgb(hexB)];
+  return `#${a.map((c, i) => Math.round((c * p + b[i] * (1 - p)) * 255).toString(16).padStart(2, "0")).join("")}`;
 }
 
 /** Снятие гаммы sRGB: компонент 0…1 → линейный. */

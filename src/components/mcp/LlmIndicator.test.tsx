@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { McpStatus } from "../../api/types";
 import { MCP_STATUS_KEY, useMcpEvents } from "../../lib/useMcpStatus";
 import { useWorkspace } from "../../state/workspace";
-import { mcpStatus } from "../../test/mcp";
+import { agentStatus, mcpStatus } from "../../test/mcp";
 import { renderWithClient } from "../../test/render";
 
 let emit: ((e: { payload: McpStatus }) => void) | undefined;
@@ -58,6 +58,37 @@ describe("LlmIndicator", () => {
     expect(useWorkspace.getState().tabs).toEqual([{ kind: "settings", section: "mcp", id: "settings" }]);
     act(() => emit!({ payload: mcpStatus({ sessions: [] }) }));
     await waitFor(() => expect(screen.queryByRole("button")).not.toBeInTheDocument());
+  });
+
+  it("во время фонового запуска — «LLM: фоновый ассистент», подсветка во время вызова; щелчок открывает его подраздел", async () => {
+    const run = { ...session, id: "s9", clientName: "qwen-cli-mcp-client-glafira-pg", runId: "a1b2c3d", active: true };
+    vi.mocked(api.getMcpStatus).mockResolvedValue(
+      mcpStatus({ sessions: [run], agent: agentStatus({ enabled: true, configured: true, running: { runId: "a1b2c3d", requestId: "r3a9f1c" } }) }),
+    );
+    const user = userEvent.setup();
+    renderWithClient(<LlmIndicator />);
+    const button = await screen.findByRole("button", { name: "LLM: фоновый ассистент" });
+    expect(button).toHaveClass("active");
+    expect(button).toHaveAttribute("title", "Работает фоновый ассистент: открыть его подраздел в «Настройках»");
+    await user.click(button);
+    expect(useWorkspace.getState().tabs).toEqual([{ kind: "settings", section: "agent", id: "settings" }]);
+  });
+
+  it("запуск ещё не подключился — индикатор уже виден; сессия запуска — не клиент чата", async () => {
+    vi.mocked(api.getMcpStatus).mockResolvedValue(mcpStatus({ agent: agentStatus({ running: { runId: "a1b2c3d", requestId: "r3a9f1c" } }) }));
+    const first = renderWithClient(<LlmIndicator />);
+    expect(await screen.findByRole("button", { name: "LLM: фоновый ассистент" })).not.toHaveClass("active");
+    first.unmount();
+    // Запуск кончился, а его сессия ещё в списке: клиент чата — один.
+    vi.mocked(api.getMcpStatus).mockResolvedValue(mcpStatus({ sessions: [{ ...session, id: "s9", clientName: "claude-code", runId: "a1b2c3d" }, session] }));
+    const second = renderWithClient(<LlmIndicator />);
+    expect(await screen.findByRole("button", { name: "LLM: qwen-code" })).toBeInTheDocument();
+    second.unmount();
+    // Осталась только сессия кончившегося запуска — индикатора нет.
+    vi.mocked(api.getMcpStatus).mockResolvedValue(mcpStatus({ sessions: [{ ...session, id: "s9", clientName: "claude-code", runId: "a1b2c3d" }] }));
+    renderWithClient(<LlmIndicator />);
+    await waitFor(() => expect(api.getMcpStatus).toHaveBeenCalledTimes(3));
+    expect(screen.queryByRole("button")).toBeNull();
   });
 
   it("клиент без имени — «Неизвестный MCP-клиент»", async () => {

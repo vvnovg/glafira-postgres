@@ -2,11 +2,11 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AppError, LlmAccess, McpStatus } from "../../../api/types";
-import { resetEventBus } from "../../../test/events";
+import type { AgentStatus, AppError, LlmAccess, McpStatus } from "../../../api/types";
+import { emitEvent, listeners, resetEventBus } from "../../../test/events";
 import { connection } from "../../../test/fixtures";
-import { optimizationRequest } from "../../../test/llm";
-import { mcpStatus } from "../../../test/mcp";
+import { agentRun, optimizationRequest } from "../../../test/llm";
+import { agentStatus, mcpStatus } from "../../../test/mcp";
 import { planTree } from "../../../test/plans";
 import { renderWithClient } from "../../../test/render";
 
@@ -17,7 +17,15 @@ vi.mock("../../../api/client", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../../../api/client")>();
   return {
     ...orig,
-    api: { listConnections: vi.fn(), listOptimizationRequests: vi.fn(), listLlmProposals: vi.fn(), createOptimizationRequest: vi.fn(), cancelOptimizationRequest: vi.fn() },
+    api: {
+      listConnections: vi.fn(),
+      listOptimizationRequests: vi.fn(),
+      listLlmProposals: vi.fn(),
+      createOptimizationRequest: vi.fn(),
+      cancelOptimizationRequest: vi.fn(),
+      listAgentRuns: vi.fn(),
+      startAgentRun: vi.fn(),
+    },
   };
 });
 
@@ -43,6 +51,7 @@ describe("AskLlmButton", () => {
     vi.mocked(api.listConnections).mockResolvedValue([connection({ id: "c", llmAccess: "diagnostics" })]);
     vi.mocked(api.listOptimizationRequests).mockResolvedValue([]);
     vi.mocked(api.listLlmProposals).mockResolvedValue([]);
+    vi.mocked(api.listAgentRuns).mockResolvedValue([]);
   });
 
   it("пока статус MCP не прочитан, кнопка неактивна и без пояснения", async () => {
@@ -104,11 +113,13 @@ describe("AskLlmButton", () => {
     expect(screen.getByRole("tooltip")).toHaveTextContent("(текст запроса, статистика, план, DDL)");
   });
 
-  it("читает только запросы подключения, предложения не запрашивает", async () => {
+  it("читает только запросы подключения, предложения не запрашивает; без режима фона и запусков — и запуски не читает", async () => {
     renderWithClient(<AskLlmButton {...props} />);
     await waitFor(() => expect(screen.getByRole("button", { name: LABEL })).toBeEnabled());
     expect(api.listOptimizationRequests).toHaveBeenCalledWith("c");
     expect(api.listLlmProposals).not.toHaveBeenCalled();
+    expect(api.listAgentRuns).not.toHaveBeenCalled();
+    expect(listeners("agent://runs")).toHaveLength(0);
   });
 
   it("запросы ещё читаются — кнопка неактивна", async () => {
@@ -290,5 +301,236 @@ describe("AskLlmButton", () => {
   it("области уведомлений присутствуют всегда (живые области): строка ожидания и строка о переданном запросе", () => {
     renderWithClient(<AskLlmButton {...props} />);
     expect(screen.getAllByRole("status")).toHaveLength(2);
+  });
+});
+
+describe("AskLlmButton: фоновый ассистент", () => {
+  /** Режим фона включён, агент настроен; поля — поверх. */
+  const bg = (patch: Partial<AgentStatus> = {}) => setStatus(mcpStatus({ agent: agentStatus({ enabled: true, configured: true, ...patch }) }));
+  const group = () => screen.findByRole("group", { name: "Фоновый ассистент: запрос r3a9f1c" });
+  const QUEUED = "Запрос r3a9f1c передан фоновому ассистенту";
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    resetEventBus();
+    bg();
+    vi.mocked(api.listConnections).mockResolvedValue([connection({ id: "c", llmAccess: "diagnostics" })]);
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([]);
+    vi.mocked(api.listLlmProposals).mockResolvedValue([]);
+    vi.mocked(api.listAgentRuns).mockResolvedValue([]);
+  });
+
+  it("создаёт запрос и ставит запуск в очередь; буфер не трогает", async () => {
+    vi.mocked(api.createOptimizationRequest).mockResolvedValue(optimizationRequest());
+    vi.mocked(api.startAgentRun).mockResolvedValue(agentRun());
+    const user = userEvent.setup();
+    await navigator.clipboard.writeText("прежнее");
+    renderWithClient(<AskLlmButton {...props} />);
+    const button = screen.getByRole("button", { name: LABEL });
+    await waitFor(() => expect(button).toBeEnabled());
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest()]);
+    vi.mocked(api.listAgentRuns).mockResolvedValue([agentRun()]);
+    await user.click(button);
+    expect(api.createOptimizationRequest).toHaveBeenCalledWith("c", { member: "pg-1", database: "perf", source: { kind: "console" }, sql: SQL, params: ["disputed"], plan: null });
+    expect(api.startAgentRun).toHaveBeenCalledWith("r3a9f1c");
+    expect(await navigator.clipboard.readText()).toBe("прежнее");
+    expect(await screen.findByText(QUEUED)).toBeInTheDocument();
+    expect(within(await group()).getByText("В очереди фонового ассистента: следующий")).toBeInTheDocument();
+    // Строку ожидания P4b заменяет строка статуса фонового ассистента.
+    expect(screen.queryByText("Ждёт ответа LLM: запрос r3a9f1c")).toBeNull();
+    expect(button).toBeDisabled();
+  });
+
+  it("Z1: строка статуса запуска и уведомление — отдельные строки в блоке под кнопками; элементы ряда (`extra`) — до них", async () => {
+    vi.mocked(api.createOptimizationRequest).mockResolvedValue(optimizationRequest());
+    vi.mocked(api.startAgentRun).mockResolvedValue(agentRun());
+    const user = userEvent.setup();
+    renderWithClient(<AskLlmButton {...props} extra={<button type="button">extra</button>} />);
+    const button = screen.getByRole("button", { name: LABEL });
+    await waitFor(() => expect(button).toBeEnabled());
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest()]);
+    vi.mocked(api.listAgentRuns).mockResolvedValue([agentRun()]);
+    await user.click(button);
+    const box = await group();
+    const notice = screen.getByText(QUEUED);
+    expect(box).not.toContainElement(notice);
+    expect(notice).toHaveAttribute("role", "status");
+    const notes = box.closest(".llm-ask-notes") as HTMLElement;
+    expect(notes).toHaveClass("shown");
+    expect(notes).toContainElement(notice);
+    const extra = screen.getByRole("button", { name: "extra" });
+    expect(notes).not.toContainElement(extra);
+    expect(extra.compareDocumentPosition(box) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // Кнопки строки статуса — вне живых областей.
+    for (const region of screen.getAllByRole("status")) expect(within(region).queryAllByRole("button")).toHaveLength(0);
+  });
+
+  it("подсказка называет агента и говорит, что снимок уходит модели агента без маскирования", async () => {
+    bg({ preset: "claude" });
+    const user = userEvent.setup();
+    renderWithClient(<AskLlmButton {...props} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: LABEL })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: `Подсказка: ${LABEL}` }));
+    expect(screen.getByRole("tooltip")).toHaveTextContent(
+      "Glafira запустит Claude Code в фоне; предложения появятся в панели «Предложения LLM». Снимок уходит модели агента без маскирования.",
+    );
+  });
+
+  it("причина неактивности важнее режима фона: подсказка объясняет её", async () => {
+    setStatus(mcpStatus({ server: "stopped", agent: agentStatus({ enabled: true, configured: true }) }));
+    const user = userEvent.setup();
+    renderWithClient(<AskLlmButton {...props} />);
+    await user.click(screen.getByRole("button", { name: `Подсказка: ${LABEL}` }));
+    await waitFor(() => expect(screen.getByRole("tooltip")).toHaveTextContent(/включите его в «Настройках»/));
+    expect(screen.getByRole("button", { name: LABEL })).toBeDisabled();
+  });
+
+  it.each<[string, Partial<AgentStatus>]>([
+    ["агент не настроен", { configured: false }],
+    ["режим выключен", { enabled: false }],
+    ["фон запрещён политикой", { policyEnabled: false }],
+  ])("%s — как в P4b: строка для чата в буфере, запуска нет", async (_name, patch) => {
+    bg(patch);
+    vi.mocked(api.createOptimizationRequest).mockResolvedValue(optimizationRequest());
+    const user = userEvent.setup();
+    renderWithClient(<AskLlmButton {...props} />);
+    const button = screen.getByRole("button", { name: LABEL });
+    await waitFor(() => expect(button).toBeEnabled());
+    await user.click(button);
+    expect(await navigator.clipboard.readText()).toBe(LINE);
+    expect(await screen.findByText(NOTICE)).toBeInTheDocument();
+    expect(api.startAgentRun).not.toHaveBeenCalled();
+    expect(api.listAgentRuns).not.toHaveBeenCalled();
+  });
+
+  it("ход работы приходит событием agent://runs: работает → закончил без предложений", async () => {
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest()]);
+    vi.mocked(api.listAgentRuns).mockResolvedValue([agentRun({ status: "running", startedAtMs: Date.now() - 83_000, calls: 4, lastTool: "hypothetical_index" })]);
+    renderWithClient(<AskLlmButton {...props} />);
+    const box = await group();
+    expect(within(box).getByText("Ассистент работает")).toBeInTheDocument();
+    expect(within(box).getByText(/· вызовов: 4 · hypothetical_index$/)).toBeInTheDocument();
+    await waitFor(() => expect(listeners("agent://runs").length).toBeGreaterThan(0));
+    emitEvent("agent://runs", agentRun({ status: "done", startedAtMs: 1, endedAtMs: 2, calls: 7, summary: "Запрос уже использует индекс" }));
+    expect(await within(box).findByText("Ассистент закончил без предложений")).toBeInTheDocument();
+    expect(within(box).getByRole("button", { name: "Ответ ассистента" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: LABEL })).toBeDisabled();
+    expect(api.listAgentRuns).toHaveBeenCalledTimes(1);
+  });
+
+  it("очередь общая для всех подключений: перед запуском — идущий запуск другого подключения", async () => {
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest()]);
+    vi.mocked(api.listAgentRuns).mockResolvedValue([
+      agentRun({ id: "a000001", connectionId: "other", requestId: "r000001", status: "running", startedAtMs: 1, queuedAtMs: 1 }),
+      agentRun({ queuedAtMs: 2 }),
+    ]);
+    renderWithClient(<AskLlmButton {...props} />);
+    expect(await screen.findByText("В очереди фонового ассистента, перед ним: 1")).toBeInTheDocument();
+  });
+
+  it("«Повторить» после ошибки ставит новый запуск; отказ очереди — текстом в области статуса", async () => {
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest()]);
+    vi.mocked(api.listAgentRuns).mockResolvedValue([agentRun({ status: "failed", reason: "notConnected", startedAtMs: 1, endedAtMs: 2 })]);
+    vi.mocked(api.startAgentRun)
+      .mockRejectedValueOnce({ code: "INVALID_INPUT", message: "The background assistant queue is full", retryable: false })
+      .mockResolvedValue(agentRun({ id: "a2b3c4d", queuedAtMs: 1_700_000_100_000 }));
+    const user = userEvent.setup();
+    renderWithClient(<AskLlmButton {...props} />);
+    expect(await screen.findByText("Ошибка фонового ассистента: агент не подключился к Glafira")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Повторить" }));
+    expect(api.startAgentRun).toHaveBeenLastCalledWith("r3a9f1c");
+    const failure = await screen.findByText("The background assistant queue is full");
+    expect(failure).toHaveAttribute("role", "status");
+    vi.mocked(api.listAgentRuns).mockResolvedValue([
+      agentRun({ id: "a2b3c4d", queuedAtMs: 1_700_000_100_000 }),
+      agentRun({ status: "failed", reason: "notConnected", startedAtMs: 1, endedAtMs: 2 }),
+    ]);
+    await user.click(screen.getByRole("button", { name: "Повторить" }));
+    expect(await screen.findByText("В очереди фонового ассистента: следующий")).toBeInTheDocument();
+    expect(screen.queryByText("The background assistant queue is full")).toBeNull();
+    // Кнопка «Повторить» исчезла — фокус на строке статуса, а не на <body>.
+    expect(await group()).toHaveFocus();
+  });
+
+  it("запуск не встал в очередь при создании: запрос ждёт, ошибка — вместо уведомления, в строке — «Запустить фонового ассистента»", async () => {
+    vi.mocked(api.createOptimizationRequest).mockResolvedValue(optimizationRequest());
+    vi.mocked(api.startAgentRun).mockRejectedValueOnce({ code: "INVALID_INPUT", message: "The background assistant queue is full", retryable: false });
+    const user = userEvent.setup();
+    renderWithClient(<AskLlmButton {...props} />);
+    const button = screen.getByRole("button", { name: LABEL });
+    await waitFor(() => expect(button).toBeEnabled());
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest()]);
+    await user.click(button);
+    expect(await screen.findByText("The background assistant queue is full")).toBeInTheDocument();
+    expect(screen.queryByText(QUEUED)).toBeNull();
+    const box = await group();
+    expect(within(box).getByText("Ждёт ответа LLM: запрос r3a9f1c")).toBeInTheDocument();
+    vi.mocked(api.startAgentRun).mockResolvedValue(agentRun());
+    vi.mocked(api.listAgentRuns).mockResolvedValue([agentRun()]);
+    await user.click(within(box).getByRole("button", { name: "Запустить фонового ассистента" }));
+    expect(await within(box).findByText("В очереди фонового ассистента: следующий")).toBeInTheDocument();
+  });
+
+  it("«Отменить запрос» во время работы отменяет запрос (Rust останавливает и запуск)", async () => {
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest()]);
+    vi.mocked(api.listAgentRuns).mockResolvedValue([agentRun({ status: "running", startedAtMs: Date.now() })]);
+    vi.mocked(api.cancelOptimizationRequest).mockResolvedValue(optimizationRequest({ status: "cancelled" }));
+    const user = userEvent.setup();
+    renderWithClient(<AskLlmButton {...props} />);
+    const box = await group();
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest({ status: "cancelled" })]);
+    vi.mocked(api.listAgentRuns).mockResolvedValue([agentRun({ status: "cancelled", startedAtMs: 1, endedAtMs: 2 })]);
+    await user.click(within(box).getByRole("button", { name: "Отменить запрос" }));
+    expect(api.cancelOptimizationRequest).toHaveBeenCalledWith("r3a9f1c");
+    await waitFor(() => expect(screen.queryByRole("group")).toBeNull());
+    expect(screen.getByRole("button", { name: LABEL })).toBeEnabled();
+  });
+
+  it("режим выключили во время запуска: статус запуска виден до конца", async () => {
+    bg({ enabled: false, running: { runId: "a1b2c3d", requestId: "r3a9f1c" } });
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest()]);
+    vi.mocked(api.listAgentRuns).mockResolvedValue([agentRun({ status: "running", startedAtMs: Date.now() })]);
+    renderWithClient(<AskLlmButton {...props} />);
+    expect(within(await group()).getByText("Ассистент работает")).toBeInTheDocument();
+  });
+
+  it("режим выключен, а запуск запроса уже кончился — строка P4b, без «Повторить» запуска", async () => {
+    bg({ enabled: false, queued: 1 });
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest()]);
+    vi.mocked(api.listAgentRuns).mockResolvedValue([agentRun({ status: "failed", reason: "exit", exitCode: 1, startedAtMs: 1, endedAtMs: 2 })]);
+    renderWithClient(<AskLlmButton {...props} />);
+    expect(await screen.findByText("Ждёт ответа LLM: запрос r3a9f1c")).toBeInTheDocument();
+    await waitFor(() => expect(api.listAgentRuns).toHaveBeenCalled());
+    expect(screen.queryByRole("group")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Повторить" })).toBeNull();
+  });
+
+  it("запуски не прочитались: строка ожидания P4b, пояснение и «Повторить»", async () => {
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest()]);
+    vi.mocked(api.listAgentRuns).mockRejectedValueOnce({ code: "INTERNAL", message: "disk", retryable: true });
+    const user = userEvent.setup();
+    renderWithClient(<AskLlmButton {...props} />);
+    expect(await screen.findByText("Не удалось прочитать запуски фонового ассистента")).toBeInTheDocument();
+    expect(screen.getByText("Ждёт ответа LLM: запрос r3a9f1c")).toBeInTheDocument();
+    vi.mocked(api.listAgentRuns).mockResolvedValue([agentRun()]);
+    await user.click(screen.getByRole("button", { name: "Повторить" }));
+    expect(await screen.findByText("В очереди фонового ассистента: следующий")).toBeInTheDocument();
+    expect(screen.queryByText("Не удалось прочитать запуски фонового ассистента")).toBeNull();
+  });
+
+  it("запуски не прочитались, а ждущего запроса нет — кнопке это не мешает, пояснения нет", async () => {
+    vi.mocked(api.listAgentRuns).mockRejectedValue({ code: "INTERNAL", message: "disk", retryable: true });
+    renderWithClient(<AskLlmButton {...props} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: LABEL })).toBeEnabled());
+    await waitFor(() => expect(api.listAgentRuns).toHaveBeenCalled());
+    expect(screen.queryByText("Не удалось прочитать запуски фонового ассистента")).toBeNull();
+  });
+
+  it("отвеченный запрос: «Ассистент прислал N предложений», пока панель их не показала; кнопка снова активна", async () => {
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest({ status: "answered", proposalIds: ["p1"] })]);
+    vi.mocked(api.listAgentRuns).mockResolvedValue([agentRun({ status: "done", proposalIds: ["p1"], startedAtMs: 1, endedAtMs: 2 })]);
+    renderWithClient(<AskLlmButton {...props} />);
+    expect(within(await group()).getByText("Ассистент прислал 1 предложение")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: LABEL })).toBeEnabled();
   });
 });

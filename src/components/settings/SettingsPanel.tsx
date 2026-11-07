@@ -34,7 +34,8 @@ export function SettingsPanel() {
   // другом разделе это снимает. Щелчок — отдельно от фокуса: в WKWebView щелчок мышью по кнопке или флажку фокус на них не
   // переносит, а по простому тексту не переносит нигде; pointerdown на фазе захвата видит и то, и другое.
   const spec = useWorkspace((st) => st.tabs.find((x) => x.id === tabId({ kind: "settings" })));
-  const showMcp = spec?.kind === "settings" && spec.section === "mcp";
+  // Во время фонового запуска индикатор открывает подраздел «Фоновый ассистент» (`section: "agent"`): это тот же раздел MCP.
+  const showMcp = spec?.kind === "settings" && (spec.section === "mcp" || spec.section === "agent");
   const loaded = lang.data !== undefined;
   const mcpRef = useRef<HTMLDivElement>(null);
   const [mcpFocused, setMcpFocused] = useState(false);

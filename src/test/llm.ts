@@ -1,4 +1,4 @@
-import type { LlmBundle, LlmProposal, OptimizationRequest } from "../api/types";
+import type { AgentRun, LlmBundle, LlmProposal, OptimizationRequest } from "../api/types";
 
 /** Снимок `LlmBundle` консоли: план есть, статистики нет. */
 export function llmBundle(patch: Partial<LlmBundle> = {}): LlmBundle {
@@ -58,6 +58,34 @@ export function llmProposal(patch: Partial<LlmProposal> = {}): LlmProposal {
     comparison: null,
     createdAtMs: 1_700_000_000_000,
     answeredAtMs: null,
+    ...patch,
+  };
+}
+
+/** Запуск фонового ассистента на запрос `r3a9f1c` подключения `c`: в очереди, Qwen Code с моделью из Ollama. */
+export function agentRun(patch: Partial<AgentRun> = {}): AgentRun {
+  return {
+    id: "a1b2c3d",
+    kind: "optimize",
+    requestId: "r3a9f1c",
+    connectionId: "c",
+    preset: "qwen",
+    model: "qwen3.6-64k:35b-a3b",
+    cliVersion: "0.26.5",
+    path: "/opt/homebrew/bin/qwen",
+    status: "queued",
+    reason: null,
+    exitCode: null,
+    queuedAtMs: 1_700_000_000_000,
+    startedAtMs: null,
+    endedAtMs: null,
+    calls: 0,
+    lastTool: null,
+    lastCallAtMs: null,
+    proposalIds: [],
+    summary: null,
+    costUsd: null,
+    warnings: [],
     ...patch,
   };
 }

@@ -1,4 +1,9 @@
-import type { McpAuditEntry, McpClientConfigs, McpStatus } from "../api/types";
+import type { AgentStatus, McpAuditEntry, McpClientConfigs, McpStatus } from "../api/types";
+
+/** Фоновый ассистент в статусе MCP: политика разрешает, режим выключен, агент не настроен, очереди нет. */
+export function agentStatus(patch: Partial<AgentStatus> = {}): AgentStatus {
+  return { policyEnabled: true, enabled: false, configured: false, preset: "qwen", running: null, queued: 0, ...patch };
+}
 
 /** Статус MCP для тестов: сервер работает, политика разрешает, открыто два подключения, сессий и запросов нет. */
 export function mcpStatus(patch: Partial<McpStatus> = {}): McpStatus {
@@ -13,6 +18,7 @@ export function mcpStatus(patch: Partial<McpStatus> = {}): McpStatus {
     dataConnections: 0,
     policyEnabled: true,
     maxAccess: "data",
+    agent: agentStatus(),
     ...patch,
   };
 }

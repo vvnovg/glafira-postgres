@@ -111,6 +111,16 @@ describe("SettingsPanel", () => {
     await waitFor(() => expect(useHelpContext.getState().byTab.settings).toBe("llm-mcp"));
   });
 
+  it("открытие с подразделом «Фоновый ассистент» (индикатор во время запуска): раздел MCP и его глава F1", async () => {
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
+    vi.mocked(api.getLanguageSettings).mockResolvedValue(base);
+    useWorkspace.setState({ tabs: [{ kind: "settings", section: "agent", id: "settings" }], activeId: "settings" });
+    renderWithClient(<SettingsPanel />);
+    await waitFor(() => expect(scroll).toHaveBeenCalledTimes(1));
+    expect(useHelpContext.getState().byTab.settings).toBe("llm-mcp");
+  });
+
   it("выбор языка; доступны все языки", async () => {
     vi.mocked(api.getLanguageSettings).mockResolvedValue(base);
     vi.mocked(api.setLanguage).mockResolvedValue({ ...base, chosen: "en", effective: "en", reason: "user" });

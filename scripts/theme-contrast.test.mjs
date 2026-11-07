@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { contrastRatio, deltaEOk, oklab, parseThemeVars } from "./theme-contrast.mjs";
+import { contrastRatio, deltaEOk, mixSrgb, oklab, parseThemeVars } from "./theme-contrast.mjs";
 
 // Порядок классов в столбце графика профиля ожиданий (WAIT_CLASS_ORDER в WaitsChart.tsx): восемь основных, затем три серых.
 const MAIN = ["cpu", "lock", "lwlock", "io", "ipc", "client", "timeout", "bufferPin"];
@@ -20,6 +20,9 @@ const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 const { light, dark } = parseThemeVars(css);
 // Тёмная тема переопределяет не всё: что в ней не названо, наследуется от :root (так это и работает в каскаде).
 const themes = { light, dark: new Map([...light, ...dark]) };
+// Доля --warn в цвете .diag-warn — из styles.css: правка смеси не пройдёт мимо проверки контраста.
+const DIAG_WARN = /\.diag-warn\s*\{\s*color:\s*color-mix\(in srgb, var\(--warn\) (\d+)%, var\(--fg\)\)/.exec(css);
+const DIAG_WARN_SHARE = DIAG_WARN ? Number(DIAG_WARN[1]) / 100 : NaN;
 
 test("parseThemeVars: переменные из :root и из блока тёмной темы, остальное и комментарии игнорируются", () => {
   const sample = `
@@ -47,6 +50,7 @@ test("parseThemeVars: переменные из :root и из блока тём�
   assert.deepEqual([...l], [
     ["--bg", "#ffffff"],
     ["--bg-alt", "#f4f5f7"],
+    ["--fg", "#111111"],
     ["--muted", "#5f6673"],
     ["--accent", "#2563eb"],
     ["--accent-fill", "#2563eb"],
@@ -71,6 +75,14 @@ test("contrastRatio: формула WCAG на известных парах", ()
   assert.ok(Math.abs(contrastRatio("#767676", "#ffffff") - 4.54) < 0.01);
 });
 
+test("mixSrgb: color-mix(in srgb, …) — доля первого цвета, компоненты с гаммой, округление до 8 бит", () => {
+  assert.equal(mixSrgb("#000000", "#ffffff", 0.5), "#808080");
+  assert.equal(mixSrgb("#ff0000", "#0000ff", 1), "#ff0000");
+  assert.equal(mixSrgb("#ff0000", "#0000ff", 0), "#0000ff");
+  // .diag-warn светлой темы: --warn 55 % с --fg.
+  assert.equal(mixSrgb("#f59e0b", "#1d2129", 0.55), "#946619");
+});
+
 test("deltaEOk: ΔE OKLab (×100) на известных парах", () => {
   assert.equal(deltaEOk("#336699", "#336699"), 0);
   assert.ok(Math.abs(deltaEOk("#000000", "#ffffff") - 100) < 0.01);
@@ -91,12 +103,17 @@ for (const theme of ["light", "dark"]) {
 
   // Пары текста и фона из правки контраста P4b (смоук 2026-11-07): заливка «Принять» и значка данных, ссылки и полосы
   // выбора цветом акцента, приглушённый текст на панелях с фоном --bg-alt.
-  test(`${theme}: акцент, его заливка и приглушённый текст — не ниже ${MIN_TEXT_CONTRAST}:1 (WCAG AA)`, () => {
+  test(`${theme}: акцент, его заливка, приглушённый текст и предупреждение — не ниже ${MIN_TEXT_CONTRAST}:1 (WCAG AA)`, () => {
+    assert.ok(DIAG_WARN, "в styles.css нет правила .diag-warn вида color-mix(in srgb, var(--warn) N%, var(--fg))");
+    const diagWarn = vars.get("--warn") && vars.get("--fg") ? mixSrgb(vars.get("--warn"), vars.get("--fg"), DIAG_WARN_SHARE) : undefined;
     const pairs = [
       ["белый на --accent-fill («Принять», значок данных, флажки)", "#ffffff", vars.get("--accent-fill")],
       ["--accent на --bg (ссылки, «Предложения LLM: N — открыть в консоли»)", vars.get("--accent"), bg],
       ["--accent на --bg-alt (ссылки боковой панели и находок)", vars.get("--accent"), vars.get("--bg-alt")],
       ["--muted на --bg-alt (приглушённый текст на панелях)", vars.get("--muted"), vars.get("--bg-alt")],
+      // .diag-warn: color-mix(in srgb, var(--warn) 55%, var(--fg)) — предупреждения видов и строки статуса фонового ассистента.
+      ["предупреждение .diag-warn на --bg (виды диагностики)", diagWarn, bg],
+      ["предупреждение .diag-warn на --bg-alt (строка статуса фонового ассистента, пометки видов)", diagWarn, vars.get("--bg-alt")],
     ];
     for (const [name, fg, back] of pairs) assert.ok(fg && back, `нет цвета для пары: ${name}`);
     const bad = pairs
