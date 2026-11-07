@@ -5,6 +5,7 @@ import { api } from "../api/client";
 import type { ConnectionProfile } from "../api/types";
 import { ENV_COLORS } from "../lib/env";
 import { type Tab, useWorkspace } from "../state/workspace";
+import { useWorkspacePersistence } from "../state/workspacePersist";
 import { UpdateNotice } from "./about/UpdateNotice";
 import { EnvBadge } from "./common/EnvBadge";
 import { FolderMenu } from "./connections/tree/FolderMenu";
@@ -116,7 +117,10 @@ export function Layout() {
   useHelpShortcut();
   useConnectionEvents();
   useMcpEvents();
-  const { data: connections = [] } = useQuery({ queryKey: ["connections"], queryFn: api.listConnections });
+  const connectionsQ = useQuery({ queryKey: ["connections"], queryFn: api.listConnections });
+  const connections = connectionsQ.data ?? [];
+  // Вкладки прошлого запуска — когда известен список подключений (смоук P4c, R18); дальше рабочая область пишется сама.
+  useWorkspacePersistence(connectionsQ.data);
   const byId = new Map(connections.map((c) => [c.id, c]));
   const active = tabs.find((x) => x.id === activeId);
   const activeConnId = active && "connectionId" in active ? active.connectionId : null;

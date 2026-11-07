@@ -3,6 +3,7 @@ import { useId, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../api/client";
 import type { AppError, ConnectionKind, ConnectionProfile, Environment, SecretsInput, SecretsSet, TestEvent, TestReport } from "../../api/types";
+import { forgetExplainDraft } from "../../state/explainDraft";
 import { useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { Hint } from "../common/Hint";
@@ -175,6 +176,9 @@ export function ConnectionForm({ initial, tabId, copyOf }: { initial: Connection
       await api.deleteConnection(profile.id);
       await queryClient.invalidateQueries({ queryKey: ["connections"] });
       queryClient.removeQueries({ predicate: (q) => q.queryKey[1] === profile.id });
+      // Черновик консоли EXPLAIN подключения стирается до закрытия вкладок (R18): закрытая консоль его уже не допишет.
+      // Сохранённые вкладки подключения уходят вместе с закрытием (рабочая область пишется при каждом изменении).
+      forgetExplainDraft(profile.id);
       closeForConnection(profile.id);
       close(tabId);
     });

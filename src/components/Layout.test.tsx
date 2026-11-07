@@ -41,6 +41,8 @@ const hex = (c: string) => {
 
 describe("Layout tabs", () => {
   beforeEach(() => {
+    // Рабочая область сохраняется в localStorage (R18): тесты не должны видеть вкладки друг друга.
+    localStorage.clear();
     useTabMarks.setState({ marks: {} });
     useHelpContext.setState({ byTab: {}, anchorByTab: {} });
     useWorkspace.setState({
@@ -57,6 +59,21 @@ describe("Layout tabs", () => {
     renderWithClient(<Layout />);
     expect(await screen.findByRole("dialog", { name: "qwen-code 0.26.7 хочет подключиться к Glafira" })).toBeInTheDocument();
     expect(listen).toHaveBeenCalledWith("mcp://state", expect.any(Function));
+  });
+
+  it("R18: после загрузки списка подключений восстанавливаются сохранённые вкладки и активная; удалённого подключения — нет", async () => {
+    useWorkspace.setState({ tabs: [], activeId: null });
+    localStorage.setItem(
+      "glafira.workspace",
+      JSON.stringify({ v: 1, tabs: [{ kind: "about" }, { kind: "explain", connectionId: "c1" }, { kind: "explain", connectionId: "gone" }], active: "explain:c1" }),
+    );
+    renderWithClient(<Layout />);
+    const list = screen.getByRole("tablist");
+    await waitFor(() => expect(within(list).getAllByRole("tab").map((t) => t.textContent)).toEqual(["О программе", "EXPLAIN — prod-1"]));
+    expect(within(list).getByRole("tab", { name: "EXPLAIN — prod-1" })).toHaveAttribute("aria-selected", "true");
+    // Дальше рабочая область пишется: закрытая вкладка уходит и из сохранённого.
+    await userEvent.setup().click(within(list).getAllByRole("button", { name: "Закрыть вкладку" })[0]);
+    expect(JSON.parse(localStorage.getItem("glafira.workspace") ?? "null")).toEqual({ v: 1, tabs: [{ kind: "explain", connectionId: "c1" }], active: "explain:c1" });
   });
 
   it("shows tab titles with accessible tab roles", () => {

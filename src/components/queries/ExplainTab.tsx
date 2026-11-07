@@ -6,6 +6,7 @@ import type { AppError, ExplainParams, ParsedPlan, PlanTree, RequestSource } fro
 import { formatShortTimestamp, formatTimestamp } from "../../lib/format";
 import { useConnectionProfile } from "../../lib/useConnectionProfile";
 import { useTopology } from "../../lib/useConnectionEvents";
+import { flushExplainDraft, readExplainDraft, saveExplainDraft } from "../../state/explainDraft";
 import { type ExplainPrefill, tabId, useWorkspace } from "../../state/workspace";
 import { SubTabs } from "../catalog/SubTabs";
 import { ErrorBanner } from "../common/ErrorBanner";
@@ -89,6 +90,10 @@ function versionNum(text: string | null | undefined): number {
  * (`prefill.autoPlan`) сразу строят «План» по новому тексту (R11), подстановка из журнала MCP — нет.
  * «Скопировать для LLM» получает план последнего запуска, пока SQL, узел и база не менялись, иначе Rust строит пробный план сам;
  * «Передать LLM-ассистенту» — тот же план и значения параметров последнего запуска (спец. P4 §8.1).
+ * Черновик (смоук P4c, R18): текст редактора, база и узел пишутся на подключение (`explainDraft.ts`, с задержкой) и при
+ * открытии консоли становятся её начальным состоянием — как если бы консоль пережила перезапуск. Спека открытия важнее:
+ * её `sql`, `member` и `database` ставятся поверх, а подстановка (`prefill`) заменяет текст как обычно, и сохранённый
+ * текст попадает в «Заменённые тексты».
  */
 export function ExplainTab({
   connectionId,
@@ -110,10 +115,15 @@ export function ExplainTab({
   const topo = view.data?.topology ?? null;
   const live = view.data?.state === "connected" || view.data?.state === "degraded";
   const dbs = useQuery({ queryKey: ["catalog", connectionId, "databases"], queryFn: () => api.listDatabases(connectionId), enabled: live && active });
-  const [node, setNode] = useState<string | null>(member ?? null);
-  const [db, setDb] = useState<string | null>(database ?? null);
+  // Черновик читается один раз, при открытии консоли; `member === null` в спеке — «за лидером», а не «не задан».
+  const [draft] = useState(() => readExplainDraft(connectionId));
+  const [node, setNode] = useState<string | null>(member !== undefined ? member : (draft?.member ?? null));
+  const [db, setDb] = useState<string | null>(database ?? draft?.database ?? null);
   const profileDb = useConnectionProfile(connectionId)?.pg.database;
-  const [sql, setSql] = useState(initialSql ?? "");
+  const [sql, setSql] = useState(initialSql ?? draft?.sql ?? "");
+  useEffect(() => saveExplainDraft(connectionId, { sql, database: db, member: node }), [connectionId, sql, db, node]);
+  // Закрытие вкладки консоли дописывает последнюю правку, не дожидаясь задержки (закрытие окна — `pagehide` в explainDraft).
+  useEffect(() => () => flushExplainDraft(connectionId), [connectionId]);
   const [source, setSource] = useState<Source>("sql");
   const [pasted, setPasted] = useState("");
   // Разобранный план хранится одним объектом: дерево плана сбрасывает развёртку при смене объекта.

@@ -30,6 +30,7 @@ const tree = () => screen.queryByRole("treegrid", { name: "Дерево план
 describe("ExplainTab", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    localStorage.clear();
     useWorkspace.setState({ tabs: [], activeId: null });
     mcp.value = { status: mcpStatus(), loading: false, error: null, refetch: vi.fn() };
     resetEventBus();
@@ -613,5 +614,76 @@ describe("ExplainTab", () => {
     ]);
     act(() => emitEvent("mcp://proposals", { kind: "proposal", connectionId: "c", proposalId: "pnew" }));
     await waitFor(() => expect(within(panel).getByRole("button", { name: /SELECT 1 AS mine$/ })).toHaveAttribute("aria-current", "true"));
+  });
+
+  describe("R18: черновик консоли переживает перезапуск", () => {
+    const DRAFT = "glafira.explain.draft:c";
+    const stored = () => JSON.parse(localStorage.getItem(DRAFT) ?? "null");
+    const draft = (sql: string, database: string | null, member: string | null) => localStorage.setItem(DRAFT, JSON.stringify({ v: 1, sql, database, member }));
+
+    it("текст, база и узел пишутся с задержкой; новое открытие без подстановки их возвращает", async () => {
+      vi.mocked(api.explain).mockResolvedValue(explained());
+      const user = userEvent.setup();
+      const first = renderWithClient(<ExplainTab connectionId="c" member={undefined} database={undefined} sql={undefined} active />);
+      const editor = await screen.findByRole("textbox", { name: "SQL" });
+      expect(editor).toHaveValue("");
+      await user.type(editor, "SELECT 42");
+      await user.selectOptions(screen.getByRole("combobox", { name: "Узел" }), "pg-2");
+      await waitFor(() => expect(screen.getByRole("option", { name: "perf" })).toBeInTheDocument());
+      await user.selectOptions(screen.getByRole("combobox", { name: "База" }), "perf");
+      // План строится, но в черновик не попадает: только текст, база и узел.
+      await user.click(screen.getByRole("button", { name: "План" }));
+      await screen.findByRole("treegrid", { name: "Дерево плана" });
+      await waitFor(() => expect(stored()).toEqual({ v: 1, sql: "SELECT 42", database: "perf", member: "pg-2" }), { timeout: 2000 });
+      first.unmount();
+      // Перезапуск: вкладка восстановлена без спеки подстановки.
+      renderWithClient(<ExplainTab connectionId="c" member={undefined} database={undefined} sql={undefined} active />);
+      expect(await screen.findByRole("textbox", { name: "SQL" })).toHaveValue("SELECT 42");
+      expect(screen.getByRole("combobox", { name: "Узел" })).toHaveValue("pg-2");
+      await waitFor(() => expect(screen.getByRole("combobox", { name: "База" })).toHaveValue("perf"));
+      expect(tree()).toBeNull();
+    });
+
+    it("закрытие консоли дописывает правку, не дожидаясь задержки", async () => {
+      const user = userEvent.setup();
+      const { unmount } = renderWithClient(<ExplainTab connectionId="c" member={undefined} database={undefined} sql={undefined} active />);
+      await user.type(await screen.findByRole("textbox", { name: "SQL" }), "SELECT 7");
+      unmount();
+      expect(stored()).toEqual({ v: 1, sql: "SELECT 7", database: null, member: null });
+    });
+
+    it("подстановку не перебивает: текст, база и узел — из подстановки, сохранённый текст — в «Заменённых текстах»", async () => {
+      draft("SELECT 1 -- before restart", "postgres", "pg-1");
+      renderWithClient(<ExplainTab connectionId="c" member={undefined} database={undefined} sql={undefined} prefill={{ sql: "SELECT 2 -- proposal", database: "perf", member: "pg-2", nonce: 1 }} active />);
+      expect(await screen.findByRole("textbox", { name: "SQL" })).toHaveValue("SELECT 2 -- proposal");
+      expect(screen.getByRole("combobox", { name: "Узел" })).toHaveValue("pg-2");
+      await waitFor(() => expect(screen.getByRole("combobox", { name: "База" })).toHaveValue("perf"));
+      const list = within(screen.getByRole("region", { name: "Заменённые тексты" }));
+      expect(list.getAllByRole("button").map((b) => b.textContent)).toEqual(["Вернуть: SELECT 1 -- before restart"]);
+    });
+
+    it("текст, узел и база из спеки (карточка запроса) важнее сохранённых", async () => {
+      draft("SELECT 1 -- before restart", "postgres", "pg-1");
+      renderWithClient(<ExplainTab connectionId="c" member="pg-2" database="perf" sql="SELECT 3 -- card" active />);
+      expect(await screen.findByRole("textbox", { name: "SQL" })).toHaveValue("SELECT 3 -- card");
+      expect(screen.getByRole("combobox", { name: "Узел" })).toHaveValue("pg-2");
+      await waitFor(() => expect(screen.getByRole("combobox", { name: "База" })).toHaveValue("perf"));
+      expect(screen.queryByRole("region", { name: "Заменённые тексты" })).toBeNull();
+    });
+
+    it("«Открыть консоль» из «Запросов» (узел в спеке, «за лидером» — null): текст и база — сохранённые, узел — спеки", async () => {
+      draft("SELECT 4", "perf", "pg-2");
+      renderWithClient(<ExplainTab connectionId="c" member={null} database={undefined} sql={undefined} active />);
+      expect(await screen.findByRole("textbox", { name: "SQL" })).toHaveValue("SELECT 4");
+      expect(screen.getByRole("combobox", { name: "Узел" })).toHaveValue("pg-1");
+      await waitFor(() => expect(screen.getByRole("combobox", { name: "База" })).toHaveValue("perf"));
+    });
+
+    it("сохранённое не читается — консоль пустая, без ошибки", async () => {
+      localStorage.setItem(DRAFT, "{broken");
+      renderWithClient(<ExplainTab connectionId="c" member={undefined} database={undefined} sql={undefined} active />);
+      expect(await screen.findByRole("textbox", { name: "SQL" })).toHaveValue("");
+      expect(screen.queryByRole("alert")).toBeNull();
+    });
   });
 });

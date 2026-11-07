@@ -50,6 +50,7 @@ function deferred<T>() {
 
 beforeEach(() => {
   vi.resetAllMocks(); // сбрасывает и реализации: ответы не перетекают между тестами
+  localStorage.clear();
   vi.mocked(api.listFolders).mockResolvedValue([]);
   vi.mocked(api.getMcpStatus).mockResolvedValue(mcpStatus());
   vi.mocked(api.connectionSecrets).mockResolvedValue(NO_SECRETS);
@@ -542,6 +543,30 @@ describe("ConnectionForm", () => {
       await waitFor(() => expect(api.deleteConnection).toHaveBeenCalledWith("c1"));
       await waitFor(() => expect(useWorkspace.getState().tabs).toEqual([]));
       expect(client.getQueryData(["catalog", "c1", "databases"])).toBeUndefined();
+    });
+
+    it("R18: удаление стирает сохранённый текст консоли EXPLAIN подключения; чужой остаётся", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.deleteConnection).mockResolvedValue(undefined);
+      localStorage.setItem("glafira.explain.draft:c1", JSON.stringify({ v: 1, sql: "SELECT 1", database: null, member: null }));
+      localStorage.setItem("glafira.explain.draft:c2", JSON.stringify({ v: 1, sql: "SELECT 2", database: null, member: null }));
+      renderWithClient(<ConnectionForm initial={existing()} tabId="connection-form:c1" />);
+      await user.click(screen.getByRole("button", { name: "Удалить" }));
+      await user.click(within(screen.getByRole("group", { name: "Удаление подключения" })).getByRole("button", { name: "Удалить" }));
+      await waitFor(() => expect(api.deleteConnection).toHaveBeenCalledWith("c1"));
+      await waitFor(() => expect(localStorage.getItem("glafira.explain.draft:c1")).toBeNull());
+      expect(localStorage.getItem("glafira.explain.draft:c2")).not.toBeNull();
+    });
+
+    it("R18: ошибка удаления сохранённый текст консоли не трогает", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.deleteConnection).mockRejectedValue(appError("INTERNAL", "Cannot delete the connection"));
+      localStorage.setItem("glafira.explain.draft:c1", JSON.stringify({ v: 1, sql: "SELECT 1", database: null, member: null }));
+      renderWithClient(<ConnectionForm initial={existing()} tabId="connection-form:c1" />);
+      await user.click(screen.getByRole("button", { name: "Удалить" }));
+      await user.click(within(screen.getByRole("group", { name: "Удаление подключения" })).getByRole("button", { name: "Удалить" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("Cannot delete the connection");
+      expect(localStorage.getItem("glafira.explain.draft:c1")).not.toBeNull();
     });
 
     it("«Отмена» возвращает обычную кнопку, ничего не удаляя", async () => {
