@@ -1,4 +1,4 @@
-import { act, fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { i18n } from "../../i18n";
 import { renderWithClient } from "../../test/render";
@@ -14,7 +14,7 @@ vi.mock("../../guide/chapters", async (importOriginal) => {
     ...actual,
     loadGuide: vi.fn().mockResolvedValue({
       "getting-started":
-        "# Начало работы\n\nОткройте [[ui:sidebar.settings]].\n\n## Первое подключение {#first-connection}\n\nСм. [пароли](getting-started.md#passwords), [сайт](https://example.com) и [файл](../admin.md), [плохая](javascript:alert(1)).\n\nЗначение: [[ui:test.tricky]].\n\n![картинка](https://example.com/a.png)\n\n## Пароли {#passwords}\n\nПароль хранится в системном хранилище.\n\n## Без якоря\n\nТекст без якоря.\n",
+        "# Начало работы\n\nОткройте [[ui:sidebar.settings]].\n\n## Первое подключение {#first-connection}\n\nСм. [пароли](getting-started.md#passwords), [сайт](https://example.com) и [файл](../admin.md), [плохая](javascript:alert(1)).\n\nЗначение: [[ui:test.tricky]].\n\n![картинка](https://example.com/a.png)\n\n## Пароли {#passwords}\n\nПароль хранится в системном хранилище.\n\n## Таблица {#table}\n\n| Поле | Значение |\n|---|---|\n| Порт | 5432 |\n\n## Без якоря\n\nТекст без якоря.\n",
     }),
   };
 });
@@ -107,5 +107,14 @@ describe("HelpPanel", () => {
       await i18n.changeLanguage("ru");
     });
     expect(await screen.findByText("Настройки")).toBeInTheDocument();
+  });
+
+  it("renders markdown tables", async () => {
+    const { container } = renderWithClient(<HelpPanel spec={{ chapter: "getting-started" }} />);
+    const table = await screen.findByRole("table");
+    expect(within(table).getByRole("columnheader", { name: "Значение" })).toBeInTheDocument();
+    expect(within(table).getByRole("cell", { name: "Порт" })).toBeInTheDocument();
+    // Без плагина таблица уходила в абзац с сырыми «|».
+    expect(container).not.toHaveTextContent("|---");
   });
 });
