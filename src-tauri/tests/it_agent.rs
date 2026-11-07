@@ -151,8 +151,8 @@ impl AgentSpawner for TestSpawner {
 
 /// `AppBackend` без проверки предложения на сервере PostgreSQL. Всё остальное — настоящее: `Gate` (подтверждение билетом,
 /// видимость инструментов, подключение запуска, предел вызовов), чтение и запросы на оптимизацию. Предложение на запрос
-/// своего запуска сохраняется тем же `store_proposal`, что после проверки (`store_proposal_unchecked`) (привязка к запросу, событие, `runId`); прямая
-/// форма, чужой запрос и обычная сессия идут в приложение и получают его ответ.
+/// своего запуска сохраняется тем же `store_proposal`, что после проверки, — через `store_proposal_unchecked`: привязка к
+/// запросу, событие, `runId`. Прямая форма, чужой запрос и обычная сессия идут в приложение и получают его ответ.
 struct NoServerCheck {
     app: AppBackend,
     st: AppState,
@@ -309,19 +309,31 @@ impl Drop for Env {
     }
 }
 
-/// Программа — фальшивый агент или шим этой сборки теста: путь целиком, после разрешения ссылок (так его отдаёт ОС); на
-/// Windows — без учёта регистра.
+/// Программа — фальшивый агент или шим этой сборки теста: путь целиком, после разрешения ссылок (так его отдаёт ОС).
 fn ours(program: &Path) -> bool {
     [FAKE_AGENT, SHIM].iter().any(|ours| {
         let ours = std::fs::canonicalize(ours).unwrap_or_else(|_| PathBuf::from(ours));
-        if cfg!(windows) {
-            program
-                .to_string_lossy()
-                .eq_ignore_ascii_case(&ours.to_string_lossy())
-        } else {
-            program == ours
-        }
+        same_program(program, &ours, cfg!(windows))
     })
+}
+
+/// Тот же путь программы. На Windows — без учёта регистра и без префикса `\\?\` (`\\?\UNC\` — `\\`): его
+/// добавляет `canonicalize`, а путь процесса (`Get-Process`) приходит без него (ревью minor-пакета бэкенда, замечание 1).
+fn same_program(program: &Path, ours: &Path, windows: bool) -> bool {
+    if !windows {
+        return program == ours;
+    }
+    let plain = |p: &Path| {
+        let s = p.to_string_lossy().into_owned();
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{rest}")
+        } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+            rest.to_string()
+        } else {
+            s
+        }
+    };
+    plain(program).eq_ignore_ascii_case(&plain(ours))
 }
 
 /// Путь программы живого процесса `pid`: на macOS — `proc_pidpath` (у `ps -o comm=` — `argv[0]`, его задаёт сам процесс).
@@ -1228,6 +1240,30 @@ fn only_programs_of_this_test_build_are_ours() {
     assert!(!ours(Path::new(
         "/Applications/Glafira for PostgreSQL.app/Contents/MacOS/glafira-pg"
     )));
+}
+
+/// Путь процесса на Windows приходит без префикса `\\?\`, а `canonicalize` его добавляет: сравнение — без префикса и без
+/// учёта регистра (ревью minor-пакета бэкенда, замечание 1). Проверяется на всех ОС: правило — строковое.
+#[test]
+fn windows_paths_of_our_programs_compare_without_the_verbatim_prefix() {
+    let win = |a: &str, b: &str| same_program(Path::new(a), Path::new(b), true);
+    let ours = r"\\?\D:\a\target\debug\glafira-fake-agent.exe";
+    assert!(win(r"D:\a\target\debug\glafira-fake-agent.exe", ours));
+    assert!(win(r"d:\A\TARGET\debug\Glafira-Fake-Agent.exe", ours));
+    assert!(win(ours, ours));
+    assert!(win(
+        r"\\server\share\target\glafira-pg.exe",
+        r"\\?\UNC\server\share\target\glafira-pg.exe"
+    ));
+    assert!(!win(r"D:\a\target\debug\glafira-pg.exe", ours));
+    assert!(!win(
+        r"C:\Program Files\Glafira for PostgreSQL\glafira-pg.exe",
+        r"\\?\D:\a\target\debug\glafira-pg.exe"
+    ));
+    // На macOS и Linux — путь как есть, с учётом регистра.
+    let unix = |a: &str, b: &str| same_program(Path::new(a), Path::new(b), false);
+    assert!(unix("/tmp/t/glafira-pg", "/tmp/t/glafira-pg"));
+    assert!(!unix("/tmp/t/Glafira-pg", "/tmp/t/glafira-pg"));
 }
 
 /// Страховка фальшивого агента (ревью задачи 8, замечание 2): сервер MCP-конфига он запускает только как шим — с
