@@ -766,7 +766,8 @@ impl AgentQueue {
 
     /// Событие `init` — не дольше `INIT_TIMEOUT` (и не дольше срока запуска); остановка запуска прерывает ожидание (решения
     /// контроллера и ревью задачи 6):
-    /// - имя без префикса `mcp__glafira-pg__` — `unsafe <имена через запятую>`;
+    /// - имя не из сессии запуска (не `mcp__glafira-pg__<имя>` с `<имя>` из `RUN_TOOL_NAMES`, `process::foreign_tools`) —
+    ///   `unsafe <имена через запятую>`;
     /// - событие без списка `tools`, строка не JSON или событие не `system` (ход модели) до него — `unsafe no-init` сразу:
     ///   модель уже работает, а проверить нечем;
     /// - поток stdout кончился без события — короткое ожидание конца процесса (`STREAM_END_GRACE`): вышел с кодом ≠ 0 —
@@ -2026,6 +2027,35 @@ mod tests {
                 .find(|e| e["event"] == "agentRunFinished")
                 .unwrap();
         assert_eq!(finished["reason"], "unsafeTools");
+    }
+
+    /// Инструменты Glafira вне сессии запуска (`run_select`, `observe_*`) — CLI подключился без билета, обычной сессией:
+    /// тоже `unsafeTools` до первого хода.
+    #[tokio::test(start_paused = true)]
+    async fn glafira_tools_beyond_the_run_session_stop_the_run_too() {
+        let h = harness();
+        h.fake.script(vec![
+            init(&[
+                "mcp__glafira-pg__run_select",
+                "mcp__glafira-pg__observe_activity",
+            ]),
+            Step::Sleep(1),
+            Step::Connect,
+            Step::Call("run_select"),
+            Step::Exit(0),
+        ]);
+        let run = h.q().start(&request(&h)).unwrap();
+        let run = until(&h, &run.id, done).await;
+        assert_eq!(
+            (run.status, run.reason),
+            (RunStatus::Failed, Some(FailReason::UnsafeTools))
+        );
+        assert_eq!(
+            run.warnings,
+            ["unsafe mcp__glafira-pg__run_select,mcp__glafira-pg__observe_activity"]
+        );
+        assert_eq!(run.calls, 0, "вызовов нет");
+        assert_eq!(h.fake.kills.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test(start_paused = true)]

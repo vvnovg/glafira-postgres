@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::future::BoxFuture;
+use glafira_pg_mcp::server::RUN_TOOL_NAMES;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
@@ -136,12 +137,18 @@ impl InitWatch {
     }
 }
 
-/// Имена инструментов вне `glafira-pg` (`mcp__glafira-pg__<имя>`): с ними запуск останавливается до первого хода.
+/// Имена инструментов вне сессии запуска: всё, кроме `mcp__glafira-pg__<имя>` с `<имя>` из `RUN_TOOL_NAMES`. С ними
+/// запуск останавливается до первого хода. Префикса мало: CLI, подключившийся без билета (обычной сессией), показал бы
+/// модели все инструменты Glafira, вместе с `run_select` и `observe_*` (финальное ревью бэкенда, замечание 4); сессия
+/// запуска показывает ровно `RUN_TOOL_NAMES`.
 pub fn foreign_tools(tools: &[String]) -> Vec<String> {
     let prefix = format!("mcp__{MCP_SERVER_NAME}__");
     tools
         .iter()
-        .filter(|t| t.strip_prefix(&prefix).is_none_or(str::is_empty))
+        .filter(|t| {
+            t.strip_prefix(&prefix)
+                .is_none_or(|name| !RUN_TOOL_NAMES.contains(&name))
+        })
         .cloned()
         .collect()
 }
@@ -1137,10 +1144,39 @@ mod tests {
                 "run_shell_command".into(),
                 "mcp__other__x".into(),
                 "mcp__glafira-pg".into(),
+                "mcp__glafira-pg__".into(),
             ]),
-            ["run_shell_command", "mcp__other__x", "mcp__glafira-pg"]
+            [
+                "run_shell_command",
+                "mcp__other__x",
+                "mcp__glafira-pg",
+                "mcp__glafira-pg__"
+            ]
         );
         assert!(foreign_tools(&["mcp__glafira-pg__explain_query".into()]).is_empty());
+        // Инструменты Glafira вне сессии запуска (CLI подключился без билета, обычной сессией) — тоже лишние.
+        assert_eq!(
+            foreign_tools(&[
+                "mcp__glafira-pg__run_select".into(),
+                "mcp__glafira-pg__observe_activity".into(),
+                "mcp__glafira-pg__get_top_queries".into(),
+                "mcp__glafira-pg__explain_query".into(),
+                "mcp__glafira-pg__list_connections ".into(),
+                "mcp__glafira-pg__List_connections".into(),
+            ]),
+            [
+                "mcp__glafira-pg__run_select",
+                "mcp__glafira-pg__observe_activity",
+                "mcp__glafira-pg__get_top_queries",
+                "mcp__glafira-pg__list_connections ",
+                "mcp__glafira-pg__List_connections"
+            ]
+        );
+        let run: Vec<String> = RUN_TOOL_NAMES
+            .iter()
+            .map(|t| format!("mcp__glafira-pg__{t}"))
+            .collect();
+        assert!(foreign_tools(&run).is_empty(), "сессия запуска — ровно эти");
     }
 
     #[tokio::test]
