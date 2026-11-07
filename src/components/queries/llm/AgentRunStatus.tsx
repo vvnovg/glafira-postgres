@@ -55,6 +55,15 @@ function phaseText(request: OptimizationRequest, run: AgentRun | null, ahead: nu
   }
 }
 
+/**
+ * Ждущий запрос после ошибки, остановки или прерывания запуска (смоук P4c, R15): «Отменить запрос» читалось бы как отмена
+ * упавшего запуска — ссылка называется «Закрыть запрос», действие то же. Пока запрос ждёт, стоит в очереди, работает или
+ * ассистент закончил без предложений — «Отменить запрос».
+ */
+function closesAfterFailure(run: AgentRun | null): boolean {
+  return run !== null && (run.status === "failed" || run.status === "cancelled" || run.status === "interrupted");
+}
+
 /** Предложения запуска, которые панель «Предложения LLM» ещё не показала, у отвеченного запроса — «Ассистент прислал N». */
 function unseenProposals(request: OptimizationRequest, run: AgentRun | null, shown: Record<string, true>): boolean {
   return run !== null && request.status === "answered" && run.proposalIds.some((id) => !shown[id]);
@@ -84,7 +93,8 @@ function progressText(run: AgentRun, now: number, t: TFunction): string {
  * копирования — в живой области; ход работы (время, вызовы, инструмент) — отдельной строкой вне её, чтобы скринридер не
  * читал его каждую секунду. Действия — ссылками отдельным рядом, вне живой области: «Ответ ассистента» (итог простым
  * текстом, без разметки), «Показать журнал», «Повторить» / «Запустить фонового ассистента», «Скопировать строку для чата»
- * (видна и во время работы: чат и фон работают с одним запросом), «Отменить запрос». О присланных предложениях строка
+ * (видна и во время работы: чат и фон работают с одним запросом), «Отменить запрос» (после ошибки, остановки или прерывания
+ * запуска — «Закрыть запрос», `closesAfterFailure`). О присланных предложениях строка
  * пишет, пока панель «Предложения LLM» их не показала (`useShownProposals`); дальше у отвеченного запроса — обычное
  * состояние (ничего, `agentRunVisible`). «Показать журнал» — у ошибки начавшегося запуска (`startedAtMs`): журнал создаёт
  * запуск процесса. После «Повторить» кнопка исчезает (запуск снова в очереди), и фокус переходит на саму строку, а не
@@ -176,7 +186,7 @@ export function AgentRunStatus({ request, run, ahead, chatLine, busy, onRetry, o
             {t("llmAssist.agent.copyLine")}
           </button>
           <button type="button" className="link" disabled={busy} onClick={onCancel}>
-            {t("llmAssist.ask.cancel")}
+            {closesAfterFailure(run) ? t("llmAssist.ask.close") : t("llmAssist.ask.cancel")}
           </button>
         </div>
       )}

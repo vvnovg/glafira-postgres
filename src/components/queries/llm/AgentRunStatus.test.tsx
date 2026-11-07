@@ -117,11 +117,11 @@ describe("AgentRunStatus", () => {
     ["предел", { reason: "limit" }, "достигнут предел вызовов или расходов"],
     ["лишние инструменты", { reason: "unsafeTools", warnings: ["unsafe run_shell_command"] }, "агенту доступны не только инструменты Glafira: run_shell_command; запуск остановлен до первого хода"],
     ["нет init", { reason: "unsafeTools", warnings: ["unsafe no-init"] }, "агент не сообщил список своих инструментов; запуск остановлен"],
-  ])("ошибка (%s): причина текстом, «Показать журнал», «Повторить»", (_name, patch, reason) => {
+  ])("ошибка (%s): причина текстом, «Показать журнал», «Повторить», «Закрыть запрос»", (_name, patch, reason) => {
     // Запуск начался (`starting` ставит startedAtMs) — журнал есть.
     view({ run: agentRun({ status: "failed", startedAtMs: NOW - 10_000, endedAtMs: NOW, ...patch }) });
     expect(screen.getByRole("status")).toHaveTextContent(new RegExp(`^Ошибка фонового ассистента: ${reason.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`));
-    expect(buttons()).toEqual(["Показать журнал", "Повторить", "Скопировать строку для чата", "Отменить запрос"]);
+    expect(buttons()).toEqual(["Показать журнал", "Повторить", "Скопировать строку для чата", "Закрыть запрос"]);
   });
 
   it.each<[string, Partial<AgentRun>]>([
@@ -130,7 +130,7 @@ describe("AgentRunStatus", () => {
     ["не настроен", { reason: "notConfigured" }],
   ])("ошибка до старта процесса (%s): журнала нет — без «Показать журнал»", (_name, patch) => {
     view({ run: agentRun({ status: "failed", startedAtMs: null, endedAtMs: NOW, ...patch }) });
-    expect(buttons()).toEqual(["Повторить", "Скопировать строку для чата", "Отменить запрос"]);
+    expect(buttons()).toEqual(["Повторить", "Скопировать строку для чата", "Закрыть запрос"]);
   });
 
   it("«Показать журнал» открывает журнал запуска, «Закрыть» закрывает", async () => {
@@ -148,10 +148,28 @@ describe("AgentRunStatus", () => {
   it.each<[RunStatus, string]>([
     ["interrupted", "Запуск прерван: Glafira закрылась"],
     ["cancelled", "Запуск остановлен"],
-  ])("%s: «Повторить», копирование, отмена", (status, text) => {
+  ])("%s: «Повторить», копирование, «Закрыть запрос»", (status, text) => {
     view({ run: agentRun({ status, endedAtMs: NOW }) });
     expect(screen.getByRole("status")).toHaveTextContent(text);
-    expect(buttons()).toEqual(["Повторить", "Скопировать строку для чата", "Отменить запрос"]);
+    expect(buttons()).toEqual(["Повторить", "Скопировать строку для чата", "Закрыть запрос"]);
+  });
+
+  it.each<[string, Partial<AgentRun> | null, string]>([
+    ["ошибка", { status: "failed", reason: "timeout", startedAtMs: NOW - 120_000, endedAtMs: NOW }, "Закрыть запрос"],
+    ["прерван", { status: "interrupted", endedAtMs: NOW }, "Закрыть запрос"],
+    ["остановлен", { status: "cancelled", endedAtMs: NOW }, "Закрыть запрос"],
+    ["ждёт без запуска", null, "Отменить запрос"],
+    ["в очереди", { status: "queued" }, "Отменить запрос"],
+    ["запускается", { status: "starting", startedAtMs: NOW }, "Отменить запрос"],
+    ["работает", { status: "running", startedAtMs: NOW }, "Отменить запрос"],
+    ["без предложений", { status: "done", startedAtMs: NOW - 1_000, endedAtMs: NOW }, "Отменить запрос"],
+  ])("R15 (%s): подпись ссылки закрытия ждущего запроса по состоянию запуска; действие то же", async (_name, patch, label) => {
+    const user = userEvent.setup();
+    view({ run: patch === null ? null : agentRun(patch) });
+    const other = label === "Закрыть запрос" ? "Отменить запрос" : "Закрыть запрос";
+    expect(within(group()).queryByRole("button", { name: other })).toBeNull();
+    await user.click(within(group()).getByRole("button", { name: label }));
+    expect(onCancel).toHaveBeenCalledTimes(1);
   });
 
   it("ждущий запрос без запуска (или запуск пропущен): ожидание и «Запустить фонового ассистента»", async () => {
@@ -170,7 +188,7 @@ describe("AgentRunStatus", () => {
   it("пока действие выполняется, «Повторить» и «Отменить запрос» неактивны, копирование — нет", () => {
     view({ run: agentRun({ status: "failed", reason: "exit", exitCode: 1 }), busy: true });
     expect(screen.getByRole("button", { name: "Повторить" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Отменить запрос" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Закрыть запрос" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Скопировать строку для чата" })).toBeEnabled();
   });
 

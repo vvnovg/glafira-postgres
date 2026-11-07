@@ -154,8 +154,43 @@ describe("AskLlmButton", () => {
     expect(await navigator.clipboard.readText()).toBe(LINE);
     expect(await screen.findByText(NOTICE)).toBeInTheDocument();
     expect(await screen.findByText("Ждёт ответа LLM: запрос r3a9f1c")).toBeInTheDocument();
-    // Пока запрос ждёт, второй не создаётся.
-    expect(button).toBeDisabled();
+    // Ждущий запрос кнопку не блокирует: новое нажатие заменит его (смоук P4c, R15).
+    await waitFor(() => expect(button).toBeEnabled());
+  });
+
+  it("R15: ждущий запрос не блокирует кнопку; «?» говорит, что новый запрос заменит его; нажатие сначала закрывает ждущий, потом создаёт новый", async () => {
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest({ id: "r1" })]);
+    vi.mocked(api.cancelOptimizationRequest).mockResolvedValue(optimizationRequest({ id: "r1", status: "cancelled" }));
+    vi.mocked(api.createOptimizationRequest).mockResolvedValue(optimizationRequest({ id: "r2" }));
+    const user = userEvent.setup();
+    renderWithClient(<AskLlmButton {...props} />);
+    expect(await screen.findByText("Ждёт ответа LLM: запрос r1")).toBeInTheDocument();
+    const button = screen.getByRole("button", { name: LABEL });
+    await waitFor(() => expect(button).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: `Подсказка: ${LABEL}` }));
+    expect(screen.getByRole("tooltip")).toHaveTextContent(/^Запрос r1 ещё ждёт ответа: новый его заменит — Glafira закроет r1 \(и остановит его фоновый запуск, если он идёт\) и создаст новый\./);
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest({ id: "r1", status: "cancelled" }), optimizationRequest({ id: "r2", createdAtMs: 1_700_000_001_000 })]);
+    await user.click(button);
+    expect(api.cancelOptimizationRequest).toHaveBeenCalledWith("r1");
+    expect(api.createOptimizationRequest).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.cancelOptimizationRequest).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(api.createOptimizationRequest).mock.invocationCallOrder[0]);
+    expect(await screen.findByText("Ждёт ответа LLM: запрос r2")).toBeInTheDocument();
+    expect(screen.queryByText("Ждёт ответа LLM: запрос r1")).toBeNull();
+    expect(await navigator.clipboard.readText()).toBe("Оптимизируй запрос r2 из Glafira");
+  });
+
+  it("R15: ждущий запрос закрыть не удалось — ошибка у кнопки, новый запрос не создаётся", async () => {
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest({ id: "r1" })]);
+    vi.mocked(api.cancelOptimizationRequest).mockRejectedValue({ code: "INTERNAL", message: "disk is full", retryable: true });
+    const user = userEvent.setup();
+    renderWithClient(<AskLlmButton {...props} />);
+    const button = screen.getByRole("button", { name: LABEL });
+    await waitFor(() => expect(button).toBeEnabled());
+    await user.click(button);
+    expect(await screen.findByText("disk is full")).toHaveAttribute("role", "status");
+    expect(api.createOptimizationRequest).not.toHaveBeenCalled();
+    expect(screen.getByText("Ждёт ответа LLM: запрос r1")).toBeInTheDocument();
+    expect(button).toBeEnabled();
   });
 
   it("Z1: ожидание (с «Отменить запрос») и уведомление о переданном запросе — отдельные строки, не одна фраза", async () => {
@@ -339,7 +374,8 @@ describe("AskLlmButton: фоновый ассистент", () => {
     expect(within(await group()).getByText("В очереди фонового ассистента: следующий")).toBeInTheDocument();
     // Строку ожидания P4b заменяет строка статуса фонового ассистента.
     expect(screen.queryByText("Ждёт ответа LLM: запрос r3a9f1c")).toBeNull();
-    expect(button).toBeDisabled();
+    // Ждущий запрос кнопку не блокирует (смоук P4c, R15).
+    await waitFor(() => expect(button).toBeEnabled());
   });
 
   it("Z1: строка статуса запуска и уведомление — отдельные строки в блоке под кнопками; элементы ряда (`extra`) — до них", async () => {
@@ -415,7 +451,7 @@ describe("AskLlmButton: фоновый ассистент", () => {
     emitEvent("agent://runs", agentRun({ status: "done", startedAtMs: 1, endedAtMs: 2, calls: 7, summary: "Запрос уже использует индекс" }));
     expect(await within(box).findByText("Ассистент закончил без предложений")).toBeInTheDocument();
     expect(within(box).getByRole("button", { name: "Ответ ассистента" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: LABEL })).toBeDisabled();
+    expect(screen.getByRole("button", { name: LABEL })).toBeEnabled();
     expect(api.listAgentRuns).toHaveBeenCalledTimes(1);
   });
 
@@ -470,6 +506,28 @@ describe("AskLlmButton: фоновый ассистент", () => {
     vi.mocked(api.listAgentRuns).mockResolvedValue([agentRun()]);
     await user.click(within(box).getByRole("button", { name: "Запустить фонового ассистента" }));
     expect(await within(box).findByText("В очереди фонового ассистента: следующий")).toBeInTheDocument();
+  });
+
+  it("R15: после ошибки запуска — «Закрыть запрос»; «Передать» закрывает ждущий и ставит новый запрос в очередь", async () => {
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest({ id: "r1" })]);
+    vi.mocked(api.listAgentRuns).mockResolvedValue([agentRun({ requestId: "r1", status: "failed", reason: "timeout", startedAtMs: 1, endedAtMs: 120_001 })]);
+    vi.mocked(api.cancelOptimizationRequest).mockResolvedValue(optimizationRequest({ id: "r1", status: "cancelled" }));
+    vi.mocked(api.createOptimizationRequest).mockResolvedValue(optimizationRequest({ id: "r2" }));
+    vi.mocked(api.startAgentRun).mockResolvedValue(agentRun({ id: "a2b3c4d", requestId: "r2" }));
+    const user = userEvent.setup();
+    renderWithClient(<AskLlmButton {...props} />);
+    const box = await screen.findByRole("group", { name: "Фоновый ассистент: запрос r1" });
+    expect(within(box).getByRole("button", { name: "Закрыть запрос" })).toBeInTheDocument();
+    expect(within(box).queryByRole("button", { name: "Отменить запрос" })).toBeNull();
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest({ id: "r1", status: "cancelled" }), optimizationRequest({ id: "r2", createdAtMs: 1_700_000_001_000 })]);
+    vi.mocked(api.listAgentRuns).mockResolvedValue([agentRun({ id: "a2b3c4d", requestId: "r2" })]);
+    await user.click(screen.getByRole("button", { name: LABEL }));
+    expect(api.cancelOptimizationRequest).toHaveBeenCalledWith("r1");
+    expect(api.createOptimizationRequest).toHaveBeenCalledTimes(1);
+    expect(api.startAgentRun).toHaveBeenCalledWith("r2");
+    expect(vi.mocked(api.cancelOptimizationRequest).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(api.createOptimizationRequest).mock.invocationCallOrder[0]);
+    expect(await screen.findByText("Запрос r2 передан фоновому ассистенту")).toBeInTheDocument();
+    expect(within(await screen.findByRole("group", { name: "Фоновый ассистент: запрос r2" })).getByText("В очереди фонового ассистента: следующий")).toBeInTheDocument();
   });
 
   it("«Отменить запрос» во время работы отменяет запрос (Rust останавливает и запуск)", async () => {

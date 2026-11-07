@@ -100,11 +100,14 @@ export interface AskLlmProps {
  * (`effectiveLlmAccess`). Строго: пока статус MCP, профиль или список запросов читаются — неактивна без пояснения; если
  * статус или список не прочитались — неактивна с пояснением и «Повторить» (неудачное чтение не значит «ничего не ждёт»:
  * иначе кнопка позволила бы дубль запроса). Значок «?» объясняет причину, а у активной кнопки — что снимок уходит модели
- * без маскирования. Пока запрос этого источника ждёт ответа, под кнопкой строка «Ждёт ответа LLM» с «Отменить запрос»,
- * второй запрос не создаётся. Строки ожидания и уведомления — отдельные, каждая в своей живой области (кнопки — вне их);
+ * без маскирования. Пока запрос этого источника ждёт ответа, под кнопкой строка «Ждёт ответа LLM» с «Отменить запрос»;
+ * кнопка ждущим запросом не блокируется (смоук P4c, R15): нажатие сначала закрывает ждущий запрос этого источника (Rust
+ * останавливает и его фоновый запуск, как «Отменить запрос»), потом создаёт новый; «?» об этом предупреждает. Не закрылся
+ * — ошибка у кнопки, новый не создаётся. Строки ожидания и уведомления — отдельные, каждая в своей живой области (кнопки — вне их);
  * блок строк занимает свой ряд, только когда в нём что-то есть. Читает только запросы подключения (`useOptimizationRequests`), предложения кнопке не нужны.
  * Уведомление о скопированной строке по умолчанию живёт в кнопке; в консоли его держит `ExplainTab` (`sent`/`onSent`),
- * потому что кнопка перемонтируется, когда появляется результат плана. Статус ожидания выводится из списка запросов.
+ * потому что кнопка перемонтируется вместе с запуском плана при смене узла или базы, а id отправленного запроса нужен панели
+ * предложений (автовыбор ответа, смоук P4b R2). Статус ожидания выводится из списка запросов.
  * Между созданием и перечитыванием списка кнопка тоже неактивна: второй быстрый клик дубля не создаёт.
  *
  * Режим фона (спец. P4c §8.1, `backgroundMode`): кнопка создаёт запрос и ставит запуск в очередь (`start_agent_run`), в
@@ -149,7 +152,7 @@ export function AskLlmButton({ connectionId, member, database, source, sql, para
   }
   // Запрос создан, но список ещё не перечитан: ждём его, иначе быстрый второй клик создал бы дубль.
   const justSent = sent !== null && !requests.some((r) => r.id === sent.id);
-  const can = ready && off === null && sql.trim() !== "" && !busy && waiting === null && !justSent;
+  const can = ready && off === null && sql.trim() !== "" && !busy && !justSent;
 
   // Строка статуса запуска. У ждущего запроса — в режиме фона, а без него — пока его запуск ещё идёт (режим выключили во
   // время запуска); у отвеченного — если у него был запуск и строке есть что сказать (идущий запуск или непоказанные
@@ -167,7 +170,14 @@ export function AskLlmButton({ connectionId, member, database, source, sql, para
   const ask = async () => {
     setBusy(true);
     setError(null);
+    // Ждущий запрос источника заменяется новым: сначала закрыть (с его запуском), не закрылся — нового не создавать.
+    const replaced = waiting;
+    let closed = false;
     try {
+      if (replaced !== null) {
+        await api.cancelOptimizationRequest(replaced.id);
+        closed = true;
+      }
       const r = await api.createOptimizationRequest(connectionId, { member, database, source, sql, params, plan });
       const line = t("llmAssist.ask.chatLine", { id: r.id });
       if (background) {
@@ -194,8 +204,15 @@ export function AskLlmButton({ connectionId, member, database, source, sql, para
       }
       setSent({ id: r.id, line, copied });
       refresh();
+      if (closed && runsWanted) refreshRuns();
     } catch (e) {
       setError(toAppError(e));
+      // Прежний запрос закрыт, а новый не создан: список и запуски должны это показать.
+      if (closed) {
+        setSent(null);
+        refresh();
+        if (runsWanted) refreshRuns();
+      }
     } finally {
       setBusy(false);
     }
@@ -243,7 +260,8 @@ export function AskLlmButton({ connectionId, member, database, source, sql, para
   const unreadable =
     off === "status" ? t("llmAssist.ask.statusUnavailable") : off === "requests" ? t("llmAssist.ask.requestsFailed") : runsUnreadable ? t("llmAssist.ask.runsFailed") : "";
   const retryRead = off === "status" ? refetchStatus : off === "requests" ? retryRequests : refreshRuns;
-  const hint = off ? OFF_HINTS[off] : background && agent ? BACKGROUND_HINTS[agent.preset] : "hints.llmAssist.ask";
+  // Ждущий запрос: «?» говорит, что новый запрос его заменит (причина неактивности важнее).
+  const hint = off ? OFF_HINTS[off] : waiting ? "hints.llmAssist.askReplace" : background && agent ? BACKGROUND_HINTS[agent.preset] : "hints.llmAssist.ask";
   const message = error ? tr(error) : notice;
   // Строка ожидания P4b — когда строки статуса запуска нет.
   const plainWaiting = showRun ? null : waiting;
@@ -253,7 +271,7 @@ export function AskLlmButton({ connectionId, member, database, source, sql, para
       <button type="button" disabled={!can} onClick={() => void ask()}>
         {t("llmAssist.ask.button")}
       </button>
-      <Hint k={hint} label={t("llmAssist.ask.button")} />
+      <Hint k={hint} label={t("llmAssist.ask.button")} values={!off && waiting ? { id: waiting.id } : undefined} />
       {extra}
       <div className={shown ? "llm-ask-notes shown" : "llm-ask-notes"}>
         <div className="llm-ask-line">

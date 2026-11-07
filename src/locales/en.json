@@ -2217,6 +2217,7 @@
       "copyFailed": "Request {{id}} sent. Tell your assistant “optimize the query from Glafira” — it fetches the request itself (could not copy the line with the id: “{{line}}”).",
       "waiting": "Waiting for the LLM: request {{id}}",
       "cancel": "Cancel request",
+      "close": "Close request",
       "statusUnavailable": "MCP status is unavailable",
       "requestsFailed": "Could not read the requests of this connection",
       "queuedNotice": "Request {{id}} sent to the background assistant",
@@ -2393,6 +2394,7 @@
     },
     "llmAssist": {
       "ask": "Creates a request an MCP assistant fetches with the snapshot (query, statistics, plan, DDL); it can check plans and indexes and returns proposals to “LLM proposals”. Not masked, even at Diagnostics.",
+      "askReplace": "Request {{id}} is still waiting: a new one replaces it — Glafira closes {{id}} (stopping its background run, if any) and creates a new one. The snapshot goes to the model unmasked.",
       "copy": "Copies the whole snapshot as text (query, statistics, plan, DDL) for any chat; no MCP needed. The model's answer does not come back to Glafira. The copy is not masked: check literals before pasting.",
       "askServer": "The MCP server is off: turn it on in Settings → LLM assistants (MCP) and connect the assistant.",
       "askOtherInstance": "The MCP server runs in another Glafira window: send the request from that window.",

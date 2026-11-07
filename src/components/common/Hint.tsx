@@ -18,8 +18,11 @@ import {
 /** Закрывает открытую сейчас подсказку: в каждый момент открыта не больше одной. */
 let closeOpenHint: (() => void) | null = null;
 
-/** Значок «?» с короткой подсказкой: наведение (300 мс), фокус, клик закрепляет; Esc и клик вне закрывают. */
-export function Hint({ k, label }: { k: string; label: string }) {
+/**
+ * Значок «?» с короткой подсказкой: наведение (300 мс), фокус, клик закрепляет; Esc и клик вне закрывают. `values` —
+ * параметры текста подсказки (`{{id}}`), если они есть.
+ */
+export function Hint({ k, label, values }: { k: string; label: string; values?: Record<string, string> }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [pinned, setPinned] = useState(false);
@@ -94,7 +97,7 @@ export function Hint({ k, label }: { k: string; label: string }) {
       {open && (
         <FloatingPortal>
           <div ref={refs.setFloating} className="hint-tooltip" style={floatingStyles} {...getFloatingProps({ onClick: (e: React.MouseEvent) => e.stopPropagation() })}>
-            <Trans i18nKey={k} components={{ code: <code /> }} />
+            <Trans i18nKey={k} values={values} components={{ code: <code /> }} />
           </div>
         </FloatingPortal>
       )}
