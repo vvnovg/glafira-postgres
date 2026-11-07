@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppError, OllamaPrices as Prices } from "../../../api/types";
@@ -10,7 +10,7 @@ vi.mock("../../../api/client", async (importOriginal) => {
 });
 
 import { api } from "../../../api/client";
-import { OllamaPrices } from "./OllamaPrices";
+import { OllamaPrices, UPDATED_NOTE_MS } from "./OllamaPrices";
 
 const builtin: Prices = { date: "2026-11-07", source: "https://ollama.com/pricing", saved: false, fetchedAtMs: null, models: 24, refreshAllowed: true };
 const BUILTIN = "Стоимость облачных запусков через Ollama — оценка по ценам Ollama Cloud на 07.11.2026, встроенным в Glafira";
@@ -48,6 +48,29 @@ describe("OllamaPrices", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Цены обновлены: моделей 25");
     expect(button).toHaveTextContent(REFRESH);
     expect(button).not.toHaveAttribute("aria-disabled");
+  });
+
+  it("«Цены обновлены…» исчезает через несколько секунд или при следующем изменении в разделе (итоговое ревью)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      vi.mocked(api.refreshOllamaPrices).mockResolvedValue({ ...builtin, saved: true, fetchedAtMs: 1_796_117_400_000, models: 25 });
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      const { rerender } = renderWithClient(<OllamaPrices changed="a" />);
+      await user.click(await screen.findByRole("button", { name: REFRESH }));
+      await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Цены обновлены: моделей 25"));
+      act(() => vi.advanceTimersByTime(UPDATED_NOTE_MS - 100));
+      expect(screen.getByRole("status")).toHaveTextContent("Цены обновлены: моделей 25");
+      act(() => vi.advanceTimersByTime(200));
+      expect(screen.getByRole("status")).toHaveTextContent(/^$/);
+      // Снова «Обновить цены», и раньше срока — правка в разделе: сообщение о прошлом действии уже не к месту.
+      await user.click(screen.getByRole("button", { name: REFRESH }));
+      await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Цены обновлены: моделей 25"));
+      rerender(<OllamaPrices changed="b" />);
+      expect(screen.getByRole("status")).toHaveTextContent(/^$/);
+      expect(screen.getByRole("button", { name: REFRESH })).toBeEnabled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("не разобралась страница или сеть — ошибка у кнопки, прежняя таблица остаётся", async () => {

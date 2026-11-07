@@ -127,16 +127,17 @@ describe("McpAudit", () => {
     renderWithClient(<McpAudit status={mcpStatus()} />);
     const table = await screen.findByRole("table", { name: "Журнал" });
     const details = (i: number) => within(within(table).getAllByRole("row")[i + 1]).getAllByRole("cell")[6];
+    const hintOf = (cell: HTMLElement) => within(cell).queryByRole("button");
     expect(details(0)).toHaveTextContent(/^≈ 0,01 \$$/);
-    expect(details(0).querySelector("[title]")?.getAttribute("title")).toBe("Оценка по ценам Ollama Cloud на 07.11.2026 (ollama.com/pricing)");
+    expect(hintOf(details(0))).toHaveAccessibleName(/^≈ 0,01\s\$: Оценка по ценам Ollama Cloud на 07\.11\.2026 \(ollama\.com\/pricing\)$/);
     expect(details(1)).toHaveTextContent(/^≈ 0,006 \$$/);
-    expect(details(1).querySelector("[title]")?.getAttribute("title")).toBe("Оценка по ценам Ollama Cloud вне пика на 07.11.2026 (ollama.com/pricing)");
+    expect(hintOf(details(1))).toHaveAccessibleName(/: Оценка по ценам Ollama Cloud вне пика на 07\.11\.2026 \(ollama\.com\/pricing\)$/);
     expect(details(2)).toHaveTextContent(/^0,42 \$$/);
     expect(details(2)).not.toHaveTextContent("≈");
-    expect(details(2).querySelector("[title]")).toBeNull();
+    expect(hintOf(details(2))).toBeNull();
     expect(details(3)).toHaveTextContent(/^$/);
     expect(details(4)).toHaveTextContent(/^≈ 0,01 \$$/);
-    expect(details(4).querySelector("[title]")?.getAttribute("title")).toBe("Оценка по ценам Ollama Cloud (ollama.com/pricing)");
+    expect(hintOf(details(4))).toHaveAccessibleName(/: Оценка по ценам Ollama Cloud \(ollama\.com\/pricing\)$/);
     expect(details(5)).toHaveTextContent(/^замаскировано: 3$/);
   });
 

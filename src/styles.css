@@ -221,6 +221,10 @@ label.inline { display: inline-flex; gap: 4px; align-items: center; white-space:
 .hint-icon { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; padding: 0; margin-left: 2px; border: 1px solid var(--muted); border-radius: 50%; background: none; color: var(--muted); font-size: 10px; line-height: 1; cursor: help; vertical-align: middle; user-select: none; }
 .field-label { display: inline-flex; align-items: center; gap: 2px; }
 .hint-icon:hover, .hint-icon:focus-visible { color: var(--accent); border-color: var(--accent); outline: none; }
+/* Подсказка у текста («≈ 0,01 $»): текст с точечным подчёркиванием, фокус — рамкой. */
+.hint-text { cursor: help; text-decoration: underline dotted; text-underline-offset: 2px; border-radius: 2px; }
+.hint-text:hover { color: var(--accent); }
+.hint-text:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .hint-tooltip { z-index: 1000; max-width: 320px; padding: 6px 8px; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15); font-size: 12px; line-height: 1.4; }
 .hint-tooltip code { font-size: 11px; }
 .help-panel { display: flex; height: 100%; min-height: 0; }

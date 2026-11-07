@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 import type { AgentRun, McpAuditEntry } from "../../../api/types";
 import { formatDay, formatUsd } from "../../../lib/format";
+import { Hint } from "../../common/Hint";
 
 /** Оценка по ценам Ollama Cloud: сумма, день цен таблицы (у записи журнала прежней сборки его нет), «вне пика». */
 interface Estimate {
@@ -16,18 +17,25 @@ export function hasCost(run: AgentRun): boolean {
 
 /**
  * Стоимость: точная, как её сообщил CLI (Claude Code без Ollama), — как есть; оценка облачного запуска через Ollama по ценам
- * Ollama Cloud (смоук P4c, sf-T6) — «≈ 0,01 $» с подсказкой о дне цен таблицы (и «вне пика»).
+ * Ollama Cloud (смоук P4c, sf-T6) — «≈ 0,01 $» с подсказкой о дне цен таблицы (и «вне пика»). Подсказка — `Hint` у самого
+ * текста: наведение, фокус с клавиатуры, имя для скринридера «≈ 0,01 $: Оценка по ценам …» (итоговое ревью фронтенда).
  */
 function CostText({ exact, estimate }: { exact?: number | null; estimate?: Estimate | null }) {
   const { t } = useTranslation();
   if (exact != null) return <>{formatUsd(exact)}</>;
   if (!estimate) return null;
-  const hint = !estimate.pricesDate
-    ? t("settings.mcp.agent.runs.costEstimateHintNoDate")
+  const values = estimate.pricesDate ? { date: formatDay(estimate.pricesDate) } : undefined;
+  const k = !estimate.pricesDate
+    ? "settings.mcp.agent.runs.costEstimateHintNoDate"
     : estimate.offPeak
-      ? t("settings.mcp.agent.runs.costEstimateHintOffPeak", { date: formatDay(estimate.pricesDate) })
-      : t("settings.mcp.agent.runs.costEstimateHint", { date: formatDay(estimate.pricesDate) });
-  return <span title={hint}>{t("settings.mcp.agent.runs.costEstimate", { cost: formatUsd(estimate.usd, "estimate") })}</span>;
+      ? "settings.mcp.agent.runs.costEstimateHintOffPeak"
+      : "settings.mcp.agent.runs.costEstimateHint";
+  const text = t("settings.mcp.agent.runs.costEstimate", { cost: formatUsd(estimate.usd, "estimate") });
+  return (
+    <Hint k={k} values={values} label={t("settings.mcp.agent.runs.costEstimateLabel", { cost: text, hint: t(k, values) })}>
+      {text}
+    </Hint>
+  );
 }
 
 /** Стоимость запуска — в «Запусках» и в строке статуса консоли и карточки после конца запуска (дополнение владельца к sf-T7). */

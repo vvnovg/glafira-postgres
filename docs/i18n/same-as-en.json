@@ -110,6 +110,7 @@
     "readiness.trackActivityQuerySize.title",
     "readiness.trackIoTiming.title",
     "settings.mcp.agent.ollamaModel",
+    "settings.mcp.agent.runs.costEstimateLabel",
     "sidebar.timeline",
     "tabs.diag",
     "tabs.explain",

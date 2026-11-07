@@ -18,6 +18,24 @@ describe("Hint", () => {
     expect(screen.getByRole("button", { name: "Подсказка: acks" })).toHaveTextContent("?");
   });
 
+  it("подсказка у текста: сам текст фокусируется, имя — из label (видимый текст и подсказка), подсказка — по фокусу", async () => {
+    const user = setup();
+    render(
+      <Hint k="hints.test.b" label="≈ 0,01 $: Вторая">
+        ≈ 0,01 $
+      </Hint>,
+    );
+    const btn = screen.getByRole("button", { name: "≈ 0,01 $: Вторая" });
+    expect(btn).toHaveTextContent(/^≈ 0,01 \$$/);
+    expect(btn).toHaveClass("hint-text");
+    expect(screen.queryByText("?")).toBeNull();
+    await user.tab();
+    expect(btn).toHaveFocus();
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Вторая");
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+
   it("наведение: показ через 300 мс, уход курсора скрывает", async () => {
     const user = setup();
     render(<Hint k="hints.test.a" label="acks" />);

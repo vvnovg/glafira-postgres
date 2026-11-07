@@ -395,9 +395,8 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
               value={model}
               {...invalid("agent-model", modelError, [...(model.trim() === "" ? ["agent-model-note"] : []), ...(models.error ? ["agent-models-failed"] : [])])}
               onChange={(e) => update(qwen ? { qwenModel: e.target.value } : { claudeModel: e.target.value })}
-              // Вход в поле и щелчок по нему (раскрытие списка) — список перечитывается.
+              // Вход в поле — список перечитывается; щелчки по полю в фокусе (правка мышью) — нет (итоговое ревью фронтенда).
               onFocus={refreshModels}
-              onClick={refreshModels}
             />
             {/* datalist не рисует групп: группы «Ollama» и «Ollama Cloud» — пунктами после найденных, имя группы (и цены) — в подписи пункта. */}
             <datalist id={modelsId}>
@@ -537,7 +536,7 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
       </div>
       <div className="settings-block">
         <AgentRuns runs={runs} state={runsState} error={runsError} onRetry={refreshRuns} onShowLog={setLogRun} />
-        <OllamaPrices />
+        <OllamaPrices changed={JSON.stringify(draft)} />
       </div>
       {logRun && <AgentLogDialog runId={logRun} onClose={() => setLogRun(null)} />}
     </>

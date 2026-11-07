@@ -196,7 +196,7 @@ describe("AgentSection", () => {
     expect(screen.getByRole("button", { name: "Сохранить" })).toBeDisabled();
   });
 
-  it("список моделей перечитывается при входе в поле «Модель» и после «Найти»; пока читается новый, виден прежний", async () => {
+  it("список моделей перечитывается при входе в поле «Модель» и после «Найти», а не на каждый щелчок; пока читается новый, виден прежний", async () => {
     /** Ответ, который тест отдаёт сам: список, который «читается». */
     let answer: (v: { ids: string[]; default: string | null; source: "qwen" }) => void = () => {};
     vi.mocked(api.listAgentModels)
@@ -216,6 +216,10 @@ describe("AgentSection", () => {
     expect(options()).toEqual(["qwen3.8:27b"]);
     act(() => answer({ ids: ["qwen3.8:27b", "glm-5.3-flash:cloud"], default: null, source: "qwen" }));
     await waitFor(() => expect(options()).toEqual(["qwen3.8:27b", "glm-5.3-flash:cloud"]));
+    // Щелчки по полю, в котором уже фокус (правка имени мышью), списка не перечитывают (итоговое ревью фронтенда).
+    await user.click(model);
+    await user.click(model);
+    expect(api.listAgentModels).toHaveBeenCalledTimes(2);
     // «Найти» — тоже.
     await user.click(screen.getByRole("button", { name: "Найти" }));
     await waitFor(() => expect(options()).toEqual(["qwen3.8:27b", "glm-5.3-flash:cloud", "qwen3.6-64k:35b-a3b"]));
