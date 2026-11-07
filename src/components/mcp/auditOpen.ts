@@ -3,7 +3,7 @@ import { effectiveLlmAccess } from "../../lib/llmAccess";
 
 /**
  * Вызовы, которые можно открыть в консоли EXPLAIN (спец. P4 §11): `explain_query` (P4a) и `run_select` (P4b). Консоль
- * получает тот же SQL, базу и узел и ничего не запускает.
+ * получает тот же SQL, базу и узел и сразу строит «План» без выполнения (итоговая волна правок смоука P4c).
  */
 const CONSOLE_TOOLS = new Set(["explain_query", "run_select"]);
 

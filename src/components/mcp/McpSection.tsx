@@ -29,10 +29,13 @@ function stateText(s: McpStatus, t: TFunction): string {
   }
 }
 
-/** «Открыть в консоли EXPLAIN» из журнала (спец. P4 §11): консоль подключения с SQL, базой и узлом вызова, без запуска. */
+/**
+ * «Открыть в консоли EXPLAIN» из журнала (спец. P4 §11): консоль подключения с SQL, базой и узлом вызова; «План» строится сразу,
+ * без выполнения (`autoPlan`, итоговая волна правок смоука P4c — как «Открыть в консоли» предложения).
+ */
 function openInConsole(e: McpAuditEntry): void {
   const r = consoleTarget(e);
-  if ("target" in r) openExplainWithPrefill(r.target.connectionId, { sql: r.target.sql, database: r.target.database, member: r.target.member });
+  if ("target" in r) openExplainWithPrefill(r.target.connectionId, { sql: r.target.sql, database: r.target.database, member: r.target.member, autoPlan: true });
 }
 
 /** Раздел группы MCP по статусу шлюза: пока статус читается — «Загрузка…», не прочитался — ошибка с «Повторить». */

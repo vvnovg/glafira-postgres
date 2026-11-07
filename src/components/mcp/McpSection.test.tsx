@@ -253,7 +253,7 @@ describe("McpSection", () => {
     expect(await screen.findByRole("checkbox", { name: toggleName })).toBeChecked();
   });
 
-  it("«Открыть в консоли EXPLAIN» из журнала открывает консоль подключения с подстановкой", async () => {
+  it("«Открыть в консоли EXPLAIN» из журнала открывает консоль подключения с подстановкой и сразу строит «План»", async () => {
     vi.mocked(api.getMcpStatus).mockResolvedValue(mcpStatus());
     vi.mocked(api.listConnections).mockResolvedValue([connection({ id: "c1", name: "perf", llmAccess: "diagnostics" })]);
     vi.mocked(api.getMcpAudit).mockResolvedValue([explainCall()]);
@@ -269,7 +269,8 @@ describe("McpSection", () => {
     expect(tabs[0]).toMatchObject({
       kind: "explain",
       connectionId: "c1",
-      prefill: { sql: "SELECT * FROM shop.orders WHERE status = 'new'", database: "perf", member: "pg-2", nonce: expect.any(Number) },
+      // Итоговая волна правок смоука P4c (решение владельца): «План» без выполнения, как у «Открыть в консоли» предложения.
+      prefill: { sql: "SELECT * FROM shop.orders WHERE status = 'new'", database: "perf", member: "pg-2", nonce: expect.any(Number), autoPlan: true },
     });
   });
 });

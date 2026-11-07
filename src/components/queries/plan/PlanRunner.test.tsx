@@ -508,7 +508,7 @@ describe("PlanRunner: кнопки запроса в ряду формы и по
     expect(api.explain).not.toHaveBeenCalled();
   });
 
-  it("подстановка без «Плана» (журнал MCP) только убирает результат; запуск, начатый до неё, уходит в историю, а не на экран", async () => {
+  it("подстановка без «Плана» (без autoPlan) только убирает результат; запуск, начатый до неё, уходит в историю, а не на экран", async () => {
     vi.mocked(api.explain).mockResolvedValueOnce(result());
     const user = userEvent.setup();
     const onSubstitution = vi.fn();
