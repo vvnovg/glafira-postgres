@@ -129,7 +129,8 @@ impl AgentSettings {
         !self.path().trim().is_empty() && !(model_needed && self.claude.model.trim().is_empty())
     }
 
-    /// Значения из «Настроек»: пробелы по краям убираются, пределы спеки §8.3, пути — абсолютные, имя модели — §4.1.
+    /// Значения из «Настроек»: пробелы по краям убираются, пределы спеки §8.3, пути — абсолютные, имя модели — §4.1,
+    /// адрес Ollama — `http(s)://хост[:порт]` (сохраняется в этом виде).
     pub fn validated(mut self) -> AppResult<Self> {
         for s in [
             &mut self.qwen.path,
@@ -176,7 +177,7 @@ impl AgentSettings {
                 max = MAX_BUDGET_USD
             ));
         }
-        check_ollama_url(&self.ollama_url)?;
+        self.ollama_url = check_ollama_url(&self.ollama_url)?;
         Ok(self)
     }
 }
@@ -200,23 +201,38 @@ fn check_path(p: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// Адрес Ollama: `http(s)://хост[:порт]`. Удалённый адрес допустим (Claude Code ходит туда сам), но моделью там Glafira
-/// не управляет (§6.1).
-fn check_ollama_url(u: &str) -> AppResult<()> {
-    let ok = u.len() <= MAX_URL_CHARS
-        && reqwest::Url::parse(u).is_ok_and(|x| {
-            matches!(x.scheme(), "http" | "https") && x.host_str().is_some_and(|h| !h.is_empty())
-        });
-    if ok {
-        Ok(())
-    } else {
-        Err(app_err!(
-            ErrorCode::InvalidInput,
-            "errors.agent.badOllamaUrl",
-            "Invalid Ollama address “{{url}}”: use http://host:port",
-            url = u
-        ))
+/// Адрес Ollama — `http(s)://хост[:порт]`, можно с `/` в конце (уточнение 16 плана P4c): без пути, query и фрагмента
+/// (иначе запросы `agent::ollama` и `ANTHROPIC_BASE_URL` собирались бы неверно), без логина и пароля (они ушли бы в
+/// `settings.json` и окружение агента), без управляющих символов, до 256 символов. Удалённый хост допустим.
+pub fn parse_ollama_url(u: &str) -> Option<reqwest::Url> {
+    if u.len() > MAX_URL_CHARS || u.chars().any(char::is_control) {
+        return None;
     }
+    let x = reqwest::Url::parse(u).ok()?;
+    let ok = matches!(x.scheme(), "http" | "https")
+        && x.host_str().is_some_and(|h| !h.is_empty())
+        && x.username().is_empty()
+        && x.password().is_none()
+        && matches!(x.path(), "" | "/")
+        && x.query().is_none()
+        && x.fragment().is_none();
+    ok.then_some(x)
+}
+
+/// Адрес Ollama из «Настроек» в виде `http(s)://хост[:порт]` (как его разобрал URL-парсер: хост строчными, порт по
+/// умолчанию не пишется, без `/` в конце). Удалённый адрес допустим (Claude Code ходит туда сам), но моделью там Glafira
+/// не управляет (§6.1).
+fn check_ollama_url(u: &str) -> AppResult<String> {
+    parse_ollama_url(u)
+        .map(|x| x.origin().ascii_serialization())
+        .ok_or_else(|| {
+            app_err!(
+                ErrorCode::InvalidInput,
+                "errors.agent.badOllamaUrl",
+                "Invalid Ollama address “{{url}}”: use http://host:port",
+                url = u
+            )
+        })
 }
 
 pub fn bad_model(m: &str) -> AppError {
@@ -397,6 +413,60 @@ mod tests {
             s.claude.budget_usd = Some(budget);
             assert!(s.validated().is_ok(), "{budget}");
         }
+    }
+
+    #[test]
+    fn the_ollama_address_is_only_a_scheme_a_host_and_a_port() {
+        let with = |url: &str| {
+            AgentSettings {
+                ollama_url: url.into(),
+                ..AgentSettings::default()
+            }
+            .validated()
+        };
+        // Сохраняется как `http(s)://хост[:порт]`: без `/` в конце, хост строчными, порт по умолчанию не пишется.
+        for (url, saved) in [
+            ("http://127.0.0.1:11434", "http://127.0.0.1:11434"),
+            ("http://127.0.0.1:11434/", "http://127.0.0.1:11434"),
+            ("HTTP://LocalHost:11434", "http://localhost:11434"),
+            ("http://[::1]:11434", "http://[::1]:11434"),
+            ("http://10.0.0.5:11434", "http://10.0.0.5:11434"),
+            ("https://ollama.example.com", "https://ollama.example.com"),
+            (
+                "https://ollama.example.com:443/",
+                "https://ollama.example.com",
+            ),
+        ] {
+            assert_eq!(with(url).unwrap().ollama_url, saved, "{url}");
+        }
+        // Путь, query, фрагмент, логин и пароль, управляющие символы — нет: с путём запросы к Ollama и
+        // `ANTHROPIC_BASE_URL` собирались бы неверно, а учётные данные ушли бы в `settings.json` и окружение агента.
+        for url in [
+            "http://127.0.0.1:11434/v1",
+            "http://127.0.0.1:11434/api/",
+            "http://127.0.0.1:11434?x=1",
+            "http://127.0.0.1:11434/?",
+            "http://127.0.0.1:11434#top",
+            "http://user@127.0.0.1:11434",
+            "http://user:secret@127.0.0.1:11434",
+            "http://:secret@127.0.0.1:11434",
+            "http://127.0.0.1:11\n434",
+            "http://127.0.0.1:11434\t/",
+            "http://127.0.0.1:99999",
+            "file:///tmp/ollama",
+        ] {
+            assert_eq!(
+                with(url).unwrap_err().key,
+                "errors.agent.badOllamaUrl",
+                "{url:?}"
+            );
+        }
+        let long = format!("http://{}.example.com", "a".repeat(250));
+        assert_eq!(
+            with(&long).unwrap_err().key,
+            "errors.agent.badOllamaUrl",
+            "длиннее 256 символов"
+        );
     }
 
     #[test]
