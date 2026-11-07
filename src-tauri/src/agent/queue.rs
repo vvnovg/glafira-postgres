@@ -186,6 +186,16 @@ pub(crate) enum Stopped {
     Shutdown,
 }
 
+/// Строка журнала запуска, остановленного до запуска программы (`process::write_early_log`).
+fn early_end_line(why: Stopped) -> &'static str {
+    match why {
+        Stopped::Stop => "the run was stopped before the program started",
+        Stopped::RequestCancelled => "the request was cancelled before the program started",
+        Stopped::Shutdown => "Glafira closed before the program started",
+        Stopped::Timeout => "the run time limit expired before the program started",
+    }
+}
+
 /// Что известно о конце запуска (`outcome`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct EndFacts {
@@ -643,6 +653,11 @@ impl AgentQueue {
         }
         if let Ok(why) = stop_rx.try_recv() {
             self.cleanup(&id);
+            // Запись уже `starting` (`startedAtMs`), а журнал создаёт запуск программы: строка о том, что случилось.
+            let log = runs::log_path(&self.runs_dir, &id);
+            if let Err(e) = process::write_early_log(&log, early_end_line(why)) {
+                tracing::warn!(run = %id, "run log not written: {e}");
+            }
             let (status, reason) = outcome(&EndFacts {
                 stopped: Some(why),
                 ..EndFacts::default()
@@ -3165,6 +3180,88 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o700);
         }
+    }
+
+    /// Предзагрузка модели, которая идёт заданное время (у настоящей Ollama — до 5 с).
+    struct SlowWarmth(Duration);
+
+    impl ModelWarmth for SlowWarmth {
+        fn before_run(&self, _model: Option<&str>) -> BoxFuture<'_, Vec<String>> {
+            Box::pin(async move {
+                tokio::time::sleep(self.0).await;
+                Vec::new()
+            })
+        }
+
+        fn after_run(&self, _model: Option<&str>) -> BoxFuture<'_, ()> {
+            Box::pin(async {})
+        }
+    }
+
+    /// Остановка, отмена запроса или выход из Glafira во время предзагрузки модели и `--version` — до запуска программы:
+    /// запись уже получила `startedAtMs` («Показать журнал»), поэтому журнал есть — одна строка о том, что случилось
+    /// (финальное ревью фронтенда, замечание 2).
+    #[tokio::test(start_paused = true)]
+    async fn a_run_ended_before_its_program_started_has_a_one_line_log() {
+        let h = harness_with(Arc::new(SlowWarmth(Duration::from_secs(5))), |_| {});
+        let check = |id: &str, status: RunStatus, line: &str| {
+            let r = h.q().get(id).unwrap();
+            assert_eq!(r.status, status, "{r:?}");
+            assert!(r.started_at_ms.is_some(), "{r:?}");
+            let log = h.q().read_log(id).expect("журнал есть");
+            assert_eq!(log, format!("# {line}\n"));
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(h.q().log_file(id).unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o777, 0o600);
+            }
+        };
+        let starting = |r: &AgentRun| r.status == RunStatus::Starting;
+
+        let a = h.q().start(&request(&h)).unwrap();
+        until(&h, &a.id, starting).await;
+        h.q().stop(&a.id).unwrap();
+        until(&h, &a.id, done).await;
+        check(
+            &a.id,
+            RunStatus::Cancelled,
+            "the run was stopped before the program started",
+        );
+
+        let rb = request(&h);
+        let b = h.q().start(&rb).unwrap();
+        until(&h, &b.id, starting).await;
+        h.q().request_cancelled(&rb);
+        until(&h, &b.id, done).await;
+        check(
+            &b.id,
+            RunStatus::Cancelled,
+            "the request was cancelled before the program started",
+        );
+
+        let c = h.q().start(&request(&h)).unwrap();
+        until(&h, &c.id, starting).await;
+        h.q().shutdown().await;
+        check(
+            &c.id,
+            RunStatus::Interrupted,
+            "Glafira closed before the program started",
+        );
+        assert!(h.fake.spawned().is_empty(), "программа не запускалась");
+        // Ошибка до `starting` (здесь — MCP выключен) журнала не получает: и `startedAtMs` у неё нет.
+        let h = harness();
+        h.st.mcp.force_server(McpServerState::Stopped);
+        let d = h.q().start(&request(&h)).unwrap();
+        let d = until(&h, &d.id, done).await;
+        assert_eq!(d.started_at_ms, None, "{d:?}");
+        assert_eq!(
+            h.q().read_log(&d.id).unwrap_err().key,
+            log_missing(&d.id).key
+        );
     }
 
     #[tokio::test(start_paused = true)]
