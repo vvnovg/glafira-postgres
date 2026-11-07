@@ -12,9 +12,10 @@ export function openContextHelp(): void {
   const active = tabs.find((t) => t.id === activeId) ?? null;
   // На самой справке вызов не сбрасывает открытую главу.
   if (active?.kind === "help") return activate(active.id);
-  // Экран может уточнить главу через useHelpChapter.
-  const override = active ? useHelpContext.getState().byTab[active.id] : undefined;
-  open({ kind: "help", chapter: override ?? helpChapterFor(active), anchor: override ? undefined : helpAnchorFor(active) });
+  // Экран может уточнить главу (и её раздел) через useHelpChapter; якорь таблицы к уточнённой главе не относится.
+  const ctx = useHelpContext.getState();
+  const override = active ? ctx.byTab[active.id] : undefined;
+  open({ kind: "help", chapter: override ?? helpChapterFor(active), anchor: override && active ? ctx.anchorByTab[active.id] : helpAnchorFor(active) });
 }
 
 /** F1 в любом месте окна — вкладка «Справка» с главой текущего экрана. */

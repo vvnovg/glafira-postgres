@@ -1,8 +1,22 @@
-import type { AgentStatus, McpAuditEntry, McpClientConfigs, McpStatus } from "../api/types";
+import type { AgentSettings, AgentStatus, McpAuditEntry, McpClientConfigs, McpStatus } from "../api/types";
 
 /** Фоновый ассистент в статусе MCP: политика разрешает, режим выключен, агент не настроен, очереди нет. */
 export function agentStatus(patch: Partial<AgentStatus> = {}): AgentStatus {
   return { policyEnabled: true, enabled: false, configured: false, preset: "qwen", running: null, queued: 0, ...patch };
+}
+
+/** Настройки фонового ассистента по умолчанию (спец. P4c §8.3): выключен, Qwen Code без пути и модели. */
+export function agentSettings(patch: Partial<AgentSettings> = {}): AgentSettings {
+  return {
+    enabled: false,
+    preset: "qwen",
+    qwen: { path: "", model: "" },
+    claude: { path: "", model: "", viaOllama: false, budgetUsd: 1 },
+    timeoutMin: 15,
+    keepWarmMin: 10,
+    ollamaUrl: "http://127.0.0.1:11434",
+    ...patch,
+  };
 }
 
 /** Статус MCP для тестов: сервер работает, политика разрешает, открыто два подключения, сессий и запросов нет. */

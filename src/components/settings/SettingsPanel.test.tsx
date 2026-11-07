@@ -1,11 +1,12 @@
-import { act, fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LanguageSettings } from "../../api/types";
 import { i18n } from "../../i18n";
+import { openContextHelp } from "../../lib/useHelpShortcut";
 import { useHelpContext } from "../../state/helpContext";
 import { useWorkspace } from "../../state/workspace";
-import { MCP_CONFIGS, mcpStatus } from "../../test/mcp";
+import { agentSettings, MCP_CONFIGS, mcpStatus } from "../../test/mcp";
 import { renderWithClient } from "../../test/render";
 
 const base: LanguageSettings = {
@@ -30,6 +31,16 @@ vi.mock("../../api/client", async (importOriginal) => {
       getMcpClientConfigs: vi.fn(),
       revealMcpAudit: vi.fn(),
       listConnections: vi.fn(),
+      getAgentSettings: vi.fn(),
+      setAgentSettings: vi.fn(),
+      detectAgentCli: vi.fn(),
+      listAgentModels: vi.fn(),
+      checkAgent: vi.fn(),
+      unloadAgentModel: vi.fn(),
+      listAgentRuns: vi.fn(),
+      stopAgentRun: vi.fn(),
+      readAgentLog: vi.fn(),
+      revealAgentLog: vi.fn(),
     },
   };
 });
@@ -45,6 +56,9 @@ beforeEach(() => {
   vi.mocked(api.listConnections).mockResolvedValue([]);
   useWorkspace.setState({ tabs: [], activeId: null });
   vi.mocked(api.getUiSettings).mockResolvedValue({ showSystemObjects: false });
+  vi.mocked(api.getAgentSettings).mockResolvedValue(agentSettings());
+  vi.mocked(api.listAgentModels).mockResolvedValue({ ids: [], default: null, source: "none" });
+  vi.mocked(api.listAgentRuns).mockResolvedValue([]);
 });
 
 // Выбор «en» в тесте переключает глобальный язык; сброс идёт в act, пока компоненты ещё
@@ -111,14 +125,56 @@ describe("SettingsPanel", () => {
     await waitFor(() => expect(useHelpContext.getState().byTab.settings).toBe("llm-mcp"));
   });
 
-  it("открытие с подразделом «Фоновый ассистент» (индикатор во время запуска): раздел MCP и его глава F1", async () => {
+  it("открытие с подразделом «Фоновый ассистент» (индикатор во время запуска): прокрутка к подразделу, F1 — раздел #background", async () => {
     const scroll = vi.fn();
     Element.prototype.scrollIntoView = scroll;
     vi.mocked(api.getLanguageSettings).mockResolvedValue(base);
     useWorkspace.setState({ tabs: [{ kind: "settings", section: "agent", id: "settings" }], activeId: "settings" });
     renderWithClient(<SettingsPanel />);
+    const agent = await screen.findByRole("region", { name: "Фоновый ассистент" });
     await waitFor(() => expect(scroll).toHaveBeenCalledTimes(1));
+    expect(scroll.mock.contexts[0]).toBe(agent);
     expect(useHelpContext.getState().byTab.settings).toBe("llm-mcp");
+    expect(useHelpContext.getState().anchorByTab.settings).toBe("background");
+  });
+
+  it("F1 в подразделе «Фоновый ассистент» — глава «LLM-ассистенты (MCP)», раздел #background; в остальном разделе — без раздела", async () => {
+    vi.mocked(api.getLanguageSettings).mockResolvedValue(base);
+    renderWithClient(<SettingsPanel />);
+    const agentToggle = await screen.findByRole("checkbox", { name: "Запускать ассистента в фоне" });
+    act(() => agentToggle.focus());
+    expect(useHelpContext.getState().byTab.settings).toBe("llm-mcp");
+    expect(useHelpContext.getState().anchorByTab.settings).toBe("background");
+    act(() => screen.getByRole("checkbox", { name: "Разрешить MCP-сервер" }).focus());
+    expect(useHelpContext.getState().byTab.settings).toBe("llm-mcp");
+    expect(useHelpContext.getState().anchorByTab.settings).toBeUndefined();
+    act(() => screen.getByLabelText("Язык интерфейса").focus());
+    expect(useHelpContext.getState().byTab.settings).toBe("getting-started");
+    expect(useHelpContext.getState().anchorByTab.settings).toBeUndefined();
+  });
+
+  it("щелчок по тексту подраздела «Фоновый ассистент» без фокуса (WKWebView) — F1 открывает раздел #background", async () => {
+    vi.mocked(api.getLanguageSettings).mockResolvedValue(base);
+    useWorkspace.setState({ tabs: [{ kind: "settings", id: "settings" }], activeId: "settings" });
+    renderWithClient(<SettingsPanel />);
+    const agent = await screen.findByRole("region", { name: "Фоновый ассистент" });
+    const help = () => useWorkspace.getState().tabs.find((x) => x.id === "help");
+    fireEvent.pointerDown(within(agent).getByText(/уходит модели агента без маскирования/));
+    expect(document.activeElement).toBe(document.body);
+    act(() => openContextHelp());
+    expect(help()).toMatchObject({ kind: "help", chapter: "llm-mcp", anchor: "background" });
+    // Щелчок в разделе MCP вне подраздела — глава без раздела.
+    act(() => useWorkspace.getState().activate("settings"));
+    fireEvent.pointerDown(screen.getByRole("heading", { level: 3, name: "LLM-ассистенты (MCP)" }));
+    act(() => openContextHelp());
+    expect(help()).toMatchObject({ kind: "help", chapter: "llm-mcp" });
+    expect((help() as { anchor?: string }).anchor).toBeUndefined();
+    // И в разделе «Язык» — «Начало работы».
+    act(() => useWorkspace.getState().activate("settings"));
+    fireEvent.pointerDown(screen.getByRole("heading", { level: 3, name: "Язык" }));
+    act(() => openContextHelp());
+    expect(help()).toMatchObject({ kind: "help", chapter: "getting-started" });
+    expect((help() as { anchor?: string }).anchor).toBeUndefined();
   });
 
   it("выбор языка; доступны все языки", async () => {

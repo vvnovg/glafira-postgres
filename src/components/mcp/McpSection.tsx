@@ -9,6 +9,7 @@ import { ErrorBanner } from "../common/ErrorBanner";
 import { Hint } from "../common/Hint";
 import { ApprovedClients } from "./ApprovedClients";
 import { ClientSnippets } from "./ClientSnippets";
+import { AgentSection } from "./agent/AgentSection";
 import { McpAudit } from "./McpAudit";
 import { consoleTarget } from "./auditOpen";
 import { McpSessions } from "./McpSessions";
@@ -29,8 +30,9 @@ function stateText(s: McpStatus, t: TFunction): string {
 
 /**
  * «Настройки» → «LLM-ассистенты (MCP)» (спец. P4 §11): выключатель с пометкой политики, статус, счётчики открытых
- * подключений, фрагменты для клиентов, активные сессии, подтверждённые клиенты, журнал. Выключатель включён, пока
- * настройка включена: сервер работает, обслуживается другим окном или упал при запуске (`server` ≠ `stopped`).
+ * подключений, фрагменты для клиентов, подраздел «Фоновый ассистент» (спец. P4c §8.3), активные сессии, подтверждённые
+ * клиенты, журнал. Выключатель включён, пока настройка включена: сервер работает, обслуживается другим окном или упал при
+ * запуске (`server` ≠ `stopped`).
  */
 /** «Открыть в консоли EXPLAIN» из журнала (спец. P4 §11): консоль подключения с SQL, базой и узлом вызова, без запуска. */
 function openInConsole(e: McpAuditEntry): void {
@@ -89,6 +91,9 @@ export function McpSection() {
               <ClientSnippets />
             </>
           )}
+          {/* Подраздел виден и под запретом политики: выключатель там неактивен с пометкой (спец. P4c §8.3). */}
+          {/* Без agent в статусе (бэкенд до P4c) подраздела нет: ему нечем работать. */}
+          {s.agent && <AgentSection status={s} />}
           <McpSessions status={s} />
           <ApprovedClients status={s} />
           <McpAudit status={s} onOpenInConsole={openInConsole} />

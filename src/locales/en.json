@@ -618,7 +618,9 @@
           "serverStarted": "Server started",
           "serverStopped": "Server stopped",
           "requestCreated": "Request sent to the LLM",
-          "proposalAnswered": "Proposal answered"
+          "proposalAnswered": "Proposal answered",
+          "agentRunStarted": "Background run started",
+          "agentRunFinished": "Background run finished"
         },
         "openInConsole": "Open in EXPLAIN console",
         "openArgsCut": "Unavailable: the call arguments are truncated in the journal",
@@ -626,6 +628,85 @@
         "openNoConnection": "Unavailable: the connection no longer exists",
         "openOff": "Unavailable: LLM access is off for the connection",
         "openConnectionsFailed": "Unavailable: the connection list could not be read"
+      },
+      "agent": {
+        "title": "Background assistant",
+        "intro": "The “Send to LLM assistant” button can run Qwen Code or Claude Code by itself, without a window: the agent takes the request over MCP, sends proposals to the panel and exits.",
+        "note": "The request snapshot (SQL, plan, statistics, DDL) goes to the agent's model without masking. With a cloud model every run is a paid call.",
+        "enable": "Run the assistant in the background",
+        "serverOff": "Turn on the MCP server above: the background assistant works through it",
+        "otherInstance": "The MCP server runs in another Glafira window: that window runs the background assistant",
+        "notConfigured": "The agent is not set up: set the program and save. Until then the button copies a line for the chat",
+        "notConfiguredModel": "The agent is not set up: Claude Code via Ollama needs a model, choose it and save. Until then the button copies a line for the chat",
+        "preset": "Agent",
+        "path": "Program",
+        "find": "Find",
+        "finding": "Searching…",
+        "version": "Version {{version}}",
+        "belowMinimum": "Version {{version}} is below the minimum {{min}}: the launch flags may not work",
+        "notFound": "Program not found: enter the path manually",
+        "detectError": "Search failed: {{error}}",
+        "model": "Model",
+        "modelDefault": "Default: {{model}}",
+        "modelClientDefault": "Empty: the client's default model",
+        "modelOllama": "Required: an Ollama model",
+        "modelsFailed": "The model list could not be read: enter the name manually",
+        "viaOllama": "Via Ollama",
+        "budget": "Spending limit per run, $",
+        "budgetEmpty": "Empty: no limit",
+        "timeout": "Run time limit, min",
+        "keepWarm": "Keep the model in memory after a run, min",
+        "ollamaUrl": "Ollama address",
+        "remoteOllama": "Not a local address: Glafira does not manage the model (localhost, 127.0.0.1, ::1 only)",
+        "unload": "Unload the model",
+        "unloaded": "The model is unloaded",
+        "saved": "Saved",
+        "check": "Check",
+        "checking": "Checking…",
+        "checkOk": "Works: {{agent}}, {{duration}}",
+        "checkFailed": "Does not work: {{reason}}",
+        "checkNeedsPath": "Set the program and save to check",
+        "checkNeedsModel": "Choose the model and save to check",
+        "checkDirty": "Save the changes to check",
+        "checkLog": "Show log of the check",
+        "errors": {
+          "range": "A whole number from {{min}} to {{max}}",
+          "budget": "A number from {{min}} to {{max}}, or empty",
+          "model": "Latin letters, digits and . _ : / @ + -, up to 128 characters",
+          "path": "An absolute path is required",
+          "url": "An address like http://127.0.0.1:11434",
+          "hidden": "There is an error in the {{agent}} settings: select that agent and fix it"
+        },
+        "runs": {
+          "title": "Runs",
+          "none": "No runs yet",
+          "colTime": "Time",
+          "colConnection": "Connection",
+          "colRequest": "Request",
+          "colAgent": "Agent and model",
+          "colResult": "Result",
+          "colDuration": "Duration",
+          "colCalls": "Calls",
+          "colCost": "Cost",
+          "colActions": "Actions",
+          "check": "Check",
+          "summaryAria": "Assistant's answer, run {{id}}",
+          "logAria": "Show log of run {{id}}",
+          "stop": "Stop",
+          "stopAria": "Stop run {{id}}",
+          "result": {
+            "queued": "queued",
+            "starting": "starting",
+            "running": "running",
+            "proposals": "proposals: {{n}}",
+            "none": "no proposals",
+            "checkOk": "check passed",
+            "failed": "error: {{reason}}",
+            "cancelled": "cancelled",
+            "interrupted": "interrupted",
+            "skipped": "skipped"
+          }
+        }
       }
     }
   },
@@ -2292,7 +2373,20 @@
       "queries": "Top queries from pg_stat_statements: since the last reset or over the last 5, 15 or 60 minutes (the sampler reads the statistics once a minute while the tab is open). Click a row for the query card."
     },
     "settings": {
-      "mcpEnable": "Glafira listens on a local socket (a named pipe on Windows) available only to your user. A client runs <code>glafira-pg mcp</code>, which connects to it. Off by default."
+      "mcpEnable": "Glafira listens on a local socket (a named pipe on Windows) available only to your user. A client runs <code>glafira-pg mcp</code>, which connects to it. Off by default.",
+      "mcp": {
+        "agent": {
+          "enable": "The “Send to LLM assistant” button queues the request in Glafira, and Glafira runs the agent without a window, one request at a time. Off by default.",
+          "path": "An absolute path to the program. “Find” asks your login shell (<code>command -v</code>) and checks the usual install locations.",
+          "model": "Qwen Code: models from ~/.qwen/settings.json; Claude Code via Ollama: Ollama models, a model is required. Empty: the client's default model, as in the chat.",
+          "viaOllama": "Claude Code talks to Ollama over its Anthropic-compatible API at the Ollama address. Without Ollama it uses your Claude Code subscription or key.",
+          "budget": "Passed to Claude Code as <code>--max-budget-usd</code>. Empty: no limit.",
+          "timeout": "From 2 to 60 minutes from the start of a run; then Glafira stops the agent.",
+          "keepWarm": "Glafira keeps the local Ollama model loaded this many minutes after a run, so the next request starts faster. 0: do not manage.",
+          "ollamaUrl": "Only localhost, 127.0.0.1 or ::1: Glafira does not manage a remote Ollama.",
+          "check": "A short run without a connection: the agent calls list_connections and answers OK. Checks the program, the model and the MCP config."
+        }
+      }
     },
     "llmAssist": {
       "ask": "Creates a request an MCP assistant fetches with the snapshot (query, statistics, plan, DDL); it can check plans and indexes and returns proposals to “LLM proposals”. Not masked, even at Diagnostics.",

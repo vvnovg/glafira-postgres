@@ -600,3 +600,21 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .agent-run-summary { margin: 2px 0; max-width: 80ch; }
 .agent-log-dialog { width: min(900px, 100%); }
 .agent-log { max-height: 60vh; overflow: auto; margin: 0; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-alt); white-space: pre-wrap; overflow-wrap: anywhere; }
+/* «Фоновый ассистент» в «Настройках» (P4c): поле с кнопкой рядом, под полем — ошибка и пояснения. Подпись строки — по верху
+   поля (высота строки поля — 24px), чтобы не съезжала, когда под полем появляется текст. Числа — узкими полями. Ошибки полей —
+   --danger-text, как у других ошибок; путь, модель и адрес — моноширинным шрифтом (общее правило полей задаёт font: inherit). */
+.agent-section .form { align-items: start; margin: 8px 0; }
+.agent-section .form > .field-label, .agent-check, .agent-presets { min-height: 24px; }
+.agent-section h5 { margin: 12px 0 4px; font-size: 1em; }
+.agent-control { display: flex; flex-direction: column; align-items: stretch; min-width: 0; }
+.agent-field { display: flex; gap: 6px; align-items: center; min-width: 0; }
+.agent-field > input:not([type="checkbox"]) { flex: 1; min-width: 0; }
+.agent-field > input.agent-num { flex: 0 1 8em; }
+.agent-field > input.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.agent-check { display: flex; align-items: center; }
+.agent-presets { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+.agent-error { margin: 0; color: var(--danger-text); overflow-wrap: anywhere; }
+.agent-lines p, .agent-note { margin: 0; overflow-wrap: anywhere; }
+.agent-control > .agent-error, .agent-control > .agent-note, .agent-control .agent-lines p, .agent-control > .error-banner { margin-top: 4px; }
+.agent-actions { margin: 4px 0; }
+.agent-run-when span { white-space: nowrap; }

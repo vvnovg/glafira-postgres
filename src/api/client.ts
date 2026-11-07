@@ -2,7 +2,11 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
   ActionRecord,
   ActionResult,
+  AgentDetected,
+  AgentModels,
+  AgentPreset,
   AgentRun,
+  AgentSettings,
   AppError,
   AppInfo,
   Confirmation,
@@ -213,6 +217,18 @@ export const api = {
   readAgentLog: (runId: string) => call<string>("read_agent_log", { runId }),
   /** Показать файл журнала запуска в файловом менеджере. */
   revealAgentLog: (runId: string) => call<void>("reveal_agent_log", { runId }),
+  /** Настройки подраздела «Фоновый ассистент» (`settings.json` → `mcp.agent`). */
+  getAgentSettings: () => call<AgentSettings>("get_agent_settings"),
+  /** Сохраняет настройки целиком; ответ — сохранённые (проверенные Rust) настройки. Политика запрещает только включение. */
+  setAgentSettings: (settings: AgentSettings) => call<AgentSettings>("set_agent_settings", { settings }),
+  /** «Найти»: путь и версия программы пресета (логин-оболочка, PATH, известные места). */
+  detectAgentCli: (preset: AgentPreset) => call<AgentDetected>("detect_agent_cli", { preset }),
+  /** Модели для поля «Модель»; список зависит от сохранённых «Через Ollama» и адреса Ollama. */
+  listAgentModels: (preset: AgentPreset) => call<AgentModels>("list_agent_models", { preset }),
+  /** «Проверить»: короткий запуск без подключения; ответ — запуск с kind check, итог приходит событием запусков. */
+  checkAgent: () => call<AgentRun>("check_agent"),
+  /** «Выгрузить модель»: keep_alive 0 у модели фонового ассистента в локальной Ollama. */
+  unloadAgentModel: () => call<void>("unload_agent_model"),
 
   /** Снимок pgss узла на диск пользователя; второй снимок узла в ту же секунду — `errors.snapshots.exists`. */
   snapshotTake: (id: string, member: string) => call<SnapshotInfo>("snapshot_take", { id, member }),

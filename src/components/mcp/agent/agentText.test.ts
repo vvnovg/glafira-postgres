@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { i18n } from "../../../i18n";
 import { agentRun } from "../../../test/llm";
-import { agentLabel, failReasonText, warningText } from "./agentText";
+import { agentLabel, agentVersionLabel, checkResultText, failReasonText, runResultText, warningText } from "./agentText";
 
 const t = i18n.t.bind(i18n);
 
@@ -54,5 +54,27 @@ describe("agentText", () => {
     );
     expect(warningText("unsafe no-init", en)).toBe("the agent did not report its tools; the run was stopped");
     expect(warningText("evict a b", en)).toBe("Ollama may unload a to load b");
+  });
+
+  it("итог запуска в списке: предложения, без предложений, ошибка, отмена, прерван, проверка", () => {
+    expect(runResultText(agentRun({ status: "done", proposalIds: ["p1", "p2"] }), t)).toBe("предложений: 2");
+    expect(runResultText(agentRun({ status: "done" }), t)).toBe("без предложений");
+    expect(runResultText(agentRun({ status: "failed", reason: "notConnected" }), t)).toBe("ошибка: агент не подключился к Glafira");
+    expect(runResultText(agentRun({ status: "cancelled" }), t)).toBe("отменён");
+    expect(runResultText(agentRun({ status: "interrupted" }), t)).toBe("прерван");
+    expect(runResultText(agentRun({ status: "skipped" }), t)).toBe("пропущен");
+    expect(runResultText(agentRun({ status: "queued" }), t)).toBe("в очереди");
+    expect(runResultText(agentRun({ status: "starting" }), t)).toBe("запускается");
+    expect(runResultText(agentRun({ status: "running" }), t)).toBe("работает");
+    expect(runResultText(agentRun({ kind: "check", status: "done" }), t)).toBe("проверка пройдена");
+  });
+
+  it("итог «Проверить»: «Работает: агент версия, модель, длительность» или «Не работает: причина»", () => {
+    expect(agentVersionLabel(agentRun())).toBe("Qwen Code 0.26.5, qwen3.6-64k:35b-a3b");
+    expect(agentVersionLabel(agentRun({ preset: "claude", cliVersion: null, model: null }))).toBe("Claude Code");
+    expect(checkResultText(agentRun({ kind: "check", status: "done", startedAtMs: 1_000, endedAtMs: 24_000 }), t)).toBe("Работает: Qwen Code 0.26.5, qwen3.6-64k:35b-a3b, 23 с");
+    expect(checkResultText(agentRun({ kind: "check", status: "failed", reason: "cliNotFound" }), t)).toBe("Не работает: программа не найдена: /opt/homebrew/bin/qwen");
+    expect(checkResultText(agentRun({ kind: "check", status: "running" }), t)).toBe("Проверка…");
+    expect(checkResultText(agentRun({ kind: "check", status: "interrupted" }), t)).toBe("Не работает: прерван");
   });
 });

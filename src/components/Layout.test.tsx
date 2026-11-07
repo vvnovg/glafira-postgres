@@ -42,7 +42,7 @@ const hex = (c: string) => {
 describe("Layout tabs", () => {
   beforeEach(() => {
     useTabMarks.setState({ marks: {} });
-    useHelpContext.setState({ byTab: {} });
+    useHelpContext.setState({ byTab: {}, anchorByTab: {} });
     useWorkspace.setState({
       tabs: [
         { kind: "settings", id: "settings" },
@@ -252,6 +252,16 @@ describe("Layout tabs", () => {
     expect(help && "anchor" in help ? help.anchor : undefined).toBeUndefined();
   });
 
+  it("F1: раздел главы, заданный экраном вместе с главой, передаётся", () => {
+    useWorkspace.setState({ tabs: [{ kind: "settings", id: "settings" }], activeId: "settings" });
+    useHelpContext.setState({ byTab: { settings: "llm-mcp" }, anchorByTab: { settings: "background" } });
+    renderWithClient(<Layout />);
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "F1", bubbles: true, cancelable: true }));
+    });
+    expect(useWorkspace.getState().tabs.find((t) => t.id === "help")).toMatchObject({ kind: "help", chapter: "llm-mcp", anchor: "background" });
+  });
+
   it("opens the guide from the sidebar", () => {
     renderWithClient(<Layout />);
     fireEvent.click(screen.getByRole("button", { name: "Справка" }));
@@ -272,7 +282,7 @@ describe("Layout: переполнение строки вкладок", () => {
     }));
 
   beforeEach(() => {
-    useHelpContext.setState({ byTab: {} });
+    useHelpContext.setState({ byTab: {}, anchorByTab: {} });
     useWorkspace.setState({
       tabs: [
         { kind: "settings", id: "settings" },

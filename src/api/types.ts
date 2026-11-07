@@ -526,6 +526,8 @@ export interface PolicyStatus {
   language: string | null;
   /** false — MCP-шлюз запрещён администратором. */
   mcpEnabled: boolean;
+  /** false — фоновый ассистент запрещён администратором (спец. P4c §9.1); `mcpEnabled = false` запрещает и его. */
+  mcpAgentEnabled: boolean;
   /** Потолок уровня доступа LLM к подключениям. */
   mcpMaxAccess: McpMaxAccess;
   errors: LocalizedText[];
@@ -1217,6 +1219,48 @@ export interface AgentStatus {
   running?: { runId: string; requestId?: string | null } | null;
   /** Запусков в очереди (все подключения). */
   queued: number;
+}
+/** Qwen Code в `settings.json` → `mcp.agent.qwen`: пустая модель — `model.name` из `~/.qwen/settings.json`. */
+export interface QwenAgentSettings {
+  path: string;
+  model: string;
+}
+/** Claude Code: через Ollama модель обязательна; `budgetUsd` — предел расходов на запуск без Ollama (null — без предела). */
+export interface ClaudeAgentSettings {
+  path: string;
+  model: string;
+  viaOllama: boolean;
+  budgetUsd: number | null;
+}
+/** «Фоновый ассистент» (`settings.json` → `mcp.agent`, спец. P4c §8.3, `agent::settings::AgentSettings`). Секретов в нём нет. */
+export interface AgentSettings {
+  /** «Запускать ассистента в фоне». */
+  enabled: boolean;
+  preset: AgentPreset;
+  qwen: QwenAgentSettings;
+  claude: ClaudeAgentSettings;
+  /** Срок запуска, мин: 2–60. */
+  timeoutMin: number;
+  /** Держать модель Ollama в памяти после запуска, мин: 0–120 (0 — не управлять). */
+  keepWarmMin: number;
+  ollamaUrl: string;
+}
+/** Итог «Найти» (`agent::detect::Detected`): путь и версия программы пресета. */
+export interface AgentDetected {
+  /** Найденный абсолютный путь; нет — не нашлась. */
+  path?: string | null;
+  version?: string | null;
+  /** Версия ниже минимальной пресета (`agent::presets::min_version`). */
+  belowMinimum: boolean;
+  /** Почему не нашлась или версию не узнать (технический английский текст). */
+  error?: string | null;
+}
+/** Модели для поля «Модель» (`agent::models::AgentModels`): `source` — откуда список (`none` — только свободный ввод). */
+export interface AgentModels {
+  ids: string[];
+  /** Модель по умолчанию (у Qwen Code — `model.name` его настроек). */
+  default?: string | null;
+  source: "qwen" | "ollama" | "none";
 }
 /** Запись журнала для EXPLAIN ANALYZE яруса записи (`ActionRecord.explain`). */
 export interface ExplainRecord {

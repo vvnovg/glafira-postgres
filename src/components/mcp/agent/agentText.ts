@@ -1,6 +1,7 @@
 import type { TFunction } from "i18next";
 import type { AgentRun, FailReason } from "../../../api/types";
-import { PRESET_NAMES } from "../../../lib/useAgentRuns";
+import { formatDuration } from "../../../lib/format";
+import { isActive, PRESET_NAMES } from "../../../lib/useAgentRuns";
 
 /** Причины ошибки запуска без параметров — литералами (правило словарей); варианты с параметром — в `failReasonText`. */
 const REASON_KEYS: Record<FailReason, string> = {
@@ -80,4 +81,45 @@ export function warningText(w: string, t: TFunction): string {
   if (m) return t("llmAssist.agent.evict", { other: m[1].split(",").join(", "), model: m[2] });
   const u = unsafeWarning(w);
   return u !== null ? unsafeText(u, t) : w;
+}
+
+/** «Qwen Code 0.26.5, qwen3.6-64k:35b-a3b» — агент с версией программы и модель запуска. */
+export function agentVersionLabel(run: AgentRun): string {
+  const name = run.cliVersion ? `${PRESET_NAMES[run.preset]} ${run.cliVersion}` : PRESET_NAMES[run.preset];
+  return run.model ? `${name}, ${run.model}` : name;
+}
+
+/** Длительность запуска в секундах (от старта до конца) или null. */
+export function runSeconds(run: AgentRun): number | null {
+  return run.startedAtMs != null && run.endedAtMs != null ? Math.max(0, Math.round((run.endedAtMs - run.startedAtMs) / 1000)) : null;
+}
+
+/** Итог запуска в «Запусках» (спец. P4c §8.3): предложений: N / без предложений / ошибка / отменён / прерван. */
+export function runResultText(run: AgentRun, t: TFunction): string {
+  switch (run.status) {
+    case "queued":
+      return t("settings.mcp.agent.runs.result.queued");
+    case "starting":
+      return t("settings.mcp.agent.runs.result.starting");
+    case "running":
+      return t("settings.mcp.agent.runs.result.running");
+    case "done":
+      if (run.kind === "check") return t("settings.mcp.agent.runs.result.checkOk");
+      return run.proposalIds.length > 0 ? t("settings.mcp.agent.runs.result.proposals", { n: run.proposalIds.length }) : t("settings.mcp.agent.runs.result.none");
+    case "failed":
+      return t("settings.mcp.agent.runs.result.failed", { reason: failReasonText(run, t) });
+    case "cancelled":
+      return t("settings.mcp.agent.runs.result.cancelled");
+    case "interrupted":
+      return t("settings.mcp.agent.runs.result.interrupted");
+    case "skipped":
+      return t("settings.mcp.agent.runs.result.skipped");
+  }
+}
+
+/** Итог «Проверить» (спец. P4c §8.3): «Работает: Qwen Code 0.26.5, модель, 23 с» или «Не работает: причина». */
+export function checkResultText(run: AgentRun, t: TFunction): string {
+  if (isActive(run)) return t("settings.mcp.agent.checking");
+  if (run.status === "done") return t("settings.mcp.agent.checkOk", { agent: agentVersionLabel(run), duration: formatDuration(runSeconds(run)) });
+  return t("settings.mcp.agent.checkFailed", { reason: run.status === "failed" ? failReasonText(run, t) : runResultText(run, t) });
 }

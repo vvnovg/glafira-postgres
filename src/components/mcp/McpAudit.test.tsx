@@ -77,6 +77,21 @@ describe("McpAudit", () => {
     expect(table).not.toHaveTextContent("proposalAnswered");
   });
 
+  it("записи фонового ассистента: начало и конец запуска — подписями, а не именами из файла", async () => {
+    vi.mocked(api.getMcpAudit).mockResolvedValue([
+      { ts: 1_700_000_000_500, event: "agentRunStarted", connection: { id: "c1", name: "perf" } },
+      { ts: 1_700_000_000_600, event: "agentRunFinished", connection: { id: "c1", name: "perf" }, calls: 7, ms: 83_000 },
+    ]);
+    renderWithClient(<McpAudit status={mcpStatus()} />);
+    const table = await screen.findByRole("table", { name: "Журнал" });
+    const rows = within(table).getAllByRole("row").slice(1);
+    expect(rows[0]).toHaveTextContent("Фоновый запуск начат");
+    expect(rows[0]).toHaveTextContent("perf");
+    expect(rows[1]).toHaveTextContent("Фоновый запуск завершён");
+    expect(table).not.toHaveTextContent("agentRunStarted");
+    expect(table).not.toHaveTextContent("agentRunFinished");
+  });
+
   it("пустой журнал, «Обновить» и «Показать файл»", async () => {
     vi.mocked(api.getMcpAudit).mockResolvedValue([]);
     vi.mocked(api.revealMcpAudit).mockResolvedValue(undefined);

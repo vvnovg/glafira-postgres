@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useWorkspace } from "../../state/workspace";
 import { connection } from "../../test/fixtures";
-import { agentStatus, explainCall, MCP_CONFIGS, mcpStatus } from "../../test/mcp";
+import { agentSettings, agentStatus, explainCall, MCP_CONFIGS, mcpStatus } from "../../test/mcp";
 import { renderWithClient } from "../../test/render";
 
 vi.mock("../../api/client", async (importOriginal) => {
@@ -19,6 +19,16 @@ vi.mock("../../api/client", async (importOriginal) => {
       getMcpClientConfigs: vi.fn(),
       revealMcpAudit: vi.fn(),
       listConnections: vi.fn(),
+      getAgentSettings: vi.fn(),
+      setAgentSettings: vi.fn(),
+      detectAgentCli: vi.fn(),
+      listAgentModels: vi.fn(),
+      checkAgent: vi.fn(),
+      unloadAgentModel: vi.fn(),
+      listAgentRuns: vi.fn(),
+      stopAgentRun: vi.fn(),
+      readAgentLog: vi.fn(),
+      revealAgentLog: vi.fn(),
     },
   };
 });
@@ -33,6 +43,9 @@ beforeEach(() => {
   vi.mocked(api.getMcpClientConfigs).mockResolvedValue(MCP_CONFIGS);
   vi.mocked(api.getMcpAudit).mockResolvedValue([]);
   vi.mocked(api.listConnections).mockResolvedValue([]);
+  vi.mocked(api.getAgentSettings).mockResolvedValue(agentSettings());
+  vi.mocked(api.listAgentModels).mockResolvedValue({ ids: [], default: null, source: "none" });
+  vi.mocked(api.listAgentRuns).mockResolvedValue([]);
 });
 
 describe("McpSection", () => {
@@ -143,6 +156,34 @@ describe("McpSection", () => {
     renderWithClient(<McpSection />);
     const rows = within(await screen.findByRole("table", { name: "Активные сессии" })).getAllByRole("row");
     expect(rows[1]).toHaveTextContent(/^Фоновый ассистент\d/);
+  });
+
+  it("подраздел «Фоновый ассистент» — после «Подключить клиент», до «Активных сессий»", async () => {
+    vi.mocked(api.getMcpStatus).mockResolvedValue(mcpStatus());
+    renderWithClient(<McpSection />);
+    const connect = await screen.findByRole("heading", { level: 4, name: "Подключить клиент" });
+    const agent = await screen.findByRole("region", { name: "Фоновый ассистент" });
+    const sessions = screen.getByRole("heading", { level: 4, name: "Активные сессии" });
+    expect(connect.compareDocumentPosition(agent) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(agent.compareDocumentPosition(sessions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(await within(agent).findByRole("checkbox", { name: "Запускать ассистента в фоне" })).toBeInTheDocument();
+  });
+
+  it("политика запрещает MCP: подраздел «Фоновый ассистент» виден, его выключатель неактивен с пометкой", async () => {
+    vi.mocked(api.getMcpStatus).mockResolvedValue(mcpStatus({ server: "stopped", policyEnabled: false, agent: agentStatus({ policyEnabled: false }) }));
+    renderWithClient(<McpSection />);
+    const agent = await screen.findByRole("region", { name: "Фоновый ассистент" });
+    expect(await within(agent).findByRole("checkbox", { name: "Запускать ассистента в фоне" })).toBeDisabled();
+    expect(within(agent).getByText("Отключено вашей организацией")).toBeInTheDocument();
+  });
+
+  it("бэкенд без статуса фонового ассистента (до P4c) — раздел без подраздела, а не ошибка", async () => {
+    const { agent: _agent, ...old } = mcpStatus();
+    vi.mocked(api.getMcpStatus).mockResolvedValue(old as never);
+    renderWithClient(<McpSection />);
+    expect(await screen.findByRole("heading", { level: 4, name: "Активные сессии" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Фоновый ассистент" })).toBeNull();
+    expect(api.getAgentSettings).not.toHaveBeenCalled();
   });
 
   it("подтверждённые клиенты: «Отозвать»", async () => {

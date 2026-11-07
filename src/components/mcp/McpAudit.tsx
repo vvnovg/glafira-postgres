@@ -34,6 +34,10 @@ function whatText(e: McpAuditEntry, t: TFunction): string {
       return t("settings.mcp.audit.events.requestCreated");
     case "proposalAnswered":
       return t("settings.mcp.audit.events.proposalAnswered");
+    case "agentRunStarted":
+      return t("settings.mcp.audit.events.agentRunStarted");
+    case "agentRunFinished":
+      return t("settings.mcp.audit.events.agentRunFinished");
     default:
       return e.event;
   }

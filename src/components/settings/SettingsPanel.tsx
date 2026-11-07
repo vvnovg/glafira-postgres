@@ -9,6 +9,14 @@ import { tabId, useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { McpSection } from "../mcp/McpSection";
 
+/**
+ * Раздел главы справки по месту в разделе MCP: ближайший предок с `data-help-anchor` у цели щелчка или элемента в фокусе
+ * («Фоновый ассистент» — `background`); вне таких мест — без раздела.
+ */
+function helpAnchorOf(target: EventTarget): string | undefined {
+  return target instanceof Element ? (target.closest("[data-help-anchor]")?.getAttribute("data-help-anchor") ?? undefined) : undefined;
+}
+
 export function SettingsPanel() {
   const { t } = useTranslation();
   const qc = useQueryClient();
@@ -33,18 +41,29 @@ export function SettingsPanel() {
   // Раздел считается текущим, пока фокус в нём, после щелчка в нём или пока вкладку открыл индикатор; фокус или щелчок в
   // другом разделе это снимает. Щелчок — отдельно от фокуса: в WKWebView щелчок мышью по кнопке или флажку фокус на них не
   // переносит, а по простому тексту не переносит нигде; pointerdown на фазе захвата видит и то, и другое.
+  // F1 в подразделе «Фоновый ассистент» — раздел `background` главы `llm-mcp` (спец. P4c §8.3): метка `data-help-anchor`
+  // у цели щелчка или элемента в фокусе; во время фонового запуска индикатор открывает подраздел (`section: "agent"`), и
+  // раздел главы — тот же.
   const spec = useWorkspace((st) => st.tabs.find((x) => x.id === tabId({ kind: "settings" })));
-  // Во время фонового запуска индикатор открывает подраздел «Фоновый ассистент» (`section: "agent"`): это тот же раздел MCP.
-  const showMcp = spec?.kind === "settings" && (spec.section === "mcp" || spec.section === "agent");
+  const section = spec?.kind === "settings" ? spec.section : undefined;
+  // `section: "agent"` — подраздел того же раздела MCP.
+  const showMcp = section === "mcp" || section === "agent";
   const loaded = lang.data !== undefined;
   const mcpRef = useRef<HTMLDivElement>(null);
   const [mcpFocused, setMcpFocused] = useState(false);
+  const [helpAnchor, setHelpAnchor] = useState<string | undefined>(undefined);
   useEffect(() => {
     if (!showMcp) return;
     setMcpFocused(true);
-    if (loaded) mcpRef.current?.scrollIntoView?.({ block: "start", behavior: "smooth" });
-  }, [spec, showMcp, loaded]);
-  useHelpChapter(tabId({ kind: "settings" }), mcpFocused ? "llm-mcp" : "getting-started");
+    setHelpAnchor(section === "agent" ? "background" : undefined);
+    // Подраздел «Фоновый ассистент» прокручивает себя сам (AgentSection): он появляется позже, после своих настроек.
+    if (loaded && section === "mcp") mcpRef.current?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+  }, [spec, showMcp, section, loaded]);
+  useHelpChapter(tabId({ kind: "settings" }), mcpFocused ? "llm-mcp" : "getting-started", mcpFocused ? helpAnchor : undefined);
+  const enterMcp = (target: EventTarget) => {
+    setMcpFocused(true);
+    setHelpAnchor(helpAnchorOf(target));
+  };
 
   if (lang.error) return <ErrorBanner error={lang.error} onRetry={() => lang.refetch()} />;
   const s = lang.data;
@@ -99,7 +118,7 @@ export function SettingsPanel() {
         {ui.error && <ErrorBanner error={ui.error} onRetry={() => void ui.refetch()} />}
         {changeUi.error && <ErrorBanner error={changeUi.error} />}
       </section>
-      <div ref={mcpRef} onFocusCapture={() => setMcpFocused(true)} onPointerDownCapture={() => setMcpFocused(true)}>
+      <div ref={mcpRef} onFocusCapture={(e) => enterMcp(e.target)} onPointerDownCapture={(e) => enterMcp(e.target)}>
         <McpSection />
       </div>
     </div>

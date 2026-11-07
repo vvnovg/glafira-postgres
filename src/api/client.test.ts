@@ -118,4 +118,31 @@ describe("api client", () => {
     await api.revealAgentLog("a1b2c3d");
     expect(invoke).toHaveBeenLastCalledWith("reveal_agent_log", { runId: "a1b2c3d" });
   });
+
+  it("команды настроек фонового ассистента", async () => {
+    invoke.mockResolvedValue({});
+    await api.getAgentSettings();
+    expect(invoke).toHaveBeenLastCalledWith("get_agent_settings", undefined);
+    const settings = {
+      enabled: true,
+      preset: "qwen" as const,
+      qwen: { path: "/opt/homebrew/bin/qwen", model: "" },
+      claude: { path: "", model: "", viaOllama: false, budgetUsd: 1 },
+      timeoutMin: 15,
+      keepWarmMin: 10,
+      ollamaUrl: "http://127.0.0.1:11434",
+    };
+    await api.setAgentSettings(settings);
+    expect(invoke).toHaveBeenLastCalledWith("set_agent_settings", { settings });
+    // «Найти» ищет программу: необязательный `path` команды (версия одной программы) не передаётся — Rust получает None.
+    await api.detectAgentCli("claude");
+    expect(invoke).toHaveBeenLastCalledWith("detect_agent_cli", { preset: "claude" });
+    await api.listAgentModels("qwen");
+    expect(invoke).toHaveBeenLastCalledWith("list_agent_models", { preset: "qwen" });
+    await api.checkAgent();
+    expect(invoke).toHaveBeenLastCalledWith("check_agent", undefined);
+    invoke.mockResolvedValue(undefined);
+    await api.unloadAgentModel();
+    expect(invoke).toHaveBeenLastCalledWith("unload_agent_model", undefined);
+  });
 });
