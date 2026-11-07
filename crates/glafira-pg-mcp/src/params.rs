@@ -649,9 +649,9 @@ pub struct ProposeParams {
     /// Up to 5 CREATE INDEX ON <table> ... statements the rewrite relies on (no CONCURRENTLY, no UNIQUE; an index name, if given, is ignored). They are never created: the user compares plans with them as hypothetical hypopg indexes.
     #[serde(default)]
     pub indexes: Option<Vec<String>>,
-    /// Why the rewrite is faster, plain text up to 4 KB; the user reads it in Glafira.
+    /// Why the rewrite is faster, plain text up to 4 KB in the user's language: in a chat, the language the user writes in; in a background run started by Glafira, the language its prompt names. The user reads it in Glafira.
     pub rationale: String,
-    /// Expected effect, plain text up to 1 KB, e.g. "cost 120000 → 800, no Seq Scan on orders".
+    /// Expected effect, plain text up to 1 KB in the same language as rationale, e.g. "cost 120000 → 800, no Seq Scan on orders".
     #[serde(default)]
     pub expected_effect: Option<String>,
 }
