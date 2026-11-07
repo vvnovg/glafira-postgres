@@ -5,6 +5,7 @@ import Markdown, { type Components } from "react-markdown";
 import { currentLocale } from "../../i18n";
 import { type ChapterId, GUIDE_CHAPTERS, isChapterId, loadGuide } from "../../guide/chapters";
 import { type GuideChapter, parseChapter, searchGuide } from "../../guide/parse";
+import { remarkTables } from "../../guide/remarkTables";
 import { ExternalLink } from "../common/ExternalLink";
 
 /** Запрос на открытие справки: глава и раздел (вкладка `help` из workspace). Новый объект — новый переход. */
@@ -140,7 +141,7 @@ export function HelpPanel({ spec }: { spec: HelpRequest }) {
           <section key={i}>
             {s.heading && <h2 id={s.id ?? undefined}>{s.title}</h2>}
             {/* Картинки не показываем: справка работает без сети. */}
-            <Markdown skipHtml disallowedElements={["img"]} components={components}>
+            <Markdown skipHtml disallowedElements={["img"]} remarkPlugins={[remarkTables]} components={components}>
               {s.markdown}
             </Markdown>
           </section>

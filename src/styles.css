@@ -233,6 +233,9 @@ label.inline { display: inline-flex; gap: 4px; align-items: center; white-space:
 .help-content pre { background: var(--bg-alt); border: 1px solid var(--border); border-radius: 4px; padding: 8px; overflow: auto; }
 .help-content pre code { padding: 0; background: none; }
 .help-content a { color: var(--accent); }
+.help-content table { border-collapse: collapse; margin: 8px 0 12px; font-size: 13px; }
+.help-content th, .help-content td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; vertical-align: top; }
+.help-content th { background: var(--bg-alt); font-weight: 600; }
 
 /* Дерево подключений: состояние подключения и ленивые списки каталога. */
 .conn-state { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; background: var(--border); }
