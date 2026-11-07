@@ -445,7 +445,7 @@ function SessionsBody({ data, preset: initial, onSessionAction }: { data: Sessio
       {() => (
         <div className="sess-view">
           <div className="toolbar">
-            <input type="text" aria-label={t("diag.sessions.filter")} placeholder={t("diag.sessions.filterPlaceholder")} value={filter} onChange={(e) => setFilter(e.target.value)} />
+            <input type="text" data-action="filter" aria-label={t("diag.sessions.filter")} placeholder={t("diag.sessions.filterPlaceholder")} value={filter} onChange={(e) => setFilter(e.target.value)} />
             <label className="inline">
               <span>{t("diag.sessions.groupBy")}</span>
               <select aria-label={t("diag.sessions.groupBy")} value={groupBy} onChange={(e) => setGroupBy(e.target.value as GroupBy)}>

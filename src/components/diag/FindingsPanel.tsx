@@ -6,6 +6,7 @@ import { useWorkspace } from "../../state/workspace";
 import { CopyButton } from "../common/CopyButton";
 import { queryTitle } from "../queries/queriesText";
 import { findingFix, findingTitle } from "./findingText";
+import { Icon } from "../common/Icon";
 
 /** Сколько знаков текста запроса показывает находка (полный — в подсказке). */
 const QUERY_PREVIEW = 90;
@@ -108,8 +109,8 @@ export function FindingsPanel({
       {/* Заголовок — сама кнопка сворачивания: имя — видимый текст с числом находок, состояние — aria-expanded. */}
       <h3 id={titleId} className="findings-head">
         <button type="button" className="findings-toggle" aria-expanded={expanded} title={expanded ? t("diag.findings.collapse") : t("diag.findings.expand")} onClick={toggle}>
-          <span className="findings-caret" aria-hidden="true">
-            {expanded ? "▾" : "▸"}
+          <span className={expanded ? "findings-caret open" : "findings-caret"} aria-hidden="true">
+            <Icon name="chevron" size={14} />
           </span>
           <span>
             {t("diag.findings.title")}

@@ -1,137 +1,42 @@
-import { type KeyboardEvent, type PointerEvent, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { openSupport } from "../lib/links";
-import { clampSidebar, SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, useSidebarWidth } from "../lib/useSidebarWidth";
-import { tabId, useWorkspace } from "../state/workspace";
+import { isMacOS } from "../lib/platform";
+import { shortcutActions } from "../lib/shortcuts";
+import { useResizable } from "../lib/useResizable";
+import { useWorkspace } from "../state/workspace";
 import { ConnectionTree } from "./connections/tree/ConnectionTree";
+import { TreeRow } from "./connections/tree/TreeRow";
 import { LlmIndicator } from "./mcp/LlmIndicator";
 
-/** Шаг изменения ширины стрелками, px; с Shift — крупный. */
-const STEP = 16;
-const BIG_STEP = 64;
+/** Ширина панели запоминается на этом компьютере (как свёрнутые папки дерева) — ключ тот же, что до U1. */
+const WIDTH_KEY = "glafira.sidebar.width";
 
 /**
- * Граница левой панели: перетаскивание мышью, стрелки (Shift — крупнее), Home и End — до пределов, двойной щелчок —
- * ширина по умолчанию. Роль `separator` со значением: экранный диктор называет текущую ширину. Значение и база
- * перетаскивания и стрелок — фактическая ширина панели (`measure`): в узком окне flex сжимает её меньше запомненной.
+ * Боковая панель (спец. U1 Kafka-версии §6–7, перенос — спец. 2026-11-07 §1): дерево подключений, нижние пункты и разделитель
+ * с изменяемой шириной 200–400 px (стрелки по 16 px, Home и End — пределы, Enter и двойной щелчок — 248).
  */
-function Resizer({
-  width,
-  rendered,
-  measure,
-  onWidth,
-}: {
-  width: number;
-  rendered: number | null;
-  measure: () => number;
-  onWidth: (w: number, opts?: { persist?: boolean }) => void;
-}) {
-  const { t } = useTranslation();
-  /** Начало перетаскивания: позиция указателя, ширина в этот момент и последняя заданная; `null` — не тащат. */
-  const drag = useRef<{ x: number; w: number; last: number } | null>(null);
-
-  const onKeyDown = (e: KeyboardEvent) => {
-    const step = e.shiftKey ? BIG_STEP : STEP;
-    const base = measure();
-    const next =
-      e.key === "ArrowRight" ? base + step : e.key === "ArrowLeft" ? base - step : e.key === "Home" ? SIDEBAR_MIN : e.key === "End" ? SIDEBAR_MAX : null;
-    if (next === null) return;
-    e.preventDefault();
-    onWidth(next);
-  };
-
-  const endDrag = () => {
-    const d = drag.current;
-    drag.current = null;
-    if (d && d.last !== d.w) onWidth(d.last);
-  };
-
-  return (
-    <div
-      className="sidebar-resizer"
-      role="separator"
-      aria-orientation="vertical"
-      aria-label={t("sidebar.resize")}
-      aria-valuenow={rendered ?? width}
-      aria-valuemin={SIDEBAR_MIN}
-      aria-valuemax={SIDEBAR_MAX}
-      tabIndex={0}
-      title={t("sidebar.resizeHint")}
-      onKeyDown={onKeyDown}
-      onDoubleClick={() => onWidth(SIDEBAR_DEFAULT)}
-      onPointerDown={(e: PointerEvent<HTMLDivElement>) => {
-        if (e.button !== 0) return;
-        e.preventDefault();
-        const w = measure();
-        drag.current = { x: e.clientX, w, last: w };
-        e.currentTarget.setPointerCapture?.(e.pointerId);
-      }}
-      onPointerMove={(e) => {
-        const d = drag.current;
-        if (!d) return;
-        d.last = clampSidebar(d.w + e.clientX - d.x);
-        onWidth(d.last, { persist: false });
-      }}
-      onPointerUp={(e) => {
-        endDrag();
-        e.currentTarget.releasePointerCapture?.(e.pointerId);
-      }}
-      onPointerCancel={endDrag}
-    />
-  );
-}
-
 export function Sidebar() {
   const { t } = useTranslation();
   const open = useWorkspace((s) => s.open);
-  // «Настройки» при открытой вкладке настроек только переключаются на неё: выбранный там раздел (`section`) остаётся.
-  const openSettings = () => {
-    const { tabs, activate } = useWorkspace.getState();
-    const id = tabId({ kind: "settings" });
-    if (tabs.some((x) => x.id === id)) activate(id);
-    else open({ kind: "settings" });
-  };
-  const [width, setWidth] = useSidebarWidth();
-  const asideRef = useRef<HTMLElement>(null);
-  /** Фактическая ширина панели (ResizeObserver); `null` — не измерена. */
-  const [rendered, setRendered] = useState<number | null>(null);
-  const measure = () => {
-    const w = asideRef.current?.getBoundingClientRect().width ?? 0;
-    return w > 0 ? Math.round(w) : width;
-  };
-
-  useEffect(() => {
-    const el = asideRef.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(() => {
-      const w = el.getBoundingClientRect().width;
-      setRendered(w > 0 ? Math.round(w) : null);
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
+  const activeKind = useWorkspace((s) => s.tabs.find((x) => x.id === s.activeId)?.kind ?? null);
+  const { width, dragging, splitterProps } = useResizable(WIDTH_KEY, { min: 200, max: 400, initial: 248 });
 
   return (
-    <>
-      <aside className="sidebar" ref={asideRef} style={{ width }}>
+    <aside className="sidebar" style={{ width }}>
+      {/* macOS: место светофора; за эту полосу окно перетаскивается. */}
+      {isMacOS() && <div className="sidebar-top" data-tauri-drag-region="" />}
+      <div className="sidebar-scroll">
         <ConnectionTree />
-        <div className="sidebar-footer">
-          <LlmIndicator />
-          <button type="button" className="link" onClick={openSettings}>
-            {t("sidebar.settings")}
-          </button>
-          <button type="button" className="link" onClick={openSupport}>
-            {t("support.title")}
-          </button>
-          <button type="button" className="link" onClick={() => open({ kind: "help" })}>
-            {t("sidebar.help")}
-          </button>
-          <button type="button" className="link" onClick={() => open({ kind: "about" })}>
-            {t("sidebar.about")}
-          </button>
-        </div>
-      </aside>
-      <Resizer width={width} rendered={rendered} measure={measure} onWidth={setWidth} />
-    </>
+      </div>
+      <div className="sidebar-footer">
+        <LlmIndicator />
+        {/* «Настройки» при открытой вкладке настроек только переключаются на неё: выбранный там раздел остаётся. */}
+        <TreeRow chevron="none" icon="settings" name={t("sidebar.settings")} current={activeKind === "settings"} onActivate={shortcutActions.settings} />
+        <TreeRow chevron="none" icon="heart" name={t("support.title")} onActivate={openSupport} />
+        <TreeRow chevron="none" icon="book" name={t("sidebar.help")} current={activeKind === "help"} onActivate={() => open({ kind: "help" })} />
+        <TreeRow chevron="none" icon="info" name={t("sidebar.about")} current={activeKind === "about"} onActivate={() => open({ kind: "about" })} />
+      </div>
+      <div className={dragging ? "sidebar-splitter active" : "sidebar-splitter"} aria-label={t("sidebar.resize")} title={t("sidebar.resizeHint")} {...splitterProps} />
+    </aside>
   );
 }

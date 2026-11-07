@@ -3,9 +3,11 @@ import type { ReadinessItem, ReadinessStatus, StepStatus, TestEvent, TestReport,
 import { tr } from "../../i18n/text";
 import { llmRoleParams } from "../../lib/llmRole";
 import { CopyButton } from "../common/CopyButton";
+import { type MarkState, StateMark } from "../common/StateMark";
 
-const STEP_ICON: Record<StepStatus, string> = { running: "⏳", ok: "✅", failed: "❌", skipped: "⏭" };
-const READY_ICON: Record<ReadinessStatus, string> = { ok: "✅", warn: "⚠️", missing: "❌" };
+/** Значки состояния вместо emoji (спец. переноса U1 §5): подпись — статус шага или пункта готовности. */
+const STEP_MARK: Record<StepStatus, MarkState> = { running: "progress", ok: "ok", failed: "error", skipped: "skip" };
+const READY_MARK: Record<ReadinessStatus, MarkState> = { ok: "ok", warn: "warn", missing: "error" };
 
 /** Скрипт роли для диагностики (спец. P1 §10). */
 export const ROLE_SCRIPT = `CREATE ROLE glafira_diag LOGIN PASSWORD '…';
@@ -29,14 +31,6 @@ function latestSteps(events: TestEvent[]): TestEvent[] {
 
 type Translate = (k: string, o?: Record<string, unknown>) => string;
 
-/** Значок статуса: эмодзи не читается скринридером как статус, поэтому у него текстовая подпись. */
-function StatusIcon({ icon, label }: { icon: string; label: string }) {
-  return (
-    <span role="img" aria-label={label}>
-      {icon}
-    </span>
-  );
-}
 
 /** Тексты пункта: вариант — `params.reason` (если есть), иначе статус; ключи `readiness.<id>.<вариант>`. */
 function itemText(item: ReadinessItem, t: Translate) {
@@ -88,7 +82,7 @@ export function TestPanel({ events, report }: { events: TestEvent[]; report: Tes
         <ul className="steps">
           {steps.map((s) => (
             <li key={`${s.step}:${s.member ?? ""}`}>
-              <StatusIcon icon={STEP_ICON[s.status]} label={t(`test.status.${s.status}`)} /> <strong>
+              <StateMark state={STEP_MARK[s.status]} label={t(`test.status.${s.status}`)} /> <strong>
                 {t(`test.step.${s.step}`)}
                 {s.member ? ` ${s.member}` : ""}
                 {/* Двоеточие — только перед текстом: шаг без сообщения (readiness: ok) не должен заканчиваться пустым «Готовность:». */}
@@ -118,7 +112,7 @@ export function TestPanel({ events, report }: { events: TestEvent[]; report: Tes
                 return (
                   <tr key={`${item.id}:${i}`}>
                     <td>
-                      <StatusIcon icon={READY_ICON[item.status]} label={t(`test.readyStatus.${item.status}`)} />
+                      <StateMark state={READY_MARK[item.status]} label={t(`test.readyStatus.${item.status}`)} />
                     </td>
                     <td>
                       <strong>{text.title}</strong>

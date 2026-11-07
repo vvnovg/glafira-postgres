@@ -6,6 +6,8 @@ import { api } from "../../api/client";
 import type { ActionRecord } from "../../api/types";
 import { formatTimestamp } from "../../lib/format";
 import { ErrorBanner } from "../common/ErrorBanner";
+import { Icon } from "../common/Icon";
+import { Kbd } from "../common/Kbd";
 
 /** Сколько последних записей читает вкладка (предел команды `list_actions`). */
 const JOURNAL_LIMIT = 1000;
@@ -70,8 +72,10 @@ export function ActionsJournal({ connectionId, active = true }: { connectionId: 
     <div className="page diag-view">
       <div className="toolbar">
         <h2>{t("actions.journal.title")}</h2>
-        <button type="button" onClick={() => void q.refetch()}>
+        <button type="button" data-action="refresh" onClick={() => void q.refetch()}>
+          <Icon name="refresh" />
           {t("diag.header.refresh")}
+          <Kbd keys="Mod+R" />
         </button>
       </div>
       {q.error && <ErrorBanner error={q.error} />}

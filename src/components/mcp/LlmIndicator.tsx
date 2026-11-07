@@ -1,6 +1,8 @@
 import { useTranslation } from "react-i18next";
 import { useMcpStatus } from "../../lib/useMcpStatus";
 import { useWorkspace } from "../../state/workspace";
+import { Icon } from "../common/Icon";
+import { TreeRow } from "../connections/tree/TreeRow";
 
 /**
  * Индикатор внизу боковой панели (спец. P4 §11, P4c §8.2): «LLM: <клиент>» или «LLM: N клиентов», пока есть сессии MCP;
@@ -20,14 +22,15 @@ export function LlmIndicator() {
   const active = status.sessions.some((x) => x.active);
   const names = [...new Set(chat.map((x) => x.clientName ?? t("mcp.unknownClient")))];
   const label = running ? t("mcp.indicator.agent") : names.length === 1 ? t("mcp.indicator.one", { client: names[0] }) : t("mcp.indicator.clients", { count: names.length });
+  // Строка нижней панели, как McpIndicator Kafka-версии (спец. U1 §6): точка подсвечивается акцентом во время вызова.
   return (
-    <button
-      type="button"
-      className={active ? "link llm-indicator active" : "link llm-indicator"}
+    <TreeRow
+      chevron="none"
+      className={active ? "mcp-indicator llm-indicator active" : "mcp-indicator llm-indicator"}
+      icon={<Icon name="dot" size={12} />}
+      name={label}
       title={running ? t("mcp.indicator.agentTitle") : t("mcp.indicator.title")}
-      onClick={() => open({ kind: "settings", section: running ? "agent" : "mcp" })}
-    >
-      {label}
-    </button>
+      onActivate={() => open({ kind: "settings", section: running ? "agent" : "mcp" })}
+    />
   );
 }

@@ -1,4 +1,4 @@
-import { act, fireEvent, screen } from "@testing-library/react";
+import { fireEvent, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { newProfile } from "./connections/profile";
@@ -71,93 +71,63 @@ describe("Sidebar", () => {
   });
 });
 
-describe("Sidebar: ширина панели", () => {
+describe("Sidebar: ширина панели (useResizable, спец. U1 §7)", () => {
   const aside = (c: HTMLElement) => c.querySelector<HTMLElement>("aside.sidebar")!;
 
-  it("по умолчанию 260 px; граница — разделитель с текущим значением и пределами", () => {
+  it("по умолчанию 248 px; граница — разделитель с текущим значением и пределами 200–400", () => {
     const { container } = renderWithClient(<Sidebar />);
-    expect(aside(container).style.width).toBe("260px");
+    expect(aside(container).style.width).toBe("248px");
     const sep = screen.getByRole("separator", { name: "Ширина панели подключений" });
     expect(sep).toHaveAttribute("aria-orientation", "vertical");
-    expect(sep).toHaveAttribute("aria-valuenow", "260");
-    expect(sep).toHaveAttribute("aria-valuemin", "180");
-    expect(sep).toHaveAttribute("aria-valuemax", "640");
+    expect(sep).toHaveAttribute("aria-valuenow", "248");
+    expect(sep).toHaveAttribute("aria-valuemin", "200");
+    expect(sep).toHaveAttribute("aria-valuemax", "400");
+    expect(sep).toHaveAttribute("title", "Перетащите, чтобы изменить ширину; двойной щелчок — ширина по умолчанию");
   });
 
-  it("стрелки меняют ширину с шагом 16 px (Shift — 64), Home и End — до пределов; ширина запоминается", async () => {
+  it("стрелки меняют ширину с шагом 16 px, Home и End — до пределов, Enter — по умолчанию; ширина запоминается", async () => {
     const user = userEvent.setup();
     const { container, unmount } = renderWithClient(<Sidebar />);
     const sep = screen.getByRole("separator", { name: "Ширина панели подключений" });
     sep.focus();
     await user.keyboard("{ArrowRight}{ArrowRight}");
-    expect(aside(container).style.width).toBe("292px");
-    await user.keyboard("{Shift>}{ArrowLeft}{/Shift}");
-    expect(aside(container).style.width).toBe("228px");
+    expect(aside(container).style.width).toBe("280px");
     await user.keyboard("{Home}");
-    expect(sep).toHaveAttribute("aria-valuenow", "180");
+    expect(sep).toHaveAttribute("aria-valuenow", "200");
     await user.keyboard("{End}");
-    expect(sep).toHaveAttribute("aria-valuenow", "640");
+    expect(sep).toHaveAttribute("aria-valuenow", "400");
+    await user.keyboard("{Enter}");
+    expect(sep).toHaveAttribute("aria-valuenow", "248");
     await user.keyboard("{ArrowLeft}");
     unmount();
-    expect(localStorage.getItem("glafira.sidebar.width")).toBe("624");
+    expect(localStorage.getItem("glafira.sidebar.width")).toBe("232");
     const again = renderWithClient(<Sidebar />);
-    expect(aside(again.container).style.width).toBe("624px");
+    expect(aside(again.container).style.width).toBe("232px");
   });
 
   it("перетаскивание границы меняет ширину в пределах; двойной щелчок возвращает ширину по умолчанию", () => {
     const { container } = renderWithClient(<Sidebar />);
     const sep = screen.getByRole("separator", { name: "Ширина панели подключений" });
-    fireEvent.pointerDown(sep, { clientX: 260, pointerId: 1, button: 0 });
-    fireEvent.pointerMove(sep, { clientX: 340, pointerId: 1 });
-    expect(aside(container).style.width).toBe("340px");
-    fireEvent.pointerMove(sep, { clientX: 10, pointerId: 1 });
-    expect(aside(container).style.width).toBe("180px");
-    fireEvent.pointerUp(sep, { clientX: 10, pointerId: 1 });
-    fireEvent.pointerMove(sep, { clientX: 400, pointerId: 1 });
-    expect(aside(container).style.width).toBe("180px");
+    fireEvent.mouseDown(sep, { clientX: 248, button: 0 });
+    fireEvent.mouseMove(document, { clientX: 328 });
+    expect(aside(container).style.width).toBe("328px");
+    fireEvent.mouseMove(document, { clientX: 10 });
+    expect(aside(container).style.width).toBe("200px");
+    fireEvent.mouseUp(document);
+    fireEvent.mouseMove(document, { clientX: 400 });
+    expect(aside(container).style.width).toBe("200px");
     fireEvent.doubleClick(sep);
-    expect(aside(container).style.width).toBe("260px");
-  });
-
-  it("значение и база перетаскивания — фактическая ширина панели; хранилище пишется по отпусканию (M10 ревью)", () => {
-    let observed: (() => void) | null = null;
-    vi.stubGlobal(
-      "ResizeObserver",
-      class {
-        constructor(cb: () => void) {
-          observed = cb;
-        }
-        observe() {}
-        disconnect() {}
-      },
-    );
-    localStorage.setItem("glafira.sidebar.width", "400");
-    const { container } = renderWithClient(<Sidebar />);
-    // Узкое окно: flex сжал панель до 200 px.
-    vi.spyOn(aside(container), "getBoundingClientRect").mockReturnValue({ width: 200 } as DOMRect);
-    act(() => observed?.());
-    const sep = screen.getByRole("separator", { name: "Ширина панели подключений" });
-    expect(sep).toHaveAttribute("aria-valuenow", "200");
-    const setItem = vi.spyOn(Storage.prototype, "setItem");
-    fireEvent.pointerDown(sep, { clientX: 500, pointerId: 1, button: 0 });
-    fireEvent.pointerMove(sep, { clientX: 540, pointerId: 1 });
-    expect(aside(container).style.width).toBe("240px");
-    fireEvent.pointerMove(sep, { clientX: 560, pointerId: 1 });
-    expect(setItem).not.toHaveBeenCalled();
-    fireEvent.pointerUp(sep, { clientX: 560, pointerId: 1 });
-    expect(setItem).toHaveBeenCalledTimes(1);
-    expect(localStorage.getItem("glafira.sidebar.width")).toBe("260");
-    setItem.mockRestore();
-    vi.unstubAllGlobals();
+    expect(aside(container).style.width).toBe("248px");
   });
 
   it("сохранённая ширина вне пределов или не число — приводится к пределам или к значению по умолчанию", () => {
-    localStorage.setItem("glafira.sidebar.width", "5000");
+    // Ширина до U1 была до 640 px: запомненное значение больше 400 сжимается до предела.
+    localStorage.setItem("glafira.sidebar.width", "600");
     const first = renderWithClient(<Sidebar />);
-    expect(aside(first.container).style.width).toBe("640px");
+    expect(aside(first.container).style.width).toBe("400px");
     first.unmount();
     localStorage.setItem("glafira.sidebar.width", "abc");
     const second = renderWithClient(<Sidebar />);
-    expect(aside(second.container).style.width).toBe("260px");
+    expect(aside(second.container).style.width).toBe("248px");
   });
 });

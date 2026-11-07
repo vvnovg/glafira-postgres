@@ -121,6 +121,40 @@ describe("ConnectionNode", () => {
     expect(useWorkspace.getState().tabs).toEqual([{ kind: "overview", connectionId: "c", id: "overview:c" }]);
   });
 
+  it("строка подключения (спец. переноса U1 §3): шеврон и имя — разные кнопки, точка цвета с состоянием в описании имени", async () => {
+    renderNode();
+    const toggle = screen.getByRole("button", { name: toggleName });
+    const name = screen.getByRole("button", { name: "billing" });
+    expect(toggle).not.toBe(name);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(name).not.toHaveAttribute("aria-expanded");
+    // Описание имени — состояние и вид подключения (бейдж Patroni справа уступает место имени в узкой панели).
+    const [stateId, kindId] = (name.getAttribute("aria-describedby") ?? "").split(" ");
+    const state = document.getElementById(stateId);
+    expect(state).toHaveAttribute("role", "img");
+    expect(state).toHaveAttribute("aria-label", "Не подключено");
+    expect(document.getElementById(kindId)).toHaveTextContent("Patroni");
+    expect(name.querySelector(".tree-extra .kind-badge")).toHaveTextContent("Patroni");
+    expect(name.querySelector(".conn-icon .dot")).not.toBeNull();
+  });
+
+  it("подсветка: «Обзор» подключения — его имя; вкладка внутри свёрнутого подключения — тоже, раскрытого — нет", async () => {
+    vi.mocked(api.getTopology).mockResolvedValue(topologyView());
+    useWorkspace.setState({ tabs: [{ id: "overview:c", kind: "overview", connectionId: "c" }], activeId: "overview:c" });
+    const user = userEvent.setup();
+    renderNode();
+    const name = screen.getByRole("button", { name: "billing" });
+    expect(name).toHaveAttribute("aria-current", "page");
+    act(() =>
+      useWorkspace.setState({ tabs: [{ id: "diag:c:locks", kind: "diag", connectionId: "c", tool: "locks" }], activeId: "diag:c:locks" }),
+    );
+    expect(name).toHaveAttribute("aria-current", "page");
+    await user.click(screen.getByRole("button", { name: toggleName }));
+    await screen.findByRole("button", { name: "Диагностика" });
+    expect(name).not.toHaveAttribute("aria-current");
+    expect(screen.getByRole("button", { name: "Диагностика" }).closest(".tree-row")).toHaveClass("current");
+  });
+
   it("меню: «Пульс» открывает вкладку пульса подключения", async () => {
     const user = userEvent.setup();
     renderNode();

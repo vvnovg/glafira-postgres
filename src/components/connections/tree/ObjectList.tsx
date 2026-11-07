@@ -6,15 +6,20 @@ import { api } from "../../../api/client";
 import type { ObjectItem, ObjectKind, ObjectPage } from "../../../api/types";
 import { formatBytes, formatCount } from "../../../lib/format";
 import { Glyph } from "../../common/Glyph";
+import { Icon, type IconName } from "../../common/Icon";
 import { useDebouncedValue } from "../../../lib/useDebouncedValue";
-import { type TabSpec, useWorkspace } from "../../../state/workspace";
+import { type TabSpec, tabId, useWorkspace } from "../../../state/workspace";
 import { ErrorBanner } from "../../common/ErrorBanner";
+import { TreeRow } from "./TreeRow";
 
 /** Размер страницы списка объектов (в спецификации — 500; предел команды Rust — 1000). */
 export const PAGE = 500;
 /** С какого числа строк список виртуализируется. */
 const VIRTUAL_FROM = 200;
-const ROW_HEIGHT = 22;
+/** Значок строки по виду списка (спец. переноса U1 §3.2). */
+const KIND_ICON: Record<ObjectKind, IconName> = { tables: "table", views: "view", matviews: "matview", functions: "function", sequences: "sequence" };
+/** Высота строки — `--row` (24 px, спец. U1 §6). */
+const ROW_HEIGHT = 24;
 /** За сколько строк до конца видимой области подгружается следующая страница. */
 const PREFETCH_AHEAD = 50;
 /** Поле фильтра — у групп больше этого числа объектов. */
@@ -90,6 +95,7 @@ function ObjectRow({
   schema,
   openState,
   rowAttrs,
+  partition = false,
 }: {
   item: ObjectItem;
   /** Вид объектов списка: по нему выбирается вкладка. */
@@ -100,48 +106,41 @@ function ObjectRow({
   schema: string;
   openState: OpenState;
   rowAttrs?: RowAttrs;
+  /** Строка списка партиций: свой значок. */
+  partition?: boolean;
 }) {
   const { t } = useTranslation();
   const openTab = useWorkspace((s) => s.open);
+  const spec = objectTab(kind, item, connectionId, db);
+  const current = useWorkspace((s) => s.activeId === tabId(spec));
   const partitioned = item.relkind === "p" && (item.partitions ?? 0) > 0;
   const open = partitioned && openState.openOids.has(item.oid);
   const name = item.schema === schema ? item.name : `${item.schema}.${item.name}`;
   const label = item.signature !== null ? `${name}(${item.signature})` : name;
   const toggleLabel = t("sidebar.partitionsToggle", { name: label });
+  const hasExtra = partitioned || (item.totalBytes !== null && item.totalBytes > 0) || (item.relkind === "p" && item.totalBytes === null);
   return (
     <li {...rowAttrs}>
-      <div className="tree-conn tree-wrap">
-        {/* Стрелка раскрывает партиции (состояние — aria-expanded), имя открывает вкладку: у кнопок разные имена. */}
-        {partitioned && (
-          <button
-            type="button"
-            className="tree-folder-toggle caret-only"
-            aria-expanded={open}
-            aria-label={toggleLabel}
-            title={toggleLabel}
-            onClick={() => openState.onToggle(item.oid)}
-          >
-            <span className="tree-caret" aria-hidden="true">
-              {open ? "▾" : "▸"}
-            </span>
-          </button>
-        )}
-        <button
-          type="button"
-          className="link tree-name"
-          title={label}
-          aria-label={t("sidebar.openObject", { name: label })}
-          onClick={() => openTab(objectTab(kind, item, connectionId, db))}
-        >
-          {label}
-        </button>
-        <span className="tree-extra">
-          {partitioned && <span className="muted">{t("sidebar.partitions", { count: item.partitions ?? 0 })}</span>}
-          {item.totalBytes !== null && item.totalBytes > 0 && <span className="muted">{formatBytes(item.totalBytes)}</span>}
-          {/* Размер партиционированной таблицы в списке не считается: пришлось бы заблокировать каждую партицию. */}
-          {item.relkind === "p" && item.totalBytes === null && <Glyph className="muted" symbol="—" label={t("sidebar.partitionedSize")} />}
-        </span>
-      </div>
+      {/* Партиционированная таблица — раздельный режим: стрелка раскрывает партиции (aria-expanded), имя открывает вкладку. */}
+      <TreeRow
+        chevron={partitioned ? { expanded: open, onToggle: () => openState.onToggle(item.oid), label: toggleLabel } : "leaf"}
+        icon={partition ? "partition" : KIND_ICON[kind]}
+        name={label}
+        title={label}
+        current={current}
+        onActivate={() => openTab(spec)}
+        activateLabel={t("sidebar.openObject", { name: label })}
+        extra={
+          hasExtra ? (
+            <>
+              {partitioned && <span>{t("sidebar.partitions", { count: item.partitions ?? 0 })}</span>}
+              {item.totalBytes !== null && item.totalBytes > 0 && <span>{formatBytes(item.totalBytes)}</span>}
+              {/* Размер партиционированной таблицы в списке не считается: пришлось бы заблокировать каждую партицию. */}
+              {item.relkind === "p" && item.totalBytes === null && <Glyph symbol="—" label={t("sidebar.partitionedSize")} />}
+            </>
+          ) : undefined
+        }
+      />
       {open && <PartitionList connectionId={connectionId} db={db} schema={item.schema} table={item.name} openState={openState} />}
     </li>
   );
@@ -152,7 +151,7 @@ function MoreButton({ pending, label, onClick }: { pending: boolean; label: stri
   const { t } = useTranslation();
   return (
     <li>
-      <button type="button" className="link" disabled={pending} aria-label={label} onClick={onClick}>
+      <button type="button" className="link tree-more" disabled={pending} aria-label={label} onClick={onClick}>
         {t("sidebar.more")}
       </button>
     </li>
@@ -194,7 +193,7 @@ function PartitionList({
       <ul>
         {items.map((item) => (
           // Партиция — таблица: вкладка открывается как у таблицы, схема берётся у самой партиции.
-          <ObjectRow key={item.oid} item={item} kind="tables" connectionId={connectionId} db={db} schema={schema} openState={openState} />
+          <ObjectRow key={item.oid} item={item} kind="tables" connectionId={connectionId} db={db} schema={schema} openState={openState} partition />
         ))}
         {q.hasNextPage && (
           <MoreButton
@@ -269,13 +268,17 @@ export function ObjectList({
   return (
     <div>
       {count > FILTER_FROM && (
-        <input
-          className="tree-filter"
-          aria-label={t("sidebar.objectFilter", { label, where })}
-          placeholder={t("sidebar.objectFilterPlaceholder")}
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-        />
+        <div className="search-field object-filter-wrap">
+          <Icon name="search" />
+          <input
+            type="search"
+            className="object-filter"
+            aria-label={t("sidebar.objectFilter", { label, where })}
+            placeholder={t("sidebar.objectFilterPlaceholder")}
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+          />
+        </div>
       )}
       {q.isPending && (
         <p className="tree-note" role="status">

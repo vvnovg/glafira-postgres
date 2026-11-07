@@ -14,12 +14,13 @@ import {
   useInteractions,
   useRole,
 } from "@floating-ui/react";
+import { Icon } from "./Icon";
 
 /** Закрывает открытую сейчас подсказку: в каждый момент открыта не больше одной. */
 let closeOpenHint: (() => void) | null = null;
 
 /**
- * Значок «?» с короткой подсказкой: наведение (300 мс), фокус, клик закрепляет; Esc и клик вне закрывают. `values` —
+ * Значок подсказки (`help`, спец. U1 §4) с короткой подсказкой: наведение (300 мс), фокус, клик закрепляет; Esc и клик вне закрывают. `values` —
  * параметры текста подсказки (`{{id}}`), если они есть. С `children` вместо значка — сам текст (например, «≈ 0,01 $»):
  * подчёркнут точками, фокусируется и показывает подсказку так же; `label` тогда — его полное имя для скринридера (видимый
  * текст и подсказка).
@@ -94,7 +95,7 @@ export function Hint({ k, label, values, children }: { k: string; label: string;
         aria-label={children === undefined ? t("hints.label", { name: label }) : label}
         {...getReferenceProps({ onClick, onKeyDown })}
       >
-        {children ?? "?"}
+        {children ?? <Icon name="help" />}
       </span>
       {open && (
         <FloatingPortal>

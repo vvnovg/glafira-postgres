@@ -191,12 +191,14 @@ describe("QueriesView", () => {
     // Отчёт по shop не содержит perf, но база, уже встречавшаяся на узле, остаётся в выборе.
     expect(within(screen.getByRole("combobox", { name: "База" })).getAllByRole("option").map((o) => o.textContent)).toEqual(["Все базы", "perf", "shop"]);
     // По умолчанию — «Доля»; «Всего» сортирует так же, но стрелка — только у той, по которой щёлкнули.
+    // Стрелка — значок arrowDown / arrowUp (спец. переноса U1 §5), порядок для экранного диктора — aria-sort.
     const sorted = () => screen.getAllByRole("columnheader").filter((h) => h.hasAttribute("aria-sort"));
-    expect(sorted().map((h) => h.textContent)).toEqual(["Доля ▾"]);
+    const arrow = (h: HTMLElement) => h.querySelector("svg[data-icon]")?.getAttribute("data-icon");
+    expect(sorted().map((h) => [h.textContent, arrow(h)])).toEqual([["Доля", "arrowDown"]]);
     await user.click(within(screen.getByRole("columnheader", { name: /Всего/ })).getByRole("button"));
-    expect(sorted().map((h) => [h.textContent, h.getAttribute("aria-sort")])).toEqual([["Всего ▾", "descending"]]);
+    expect(sorted().map((h) => [h.textContent, h.getAttribute("aria-sort"), arrow(h)])).toEqual([["Всего", "descending", "arrowDown"]]);
     await user.click(within(screen.getByRole("columnheader", { name: /Hit %/ })).getByRole("button"));
-    expect(sorted().map((h) => [h.textContent, h.getAttribute("aria-sort")])).toEqual([["Hit % ▴", "ascending"]]);
+    expect(sorted().map((h) => [h.textContent, h.getAttribute("aria-sort"), arrow(h)])).toEqual([["Hit %", "ascending", "arrowUp"]]);
   });
 
   it("покрытие окна — по режиму показанного отчёта: отчёт «с момента сброса» на месте окна пометки не даёт", async () => {

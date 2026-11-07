@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
 import { useWorkspace } from "../../state/workspace";
+import { Icon } from "../common/Icon";
 
 /** Проверка обновлений один раз при запуске. Ошибки и «выключено» молча игнорируются — подробности в «О программе». */
 export function UpdateNotice() {
@@ -18,7 +19,7 @@ export function UpdateNotice() {
         {t("about.notice.more")}
       </button>
       <button type="button" className="icon" aria-label={t("about.notice.hideAria")} onClick={() => setHidden(true)}>
-        ×
+        <Icon name="close" size={14} />
       </button>
     </div>
   );

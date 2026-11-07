@@ -12,6 +12,7 @@ import { FindingsPanel } from "../diag/FindingsPanel";
 import { unavailableText } from "../diag/unavailable";
 import { BLOCK_BYTES, QUERY_KEY_ID, cpuMs, queryTitle, snapshotFileParts, sortAvailable } from "./queriesText";
 import { SnapshotsPanel } from "./SnapshotsPanel";
+import { Icon } from "../common/Icon";
 
 /** Интервал обновления режима «с момента сброса» по умолчанию, с. */
 const DEFAULT_INTERVAL_S = 10;
@@ -253,7 +254,7 @@ export function QueriesView({
     <div className="toolbar queries-top-head">
       <label className="inline">
         <span>{t("diag.queries.search")}</span>
-        <input type="search" aria-label={t("diag.queries.search")} placeholder={t("diag.queries.searchPlaceholder")} value={searchInput} onChange={(e) => setSearchInput(e.target.value)} />
+        <input type="search" data-action="filter" aria-label={t("diag.queries.search")} placeholder={t("diag.queries.searchPlaceholder")} value={searchInput} onChange={(e) => setSearchInput(e.target.value)} />
       </label>
     </div>
   );
@@ -404,7 +405,7 @@ export function QueriesView({
                             <th key={c.id} scope="col" className="num" aria-sort={current ? (ascending ? "ascending" : "descending") : undefined}>
                               <button type="button" className="link" disabled={!enabled} title={enabled ? undefined : t("diag.queries.sortUnavailable")} onClick={() => setSort(c)}>
                                 {t(c.labelKey)}
-                                {current ? (ascending ? " ▴" : " ▾") : ""}
+                                {current && <Icon name={ascending ? "arrowUp" : "arrowDown"} size={12} className="sort-mark" />}
                               </button>
                               {c.kcache && data.pgss?.kcacheSeparate && (
                                 <span className="muted" title={t("diag.queries.kcacheColumnHint")}>

@@ -5,6 +5,7 @@ import { i18n } from "../../i18n";
 import { formatDuration } from "../../lib/format";
 import type { SessionActionChoice } from "../actions/SessionActionDialog";
 import { blockersText, oneLine, QUERY_PREVIEW_CHARS, QUERY_TITLE_CHARS } from "./sessionText";
+import { Icon } from "../common/Icon";
 
 /** Знаков запроса в карточке DDL (в дереве — `QUERY_PREVIEW_CHARS`); полный текст — в подсказке. */
 const CARD_QUERY_CHARS = 200;
@@ -106,7 +107,9 @@ function TreeNode({
             aria-label={t(expanded ? "diag.locks.collapse" : "diag.locks.expand", { pid: s.pid })}
             onClick={() => toggle(s.pid)}
           >
-            <span aria-hidden="true">{expanded ? "▾" : "▸"}</span>
+            <span className={expanded ? "tree-chevron open" : "tree-chevron"} aria-hidden="true">
+              <Icon name="chevron" size={14} />
+            </span>
           </button>
         ) : (
           <span className="lock-toggle" aria-hidden="true" />

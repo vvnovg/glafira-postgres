@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
 import type { PatroniAction, WatchEvent, WatchStep } from "../../api/types";
 import { tr } from "../../i18n/text";
+import { Icon } from "../common/Icon";
 
 /** Шаги наблюдения по действию — как `WatchPlan::steps` в Rust (спец. §8.6). */
 export function WATCH_STEPS(kind: PatroniAction["kind"], onlyPending: boolean): WatchStep[] {
@@ -102,7 +103,9 @@ export function WatchPanel({ action, onlyPending = false, events, watchId, onClo
           const done = i <= reached;
           return (
             <li key={s} aria-current={i === reached + 1 && last?.status === "running" ? "step" : undefined}>
-              <span aria-hidden="true">{done ? "✓ " : "· "}</span>
+              <span className={done ? "watch-mark done" : "watch-mark"} aria-hidden="true">
+                <Icon name={done ? "check" : "dot"} size={done ? 14 : 8} />
+              </span>
               {t(STEP_KEYS[s])}
               {done && <span className="sr-only"> — {t("actions.watch.reached")}</span>}
             </li>

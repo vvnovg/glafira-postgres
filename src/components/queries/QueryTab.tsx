@@ -12,6 +12,8 @@ import { QueryOverview } from "./QueryOverview";
 import { CopyLlmButton } from "./CopyLlmButton";
 import { QueryPlan } from "./QueryPlan";
 import { queryTitle } from "./queriesText";
+import { Icon } from "../common/Icon";
+import { Kbd } from "../common/Kbd";
 
 type Section = "overview" | "plan";
 
@@ -132,8 +134,10 @@ export function QueryTab({ connectionId, member, database, queryId, active }: { 
             </select>
           </label>
         )}
-        <button type="button" onClick={() => void q.refetch()}>
+        <button type="button" data-action="refresh" onClick={() => void q.refetch()}>
+          <Icon name="refresh" />
           {t("diag.header.refresh")}
+          <Kbd keys="Mod+R" />
         </button>
       </div>
       {q.error && <ErrorBanner error={q.error} onRetry={() => void q.refetch()} />}

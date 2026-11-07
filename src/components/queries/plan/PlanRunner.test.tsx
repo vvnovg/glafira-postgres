@@ -359,10 +359,16 @@ describe("PlanRunner: отказы и режим", () => {
     vi.mocked(api.listConnections).mockResolvedValue([connection({ id: "c", environment: "dev", readOnly: false })]);
   });
 
-  it("«План» и «План с выполнением» без primary-стиля", async () => {
+  it("«План» — главная кнопка запуска с ⌘⏎ (спец. переноса U1 §1), «План с выполнением» — обычная", async () => {
     renderWithClient(<PlanRunner connectionId="c" member="pg-1" database="perf" sql="SELECT 1" serverVersionNum={170_000} inRecovery={false} />);
-    expect(screen.getByRole("button", { name: "План" })).not.toHaveClass("primary");
-    expect(screen.getByRole("button", { name: "План с выполнением" })).not.toHaveClass("primary");
+    const plan = screen.getByRole("button", { name: "План" });
+    expect(plan).toHaveClass("primary");
+    expect(plan).toHaveAttribute("data-action", "run");
+    expect(plan.querySelector('svg[data-icon="play"]')).not.toBeNull();
+    expect(plan.querySelector(".kbd")).not.toBeNull();
+    const analyze = screen.getByRole("button", { name: "План с выполнением" });
+    expect(analyze).not.toHaveClass("primary");
+    expect(analyze).not.toHaveAttribute("data-action");
   });
 
   it("ошибка запуска убирает прошлый результат с экрана до нового успешного; история остаётся", async () => {

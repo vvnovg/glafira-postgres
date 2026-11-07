@@ -1,11 +1,11 @@
 // Контраст и различимость цветов темы: чистые функции для theme-contrast.test.mjs (`pnpm test:scripts`).
-// Разбирает фоны, текстовые цвета и --wait-* из src/styles.css; считает WCAG-контраст и ΔE в OKLab (формулы CSS Color 4).
+// Разбирает фоны, текстовые цвета и --wait-* из src/styles.css и src/app.css; считает WCAG-контраст и ΔE в OKLab (формулы CSS Color 4).
 
 /**
- * Переменные с цветом `#rrggbb`, которые разбирает `parseThemeVars`: фоны, текст и приглушённый текст, акцент и его заливка,
- * предупреждение (`.diag-warn` подмешивает к нему цвет текста).
+ * Переменные с цветом `#rrggbb`, которые разбирает `parseThemeVars`: фоны (рабочая область, панели, боковая панель), текст
+ * и приглушённый текст, акцент (заливки и выделение), цвет ссылок, предупреждение (`.diag-warn` подмешивает к нему цвет текста).
  */
-const THEME_VARS = new Set(["--bg", "--bg-alt", "--fg", "--muted", "--accent", "--accent-fill", "--warn"]);
+const THEME_VARS = new Set(["--bg", "--bg-alt", "--sidebar", "--fg", "--muted", "--accent", "--link", "--warn"]);
 
 /** Переменные, которые разбирает `parseThemeVars`: `THEME_VARS` и цвета классов ожиданий. */
 const isThemeVar = (name) => THEME_VARS.has(name) || name.startsWith("--wait-");
@@ -49,7 +49,7 @@ function themeDeclarations(body, into) {
 }
 
 /**
- * Цвета темы из текста styles.css: `:root` верхнего уровня — светлая тема, `:root` внутри
+ * Цвета темы из текста стилей (styles.css и app.css подряд): `:root` верхнего уровня — светлая тема, `:root` внутри
  * `@media (prefers-color-scheme: dark)` — тёмная (только то, что она переопределяет).
  * @returns {{ light: Map<string, string>, dark: Map<string, string> }}
  */

@@ -118,8 +118,8 @@ describe("CatalogNodes: детали", () => {
     // Одинаковые «Узлы» и «Роли» в обоих списках — но каждая принадлежит своему.
     expect(screen.getAllByRole("button", { name: /^Узлы/ })).toHaveLength(2);
     await user.click(within(audit).getByRole("button", { name: /^Узлы/ }));
-    expect(within(audit).getByRole("button", { name: "★ pg-1" })).toBeInTheDocument();
-    expect(within(billing).queryByRole("button", { name: "★ pg-1" })).not.toBeInTheDocument();
+    expect(within(audit).getByRole("button", { name: /^pg-1, / })).toBeInTheDocument();
+    expect(within(billing).queryByRole("button", { name: /^pg-1, / })).not.toBeInTheDocument();
   });
 
   it("индикатор загрузки списка баз — role=status", async () => {
@@ -161,7 +161,7 @@ describe("CatalogNodes: детали", () => {
     await user.click(screen.getByRole("button", { name: /^Узлы/ }));
     expect(screen.getByRole("img", { name: "Узел недоступен" })).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "Лаг больше 16 МБ" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "○ pg-2" }));
+    await user.click(screen.getByRole("button", { name: /^pg-2, / }));
     expect(useWorkspace.getState().tabs).toEqual([{ kind: "overview", connectionId: "c", member: "pg-2", id: "overview:c" }]);
   });
 

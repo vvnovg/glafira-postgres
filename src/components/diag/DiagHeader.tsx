@@ -4,6 +4,8 @@ import { formatTime, formatTimestamp } from "../../lib/format";
 import { roleLabel } from "../../lib/topology";
 import { Hint } from "../common/Hint";
 import { DIAG_INTERVALS_S, WAITS_WINDOWS_S } from "../../lib/useDiagnostic";
+import { Icon } from "../common/Icon";
+import { Kbd } from "../common/Kbd";
 
 /** Пояснение «?» у названия инструмента. Ключи — литералами: `pnpm i18n:check` сверяет значки с ключами `hints`. */
 const TOOL_HINTS: Record<DiagTool, string> = {
@@ -104,8 +106,10 @@ export function DiagHeader({ tool, controls }: { tool: DiagTool; controls?: Diag
               </select>
             </label>
           )}
-          <button type="button" onClick={c.onRefresh}>
+          <button type="button" data-action="refresh" onClick={c.onRefresh}>
+            <Icon name="refresh" />
             {t("diag.header.refresh")}
+            <Kbd keys="Mod+R" />
           </button>
           {c.updatedAtMs !== null && (
             <span className="muted" title={formatTimestamp(c.updatedAtMs)}>

@@ -4,6 +4,8 @@ import { useTranslation } from "react-i18next";
 import { api } from "../api/client";
 import type { ConnectionProfile } from "../api/types";
 import { ENV_COLORS } from "../lib/env";
+import { isMacOS } from "../lib/platform";
+import { useShortcuts } from "../lib/shortcuts";
 import { type Tab, useWorkspace } from "../state/workspace";
 import { useWorkspacePersistence } from "../state/workspacePersist";
 import { UpdateNotice } from "./about/UpdateNotice";
@@ -14,6 +16,7 @@ import { Sidebar } from "./Sidebar";
 import { i18n } from "../i18n";
 import { useTabMarks } from "../state/tabMarks";
 import { Glyph } from "./common/Glyph";
+import { Icon } from "./common/Icon";
 import { TabContent } from "./TabContent";
 import { useConnectionEvents } from "../lib/useConnectionEvents";
 import { useMcpEvents } from "../lib/useMcpStatus";
@@ -115,6 +118,7 @@ export function Layout() {
   const { tabs, activeId, activate, close } = useWorkspace();
   const marks = useTabMarks((s) => s.marks);
   useHelpShortcut();
+  useShortcuts();
   useConnectionEvents();
   useMcpEvents();
   const connectionsQ = useQuery({ queryKey: ["connections"], queryFn: api.listConnections });
@@ -135,18 +139,19 @@ export function Layout() {
     if (hidden.length === 0) setMoreOpen(false);
   }, [hidden.length]);
   const moreLabel = t("layout.hiddenTabs", { count: hidden.length });
+  // macOS: заголовок окна слит с панелями (спец. U1 §7) — панель вкладок и верх боковой панели тянут окно.
+  const mac = isMacOS();
 
   return (
-    <div className="layout">
+    <div className={mac ? "layout mac" : "layout"}>
       <Sidebar />
       <main className="workspace">
-        <div className="env-stripe" style={{ background: activeConn ? ENV_COLORS[activeConn.environment] : "transparent" }} />
-        <UpdateNotice />
         <div className="tabbar-wrap">
           <nav
             className="tabbar"
             role="tablist"
             ref={stripRef}
+            data-tauri-drag-region={mac ? "" : undefined}
             // Колесо мыши без Shift прокручивает строку вкладок по горизонтали: вертикально ей прокручиваться некуда.
             onWheel={(e) => {
               if (e.deltaY !== 0 && Math.abs(e.deltaY) > Math.abs(e.deltaX)) e.currentTarget.scrollLeft += e.deltaY;
@@ -161,7 +166,7 @@ export function Layout() {
                   {conn && <EnvBadge environment={conn.environment} readOnly={conn.readOnly} />}
                   <button type="button" role="tab" aria-selected={isActive} onClick={() => activate(tab.id)}>
                     {tabTitle(tab, byId)}
-                    {marks[tab.id] && <Glyph symbol="●" label={t("llmAssist.panel.newDot")} className="tab-dot" />}
+                    {marks[tab.id] && <Glyph symbol={<Icon name="dot" size={10} />} label={t("llmAssist.panel.newDot")} className="tab-dot" />}
                   </button>
                   <button
                     type="button"
@@ -172,7 +177,7 @@ export function Layout() {
                       close(tab.id);
                     }}
                   >
-                    ×
+                    <Icon name="close" size={14} />
                   </button>
                 </div>
               );
@@ -189,7 +194,8 @@ export function Layout() {
                 aria-expanded={moreOpen}
                 onClick={() => setMoreOpen((v) => !v)}
               >
-                » {hidden.length}
+                <Icon name="chevrons" size={14} />
+                {hidden.length}
               </button>
               {moreOpen && (
                 <FolderMenu
@@ -203,6 +209,8 @@ export function Layout() {
             </span>
           )}
         </div>
+        <div className="env-stripe" style={{ background: activeConn ? ENV_COLORS[activeConn.environment] : "transparent" }} />
+        <UpdateNotice />
         {tabs.length === 0 && <p className="empty">{t("layout.empty")}</p>}
         {/* Неактивные вкладки скрыты, но не размонтированы — состояние форм сохраняется. */}
         {tabs.map((tab) => (

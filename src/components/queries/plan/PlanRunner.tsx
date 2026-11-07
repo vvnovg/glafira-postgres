@@ -12,6 +12,8 @@ import { AnalyzeConfirm } from "./AnalyzeConfirm";
 import { PARAM_FIELDS_LIMIT, ParamsForm } from "./ParamsForm";
 import { PlanView } from "./PlanView";
 import { Recommendations } from "./Recommendations";
+import { Icon } from "../../common/Icon";
+import { Kbd } from "../../common/Kbd";
 
 /** Сроки ANALYZE в выборе, секунды (Rust принимает 5…600); пробный план всегда идёт со своим сроком 15 с. */
 const TIMEOUTS_S = [5, 15, 30, 60, 300, 600] as const;
@@ -431,8 +433,11 @@ export function PlanRunner({
     <div className="plan-runner">
       <ParamsForm count={count} values={values} onChange={setValues} generic={generic} canGeneric={canGeneric} onGeneric={setGeneric} />
       <div className="toolbar">
-        <button type="button" disabled={!idle || planBlocked} onClick={() => void runPlan()}>
+        {/* Главная кнопка запуска (спец. переноса U1 §1): ⌘⏎ — пункт меню «Вид → Запустить», на Windows и Linux — Ctrl+Enter. */}
+        <button type="button" className="primary" data-action="run" disabled={!idle || planBlocked} onClick={() => void runPlan()}>
+          <Icon name="play" />
           {genericOn ? t("diag.plan.run.planGeneric") : t("diag.plan.run.plan")}
+          <Kbd keys="Mod+Enter" />
         </button>
         <button type="button" disabled={!idle || analyzeBlocked} onClick={() => void runAnalyze()}>
           {t("diag.plan.run.analyze")}
