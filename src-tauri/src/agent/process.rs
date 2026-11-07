@@ -176,10 +176,11 @@ impl InitScan {
 }
 
 /// Строка потока до события `init`: само событие (имя инструмента — строка; объект с `name` — его имя; прочее — JSON
-/// текстом, такое имя проверку не пройдёт), строка не JSON (`NotStreamJson`), другое системное событие (`None`, у Claude
-/// Code до `init` идут `hook_started` и `hook_response`) или событие не `system` (`NoList`): ход модели (`assistant`,
-/// `user`) или незнакомое событие до списка инструментов — модель уже работает, а проверить нечем (повторное ревью
-/// задачи 6, замечание 1).
+/// текстом, такое имя проверку не пройдёт), строка не JSON (`NotStreamJson`), другое системное событие или служебное
+/// событие входа `auth_status` (`None`, у Claude Code до `init` идут `hook_started` и `hook_response`, при входе по
+/// подписке — `auth_status`) или любое другое событие (`NoList`): ход модели (`assistant`, `user`) или незнакомое
+/// событие до списка инструментов — модель уже работает, а проверить нечем (повторное ревью задачи 6, замечание 1).
+/// Список допустимых — разрешающий: новое незнакомое событие останавливает запуск, а не пропускается.
 fn init_of(line: &[u8]) -> Option<InitTools> {
     let t = line.trim_ascii();
     if t.is_empty() {
@@ -188,9 +189,10 @@ fn init_of(line: &[u8]) -> Option<InitTools> {
     let Ok(v) = serde_json::from_slice::<Value>(t) else {
         return Some(InitTools::NotStreamJson);
     };
-    let system = v.get("type").and_then(Value::as_str) == Some("system");
-    if !system {
-        return Some(InitTools::NoList);
+    match v.get("type").and_then(Value::as_str) {
+        Some("system") => {}
+        Some("auth_status") => return None,
+        _ => return Some(InitTools::NoList),
     }
     if v.get("subtype").and_then(Value::as_str) != Some("init") {
         return None;
@@ -1096,6 +1098,21 @@ mod tests {
                 "{before}"
             );
         }
+        // Служебное событие входа Claude Code до `init` — не ход модели: ждём `init`.
+        let mut scan = InitScan::default();
+        assert_eq!(
+            scan.feed(
+                format!(
+                    "{}\n{INIT}\n",
+                    r#"{"type":"auth_status","isAuthenticating":true,"output":[]}"#
+                )
+                .as_bytes()
+            ),
+            Some(InitTools::Listed(vec![
+                "mcp__glafira-pg__list_connections".into(),
+                "mcp__glafira-pg__get_optimization_request".into()
+            ]))
+        );
         // Слишком длинная строка пропускается целиком, следующая разбирается.
         let mut scan = InitScan::default();
         let long = format!("{{\"x\":\"{}\"}}", "z".repeat(MAX_INIT_LINE));
