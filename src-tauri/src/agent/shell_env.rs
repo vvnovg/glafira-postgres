@@ -377,14 +377,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_profile_that_keeps_stdout_open_does_not_hold_glafira() {
-        // Фоновый процесс профиля держит stdout: вывод между метками уже есть, ждать его конца незачем.
+        // Фоновый процесс профиля держит stdout: вывод между метками уже есть, ждать его конца незачем. Срок — с
+        // запасом на нагрузку параллельных тестов; фоновый `sleep` заметно дольше срока.
         let dir = tempfile::tempdir().unwrap();
-        let shell = fake_shell(dir.path(), "(sleep 5 &)\nshift\neval \"$1\"");
+        let shell = fake_shell(dir.path(), "(sleep 15 &)\nshift\neval \"$1\"");
         let started = std::time::Instant::now();
-        let env = capture_with(&shell, Duration::from_secs(2));
+        let env = capture_with(&shell, Duration::from_secs(5));
         assert!(env.from_shell, "окружение снято, хотя stdout ещё открыт");
         assert!(
-            started.elapsed() < Duration::from_secs(2),
+            started.elapsed() < Duration::from_secs(10),
             "{:?}",
             started.elapsed()
         );
