@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -545,8 +545,9 @@ describe("AskLlmButton: фоновый ассистент", () => {
       expect(notes).toHaveTextContent("");
       expect(screen.queryByRole("group", { name: "Фоновый ассистент: запрос r3a9f1c" })).toBeNull();
     } finally {
-      // Упавший тест не должен оставить «показанные» предложения соседям.
-      useShownProposals.setState({ shown: {} });
+      // Упавший тест не должен оставить «показанные» предложения соседям. Сброс перерисовывает ещё смонтированную кнопку —
+      // внутри act.
+      act(() => useShownProposals.setState({ shown: {} }));
     }
   });
 

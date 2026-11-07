@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSettings, AgentStatus, AppInfo, McpStatus } from "../../../api/types";
@@ -269,9 +269,12 @@ describe("AgentSection", () => {
     expect(api.detectAgentCli).toHaveBeenCalledWith("qwen", "/usr/local/bin/qwen");
     // Пока проверка идёт, путь поправили.
     await user.type(path, "2");
-    answer({ path: "/usr/local/bin/qwen", version: "0.25.1", belowMinimum: true, error: null });
-    await waitFor(() => expect(api.detectAgentCli).toHaveBeenCalledTimes(1));
-    await new Promise((r) => setTimeout(r, 0));
+    // Запоздалый ответ и обновления после него — внутри act, пока тест не кончился.
+    await act(async () => {
+      answer({ path: "/usr/local/bin/qwen", version: "0.25.1", belowMinimum: true, error: null });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(api.detectAgentCli).toHaveBeenCalledTimes(1);
     expect(screen.queryByText(/Версия 0.25.1/)).toBeNull();
     expect(path).toHaveValue("/usr/local/bin/qwen2");
   });
