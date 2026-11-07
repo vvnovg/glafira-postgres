@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { connection } from "../../../test/fixtures";
@@ -72,12 +72,17 @@ describe("AgentRuns", () => {
     expect(within(table).queryByText("План уже хороший: индекс по status есть")).toBeNull();
   });
 
-  it("ошибка «Остановить» показывается под списком", async () => {
+  it("ошибка «Остановить» показывается под списком; фокус потом никуда не переводится", async () => {
     vi.mocked(api.stopAgentRun).mockRejectedValue({ code: "NOT_FOUND", message: "Background run a0000a1 not found", retryable: false });
     const user = userEvent.setup();
-    renderWithClient(<AgentRuns runs={[agentRun({ id: "a0000a1", status: "running", startedAtMs: 1 })]} onShowLog={onShowLog} />);
+    const run = agentRun({ id: "a0000a1", status: "running", startedAtMs: 1 });
+    const { rerender } = renderWithClient(<AgentRuns runs={[run]} onShowLog={onShowLog} />);
     await user.click(screen.getByRole("button", { name: "Остановить запуск a0000a1" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Background run a0000a1 not found");
+    // Фокус ушёл на <body> (щелчок по тексту), а запуск потом кончился сам: фокус не прыгает на его журнал.
+    act(() => (document.activeElement as HTMLElement | null)?.blur());
+    rerender(<AgentRuns runs={[{ ...run, status: "done", endedAtMs: 2 }]} onShowLog={onShowLog} />);
+    expect(document.activeElement).toBe(document.body);
   });
 
   it("«Остановить» во время записи — aria-disabled (фокус остаётся); запуск остановлен — фокус на его журнал или на заголовок", async () => {

@@ -11,7 +11,7 @@ import { ErrorBanner } from "../../common/ErrorBanner";
 import { Hint } from "../../common/Hint";
 import { AgentLogDialog } from "./AgentLogDialog";
 import { AgentRuns } from "./AgentRuns";
-import { type AgentDraft, type FieldError, fromDraft, hiddenErrorPreset, isLoopbackUrl, MIN_VERSION, needsModel, toDraft, unloadOff, validateDraft } from "./agentForm";
+import { type AgentDraft, type FieldError, fromDraft, hiddenErrorPreset, isLoopbackUrl, MIN_VERSION, needsModel, pathRules, toDraft, unloadOff, validateDraft } from "./agentForm";
 import { checkResultText } from "./agentText";
 
 /** Ключ настроек фонового ассистента в кэше запросов. */
@@ -51,9 +51,10 @@ const UNLOAD_OFF_KEYS = {
   keepWarmOff: "settings.mcp.agent.unloadKeepWarmOff",
 } as const;
 
-/** Атрибуты поля с ошибкой: `aria-invalid` и связь с текстом ошибки. */
-function invalid(id: string, e: FieldError | undefined) {
-  return e ? { "aria-invalid": true as const, "aria-describedby": `${id}-error` } : {};
+/** Атрибуты поля с ошибкой: `aria-invalid` и связь с текстом ошибки (и с пояснениями поля `notes` — их id). */
+function invalid(id: string, e: FieldError | undefined, notes: string[] = []) {
+  const describedBy = [...(e ? [`${id}-error`] : []), ...notes].join(" ");
+  return { ...(e ? { "aria-invalid": true as const } : {}), ...(describedBy ? { "aria-describedby": describedBy } : {}) };
 }
 
 /**
@@ -142,7 +143,9 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
   const pathNow = useRef("");
   const linesRef = useRef<HTMLDivElement>(null);
   const { all: runs, state: runsState, error: runsError, refresh: refreshRuns } = useAgentRuns(null);
-  const errors = validateDraft(draft);
+  // ОС Glafira — для проверки абсолютного пути, как у Rust; пока не прочитана — годится любой вид пути (кэш общий с «О программе»).
+  const appInfo = useQuery({ queryKey: ["app-info"], queryFn: () => api.getAppInfo(), staleTime: Infinity });
+  const errors = validateDraft(draft, pathRules(appInfo.data?.os));
   const hasErrors = Object.keys(errors).length > 0;
   const hidden = hiddenErrorPreset(draft, errors);
   const dirty = JSON.stringify(draft) !== JSON.stringify(toDraft(saved));
@@ -329,8 +332,16 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
           error={modelError}
           below={
             <>
-              {model.trim() === "" && <p className="muted agent-note">{modelEmptyNote}</p>}
-              {models.error && <p className="muted agent-note">{t("settings.mcp.agent.modelsFailed")}</p>}
+              {model.trim() === "" && (
+                <p id="agent-model-note" className="muted agent-note">
+                  {modelEmptyNote}
+                </p>
+              )}
+              {models.error && (
+                <p id="agent-models-failed" className="muted agent-note">
+                  {t("settings.mcp.agent.modelsFailed")}
+                </p>
+              )}
             </>
           }
         >
@@ -342,7 +353,7 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
             autoComplete="off"
             list={modelsId}
             value={model}
-            {...invalid("agent-model", modelError)}
+            {...invalid("agent-model", modelError, [...(model.trim() === "" ? ["agent-model-note"] : []), ...(models.error ? ["agent-models-failed"] : [])])}
             onChange={(e) => update(qwen ? { qwenModel: e.target.value } : { claudeModel: e.target.value })}
           />
           <datalist id={modelsId}>

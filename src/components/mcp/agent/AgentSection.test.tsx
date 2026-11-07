@@ -1,7 +1,7 @@
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentSettings, AgentStatus, McpStatus } from "../../../api/types";
+import type { AgentSettings, AgentStatus, AppInfo, McpStatus } from "../../../api/types";
 import { useWorkspace } from "../../../state/workspace";
 import { emitEvent, listeners, resetEventBus } from "../../../test/events";
 import { connection } from "../../../test/fixtures";
@@ -26,6 +26,7 @@ vi.mock("../../../api/client", async (importOriginal) => {
       readAgentLog: vi.fn(),
       revealAgentLog: vi.fn(),
       listConnections: vi.fn(),
+      getAppInfo: vi.fn(),
     },
   };
 });
@@ -36,6 +37,8 @@ import { AgentSection } from "./AgentSection";
 const TOGGLE = "Запускать ассистента в фоне";
 /** Настройки с заданной программой Qwen Code. */
 const configured: AgentSettings = agentSettings({ qwen: { path: "/opt/homebrew/bin/qwen", model: "" } });
+/** Glafira на этой ОС (`AppInfo.os` — правила абсолютного пути). */
+const appInfo = (os: string): AppInfo => ({ ...{ name: "Glafira for PostgreSQL", version: "0.6.0", commit: "abc1234", os: "macos", arch: "aarch64", dataDir: "/d", logDir: "/l" }, os });
 /** Статус MCP: сервер работает, агент настроен. */
 const ready = (patch: Partial<AgentStatus> = {}): McpStatus => mcpStatus({ agent: agentStatus({ configured: true, ...patch }) });
 
@@ -48,6 +51,7 @@ describe("AgentSection", () => {
     vi.mocked(api.listAgentModels).mockResolvedValue({ ids: [], default: null, source: "none" });
     vi.mocked(api.listAgentRuns).mockResolvedValue([]);
     vi.mocked(api.listConnections).mockResolvedValue([connection({ id: "c", name: "perf" })]);
+    vi.mocked(api.getAppInfo).mockResolvedValue(appInfo("macos"));
   });
 
   it("выключатель сохраняется сразу, статус MCP перечитывается; пометка о маскировании и расходах видна всегда", async () => {
@@ -120,7 +124,7 @@ describe("AgentSection", () => {
     expect(screen.getByRole("combobox", { name: "Модель" })).not.toHaveAttribute("placeholder");
     await user.click(screen.getByRole("checkbox", { name: "Через Ollama" }));
     expect(screen.queryByRole("textbox", { name: "Предел расходов на запуск, $" })).toBeNull();
-    expect(screen.getByText("Нужна модель Ollama")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Модель" })).toHaveAccessibleDescription("Нужна модель Ollama");
     await user.type(screen.getByRole("combobox", { name: "Модель" }), "qwen3.6-64k:35b-a3b");
     expect(screen.queryByText("Нужна модель Ollama")).toBeNull();
     await user.click(screen.getByRole("radio", { name: "Qwen Code" }));
@@ -166,6 +170,8 @@ describe("AgentSection", () => {
     const { container } = renderWithClient(<AgentSection status={mcpStatus()} />);
     const model = await screen.findByRole("combobox", { name: "Модель" });
     expect(await screen.findByText("По умолчанию: qwen3.6-64k:35b-a3b")).toBeInTheDocument();
+    // Что значит пустое поле, скринридер читает при входе в поле.
+    expect(model).toHaveAccessibleDescription("По умолчанию: qwen3.6-64k:35b-a3b");
     expect(Array.from(container.querySelectorAll("datalist option")).map((o) => o.getAttribute("value"))).toEqual(["qwen3.6-64k:35b-a3b", "qwen3.8:27b"]);
     await user.type(model, "bad model");
     expect(model).toHaveAttribute("aria-invalid", "true");
@@ -218,6 +224,46 @@ describe("AgentSection", () => {
     expect(screen.queryByText("Сохранено")).toBeNull();
   });
 
+  it("запись настроек — одна за раз: пока идёт «Сохранить», выключатель не пишет", async () => {
+    let finish: (s: AgentSettings) => void = () => {};
+    vi.mocked(api.setAgentSettings)
+      .mockImplementationOnce(() => new Promise<AgentSettings>((r) => (finish = r)))
+      .mockImplementation(async (s) => s);
+    const user = userEvent.setup();
+    renderWithClient(<AgentSection status={mcpStatus()} />);
+    await user.type(await screen.findByRole("textbox", { name: "Программа" }), "/opt/homebrew/bin/qwen");
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    const toggle = screen.getByRole("checkbox", { name: TOGGLE });
+    expect(toggle).toHaveAttribute("aria-disabled", "true");
+    await user.click(toggle);
+    expect(api.setAgentSettings).toHaveBeenCalledTimes(1);
+    expect(toggle).not.toBeChecked();
+    const saved = agentSettings({ qwen: { path: "/opt/homebrew/bin/qwen", model: "" } });
+    finish(saved);
+    await waitFor(() => expect(toggle).not.toHaveAttribute("aria-disabled"));
+    await user.click(toggle);
+    // Выключатель берёт остальное из только что сохранённых настроек.
+    expect(api.setAgentSettings).toHaveBeenLastCalledWith({ ...saved, enabled: true });
+  });
+
+  it("ответ проверки пути, пришедший после новой правки, отброшен: он о прежнем пути", async () => {
+    let answer: (d: { path: string; version: string; belowMinimum: boolean; error: null }) => void = () => {};
+    vi.mocked(api.detectAgentCli).mockImplementationOnce(() => new Promise((r) => (answer = r)));
+    const user = userEvent.setup();
+    renderWithClient(<AgentSection status={mcpStatus()} />);
+    const path = await screen.findByRole("textbox", { name: "Программа" });
+    await user.type(path, "/usr/local/bin/qwen");
+    await user.tab();
+    expect(api.detectAgentCli).toHaveBeenCalledWith("qwen", "/usr/local/bin/qwen");
+    // Пока проверка идёт, путь поправили.
+    await user.type(path, "2");
+    answer({ path: "/usr/local/bin/qwen", version: "0.25.1", belowMinimum: true, error: null });
+    await waitFor(() => expect(api.detectAgentCli).toHaveBeenCalledTimes(1));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByText(/Версия 0.25.1/)).toBeNull();
+    expect(path).toHaveValue("/usr/local/bin/qwen2");
+  });
+
   it("отказ Rust при сохранении — ошибка, черновик остаётся", async () => {
     vi.mocked(api.setAgentSettings).mockRejectedValue({ code: "INTERNAL", message: "settings.json: disk full", retryable: false });
     const user = userEvent.setup();
@@ -230,12 +276,29 @@ describe("AgentSection", () => {
     expect(screen.getByRole("button", { name: "Сохранить" })).toBeEnabled();
   });
 
-  it("путь Windows в macOS и Linux — ошибка у поля, как у Rust (Path::is_absolute)", async () => {
+  it("абсолютный путь — по ОС из AppInfo.os, как у Rust (Path::is_absolute); ОС не прочитана — любой вид, решит Rust", async () => {
     const user = userEvent.setup();
+    const mac = renderWithClient(<AgentSection status={mcpStatus()} />);
+    await user.type(await screen.findByRole("textbox", { name: "Программа" }), "C:\\Tools\\qwen.cmd");
+    expect(await screen.findByText("Нужен абсолютный путь")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Сохранить" })).toBeDisabled();
+    mac.unmount();
+    vi.mocked(api.getAppInfo).mockResolvedValue(appInfo("windows"));
+    const win = renderWithClient(<AgentSection status={mcpStatus()} />);
+    const path = await screen.findByRole("textbox", { name: "Программа" });
+    await waitFor(() => expect(api.getAppInfo).toHaveBeenCalled());
+    await user.type(path, "C:\\Tools\\qwen.cmd");
+    expect(screen.queryByText("Нужен абсолютный путь")).toBeNull();
+    await user.clear(path);
+    await user.type(path, "/usr/local/bin/qwen");
+    expect(await screen.findByText("Нужен абсолютный путь")).toBeInTheDocument();
+    win.unmount();
+    vi.mocked(api.getAppInfo).mockRejectedValue({ code: "INTERNAL", message: "no info", retryable: false });
     renderWithClient(<AgentSection status={mcpStatus()} />);
     await user.type(await screen.findByRole("textbox", { name: "Программа" }), "C:\\Tools\\qwen.cmd");
-    expect(screen.getByText("Нужен абсолютный путь")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Сохранить" })).toBeDisabled();
+    await waitFor(() => expect(api.getAppInfo).toHaveBeenCalledTimes(3));
+    expect(screen.queryByText("Нужен абсолютный путь")).toBeNull();
+    expect(screen.getByRole("button", { name: "Сохранить" })).toBeEnabled();
   });
 
   it("путь, указанный руками, при уходе из поля — версия этой программы (detect_agent_cli с path); путь не меняется", async () => {

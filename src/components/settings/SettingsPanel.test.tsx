@@ -41,6 +41,7 @@ vi.mock("../../api/client", async (importOriginal) => {
       stopAgentRun: vi.fn(),
       readAgentLog: vi.fn(),
       revealAgentLog: vi.fn(),
+      getAppInfo: vi.fn(),
     },
   };
 });
@@ -59,6 +60,7 @@ beforeEach(() => {
   vi.mocked(api.getAgentSettings).mockResolvedValue(agentSettings());
   vi.mocked(api.listAgentModels).mockResolvedValue({ ids: [], default: null, source: "none" });
   vi.mocked(api.listAgentRuns).mockResolvedValue([]);
+  vi.mocked(api.getAppInfo).mockResolvedValue({ name: "Glafira for PostgreSQL", version: "0.6.0", commit: "abc1234", os: "macos", arch: "aarch64", dataDir: "/d", logDir: "/l" });
 });
 
 // Выбор «en» в тесте переключает глобальный язык; сброс идёт в act, пока компоненты ещё

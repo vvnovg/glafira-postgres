@@ -45,6 +45,10 @@ export function AgentRuns({
   const stop = useMutation({
     mutationFn: (runId: string) => api.stopAgentRun(runId),
     onSuccess: () => void qc.invalidateQueries({ queryKey: AGENT_RUNS_KEY, exact: true }),
+    // Не остановился — кнопка остаётся, и переводить фокус потом незачем (иначе он прыгнул бы с <body> позже).
+    onError: () => {
+      refocus.current = null;
+    },
   });
   const [open, setOpen] = useState<string | null>(null);
   const tableRef = useRef<HTMLTableElement>(null);

@@ -44,17 +44,30 @@ export function parseDecimal(s: string): number {
   return /^\d+(\.\d+)?$/.test(v) ? Number(v) : NaN;
 }
 
-/** Glafira работает в Windows (по User-Agent WebView, как `isMacOS` в `useAppMenu`). */
-export function isWindows(): boolean {
-  return typeof navigator !== "undefined" && navigator.userAgent.includes("Windows");
+/** Правила путей ОС, где работает Glafira: `windows`, `unix` (macOS, Linux) или `null` — ОС ещё неизвестна. */
+export type PathRules = "windows" | "unix" | null;
+
+/** Правила путей по `AppInfo.os` (`std::env::consts::OS` в Rust: `windows`, `macos`, `linux`…); нет ответа — `null`. */
+export function pathRules(os: string | undefined): PathRules {
+  return os === undefined ? null : os === "windows" ? "windows" : "unix";
 }
+
+/** Буква диска с разделителем: `C:\` или `C:/`. */
+const WIN_DRIVE = /^[A-Za-z]:[\\/]/;
+/**
+ * UNC — два разделителя (обратная или прямая косая черта), сервер и ресурс: `\\server\share`; так же и `\\?\C:\…`.
+ */
+const WIN_UNC = /^[\\/]{2}[^\\/]+[\\/][^\\/]+/;
 
 /**
  * Путь абсолютный — как `Path::is_absolute` в Rust той ОС, где работает Glafira (спец. P4c §4.2): в Windows — с буквы диска
- * (`C:\`) или UNC (`\\сервер\…`), в macOS и Linux — с «/».
+ * или UNC с сервером и ресурсом (`\\сервер` без ресурса — нет), в macOS и Linux — с «/». Пока ОС неизвестна (`null`), годится
+ * любой из видов: окончательно решит Rust.
  */
-export function isAbsolutePath(p: string, windows = isWindows()): boolean {
-  return windows ? /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("\\\\") : p.startsWith("/");
+export function isAbsolutePath(p: string, rules: PathRules): boolean {
+  const windows = WIN_DRIVE.test(p) || WIN_UNC.test(p);
+  const unix = p.startsWith("/");
+  return rules === "windows" ? windows : rules === "unix" ? unix : windows || unix;
 }
 
 /** Управляющие символы (Unicode Cc), как `char::is_control` в Rust. */
@@ -125,12 +138,12 @@ export function fromDraft(d: AgentDraft, saved: AgentSettings): AgentSettings {
   };
 }
 
-/** Проверка черновика по правилам Rust; поля обоих агентов (скрытые тоже — `hiddenErrorPreset`). `windows` — ОС Glafira. */
-export function validateDraft(d: AgentDraft, windows = isWindows()): DraftErrors {
+/** Проверка черновика по правилам Rust; поля обоих агентов (скрытые тоже — `hiddenErrorPreset`). `rules` — правила путей ОС. */
+export function validateDraft(d: AgentDraft, rules: PathRules): DraftErrors {
   const e: DraftErrors = {};
   const path = (field: "qwenPath" | "claudePath") => {
     const v = d[field].trim();
-    if (v !== "" && (!isAbsolutePath(v, windows) || CONTROL.test(v) || [...v].length > MAX_PATH_CHARS)) e[field] = { key: "settings.mcp.agent.errors.path" };
+    if (v !== "" && (!isAbsolutePath(v, rules) || CONTROL.test(v) || [...v].length > MAX_PATH_CHARS)) e[field] = { key: "settings.mcp.agent.errors.path" };
   };
   const model = (field: "qwenModel" | "claudeModel") => {
     const v = d[field].trim();
