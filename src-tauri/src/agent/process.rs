@@ -847,27 +847,41 @@ const SUMMARY_MARKER: &str = "summary";
 /// остаётся в журнале запуска.
 /// - Текст после последней строки-маркера `SUMMARY`: регистр не важен, вокруг допустимы `**`, `__`, `#`, двоеточие и
 ///   пробелы. Итог может начинаться в строке маркера после двоеточия (`**Summary:** без предложений`).
-/// - После маркера пусто или маркера нет — последний абзац (после последней пустой строки), а если он один — весь
-///   текст.
+/// - Маркера нет — последний абзац (после последней пустой строки), а если он один — весь текст.
+/// - После маркера пусто — так же, но в тексте до строки маркера: сама строка маркера в итог не попадает.
 pub fn summary_part(text: &str) -> &str {
     let text = text.trim();
-    let mut after_marker = None;
-    let mut last_blank_end = 0;
+    // Последний маркер: начало его строки и начало итога.
+    let mut marker = None;
     let mut offset = 0;
     for line in text.split_inclusive('\n') {
         let start = offset;
         offset += line.len();
-        let body = line.trim_end_matches(['\n', '\r']);
-        if body.trim().is_empty() {
-            last_blank_end = offset;
-        } else if let Some(at) = marker_end(body) {
-            after_marker = Some(start + at);
+        if let Some(at) = marker_end(line.trim_end_matches(['\n', '\r'])) {
+            marker = Some((start, start + at));
         }
     }
-    if let Some(at) = after_marker {
-        let rest = text[at..].trim();
-        if !rest.is_empty() {
-            return rest;
+    match marker {
+        Some((line_start, at)) => {
+            let rest = text[at..].trim();
+            if rest.is_empty() {
+                last_paragraph(text[..line_start].trim())
+            } else {
+                rest
+            }
+        }
+        None => last_paragraph(text),
+    }
+}
+
+/// Последний абзац текста (после последней пустой строки); абзац один — весь текст.
+fn last_paragraph(text: &str) -> &str {
+    let mut last_blank_end = 0;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        offset += line.len();
+        if line.trim().is_empty() {
+            last_blank_end = offset;
         }
     }
     let last = text[last_blank_end..].trim();
@@ -1166,8 +1180,11 @@ mod tests {
             "one\ntwo",
             "абзац один — весь текст"
         );
-        // Маркер в конце без текста после него — как без маркера.
-        assert_eq!(summary_part("a\n\nb\nSUMMARY"), "b\nSUMMARY");
+        // Маркер в конце без текста после него — последний абзац до маркера, без строки маркера (итоговое ревью бэкенда).
+        assert_eq!(summary_part("a\n\nb\nSUMMARY"), "b");
+        assert_eq!(summary_part("a\n\nb\nc\n\n**Summary:**\n\n"), "b\nc");
+        assert_eq!(summary_part("one\nSUMMARY:"), "one");
+        assert_eq!(summary_part("## SUMMARY"), "", "кроме маркера ничего нет");
         assert_eq!(summary_part("  \n "), "");
         // Итог потока JSON — после маркера; полный текст остаётся в журнале.
         let event = serde_json::json!({

@@ -154,6 +154,11 @@ label.inline.wrap { white-space: normal; }
 .state-error { color: var(--danger); }
 .state-progress, .state-skip { color: var(--muted); }
 
+/* Подсказка у текста («≈ 0,01 $», смоук P4c): текст с точечным подчёркиванием, фокус — кольцом. */
+.hint-text { cursor: help; text-decoration: underline dotted; text-underline-offset: 2px; border-radius: 2px; }
+.hint-text:hover { color: var(--link); }
+.hint-text:focus-visible { outline: none; box-shadow: var(--ring); }
+
 /* Справка: таблицы GFM. */
 .help-content table { border-collapse: collapse; margin: 8px 0 12px; font-size: 13px; }
 .help-content th, .help-content td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; vertical-align: top; }

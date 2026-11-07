@@ -101,6 +101,46 @@ describe("McpAudit", () => {
     expect(table).not.toHaveTextContent("agentRunFinished");
   });
 
+  it("конец фонового запуска со стоимостью — в «Подробностях»: оценка «≈ …» с подсказкой о дне цен, точная — без «≈»", async () => {
+    const finished = (runId: string, extra: Partial<McpAuditEntry>): McpAuditEntry => ({
+      ts: 1_700_000_000_600,
+      event: "agentRunFinished",
+      runId,
+      requestId: "r1",
+      connection: { id: "c1", name: "perf" },
+      status: "done",
+      calls: 7,
+      proposals: 1,
+      ms: 40_000,
+      ...extra,
+    });
+    vi.mocked(api.getMcpAudit).mockResolvedValue([
+      finished("a1", { costUsd: 0.0148, costEstimated: true, pricesDate: "2026-11-07", offPeak: false }),
+      finished("a2", { costUsd: 0.0061, costEstimated: true, pricesDate: "2026-11-07", offPeak: true }),
+      finished("a3", { costUsd: 0.42 }),
+      finished("a4", {}),
+      // Запись сборки до итоговой волны: оценка без дня цен.
+      finished("a5", { costUsd: 0.0123, costEstimated: true }),
+      // Поле стоимости у вызова инструмента ничего не значит.
+      { ...activity, costUsd: 1 },
+    ]);
+    renderWithClient(<McpAudit status={mcpStatus()} />);
+    const table = await screen.findByRole("table", { name: "Журнал" });
+    const details = (i: number) => within(within(table).getAllByRole("row")[i + 1]).getAllByRole("cell")[6];
+    const hintOf = (cell: HTMLElement) => within(cell).queryByRole("button");
+    expect(details(0)).toHaveTextContent(/^≈ 0,01 \$$/);
+    expect(hintOf(details(0))).toHaveAccessibleName(/^≈ 0,01\s\$: Оценка по ценам Ollama Cloud на 07\.11\.2026 \(ollama\.com\/pricing\)$/);
+    expect(details(1)).toHaveTextContent(/^≈ 0,006 \$$/);
+    expect(hintOf(details(1))).toHaveAccessibleName(/: Оценка по ценам Ollama Cloud вне пика на 07\.11\.2026 \(ollama\.com\/pricing\)$/);
+    expect(details(2)).toHaveTextContent(/^0,42 \$$/);
+    expect(details(2)).not.toHaveTextContent("≈");
+    expect(hintOf(details(2))).toBeNull();
+    expect(details(3)).toHaveTextContent(/^$/);
+    expect(details(4)).toHaveTextContent(/^≈ 0,01 \$$/);
+    expect(hintOf(details(4))).toHaveAccessibleName(/: Оценка по ценам Ollama Cloud \(ollama\.com\/pricing\)$/);
+    expect(details(5)).toHaveTextContent(/^замаскировано: 3$/);
+  });
+
   it("пустой журнал, «Обновить» и «Показать файл»", async () => {
     vi.mocked(api.getMcpAudit).mockResolvedValue([]);
     vi.mocked(api.revealMcpAudit).mockResolvedValue(undefined);

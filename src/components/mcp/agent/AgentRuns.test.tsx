@@ -144,20 +144,24 @@ describe("AgentRuns", () => {
     ];
     const ru = renderWithClient(<AgentRuns runs={runs} onShowLog={onShowLog} />);
     const costCell = (i: number) => within(within(screen.getByRole("table")).getAllByRole("row")[i + 1]).getAllByRole("cell")[7];
+    // Подсказка у «≈ …» — с клавиатуры и для скринридера (итоговое ревью): сам текст фокусируется, имя — текст и подсказка.
+    const hintOf = (cell: HTMLElement) => within(cell).queryByRole("button");
     expect(costCell(0)).toHaveTextContent(/^≈ 0,01 \$$/);
-    expect(costCell(0).querySelector("[title]")?.getAttribute("title")).toBe("Оценка по ценам Ollama Cloud на 07.11.2026 (ollama.com/pricing)");
+    expect(hintOf(costCell(0))).toHaveAccessibleName(/^≈ 0,01\s\$: Оценка по ценам Ollama Cloud на 07\.11\.2026 \(ollama\.com\/pricing\)$/);
+    act(() => hintOf(costCell(0))!.focus());
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Оценка по ценам Ollama Cloud на 07.11.2026 (ollama.com/pricing)");
     // Меньше цента — одна значащая цифра, а не «0,00 $»; вне пика — сказано в подсказке.
     expect(costCell(1)).toHaveTextContent(/^≈ 0,006 \$$/);
-    expect(costCell(1).querySelector("[title]")?.getAttribute("title")).toBe("Оценка по ценам Ollama Cloud вне пика на 01.12.2026 (ollama.com/pricing)");
+    expect(hintOf(costCell(1))).toHaveAccessibleName(/Оценка по ценам Ollama Cloud вне пика на 01\.12\.2026 \(ollama\.com\/pricing\)$/);
     expect(costCell(2)).toHaveTextContent(/^0,42 \$$/);
-    expect(costCell(2).querySelector("[title]")).toBeNull();
+    expect(hintOf(costCell(2))).toBeNull();
     expect(costCell(3)).toHaveTextContent(/^$/);
     ru.unmount();
     try {
       await act(() => i18n.changeLanguage("en"));
       renderWithClient(<AgentRuns runs={runs} onShowLog={onShowLog} />);
       expect(costCell(0)).toHaveTextContent(/^≈ \$0\.01$/);
-      expect(costCell(0).querySelector("[title]")?.getAttribute("title")).toBe("Estimate based on Ollama Cloud prices as of 11/07/2026 (ollama.com/pricing)");
+      expect(hintOf(costCell(0))).toHaveAccessibleName("≈ $0.01: Estimate based on Ollama Cloud prices as of 11/07/2026 (ollama.com/pricing)");
       expect(costCell(2)).toHaveTextContent(/^\$0\.42$/);
     } finally {
       await act(() => i18n.changeLanguage("ru"));

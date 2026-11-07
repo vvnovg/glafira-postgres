@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import {
   FloatingPortal,
@@ -20,10 +20,12 @@ import { Icon } from "./Icon";
 let closeOpenHint: (() => void) | null = null;
 
 /**
- * Значок «?» с короткой подсказкой: наведение (300 мс), фокус, клик закрепляет; Esc и клик вне закрывают. `values` —
- * параметры текста подсказки (`{{id}}`), если они есть.
+ * Значок подсказки (`help`, спец. U1 §4) с короткой подсказкой: наведение (300 мс), фокус, клик закрепляет; Esc и клик вне закрывают. `values` —
+ * параметры текста подсказки (`{{id}}`), если они есть. С `children` вместо значка — сам текст (например, «≈ 0,01 $»):
+ * подчёркнут точками, фокусируется и показывает подсказку так же; `label` тогда — его полное имя для скринридера (видимый
+ * текст и подсказка).
  */
-export function Hint({ k, label, values }: { k: string; label: string; values?: Record<string, string> }) {
+export function Hint({ k, label, values, children }: { k: string; label: string; values?: Record<string, string>; children?: ReactNode }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [pinned, setPinned] = useState(false);
@@ -88,12 +90,12 @@ export function Hint({ k, label, values }: { k: string; label: string; values?: 
       <span
         role="button"
         tabIndex={0}
-        className="hint-icon"
+        className={children === undefined ? "hint-icon" : "hint-text"}
         ref={refs.setReference}
-        aria-label={t("hints.label", { name: label })}
+        aria-label={children === undefined ? t("hints.label", { name: label }) : label}
         {...getReferenceProps({ onClick, onKeyDown })}
       >
-        <Icon name="help" />
+        {children ?? <Icon name="help" />}
       </span>
       {open && (
         <FloatingPortal>

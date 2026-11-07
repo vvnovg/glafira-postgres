@@ -18,6 +18,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::{oneshot, watch};
 
 use super::models::{self, effective_model};
+use super::ollama::is_cloud;
 use super::presets::{self, RunInputs};
 use super::pricing;
 use super::process::{self, AgentProcess, AgentSpawner, ExitInfo, InitTools, TokioSpawner};
@@ -565,6 +566,18 @@ impl AgentQueue {
         });
     }
 
+    /// Qwen Code и модель Ollama, которой нет в его настройках (`models::qwen_knows`), — адрес и ключ Ollama (`presets::build`):
+    /// облачная модель (смоук P4c, sf-T7) — по тегу, модель локальной Ollama (итоговая волна правок) — по `/api/tags`
+    /// (`ModelWarmth::has_local_model`, только если Qwen Code модели не знает). Модель из его настроек — как в чате.
+    async fn qwen_via_ollama(&self, model: &str) -> bool {
+        let (m, home) = (model.to_string(), self.home.clone());
+        let known = off_thread(move || Ok(models::qwen_knows(&m, home.as_deref())))
+            .await
+            .unwrap_or(true);
+        !known
+            && (is_cloud(model, &Value::Null) || self.d.runtime.warmth.has_local_model(model).await)
+    }
+
     /// Один запуск от перепроверок до итога.
     async fn run_one(self: Arc<Self>, id: String, mut stop_rx: oneshot::Receiver<Stopped>) {
         let Some(run) = self.runs.get(&id) else {
@@ -607,14 +620,8 @@ impl AgentQueue {
             }
         };
         let model_arg = Some(s.model().trim().to_string()).filter(|m| !m.is_empty());
-        // Облачная модель Ollama не из настроек Qwen Code — адрес и ключ Ollama (смоук P4c, sf-T7).
-        let qwen_via_ollama = match (s.preset, model_arg.clone()) {
-            (Preset::Qwen, Some(m)) => {
-                let home = self.home.clone();
-                off_thread(move || Ok(models::qwen_cloud_via_ollama(&m, home.as_deref())))
-                    .await
-                    .unwrap_or(false)
-            }
+        let qwen_via_ollama = match (s.preset, model_arg.as_deref()) {
+            (Preset::Qwen, Some(m)) => self.qwen_via_ollama(m).await,
             _ => false,
         };
         let inputs = RunInputs {
@@ -1316,7 +1323,8 @@ impl AgentQueue {
 
     /// `agentRunFinished` (спец. §9.2); итоговый текст в журнал не пишется. Стоимость — `costUsd`: точная у Claude Code без
     /// Ollama; у облачного запуска через Ollama — оценка по ценам Ollama Cloud с признаком `costEstimated: true`
-    /// (дополнение владельца к sf-T7). Цен и токенов в журнале нет; нет стоимости — нет и полей.
+    /// (дополнение владельца к sf-T7), днём цен таблицы `pricesDate` и `offPeak` — для подсказки у «≈ …» в «Журнале»
+    /// «Настроек» (итоговая волна правок смоука P4c). Самих цен и токенов в журнале нет; нет стоимости — нет и полей.
     fn audit_finished(&self, r: &AgentRun) {
         let mut f = Map::new();
         f.insert("runId".into(), r.id.clone().into());
@@ -1344,6 +1352,8 @@ impl AgentQueue {
         } else if let Some(e) = &r.cost_estimate {
             f.insert("costUsd".into(), json!(e.usd));
             f.insert("costEstimated".into(), true.into());
+            f.insert("pricesDate".into(), e.prices_date.clone().into());
+            f.insert("offPeak".into(), e.off_peak.into());
         }
         self.d.mcp.record_audit(AuditEvent::App {
             kind: "agentRunFinished".into(),
@@ -1772,6 +1782,9 @@ mod tests {
         warnings: Vec<String>,
         before: Mutex<Vec<Option<String>>>,
         after: Mutex<Vec<Option<String>>>,
+        /// Модели «локальной Ollama» (`has_local_model`) и о каких спросили.
+        local: Vec<String>,
+        asked: Mutex<Vec<String>>,
     }
 
     impl ModelWarmth for FakeWarmth {
@@ -1784,6 +1797,12 @@ mod tests {
         fn after_run(&self, model: Option<&str>) -> BoxFuture<'_, ()> {
             self.after.lock().unwrap().push(model.map(String::from));
             Box::pin(async {})
+        }
+
+        fn has_local_model<'a>(&'a self, model: &'a str) -> BoxFuture<'a, bool> {
+            self.asked.lock().unwrap().push(model.to_string());
+            let found = self.local.iter().any(|m| m == model);
+            Box::pin(async move { found })
         }
     }
 
@@ -2095,8 +2114,9 @@ mod tests {
             if let (Some(e), Some(usd)) = (got, estimate) {
                 assert!((e.usd - usd).abs() < 1e-12, "{preset:?} {model}: {}", e.usd);
             }
-            // Журнал MCP (дополнение владельца к sf-T7): оценка — `costUsd` с признаком `costEstimated`; точная стоимость
-            // Claude Code без Ollama — `costUsd` без признака; нет ни того ни другого — полей нет (цен и токенов там нет).
+            // Журнал MCP (дополнение владельца к sf-T7): оценка — `costUsd` с признаком `costEstimated`, днём цен и «вне пика»
+            // (подсказка у «≈ …» в «Журнале» «Настроек», итоговая волна); точная стоимость Claude Code без Ollama — `costUsd`
+            // без признака; нет ни того ни другого — полей нет. Самих цен и токенов там нет.
             let finished =
                 h.st.mcp
                     .audit_tail(20)
@@ -2111,13 +2131,20 @@ mod tests {
                         "{preset:?} {model}: {finished}"
                     );
                     assert_eq!(finished["costEstimated"], true, "{finished}");
+                    assert_eq!(
+                        (&finished["pricesDate"], &finished["offPeak"]),
+                        (&json!("2026-11-07"), &json!(false)),
+                        "{finished}"
+                    );
                 }
                 (exact, None) => {
                     assert_eq!(usd, exact, "{preset:?} {model}: {finished}");
-                    assert!(finished.get("costEstimated").is_none(), "{finished}");
+                    for k in ["costEstimated", "pricesDate", "offPeak"] {
+                        assert!(finished.get(k).is_none(), "{k}: {finished}");
+                    }
                 }
             }
-            for k in ["usage", "prices", "pricesDate", "offPeak", "inputTokens"] {
+            for k in ["usage", "prices", "inputTokens", "outputTokens"] {
                 assert!(finished.get(k).is_none(), "{k}: {finished}");
             }
         }
@@ -2130,24 +2157,32 @@ mod tests {
         std::fs::write(dir.join("settings.json"), text).unwrap();
     }
 
-    /// Смоук P4c, sf-T7: облачная модель Ollama, которой нет в настройках Qwen Code, — «Проверить» и запуск получают адрес
-    /// Ollama и ключ окружением процесса; модель из его настроек и локальная модель — без них, как в чате.
+    /// Смоук P4c, sf-T7 и итоговая волна правок: модель Ollama, которой нет в настройках Qwen Code, — облачная (по тегу) или
+    /// скачанная в локальную Ollama (`has_local_model`), — «Проверить» и запуск получают адрес Ollama и ключ окружением
+    /// процесса; модель из его настроек (и облачная, и локальная) и модель, которой нет ни там, ни в Ollama, — без них, как
+    /// в чате. Ollama спрашивают только о модели, которой Qwen Code не знает и у которой нет облачного тега.
     #[tokio::test(start_paused = true)]
-    async fn qwen_code_gets_the_ollama_address_for_a_cloud_model_outside_its_settings() {
+    async fn qwen_code_gets_the_ollama_address_for_an_ollama_model_outside_its_settings() {
         let base = (
             "OPENAI_BASE_URL".to_string(),
             "http://127.0.0.1:11434/v1".to_string(),
         );
         let key = ("OPENAI_API_KEY".to_string(), "ollama".to_string());
-        for (model, routed) in [
-            ("deepseek-v4.1-flash:cloud", true),
-            ("glm-5.3-flash:cloud", false),
-            (MODEL, false),
+        for (model, routed, asked) in [
+            ("deepseek-v4.1-flash:cloud", true, false),
+            ("glm-5.3-flash:cloud", false, false),
+            ("qwen3.8:27b", true, true),
+            ("qwen3-coder:30b", false, false),
+            (MODEL, false, true),
         ] {
-            let h = harness_with(Arc::new(NoWarmth), |a| a.qwen.model = model.into());
+            let warmth = Arc::new(FakeWarmth {
+                local: vec!["qwen3.8:27b".into(), "qwen3-coder:30b".into()],
+                ..FakeWarmth::default()
+            });
+            let h = harness_with(warmth.clone(), |a| a.qwen.model = model.into());
             qwen_settings(
                 &h,
-                r#"{"modelProviders": {"openai": [{"id": "glm-5.3-flash:cloud", "envKey": "OLLAMA_API_KEY"}]}}"#,
+                r#"{"modelProviders": {"openai": [{"id": "glm-5.3-flash:cloud", "envKey": "OLLAMA_API_KEY"}, {"id": "qwen3-coder:30b"}]}}"#,
             );
             h.fake.script(vec![
                 Step::Connect,
@@ -2180,6 +2215,12 @@ mod tests {
                 assert_eq!(s.spec.args[s.spec.args.len() - 2..], ["-m", model]);
             }
             assert_eq!(h.fake.spawned().len(), 2);
+            let want: Vec<String> = if asked {
+                vec![model.into(), model.into()]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(*warmth.asked.lock().unwrap(), want, "{model}");
         }
     }
 

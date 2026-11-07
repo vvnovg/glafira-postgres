@@ -7,6 +7,7 @@
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use glafira_llm_pricing::{self as pricing, CacheAccounting, Origin, RefreshError, TokenUsage};
@@ -40,10 +41,21 @@ fn accounting(preset: Preset) -> CacheAccounting {
     }
 }
 
-/// Действующая таблица; файл не прочитался — встроенная и предупреждение в журнал приложения.
+/// Предупреждение об испорченном файле таблицы уже записано в этом запуске приложения.
+static BROKEN_FILE_REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// Первый раз за запуск: `true` и флаг поднят; дальше — `false`.
+fn first_warning(flag: &AtomicBool) -> bool {
+    !flag.swap(true, Ordering::Relaxed)
+}
+
+/// Действующая таблица; файл не прочитался — встроенная и предупреждение в журнал приложения, одно за запуск (таблицу
+/// читают `info`, список моделей и оценка каждого запуска).
 fn effective(data_dir: &Path) -> pricing::Effective {
     let e = pricing::effective(&prices_path(data_dir));
-    if let Some(p) = &e.problem {
+    if let Some(p) = &e.problem
+        && first_warning(&BROKEN_FILE_REPORTED)
+    {
         tracing::warn!("ollama price table not read, the built-in one is used: {p}");
     }
     e
@@ -161,12 +173,35 @@ where
     .await
 }
 
+/// Больше переадресаций страница цен не делает (столько же по умолчанию у reqwest).
+const MAX_REDIRECTS: usize = 10;
+
+/// Переадресация страницы цен — только на HTTPS ollama.com и его поддомены: чужая страница в разбор не попадает.
+fn redirect_allowed(url: &reqwest::Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str().is_some_and(|h| {
+            let h = h.to_ascii_lowercase();
+            h == "ollama.com" || h.ends_with(".ollama.com")
+        })
+}
+
 /// Страница цен тем же способом, что и проверка обновлений (`tauri-plugin-updater`): общий `reqwest` с прокси окружения
-/// и системным (`system-proxy`), только HTTPS, срок `FETCH_TIMEOUT`, ответ не больше `MAX_PAGE_BYTES`. Ошибка —
-/// технический текст для подробностей.
+/// и системным (`system-proxy`), только HTTPS, переадресации — только на ollama.com (`redirect_allowed`, иначе ошибка
+/// сети), срок `FETCH_TIMEOUT`, ответ не больше `MAX_PAGE_BYTES`. Ошибка — технический текст для подробностей.
 pub async fn fetch_page(url: &'static str) -> Result<String, String> {
+    let redirects = reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= MAX_REDIRECTS {
+            attempt.error(format!("more than {MAX_REDIRECTS} redirects"))
+        } else if redirect_allowed(attempt.url()) {
+            attempt.follow()
+        } else {
+            let to = attempt.url().host_str().unwrap_or_default().to_string();
+            attempt.error(format!("redirect outside ollama.com: {to}"))
+        }
+    });
     let http = reqwest::Client::builder()
         .https_only(true)
+        .redirect(redirects)
         .timeout(FETCH_TIMEOUT)
         .user_agent(concat!("glafira-pg/", env!("CARGO_PKG_VERSION")))
         .build()
@@ -214,6 +249,40 @@ mod tests {
     /// Страница цен, как её отдаёт ollama.com (образец крейта).
     const PAGE: &str =
         include_str!("../../../crates/glafira-llm-pricing/testdata/ollama-pricing-2026-11-07.html");
+
+    /// Итоговое ревью бэкенда: страница цен — только с ollama.com; переадресация на другой хост (или не на HTTPS) — ошибка
+    /// сети, а не чужая страница в разборе.
+    #[test]
+    fn redirects_of_the_price_page_stay_on_ollama_com() {
+        let url = |s: &str| reqwest::Url::parse(s).unwrap();
+        for ok in [
+            "https://ollama.com/pricing",
+            "https://www.ollama.com/pricing",
+            "https://OLLAMA.com/pricing?x=1",
+            "https://cdn.eu.ollama.com/p",
+        ] {
+            assert!(redirect_allowed(&url(ok)), "{ok}");
+        }
+        for bad in [
+            "http://ollama.com/pricing",
+            "https://ollama.com.evil.example/pricing",
+            "https://evil-ollama.com/pricing",
+            "https://example.com/ollama.com",
+            "https://127.0.0.1/pricing",
+        ] {
+            assert!(!redirect_allowed(&url(bad)), "{bad}");
+        }
+    }
+
+    /// Итоговое ревью бэкенда: испорченный `ollama-prices.json` — одно предупреждение в журнал приложения за запуск, а не
+    /// на каждое чтение таблицы (`info`, `table`, оценка каждого запуска).
+    #[test]
+    fn a_broken_price_file_is_reported_once() {
+        let flag = AtomicBool::new(false);
+        assert!(first_warning(&flag));
+        assert!(!first_warning(&flag));
+        assert!(!first_warning(&flag));
+    }
 
     #[test]
     fn the_times_of_the_tests_are_what_they_say() {

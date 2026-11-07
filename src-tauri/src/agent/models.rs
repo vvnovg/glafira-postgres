@@ -1,9 +1,10 @@
 //! Модели для поля «Модель» (спец. P4c §4.1, §8.3): у Qwen Code — `modelProviders.*[].id` и `model.name` из
-//! `~/.qwen/settings.json` (файл только читается и в журнал не пишется), у Claude Code через Ollama — `/api/tags`
-//! (`agent::ollama`, задача 7). У обоих (кроме Claude Code без Ollama) — ещё группа «Ollama Cloud»: облачные модели
-//! действующей таблицы цен (смоук P4c, sf-T7) — облачной модели без `ollama pull` в `/api/tags` нет, а через Ollama она
-//! отвечает. Облачную модель, которой нет в настройках Qwen Code, Glafira направляет к Ollama сама
-//! (`qwen_cloud_via_ollama`, `presets::build`).
+//! `~/.qwen/settings.json` (файл только читается и в журнал не пишется) и группа «Ollama» — модели локальной Ollama
+//! (`/api/tags`), которых нет в его настройках (итоговая волна правок смоука P4c); у Claude Code — `/api/tags` (`agent::ollama`,
+//! задача 7). У обоих — ещё группа «Ollama Cloud»: облачные модели действующей таблицы цен (смоук P4c, sf-T7) — облачной
+//! модели без `ollama pull` в `/api/tags` нет, а через Ollama она отвечает. Списки Ollama у Claude Code отдаются всегда:
+//! интерфейс показывает их только при «Через Ollama» в черновике. Модель Ollama (облачную или из `/api/tags`), которой нет
+//! в настройках Qwen Code, Glafira направляет к Ollama сама (`qwen_knows`, `presets::build`).
 
 use std::path::{Path, PathBuf};
 
@@ -11,7 +12,6 @@ use glafira_llm_pricing::{PriceTable, Prices};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::ollama::is_cloud;
 use super::presets::valid_model;
 use super::settings::{AgentSettings, Preset};
 
@@ -47,11 +47,14 @@ pub struct CloudModel {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentModels {
+    /// Найденные модели: у Qwen Code — из его настроек, у Claude Code — `/api/tags` локальной Ollama.
     pub ids: Vec<String>,
     pub default: Option<String>,
     pub source: ModelsSource,
-    /// Группа «Ollama Cloud» (`with_cloud`): облачные модели таблицы цен, которых нет в `ids`; у Claude Code без Ollama —
-    /// пусто (`cloud_offered`).
+    /// Группа «Ollama» у Qwen Code (`with_ollama`): модели локальной Ollama (`/api/tags`), которых нет ни в его настройках,
+    /// ни в группе «Ollama Cloud». У Claude Code пусто: его модели Ollama — сами `ids`.
+    pub ollama: Vec<String>,
+    /// Группа «Ollama Cloud» (`with_cloud`): облачные модели таблицы цен, которых нет в `ids`.
     pub cloud: Vec<CloudModel>,
 }
 
@@ -62,6 +65,7 @@ impl AgentModels {
             ids: Vec::new(),
             default: None,
             source: ModelsSource::None,
+            ollama: Vec::new(),
             cloud: Vec::new(),
         }
     }
@@ -71,8 +75,43 @@ impl AgentModels {
             ids: q.ids,
             default: q.default,
             source: ModelsSource::Qwen,
+            ollama: Vec::new(),
             cloud: Vec::new(),
         }
+    }
+
+    /// Claude Code: модели локальной Ollama (`ollama::local_tags`, по алфавиту, без повторов); Ollama не ответила, адрес не
+    /// локальный — свободный ввод.
+    pub fn from_ollama(tags: Option<Vec<String>>) -> Self {
+        match tags {
+            Some(ids) => Self {
+                ids,
+                source: ModelsSource::Ollama,
+                ..Self::none()
+            },
+            None => Self::none(),
+        }
+    }
+
+    /// Группа «Ollama» у Qwen Code (вызывается после `with_cloud`): модели локальной Ollama `tags` без моделей его настроек
+    /// (`ids`, `default`) и без моделей группы «Ollama Cloud» (у них подпись с ценой); имена Ollama — без учёта регистра.
+    /// По алфавиту, без повторов.
+    pub fn with_ollama(mut self, tags: Vec<String>) -> Self {
+        let mut ollama: Vec<String> = Vec::new();
+        for t in tags {
+            let taken = |id: &str| t.eq_ignore_ascii_case(id);
+            if self.ids.iter().any(|x| taken(x))
+                || self.default.as_deref().is_some_and(taken)
+                || self.cloud.iter().any(|m| taken(&m.id))
+                || ollama.iter().any(|x| taken(x))
+            {
+                continue;
+            }
+            ollama.push(t);
+        }
+        ollama.sort();
+        self.ollama = ollama;
+        self
     }
 
     /// Группа «Ollama Cloud»: облачные модели таблицы `table` под именами Ollama (`PriceTable::cloud_models`), в её
@@ -93,29 +132,15 @@ impl AgentModels {
     }
 }
 
-/// Группа «Ollama Cloud» в списке: у Qwen Code (облачную модель не из его настроек Glafira направит к Ollama,
-/// `qwen_cloud_via_ollama`) и у Claude Code «Через Ollama» (по сохранённой настройке). Claude Code без Ollama ходит в
-/// облако Anthropic — облачные модели Ollama ему не годятся.
-pub fn cloud_offered(preset: Preset, s: &AgentSettings) -> bool {
-    match preset {
-        Preset::Qwen => true,
-        Preset::Claude => s.claude.via_ollama,
-    }
-}
-
-/// Qwen Code и облачная модель Ollama (`…:cloud`, `…-cloud`), которой нет в его настройках — ни среди
-/// `modelProviders.*[].id`, ни в `model.name` (`qwen_models`): адреса и ключа этой модели Qwen Code не знает («Missing
-/// API key for OpenAI-compatible auth», смоук P4c), их даёт Glafira — адрес Ollama из настроек ассистента
-/// (`presets::build`). Модель из настроек Qwen Code и локальная модель запускаются как в чате: локальное имя не из
-/// настроек может быть моделью другого провайдера Qwen Code, а облачный тег — только у Ollama. Нет домашнего каталога
-/// или файла — модель Qwen Code не знает. Блокирующий вызов (чтение файла — только для облачной модели).
-pub fn qwen_cloud_via_ollama(model: &str, home: Option<&Path>) -> bool {
+/// Модель есть в настройках Qwen Code — среди `modelProviders.*[].id` или в `model.name` (`qwen_models`): её адрес и ключ
+/// Qwen Code знает сам, она запускается как в чате. Нет домашнего каталога или файла — не знает. Модель Ollama не из его
+/// настроек адреса и ключа у Qwen Code нет («Missing API key for OpenAI-compatible auth», смоук P4c) — их даёт Glafira:
+/// облачной модели (тег `cloud` — только у Ollama, смоук P4c, sf-T7) и модели из `/api/tags` локальной Ollama (итоговая
+/// волна правок) — очередь, `presets::build`. Блокирующий вызов.
+pub fn qwen_knows(model: &str, home: Option<&Path>) -> bool {
     let m = model.trim();
-    if !is_cloud(m, &Value::Null) {
-        return false;
-    }
     let q = home.map(qwen_models).unwrap_or_default();
-    !q.ids.iter().any(|x| x == m) && q.default.as_deref() != Some(m)
+    q.ids.iter().any(|x| x == m) || q.default.as_deref() == Some(m)
 }
 
 pub fn qwen_settings_path(home: &Path) -> PathBuf {
@@ -312,7 +337,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             v,
-            serde_json::json!({ "ids": ["m"], "default": "m", "source": "qwen", "cloud": [] })
+            serde_json::json!({ "ids": ["m"], "default": "m", "source": "qwen", "ollama": [], "cloud": [] })
         );
         assert_eq!(
             serde_json::to_value(AgentModels::none()).unwrap()["source"],
@@ -370,31 +395,67 @@ mod tests {
             (0.15, 0.60, None)
         );
         // Имя из `/api/tags` в другом регистре — та же модель.
-        let tags = AgentModels {
-            ids: vec!["GPT-OSS:120b-cloud".into()],
-            default: None,
-            source: ModelsSource::Ollama,
-            cloud: Vec::new(),
-        }
-        .with_cloud(table);
+        let tags =
+            AgentModels::from_ollama(Some(vec!["GPT-OSS:120b-cloud".into()])).with_cloud(table);
         assert!(!tags.cloud.iter().any(|m| m.id == "gpt-oss:120b-cloud"));
         assert_eq!(tags.cloud.len(), table.models.len() - 1);
     }
 
+    /// Итоговая волна правок смоука P4c: у Claude Code модели Ollama — `/api/tags` (по алфавиту, без повторов), и отдаются
+    /// они всегда, без оглядки на сохранённое «Через Ollama» (группы показывает интерфейс по черновику); Ollama не
+    /// ответила — свободный ввод.
     #[test]
-    fn cloud_models_are_offered_to_qwen_code_and_to_claude_code_through_ollama() {
-        let mut s = AgentSettings::default();
-        assert!(cloud_offered(Preset::Qwen, &s));
-        assert!(!cloud_offered(Preset::Claude, &s), "Claude Code без Ollama");
-        s.claude.via_ollama = true;
-        assert!(cloud_offered(Preset::Claude, &s));
+    fn claude_code_models_are_the_tags_of_ollama() {
+        let m =
+            AgentModels::from_ollama(Some(vec!["a:1".into(), "b:2".into()])).with_cloud(builtin());
+        assert_eq!(
+            (m.ids.as_slice(), m.source, m.ollama.len()),
+            (
+                ["a:1".to_string(), "b:2".to_string()].as_slice(),
+                ModelsSource::Ollama,
+                0
+            )
+        );
+        assert_eq!(m.cloud.len(), builtin().models.len());
+        assert_eq!(AgentModels::from_ollama(None), AgentModels::none());
     }
 
-    /// Смоук P4c: `qwen -m glm-5.3-flash:cloud` с моделью не из `~/.qwen/settings.json` падал «Missing API key». Облачной
-    /// модели Ollama не из настроек Glafira даёт адрес и ключ Ollama; модели из настроек (провайдеры, `model.name`) и
-    /// локальные модели — как в чате Qwen Code.
+    /// Итоговая волна правок смоука P4c (решение владельца): у Qwen Code — группа «Ollama»: модели локальной Ollama, которых
+    /// нет ни в его настройках (провайдеры и `model.name`), ни в группе «Ollama Cloud» (там они с ценой); облачная модель
+    /// из `/api/tags` без цены — тоже здесь. Регистр имени Ollama не важен; по алфавиту, без повторов.
     #[test]
-    fn a_cloud_model_outside_the_settings_of_qwen_code_goes_through_ollama() {
+    fn local_ollama_models_follow_the_settings_of_qwen_code_without_repeats() {
+        let m = AgentModels::from_qwen(QwenModels {
+            ids: vec!["glm-5.3-flash:cloud".into(), "qwen3.6-64k:35b-a3b".into()],
+            default: Some("qwen3-coder:30b".into()),
+        })
+        .with_cloud(builtin())
+        .with_ollama(vec![
+            "qwen3.8:27b".into(),
+            "QWEN3.6-64K:35b-a3b".into(),
+            "qwen3-coder:30b".into(),
+            "gpt-oss:120b-cloud".into(),
+            "glm-5.3-flash:cloud".into(),
+            "kimi-k2:1t-cloud".into(),
+            "gemma3:4b".into(),
+            "qwen3.8:27b".into(),
+        ]);
+        assert_eq!(m.ollama, ["gemma3:4b", "kimi-k2:1t-cloud", "qwen3.8:27b"]);
+        assert_eq!(m.ids, ["glm-5.3-flash:cloud", "qwen3.6-64k:35b-a3b"]);
+        assert!(m.cloud.iter().any(|c| c.id == "gpt-oss:120b-cloud"));
+        assert!(!m.cloud.iter().any(|c| c.id == "glm-5.3-flash:cloud"));
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(
+            v["ollama"],
+            serde_json::json!(["gemma3:4b", "kimi-k2:1t-cloud", "qwen3.8:27b"])
+        );
+    }
+
+    /// Смоук P4c: `qwen -m glm-5.3-flash:cloud` с моделью не из `~/.qwen/settings.json` падал «Missing API key». Модели из
+    /// настроек (провайдеры, `model.name`) Qwen Code знает и запускает как в чате; остальные — нет (их адрес и ключ даёт
+    /// Glafira: облачные — по тегу, локальные Ollama — по `/api/tags`, очередь). Нет файла или домашнего каталога — не знает.
+    #[test]
+    fn qwen_code_knows_only_the_models_of_its_settings() {
         let home = home_with(
             r#"{"model": {"name": "kimi-k3:cloud"}, "modelProviders": {"openai": [
   {"id": "glm-5.3-flash:cloud", "baseUrl": "http://127.0.0.1:11434/v1", "envKey": "OLLAMA_API_KEY"},
@@ -402,29 +463,19 @@ mod tests {
 ]}}"#,
         );
         let h = Some(home.path());
+        for m in ["glm-5.3-flash:cloud", " kimi-k3:cloud ", "qwen3.8:27b"] {
+            assert!(qwen_knows(m, h), "{m}");
+        }
         for m in [
             "deepseek-v4.1-flash:cloud",
             "gpt-oss:120b-cloud",
-            " glm-5.3:cloud ",
-        ] {
-            assert!(qwen_cloud_via_ollama(m, h), "{m}");
-        }
-        for m in [
-            "glm-5.3-flash:cloud",
-            "kimi-k3:cloud",
-            "qwen3.8:27b",
             "qwen3.6:35b",
-            "gpt-oss:120b",
+            "gemma3:4b",
         ] {
-            assert!(!qwen_cloud_via_ollama(m, h), "{m}");
+            assert!(!qwen_knows(m, h), "{m}");
         }
-        // Настроек Qwen Code нет (или домашний каталог неизвестен) — облачную модель он не знает.
         let empty = tempfile::tempdir().unwrap();
-        assert!(qwen_cloud_via_ollama(
-            "glm-5.3-flash:cloud",
-            Some(empty.path())
-        ));
-        assert!(qwen_cloud_via_ollama("glm-5.3-flash:cloud", None));
-        assert!(!qwen_cloud_via_ollama("qwen3.8:27b", None));
+        assert!(!qwen_knows("glm-5.3-flash:cloud", Some(empty.path())));
+        assert!(!qwen_knows("qwen3.8:27b", None));
     }
 }

@@ -1307,7 +1307,9 @@ export interface AgentModels {
   /** Модель по умолчанию (у Qwen Code — `model.name` его настроек). */
   default?: string | null;
   source: "qwen" | "ollama" | "none";
-  /** Группа «Ollama Cloud»: облачные модели таблицы цен, которых нет в `ids`; у Claude Code без Ollama — пусто. */
+  /** Группа «Ollama» у Qwen Code: модели локальной Ollama (`/api/tags`), которых нет в его настройках и в `cloud`. */
+  ollama?: string[];
+  /** Группа «Ollama Cloud»: облачные модели таблицы цен, которых нет в `ids` (у Claude Code — и без «Через Ollama»: интерфейс прячет её по черновику). */
   cloud?: CloudModel[];
 }
 /** Запись журнала для EXPLAIN ANALYZE яруса записи (`ActionRecord.explain`). */
@@ -2034,6 +2036,9 @@ export interface McpAuditEntry {
   /** Стоимость запуска, $: точная у Claude Code без Ollama; оценка по ценам Ollama Cloud — с `costEstimated: true`. */
   costUsd?: number;
   costEstimated?: boolean;
+  /** У оценки: день цен таблицы (`ГГГГ-ММ-ДД`) и цены «вне пика» — для подсказки у «≈ …» в «Журнале». */
+  pricesDate?: string;
+  offPeak?: boolean;
 }
 
 /** Фрагменты конфигураций MCP-клиентов (`get_mcp_client_configs`): путь — к установленному приложению (AppImage — `$APPIMAGE`). */

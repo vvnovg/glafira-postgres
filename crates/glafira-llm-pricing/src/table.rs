@@ -80,6 +80,20 @@ impl PriceTable {
         exact(&key).or_else(|| key.split_once(':').and_then(|(base, _)| exact(base)))
     }
 
+    /// Таблица с моделями `base`, которых в ней нет (по имени модели), — в конце, в порядке `base`. Так частично разобранная
+    /// страница (вёрстка сменилась, а моделей не меньше `MIN_MODELS`) не теряет оценки моделей встроенной таблицы: их цены
+    /// — на день `base`, а не этой таблицы. Источник, день и время загрузки — этой таблицы.
+    pub fn supplemented_from(mut self, base: &PriceTable) -> PriceTable {
+        let missing: Vec<ModelPrices> = base
+            .models
+            .iter()
+            .filter(|b| !self.models.iter().any(|m| m.model == b.model))
+            .cloned()
+            .collect();
+        self.models.extend(missing);
+        self
+    }
+
     /// Облачные модели Ollama таблицы в её порядке: имя модели Ollama (`cloud_model_name`: `glm-5.3-flash:cloud`,
     /// `gpt-oss:120b-cloud`) и цены. Так приложение предлагает их в списке моделей агента.
     pub fn cloud_models(&self) -> impl Iterator<Item = (String, &ModelPrices)> {

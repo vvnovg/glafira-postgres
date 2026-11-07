@@ -344,7 +344,7 @@ describe("ExplainTab", () => {
     const user = userEvent.setup();
     const { rerender } = renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql="SELECT 1 -- mine" active />);
     const editor = await screen.findByRole("textbox", { name: "SQL" });
-    // Подстановка из журнала MCP (без «Плана»): прежний текст — в «Заменённых текстах».
+    // Подстановка без «Плана» (`autoPlan` нет): прежний текст — в «Заменённых текстах».
     rerender(<ExplainTab connectionId="c" member="pg-1" database="perf" sql={undefined} prefill={{ sql: "SELECT 2", database: "perf", member: "pg-1", nonce: 1 }} active />);
     const replaced = screen.getByRole("region", { name: "Заменённые тексты" });
     const plan = screen.getByRole("button", { name: "План" });
@@ -370,7 +370,7 @@ describe("ExplainTab", () => {
       expect(copyRow).not.toContainElement(b);
     }
   });
-  it("подстановка из журнала MCP: SQL, база и узел ставятся один раз на nonce, план не строится", async () => {
+  it("подстановка без autoPlan: SQL, база и узел ставятся один раз на nonce, план не строится", async () => {
     const user = userEvent.setup();
     const prefill = { sql: "SELECT 1 FROM shop.orders", database: "perf", member: "pg-2", nonce: 1 };
     const view = (p: typeof prefill) => <ExplainTab connectionId="c" member={undefined} database={undefined} sql={undefined} prefill={p} active />;
@@ -472,21 +472,29 @@ describe("ExplainTab", () => {
     expect(list.getAllByRole("button").map((b) => b.textContent)).toEqual(["Вернуть: SELECT count(*) FROM orders WHERE status = $1"]);
   });
 
-  it("Z9: смоук через вкладку — три «Открыть в консоли EXPLAIN» из журнала (база, та же база, другая база)", async () => {
+  it("Z9: смоук через вкладку — три «Открыть в консоли EXPLAIN» из журнала (база, та же база, другая база); «План» — сразу по каждому", async () => {
+    vi.mocked(api.explain).mockResolvedValue(explained());
     // Как TabContent: консоль получает спеку вкладки из рабочей области; вкладка не перемонтируется.
     function Console() {
       const tab = useWorkspace((s) => s.tabs.find((x) => x.id === "explain:c"));
       return tab?.kind === "explain" ? <ExplainTab connectionId="c" member={tab.member} database={tab.database} sql={tab.sql} prefill={tab.prefill} active /> : null;
     }
-    act(() => openExplainWithPrefill("c", { sql: "SELECT md5('p4b-smoke')", database: "perf" }));
+    // Журнал MCP открывает консоль с `autoPlan` (итоговая волна правок смоука P4c): «План» без выполнения.
+    act(() => openExplainWithPrefill("c", { sql: "SELECT md5('p4b-smoke')", database: "perf", autoPlan: true }));
     renderWithClient(<Console />);
     const editor = await screen.findByRole("textbox", { name: "SQL" });
     await waitFor(() => expect(screen.getByRole("combobox", { name: "База" })).toHaveValue("perf"));
-    act(() => openExplainWithPrefill("c", { sql: "SELECT count(*) FROM orders WHERE status = 'new'", database: "perf" }));
+    await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("c", expect.objectContaining({ sql: "SELECT md5('p4b-smoke')", mode: "plan", database: "perf" })));
+    await screen.findByRole("treegrid", { name: "Дерево плана" });
+    act(() => openExplainWithPrefill("c", { sql: "SELECT count(*) FROM orders WHERE status = 'new'", database: "perf", autoPlan: true }));
     expect(editor).toHaveValue("SELECT count(*) FROM orders WHERE status = 'new'");
-    act(() => openExplainWithPrefill("c", { sql: "SELECT current_database()", database: "postgres" }));
+    await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("c", expect.objectContaining({ sql: "SELECT count(*) FROM orders WHERE status = 'new'", mode: "plan", database: "perf" })));
+    act(() => openExplainWithPrefill("c", { sql: "SELECT current_database()", database: "postgres", autoPlan: true }));
     expect(editor).toHaveValue("SELECT current_database()");
     await waitFor(() => expect(screen.getByRole("combobox", { name: "База" })).toHaveValue("postgres"));
+    await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("c", expect.objectContaining({ sql: "SELECT current_database()", mode: "plan", database: "postgres" })));
+    expect(api.explain).toHaveBeenCalledTimes(3);
+    expect(api.explain).not.toHaveBeenCalledWith("c", expect.objectContaining({ mode: "analyze" }));
     const list = within(screen.getByRole("region", { name: "Заменённые тексты" }));
     expect(list.getAllByRole("button").map((b) => b.textContent)).toEqual(["Вернуть: SELECT count(*) FROM orders WHERE status = 'new'", "Вернуть: SELECT md5('p4b-smoke')"]);
   });
@@ -497,7 +505,7 @@ describe("ExplainTab", () => {
     const { rerender } = renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql="SELECT 1 -- mine" active />);
     await user.click(await screen.findByRole("button", { name: "План" }));
     await screen.findByRole("treegrid", { name: "Дерево плана" });
-    // Подстановка из журнала MCP: план прежнего текста убран сразу, новый не строится (спец. P4 §11).
+    // Подстановка без autoPlan: план прежнего текста убран сразу, новый не строится.
     rerender(<ExplainTab connectionId="c" member="pg-1" database="perf" sql={undefined} prefill={{ sql: "SELECT 2 -- journal", database: "perf", member: "pg-1", nonce: 1 }} active />);
     expect(tree()).toBeNull();
     await act(() => new Promise((r) => setTimeout(r, 0)));
