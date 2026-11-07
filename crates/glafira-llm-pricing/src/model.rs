@@ -1,4 +1,4 @@
-//! Ключ модели в таблице цен по имени модели Ollama.
+//! Ключ модели в таблице цен по имени модели Ollama и обратно — имя облачной модели Ollama по ключу таблицы.
 
 /// Ключ облачной модели Ollama в таблице цен — имя без тега `cloud`, в нижнем регистре:
 /// - `glm-5.3-flash:cloud` → `glm-5.3-flash`;
@@ -20,4 +20,17 @@ pub fn model_key(name: &str) -> Option<String> {
         format!("{base}:{size}")
     };
     Some(key.to_ascii_lowercase())
+}
+
+/// Имя облачной модели Ollama по ключу таблицы цен (обратное `model_key`): ключ без размера получает тег `cloud`, ключ с
+/// размером — суффикс `-cloud` у тега:
+/// - `glm-5.3-flash` → `glm-5.3-flash:cloud`;
+/// - `gpt-oss:120b` → `gpt-oss:120b-cloud`.
+pub fn cloud_model_name(key: &str) -> String {
+    let key = key.trim();
+    if key.contains(':') {
+        format!("{key}-cloud")
+    } else {
+        format!("{key}:cloud")
+    }
 }

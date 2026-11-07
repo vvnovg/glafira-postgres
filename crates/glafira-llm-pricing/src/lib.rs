@@ -3,7 +3,9 @@
 //!
 //! Что есть:
 //! - встроенная таблица цен с датой и адресом источника (`builtin`), её обновляют при выпуске;
-//! - ключ модели в таблице по имени модели Ollama (`model_key`: только облачные — тег `cloud` или `…-cloud`);
+//! - ключ модели в таблице по имени модели Ollama (`model_key`: только облачные — тег `cloud` или `…-cloud`) и обратно —
+//!   имя облачной модели Ollama по ключу (`cloud_model_name`, `PriceTable::cloud_models`: модели таблицы для списка
+//!   моделей агента);
 //! - токены из итога агента (`TokenUsage::from_json`: у Claude Code кэш считается отдельно от входа, у Qwen Code — внутри
 //!   входа);
 //! - оценка по usage и времени начала запуска (`estimate`: цены «вне пика» — будни вне 12:00–18:00 UTC и выходные);
@@ -27,7 +29,7 @@ mod usage;
 pub use builtin::{BUILTIN_DATE, builtin};
 pub use date::{format_ymd, parse_ymd};
 pub use estimate::{CostEstimate, PEAK_END_HOUR_UTC, PEAK_START_HOUR_UTC, estimate, is_off_peak};
-pub use model::model_key;
+pub use model::{cloud_model_name, model_key};
 pub use page::{RefreshError, fetch_table, parse_pricing_page};
 pub use store::{Effective, Origin, PRICES_FILE, StoreError, effective, load, save};
 pub use table::{MAX_PRICE, MIN_MODELS, ModelPrices, PRICING_URL, ParseError, PriceTable, Prices};

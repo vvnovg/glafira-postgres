@@ -6,6 +6,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use time::{Date, OffsetDateTime};
 
+use crate::model::cloud_model_name;
+
 /// Страница цен Ollama Cloud.
 pub const PRICING_URL: &str = "https://ollama.com/pricing";
 /// Здравый смысл: цена за 1 млн токенов — не меньше 0 и меньше этого числа долларов.
@@ -76,6 +78,12 @@ impl PriceTable {
         let key = key.trim().to_ascii_lowercase();
         let exact = |k: &str| self.models.iter().find(|m| m.model == k);
         exact(&key).or_else(|| key.split_once(':').and_then(|(base, _)| exact(base)))
+    }
+
+    /// Облачные модели Ollama таблицы в её порядке: имя модели Ollama (`cloud_model_name`: `glm-5.3-flash:cloud`,
+    /// `gpt-oss:120b-cloud`) и цены. Так приложение предлагает их в списке моделей агента.
+    pub fn cloud_models(&self) -> impl Iterator<Item = (String, &ModelPrices)> {
+        self.models.iter().map(|m| (cloud_model_name(&m.model), m))
     }
 
     /// Здравый смысл (и для разобранной страницы, и для прочитанного файла): каждая цена — конечное число от 0 до

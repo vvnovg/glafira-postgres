@@ -1,6 +1,6 @@
-//! Ключ модели в таблице цен по имени модели Ollama и поиск цен по ключу.
+//! Ключ модели в таблице цен по имени модели Ollama, имя облачной модели Ollama по ключу и поиск цен по ключу.
 
-use glafira_llm_pricing::{builtin, model_key};
+use glafira_llm_pricing::{builtin, cloud_model_name, model_key};
 
 #[test]
 fn the_key_is_the_name_without_the_cloud_tag() {
@@ -46,4 +46,32 @@ fn prices_are_found_by_the_exact_key_or_the_name_without_the_size() {
     assert_eq!(t.find("GLM-5.3").unwrap().model, "glm-5.3");
     assert!(t.find("gpt-oss:7b").is_none(), "у gpt-oss цены по размерам");
     assert!(t.find("unknown-model").is_none());
+}
+
+#[test]
+fn the_cloud_model_name_is_the_key_with_the_cloud_tag() {
+    // Ключ без размера — тег `cloud`; с размером — суффикс `-cloud` у тега (так называет облачные модели Ollama).
+    for (key, name) in [
+        ("glm-5.3-flash", "glm-5.3-flash:cloud"),
+        ("deepseek-v4.1-flash", "deepseek-v4.1-flash:cloud"),
+        ("gpt-oss:120b", "gpt-oss:120b-cloud"),
+        ("gpt-oss:20b", "gpt-oss:20b-cloud"),
+    ] {
+        assert_eq!(cloud_model_name(key), name, "{key}");
+        assert_eq!(model_key(name).as_deref(), Some(key), "обратно: {name}");
+    }
+}
+
+#[test]
+fn every_model_of_the_table_has_a_cloud_name_in_the_page_order() {
+    let t = builtin();
+    let names: Vec<String> = t.cloud_models().map(|(name, _)| name).collect();
+    assert_eq!(names.len(), t.models.len());
+    assert_eq!(names[0], "beam:cloud");
+    assert!(names.iter().any(|n| n == "gpt-oss:120b-cloud"), "{names:?}");
+    for ((name, prices), m) in t.cloud_models().zip(&t.models) {
+        assert_eq!(prices, m, "{name}");
+        assert_eq!(model_key(&name).as_deref(), Some(m.model.as_str()));
+        assert_eq!(t.find(&model_key(&name).unwrap()), Some(m), "{name}");
+    }
 }

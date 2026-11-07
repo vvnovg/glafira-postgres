@@ -11,6 +11,11 @@
 - **Ключ модели** `model_key(name)`: только облачные модели Ollama — тег `cloud` или `…-cloud`:
   `glm-5.3-flash:cloud` → `glm-5.3-flash`, `gpt-oss:120b-cloud` → `gpt-oss:120b`. У локальной модели ключа нет.
   `PriceTable::find` ищет ключ, а если его нет — имя без тега (`gemma4:31b` → `gemma4`).
+- **Имя облачной модели** `cloud_model_name(key)` — обратное `model_key`: ключ без размера получает тег `cloud`
+  (`glm-5.3-flash` → `glm-5.3-flash:cloud`), ключ с размером — суффикс `-cloud` (`gpt-oss:120b` → `gpt-oss:120b-cloud`).
+  `PriceTable::cloud_models()` — модели таблицы под этими именами с ценами, в порядке страницы: так приложение
+  предлагает облачные модели в списке моделей агента, даже если их нет в `ollama list` (облачная модель отвечает через
+  Ollama без `ollama pull`).
 - **Токены** `TokenUsage::from_json(usage, accounting)` из объекта `usage` события `"type": "result"` потока
   `stream-json`. Смысл полей у агентов разный:
   - Claude Code (`CacheAccounting::Separate`, как Anthropic API): `input_tokens` — вход без кэша,
