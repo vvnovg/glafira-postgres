@@ -108,6 +108,67 @@ fn the_saved_table_wins_over_the_builtin_one() {
     assert_eq!(effective(&path).origin, Origin::Saved);
 }
 
+/// Страница сменила вёрстку и разобралась частично (не меньше `MIN_MODELS` моделей): модели, которых в ней нет, действующая
+/// таблица берёт из встроенной — оценки по ним не пропадают; цены разобранных моделей — со страницы. Файл остаётся как
+/// записан (итоговое ревью бэкенда, итоговая волна правок смоука P4c).
+#[test]
+fn models_missing_from_a_partial_page_come_from_the_builtin_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ollama-prices.json");
+    let mut partial = fetched("2026-12-01");
+    partial.models.retain(|m| {
+        [
+            "gemma4",
+            "glm-5.3-flash",
+            "gpt-oss:20b",
+            "minimax-m3.1-flash",
+            "nemotron-3-super",
+        ]
+        .contains(&m.model.as_str())
+    });
+    assert_eq!(partial.models.len(), 5);
+    save(&path, &partial).unwrap();
+    assert_eq!(
+        load(&path).unwrap(),
+        Some(partial.clone()),
+        "файл — как записан"
+    );
+    let e = effective(&path);
+    assert_eq!(e.origin, Origin::Saved);
+    assert_eq!(
+        (e.table.date, e.table.fetched_at),
+        (partial.date, partial.fetched_at)
+    );
+    assert_eq!(e.table.models.len(), builtin().models.len());
+    assert_eq!(
+        e.table.models[..5],
+        partial.models[..],
+        "сначала модели страницы"
+    );
+    assert_eq!(
+        e.table.find("gemma4").unwrap().standard.input,
+        0.2,
+        "цена со страницы"
+    );
+    let deepseek = e.table.find("deepseek-v4.1-flash").unwrap();
+    assert_eq!(deepseek, builtin().find("deepseek-v4.1-flash").unwrap());
+    let rest: Vec<&str> = e.table.models[5..]
+        .iter()
+        .map(|m| m.model.as_str())
+        .collect();
+    let want: Vec<&str> = builtin()
+        .models
+        .iter()
+        .map(|m| m.model.as_str())
+        .filter(|m| !partial.models.iter().any(|p| p.model == *m))
+        .collect();
+    assert_eq!(rest, want, "дополнение — в порядке встроенной таблицы");
+    // Полная загруженная таблица дополнять нечего.
+    let full = fetched("2026-12-01");
+    save(&path, &full).unwrap();
+    assert_eq!(effective(&path).table, full);
+}
+
 #[test]
 fn an_older_saved_table_gives_way_to_a_newer_builtin_one() {
     // Таблицу загрузили, потом поставили выпуск с более свежей встроенной: свежая и действует.

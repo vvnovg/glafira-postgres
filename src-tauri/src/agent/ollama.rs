@@ -40,11 +40,11 @@ fn loopback_host(u: &reqwest::Url) -> bool {
     matches!(u.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
 }
 
-/// Облачная модель Ollama: тег `cloud` (`…:cloud`, `…:120b-cloud`) или `remote_host` в `/api/show`.
+/// Облачная модель Ollama: тег `cloud` (`…:cloud`, `…:120b-cloud`, регистр не важен) или `remote_host` в `/api/show`. По
+/// имени — то же правило, что у ключа таблицы цен (`glafira_llm_pricing::model_key`): модель с оценкой стоимости и модель,
+/// которую Qwen Code отправляет через Ollama, — одни и те же.
 pub fn is_cloud(name: &str, show: &Value) -> bool {
-    let tag = name.rsplit_once(':').map_or("", |(_, t)| t);
-    tag == "cloud"
-        || tag.ends_with("-cloud")
+    glafira_llm_pricing::model_key(name).is_some()
         || show
             .get("remote_host")
             .and_then(Value::as_str)
@@ -710,6 +710,28 @@ mod tests {
         ));
         assert!(!is_cloud("qwen3", &json!({ "remote_host": "" })));
         assert!(!is_cloud("cloud", &Value::Null), "имя без тега");
+        // Тег — без учёта регистра, как у ключа таблицы цен (`glafira_llm_pricing::model_key`, итоговое ревью бэкенда):
+        // облачная модель с оценкой стоимости и маршрутом Qwen Code через Ollama — одна и та же.
+        for name in [
+            "kimi-k2:CLOUD",
+            "GPT-OSS:120B-Cloud",
+            "glm-5.3-flash:cloud",
+            "gpt-oss:120b-cloud",
+            " deepseek-v4.1-flash:cloud ",
+            "qwen3:8b",
+            "qwen3",
+            "cloud",
+            ":cloud",
+            "x:-cloud",
+            "x:cloudy",
+        ] {
+            assert_eq!(
+                is_cloud(name, &Value::Null),
+                glafira_llm_pricing::model_key(name).is_some(),
+                "{name}"
+            );
+        }
+        assert!(is_cloud("kimi-k2:CLOUD", &Value::Null));
         assert!(same_model("qwen3", "qwen3:latest"));
         assert!(same_model(MODEL, MODEL));
         assert!(!same_model("qwen3:8b", "qwen3:latest"));
