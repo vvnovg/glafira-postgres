@@ -622,6 +622,24 @@ mod tests {
         assert!(c.iter().all(|t| !t.title.is_empty() && t.title.is_ascii()));
     }
 
+    /// Финальное ревью правок смоука P4b, nit #9: карта экранов (INSTRUCTIONS и сценарии) называет экран каждого id
+    /// `run_diagnostic` из `list_diagnostics` — модель не гадает, где пользователь увидит `pulse` и `queries`.
+    #[test]
+    fn screens_map_names_every_diagnostic_id() {
+        let map = glafira_pg_mcp::server::prompts::GLAFIRA_SCREENS;
+        let words: BTreeSet<&str> = map
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .collect();
+        for t in diag_catalog() {
+            assert!(
+                words.contains(t.id.as_str()),
+                "{} нет в карте экранов",
+                t.id
+            );
+        }
+        assert!(glafira_pg_mcp::INSTRUCTIONS.contains(map.split_once(". ").unwrap().1));
+    }
+
     #[test]
     fn formats_follow_the_interface() {
         assert_eq!(bytes(512.0), "512 B");

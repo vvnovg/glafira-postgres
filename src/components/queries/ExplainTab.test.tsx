@@ -403,7 +403,7 @@ describe("ExplainTab", () => {
     expect(api.createOptimizationRequest).toHaveBeenLastCalledWith("c", { member: "pg-1", database: "perf", source: { kind: "console" }, sql: `${sql} `, params: [], plan: null });
   });
 
-  it("«Предложения LLM» — сразу под редактором; подстановка значка карточки выбирает её предложение", async () => {
+  it("«Предложения LLM» — сразу под редактором; подстановка по ссылке карточки выбирает её предложение", async () => {
     vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest({ id: "r9", source: { kind: "query", queryId: "7" }, status: "answered" })]);
     vi.mocked(api.listLlmProposals).mockResolvedValue([llmProposal({ id: "p9", requestId: "r9", rewrittenSql: "SELECT 9 AS from_card" })]);
     renderWithClient(

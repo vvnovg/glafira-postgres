@@ -414,6 +414,25 @@ async fn typed_literals_of_a_card_query_are_proposed_and_compared() {
     assert!(c.cost_before > 0.0 && c.cost_after > 0.0, "{c:?}");
     assert_eq!(c.indexes_used.len(), 1, "{c:?}");
 
+    // Финальное ревью правок смоука, #3: ошибка сервера в `rewrittenSql` с приведениями — позиция в тексте модели
+    // (ведущие пробелы и `тип $N` в счёте), а не в тексте приведений.
+    let bad = format!("  {rewritten} AND o.no_such_column = 1");
+    let e = gw
+        .err(
+            "propose_query_rewrite",
+            propose(json!({"rewrittenSql": bad})),
+        )
+        .await;
+    assert!(
+        e.starts_with("invalid_sql: ")
+            && e.contains("no_such_column")
+            && e.ends_with(&format!(
+                "(position {})",
+                bad.find("o.no_such_column").unwrap() + 1
+            )),
+        "{e}"
+    );
+
     // #4: прямая форма по queryId — текст pgss с приведениями, связь с карточкой — по originalQueryId.
     let v = gw
         .ok(

@@ -197,7 +197,7 @@ export function ExplainTab({
             {/* Обе панели остаются смонтированными: переключение на «Вставить план» не стирает историю и значения параметров запуска. */}
             <div className="explain-panel" hidden={s !== "sql"}>
               <textarea className="mono explain-sql" aria-label="SQL" rows={8} value={sql} onChange={(e) => setSql(e.target.value)} placeholder={t("diag.explain.placeholder")} />
-              {/* Предложения LLM — под редактором (спец. P4 §8.4); значок карточки выбирает своё предложение по nonce подстановки. */}
+              {/* Предложения LLM — под редактором (спец. P4 §8.4); ссылка карточки выбирает своё предложение по nonce подстановки. */}
               <ProposalsPanel
                 connectionId={connectionId}
                 database={dbName}

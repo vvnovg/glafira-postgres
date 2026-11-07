@@ -585,6 +585,28 @@ mod tests {
         assert_eq!(plain.restore(e.clone()), e);
     }
 
+    /// Финальное ревью правок смоука P4b, #3: позиции сервера — в символах, а не в байтах: кириллица до приведений и
+    /// между ними не сдвигает пересчёт.
+    #[test]
+    fn positions_count_characters_of_non_ascii_text() {
+        let original = "SELECT 'жжж' AS \"имя\", date $1, 'ё' || text  $2, nope";
+        let p = PlanText::new(original);
+        assert_eq!(
+            p.text,
+            "SELECT 'жжж' AS \"имя\", $1::date, 'ё' || $2::text, nope"
+        );
+        let at = |text: &str, part: &str| text[..text.find(part).unwrap()].chars().count() + 1;
+        for (cast, want) in [
+            (at(&p.text, "\"имя\""), at(original, "\"имя\"")),
+            (at(&p.text, "$1::"), at(original, "date $1")),
+            (at(&p.text, ", 'ё'"), at(original, ", 'ё'")),
+            (at(&p.text, "::text"), at(original, "text  $2")),
+            (at(&p.text, "nope"), at(original, "nope")),
+        ] {
+            assert_eq!(p.original_position(cast), want, "{cast}");
+        }
+    }
+
     /// SQL модели с `date $1` уходит серверу приведённым (`pg_query` разбирает и `date $1`, сервер — нет); отказ
     /// `sqlcheck` по тексту приведений — с позицией в тексте модели.
     #[test]

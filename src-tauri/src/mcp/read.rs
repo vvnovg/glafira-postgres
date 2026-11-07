@@ -1402,7 +1402,8 @@ async fn settings(st: &AppState, p: SettingsParams) -> Result<PgAnswer, ToolErro
 pub const EXPLAIN_TIMEOUT_S: u32 = 5;
 const GENERIC_WARNING: &str = "The plan is generic (GENERIC_PLAN): parameter values are unknown, estimates use average selectivity";
 /// Параметры `$N` (§5.2): значения модели; без них — `GENERIC_PLAN` (PostgreSQL 16+, на старых значения обязательны);
-/// `genericPlan` — явная просьба об обобщённом плане.
+/// `genericPlan` — явная просьба об обобщённом плане. Пустой список — «значений нет», как и без `params` (финальное
+/// ревью правок смоука P4b, #1: запрос из карточки несёт `"params": []`, и модель передаёт его как есть).
 fn plan_params(
     sql: &str,
     values: Option<&[Option<String>]>,
@@ -1410,7 +1411,7 @@ fn plan_params(
     version_num: i32,
 ) -> Result<Params, ToolError> {
     let expected = count_params(sql);
-    match values {
+    match values.filter(|v| !v.is_empty()) {
         Some(_) if generic => Err(invalid_argument(
             "Pass either params or genericPlan, not both",
         )),
@@ -1418,7 +1419,6 @@ fn plan_params(
             "The query has {expected} parameters, {} values given",
             v.len()
         ))),
-        Some([]) => Ok(Params::None),
         Some(v) => Ok(Params::Values { values: v.to_vec() }),
         None if generic || expected > 0 => {
             if version_num < V16 {
@@ -2949,6 +2949,34 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(e.code, "invalid_argument");
+    }
+
+    /// Финальное ревью правок смоука P4b, #1: запрос из карточки несёт `"params": []` при тексте с `$N`; модель, которая
+    /// передаёт его поля в explain_query и hypothetical_index как есть, получает то же, что без `params`: обобщённый план
+    /// на 16+, на старых версиях — просьбу передать значения; пустой список с `genericPlan` — не «оба сразу».
+    #[test]
+    fn empty_params_mean_no_values() {
+        let none: &[Option<String>] = &[];
+        assert_eq!(
+            plan_params("SELECT $1", Some(none), false, 170_000).ok(),
+            Some(Params::Generic)
+        );
+        assert_eq!(
+            plan_params("SELECT $1", Some(none), true, 160_000).ok(),
+            Some(Params::Generic)
+        );
+        assert_eq!(
+            plan_params("SELECT 1", Some(none), false, 130_000).ok(),
+            Some(Params::None)
+        );
+        let e = plan_params("SELECT $1, $2", Some(none), false, 150_000)
+            .err()
+            .unwrap();
+        assert!(
+            e.code == "invalid_argument" && e.message.contains("pass params with 2 values"),
+            "{}",
+            e.message
+        );
     }
 
     // Сверх плана: маскирование плана по тексту pgss, проверки EXPLAIN и гипотез до соединения.

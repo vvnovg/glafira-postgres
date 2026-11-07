@@ -402,7 +402,7 @@ impl PgServer {
     }
 
     #[tool(
-        description = "Build the plan of a query without executing it (EXPLAIN with FORMAT JSON, VERBOSE and SETTINGS, never ANALYZE). Pass sql or queryId (its text from pg_stat_statements; typed literals that pg_stat_statements normalized, such as date $1, are planned as $1::date for common types). $1, $2 and so on take values from params; for queryId without params PostgreSQL 16+ builds a generic plan, older versions need params. Allowed: one SELECT, INSERT, UPDATE, DELETE or MERGE statement; nothing is executed. Returns the plan as psql text, the cost summary, Glafira's recommendations, tables and warnings.",
+        description = "Build the plan of a query without executing it (EXPLAIN with FORMAT JSON, VERBOSE and SETTINGS, never ANALYZE). Pass sql or queryId (its text from pg_stat_statements). Typed literals as pg_stat_statements writes them (date $1) are planned as $1::date for common types, in sql and in queryId texts. $1, $2 and so on take values from params; without values (params omitted or empty) PostgreSQL 16+ builds a generic plan, older versions need params. Allowed: one SELECT, INSERT, UPDATE, DELETE or MERGE statement; nothing is executed. Returns the plan as psql text, the cost summary, Glafira's recommendations, tables and warnings.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,

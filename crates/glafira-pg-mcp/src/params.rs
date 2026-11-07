@@ -523,7 +523,7 @@ pub struct ExplainParams {
     /// Values for $1, $2… in order, as text; null is SQL NULL.
     #[serde(default)]
     pub params: Option<Vec<Option<String>>>,
-    /// Build a generic plan without parameter values (EXPLAIN GENERIC_PLAN, PostgreSQL 16+). Used by default for queryId without params.
+    /// Build a generic plan without parameter values (EXPLAIN GENERIC_PLAN, PostgreSQL 16+). Used by default when the query has $1, $2… and params is omitted or empty.
     #[serde(default)]
     pub generic_plan: Option<bool>,
 }
@@ -629,7 +629,7 @@ impl GetRequestParams {
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ProposeParams {
-    /// Request id from get_optimization_request. With it pass only rewrittenSql, indexes, rationale and expectedEffect (connectionId, database, sql or queryId of the same request are accepted and ignored); without it pass connectionId with sql or queryId.
+    /// Request id from get_optimization_request. With it pass only rewrittenSql, indexes, rationale and expectedEffect (connectionId, database, sql or queryId of the same request are accepted when they match the request (a mismatch is invalid_argument)); without it pass connectionId with sql or queryId.
     #[serde(default)]
     pub request_id: Option<String>,
     /// Connection id from list_connections, for a query you found yourself (without requestId).

@@ -205,7 +205,8 @@ pub async fn bundle(
         None => match probe_text(text.as_deref(), text_truncated) {
             Some(sql) => match probe_params(count_params(sql), version) {
                 Some(params) => {
-                    // Текст карточки — из pg_stat_statements: `date $1` планируется как `$1::date` (`plannable`).
+                    // Текст карточки (из pg_stat_statements) или консоли без плана («Скопировать для LLM» P3):
+                    // `date $1` планируется как `$1::date` (`plannable`).
                     let req = ExplainRequest {
                         member: member.to_string(),
                         database: database.to_string(),

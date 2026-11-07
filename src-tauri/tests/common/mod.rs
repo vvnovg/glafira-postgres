@@ -126,7 +126,6 @@ pub fn lab_addr() -> Option<String> {
     env("GPG_IT_LAB")
 }
 
-/// Стенд тяжёлых запросов P3 (`GPG_IT_PERF=localhost:5471`, PG 17 с hypopg, pg_stat_kcache, pg_wait_sampling).
 /// Выполняет `sql` суперпользователем в базе `perf` стенда (строка попадает в pg_stat_statements) и отдаёт его
 /// `queryid` из плана (`Query Identifier`, PG 14+).
 pub async fn pgss_query_id(perf: &str, sql: &str) -> i64 {
@@ -142,6 +141,7 @@ pub async fn pgss_query_id(perf: &str, sql: &str) -> i64 {
         .unwrap_or_else(|| panic!("{plan}"))
 }
 
+/// Стенд тяжёлых запросов P3 (`GPG_IT_PERF=localhost:5471`, PG 17 с hypopg, pg_stat_kcache, pg_wait_sampling).
 pub fn perf_addr() -> Option<String> {
     env("GPG_IT_PERF")
 }

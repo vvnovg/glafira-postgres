@@ -422,7 +422,7 @@ describe("QueryTab", () => {
     expect(screen.getByRole("group", { name: "Текст запроса" }).nextElementSibling).toContainElement(again);
   });
 
-  it("значок «Предложения LLM: N» открывает консоль с исходным текстом и выбранным предложением", async () => {
+  it("ссылка «Предложения LLM: N» открывает консоль с исходным текстом и выбранным предложением", async () => {
     vi.mocked(api.queryDetail).mockResolvedValue(detail());
     vi.mocked(api.listLlmProposals).mockResolvedValue([
       llmProposal({ id: "p1", requestId: null, originalQueryId: "7", originalSql: "SELECT * FROM shop.customers WHERE id = $1", member: "pg-1" }),
@@ -437,7 +437,7 @@ describe("QueryTab", () => {
     expect(useWorkspace.getState().activeId).toBe("explain:c");
   });
 
-  it("без предложений значка нет", async () => {
+  it("без предложений ссылки нет", async () => {
     vi.mocked(api.queryDetail).mockResolvedValue(detail());
     renderWithClient(<QueryTab connectionId="c" member="pg-1" database="perf" queryId="7" active />);
     await screen.findByRole("button", { name: "Обновить" });

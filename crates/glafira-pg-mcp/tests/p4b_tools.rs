@@ -303,6 +303,15 @@ async fn descriptions_say_what_compact_answers_omit() {
     ] {
         assert!(card.contains(phrase), "{phrase}: {card}");
     }
+    // Финальное ревью правок смоука P4b, #2: приведения `date $1` — и для `sql`, и для текста по `queryId`; пустой
+    // `params` — как без значений.
+    let explain = description("explain_query");
+    for phrase in [
+        "Typed literals as pg_stat_statements writes them (date $1) are planned as $1::date for common types, in sql and in queryId texts",
+        "without values (params omitted or empty) PostgreSQL 16+ builds a generic plan",
+    ] {
+        assert!(explain.contains(phrase), "{phrase}: {explain}");
+    }
     let diag = description("run_diagnostic");
     for phrase in [
         // Ревью правки A, #3: подряд идущие интервалы без активных сессий — одна запись.
@@ -360,7 +369,7 @@ async fn descriptions_and_instructions_carry_the_smoke_texts() {
         "the fix text of each finding id is given once in fixes (a finding keeps its own fix only when it differs)",
         "naming Glafira's screens and buttons, never tool names",
         // Ревью правки B, #3: карта экранов — и в `instructions` (свободный разговор без сценария).
-        "Screens behind the tools: get_health_summary → “Pulse”",
+        "Screens behind the tools: get_health_summary and pulse → “Pulse”",
         "“Compare plans”",
     ] {
         assert!(INSTRUCTIONS.contains(phrase), "{phrase}");
@@ -657,6 +666,16 @@ async fn proposal_tools_describe_their_parameters() {
         .as_str()
         .unwrap();
     assert!(indexes.contains("is ignored"), "{indexes}");
+    // Финальное ревью правок смоука P4b, nit #4: поля прямой формы рядом с `requestId` сверяются с запросом.
+    let request_id = schema["properties"]["requestId"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(
+        request_id
+            .contains("are accepted when they match the request (a mismatch is invalid_argument)")
+            && !request_id.contains("ignored"),
+        "{request_id}"
+    );
     let propose = tool("propose_query_rewrite")
         .description
         .as_deref()

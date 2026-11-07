@@ -472,8 +472,10 @@ fn sql_tokens(b: &[u8]) -> Vec<Token> {
 }
 
 /// Тип из `TYPED_LITERAL_TYPES`, которым кончаются лексемы `before` (перед параметром): начало и конец его текста. Перед
-/// типом не должно быть точки — `s.date` это имя, а не тип.
+/// типом не должно быть точки — `s.date` это имя, а не тип — и `::`: `x::date $1` — приведение `x`, а не литерал
+/// (текст и так не SQL, а двойное приведение `x::$1::date` увело бы ошибку сервера от текста модели).
 fn typed_literal_type(sql: &str, before: &[Token]) -> Option<(usize, usize)> {
+    let b = sql.as_bytes();
     TYPED_LITERAL_TYPES.iter().find_map(|words| {
         let from = before.len().checked_sub(words.len())?;
         let mut span = None;
@@ -486,9 +488,10 @@ fn typed_literal_type(sql: &str, before: &[Token]) -> Option<(usize, usize)> {
             }
             span = Some(span.map_or((s, e), |(first, _)| (first, e)));
         }
-        let qualified = from
-            .checked_sub(1)
-            .is_some_and(|p| matches!(before[p], Token::Other(at) if sql.as_bytes()[at] == b'.'));
+        let qualified = from.checked_sub(1).is_some_and(|p| {
+            matches!(before[p], Token::Other(at)
+                if b[at] == b'.' || (b[at] == b':' && at > 0 && b[at - 1] == b':'))
+        });
         span.filter(|_| !qualified)
     })
 }
@@ -886,6 +889,9 @@ mod tests {
             "SELECT * FROM t WHERE a = b$1",
             "SELECT * FROM t WHERE d = character varying $1",
             "SELECT * FROM t LIMIT $1",
+            // Финальное ревью правок смоука, nit #5: тип после `::` — приведение, а не типизированный литерал.
+            "SELECT * FROM t WHERE d = x::date $1",
+            "SELECT * FROM t WHERE d = x:: double precision $1",
         ] {
             assert_eq!(cast_typed_literal_params(text), text);
         }

@@ -207,7 +207,7 @@ describe("ProposalsPanel", () => {
     expect(await navigator.clipboard.readText()).toBe(REWRITTEN);
   });
 
-  it("значок карточки: предложение запроса карточки показывается и выбирается", async () => {
+  it("ссылка карточки: предложение запроса карточки показывается и выбирается", async () => {
     vi.mocked(api.listLlmProposals).mockResolvedValue([
       llmProposal({ id: "p1", rewrittenSql: "SELECT 1 AS console_one" }),
       llmProposal({ id: "p9", requestId: "r9", rewrittenSql: "SELECT 9 AS from_card", createdAtMs: 1 }),
