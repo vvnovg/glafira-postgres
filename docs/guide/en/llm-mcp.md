@@ -10,7 +10,7 @@ The socket is available only to your user. Connecting needs a token that Glafira
 
 ## Turning it on {#enable}
 
-1. Open [[ui:sidebar.settings]], section [[ui:settings.mcp.section]].
+1. Open [[ui:sidebar.settings]], the [[ui:settings.nav.mcpServer]] section of the [[ui:settings.mcp.section]] group.
 2. Check [[ui:settings.mcp.enable]]. The status changes to [[ui:settings.mcp.state.running]].
 3. Open the connection form ([[ui:sidebar.editConnection]] in the connection menu), choose [[ui:connections.form.llmLevels.diagnostics]] in the [[ui:connections.form.llmAccess]] group and save. The connection gets an `LLM` badge in the tree. The third level, [[ui:connections.form.llmLevels.data]], is for test stands: see [Diagnostics and data level](llm-mcp.md#data-level).
 
@@ -20,7 +20,7 @@ If MCP is already served by another Glafira window, the status is [[ui:settings.
 
 ## Connecting a client {#connect-client}
 
-The [[ui:settings.mcp.connect.title]] block has ready snippets with the path to the installed application and copy buttons:
+In the [[ui:settings.mcp.connect.title]] block choose the client to get ready snippets with the path to the installed application and copy buttons:
 
 - Qwen Code — the command `qwen mcp add glafira-pg "<path>" mcp` or an `mcpServers` block for `~/.qwen/settings.json`;
 - Claude Code — the command `claude mcp add glafira-pg -- "<path>" mcp`;
@@ -77,7 +77,7 @@ At [[ui:connections.form.llmLevels.data]] Glafira masks nothing, in any tool.
 
 ## Sessions, revoking and the journal {#sessions-log}
 
-While a client is connected, an `LLM` indicator with the client's name (or the number of clients) is shown at the bottom of the sidebar; it is highlighted during a call. Clicking it opens the MCP section of the settings.
+While a client is connected, an `LLM` indicator with the client's name (or the number of clients) is shown at the bottom of the sidebar; it is highlighted during a call. Clicking it opens the [[ui:settings.nav.mcpServer]] section of the settings. Sessions and approved clients are in the [[ui:settings.nav.sessions]] section, the journal is in the [[ui:settings.mcp.audit.title]] section of the same group.
 
 - [[ui:settings.mcp.sessions.title]] — the client, start time and number of calls; [[ui:settings.mcp.sessions.disconnect]] closes one session, [[ui:settings.mcp.sessions.disconnectAll]] closes all.
 - [[ui:settings.mcp.clients.title]] — [[ui:settings.mcp.clients.revoke]] forgets the client and closes its sessions; on the next connection it asks for approval again.
@@ -161,7 +161,7 @@ The [[ui:llmAssist.ask.button]] button can do without the chat. With the backgro
 
 To turn it on:
 
-1. Open [[ui:sidebar.settings]], section [[ui:settings.mcp.section]], and make sure [[ui:settings.mcp.enable]] is checked: the background assistant works through the same gateway.
+1. Open [[ui:sidebar.settings]], the [[ui:settings.nav.mcpServer]] section of the [[ui:settings.mcp.section]] group, and make sure [[ui:settings.mcp.enable]] is checked: the background assistant works through the same gateway.
 2. In the [[ui:settings.mcp.agent.title]] subsection choose the agent — Qwen Code 0.26 or newer, or Claude Code 2.1 or newer — and press [[ui:settings.mcp.agent.find]]. On macOS and Linux Glafira asks your login shell where `qwen` or `claude` is (an application started from the Dock or the desktop menu does not see the shell's `PATH`), then looks in the shell's `PATH` and in the usual places: `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `~/.npm-global/bin`, `~/.claude/local`. On Windows it looks in `PATH` (`.exe` and `.cmd` files), `%APPDATA%\npm` and `%USERPROFILE%\.local\bin`. The path and the version are shown. You can correct the path by hand: when you leave the field, Glafira asks the program for its version. A version below the minimum gets a warning, and a program that does not answer `--version` gets “Could not get the version: …”.
 3. Choose the model. For Qwen Code the list comes from `modelProviders` in `~/.qwen/settings.json` (Glafira only reads the file); an empty field means the model from Qwen Code's own settings, the same as in the chat, and the line under the field names it. For Claude Code, [[ui:settings.mcp.agent.viaOllama]] takes the list from Ollama and points Claude Code at it, and then the model is required; without it you type the model (empty — Claude Code's default model), and [[ui:settings.mcp.agent.budget]] limits the spending of one run (1 $ by default; empty — no limit).
 4. Press [[ui:common.save]], check [[ui:settings.mcp.agent.enable]] (the switch is saved at once) and press [[ui:settings.mcp.agent.check]]. The check works with the saved settings, so it is unavailable while there are unsaved changes. A short run asks the agent to call `list_connections` and answer OK; the result is, for example, “Works: Qwen Code 0.26.5, qwen3.6-64k:35b-a3b, 23 s”, or “Does not work: …” with [[ui:llmAssist.agent.showLog]]. The check covers the program, the model, the MCP configuration and the run ticket.

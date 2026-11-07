@@ -10,7 +10,7 @@ Glafira может работать шлюзом для LLM-ассистента
 
 ## Включение {#enable}
 
-1. Откройте [[ui:sidebar.settings]], раздел [[ui:settings.mcp.section]].
+1. Откройте [[ui:sidebar.settings]], в группе [[ui:settings.mcp.section]] — раздел [[ui:settings.nav.mcpServer]].
 2. Отметьте [[ui:settings.mcp.enable]]. Статус сменится на [[ui:settings.mcp.state.running]].
 3. Откройте форму подключения ([[ui:sidebar.editConnection]] в меню подключения), выберите [[ui:connections.form.llmLevels.diagnostics]] в группе [[ui:connections.form.llmAccess]] и сохраните. В дереве у подключения появится значок `LLM`. Третий уровень, [[ui:connections.form.llmLevels.data]], — для тестовых стендов: см. [Уровень «Диагностика и данные»](llm-mcp.md#data-level).
 
@@ -20,7 +20,7 @@ Glafira может работать шлюзом для LLM-ассистента
 
 ## Подключение клиента {#connect-client}
 
-В блоке [[ui:settings.mcp.connect.title]] — готовые фрагменты с путём к установленному приложению и кнопками копирования:
+В блоке [[ui:settings.mcp.connect.title]] выберите клиент — появятся готовые фрагменты с путём к установленному приложению и кнопками копирования:
 
 - Qwen Code — команда `qwen mcp add glafira-pg "<путь>" mcp` или блок `mcpServers` для файла `~/.qwen/settings.json`;
 - Claude Code — команда `claude mcp add glafira-pg -- "<путь>" mcp`;
@@ -77,7 +77,7 @@ SQL ассистента проверяется до отправки на се�
 
 ## Сессии, отзыв и журнал {#sessions-log}
 
-Пока клиент подключён, внизу боковой панели виден индикатор `LLM` с именем клиента (или числом клиентов); во время вызова он подсвечивается. Щелчок открывает раздел MCP в настройках.
+Пока клиент подключён, внизу боковой панели виден индикатор `LLM` с именем клиента (или числом клиентов); во время вызова он подсвечивается. Щелчок открывает раздел [[ui:settings.nav.mcpServer]] в настройках. Сессии и подтверждённые клиенты — в разделе [[ui:settings.nav.sessions]], журнал — в разделе [[ui:settings.mcp.audit.title]] той же группы.
 
 - [[ui:settings.mcp.sessions.title]] — клиент, начало и число вызовов; [[ui:settings.mcp.sessions.disconnect]] закрывает одну сессию, [[ui:settings.mcp.sessions.disconnectAll]] — все.
 - [[ui:settings.mcp.clients.title]] — [[ui:settings.mcp.clients.revoke]] забывает клиента и закрывает его сессии; при следующем подключении он снова попросит подтверждение.
@@ -161,7 +161,7 @@ Glafira даёт MCP-клиентам четыре готовых сценари
 
 Как включить:
 
-1. Откройте [[ui:sidebar.settings]], раздел [[ui:settings.mcp.section]], и проверьте, что отмечено [[ui:settings.mcp.enable]]: фоновый ассистент работает через тот же шлюз.
+1. Откройте [[ui:sidebar.settings]], в группе [[ui:settings.mcp.section]] — раздел [[ui:settings.nav.mcpServer]], и проверьте, что отмечено [[ui:settings.mcp.enable]]: фоновый ассистент работает через тот же шлюз.
 2. В подразделе [[ui:settings.mcp.agent.title]] выберите агента — Qwen Code 0.26 или новее либо Claude Code 2.1 или новее — и нажмите [[ui:settings.mcp.agent.find]]. На macOS и Linux Glafira спрашивает вашу логин-оболочку, где лежит `qwen` или `claude` (приложение, запущенное из Dock или меню рабочего стола, не видит `PATH` оболочки), затем смотрит в `PATH` оболочки и в обычных местах: `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `~/.npm-global/bin`, `~/.claude/local`. На Windows — в `PATH` (файлы `.exe` и `.cmd`), `%APPDATA%\npm` и `%USERPROFILE%\.local\bin`. Путь и версия показываются. Путь можно поправить руками: когда вы уходите из поля, Glafira спрашивает у программы её версию. Версия ниже минимальной получает предупреждение, а программа, которая не ответила на `--version`, — «Версию не узнать: …».
 3. Выберите модель. У Qwen Code список берётся из `modelProviders` файла `~/.qwen/settings.json` (Glafira файл только читает); пустое поле — модель из настроек самого Qwen Code, та же, что в чате, и строка под полем её называет. У Claude Code флажок [[ui:settings.mcp.agent.viaOllama]] берёт список из Ollama и направляет Claude Code к ней, и тогда модель обязательна; без него модель вводится руками (пусто — модель Claude Code по умолчанию), а [[ui:settings.mcp.agent.budget]] ограничивает расходы одного запуска (по умолчанию 1 $; пусто — без предела).
 4. Нажмите [[ui:common.save]], отметьте [[ui:settings.mcp.agent.enable]] (выключатель сохраняется сразу) и нажмите [[ui:settings.mcp.agent.check]]. Проверка работает по сохранённым настройкам, поэтому, пока есть несохранённые изменения, она недоступна. Короткий запуск просит агента вызвать `list_connections` и ответить OK; итог — например, «Работает: Qwen Code 0.26.5, qwen3.6-64k:35b-a3b, 23 с» — или «Не работает: …» и [[ui:llmAssist.agent.showLog]]. Проверка охватывает программу, модель, MCP-конфигурацию и билет запуска.
