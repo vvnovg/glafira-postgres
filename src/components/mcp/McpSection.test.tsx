@@ -26,6 +26,8 @@ vi.mock("../../api/client", async (importOriginal) => {
       checkAgent: vi.fn(),
       unloadAgentModel: vi.fn(),
       listAgentRuns: vi.fn(),
+      getOllamaPrices: vi.fn(),
+      refreshOllamaPrices: vi.fn(),
       stopAgentRun: vi.fn(),
       readAgentLog: vi.fn(),
       revealAgentLog: vi.fn(),
@@ -47,6 +49,7 @@ beforeEach(() => {
   vi.mocked(api.getAgentSettings).mockResolvedValue(agentSettings());
   vi.mocked(api.listAgentModels).mockResolvedValue({ ids: [], default: null, source: "none" });
   vi.mocked(api.listAgentRuns).mockResolvedValue([]);
+  vi.mocked(api.getOllamaPrices).mockResolvedValue({ date: "2026-11-07", source: "https://ollama.com/pricing", saved: false, models: 24, refreshAllowed: true });
   vi.mocked(api.getAppInfo).mockResolvedValue({ name: "Glafira for PostgreSQL", version: "0.6.0", commit: "abc1234", os: "macos", arch: "aarch64", dataDir: "/d", logDir: "/l" });
 });
 
@@ -198,7 +201,7 @@ describe("McpSection", () => {
     expect(rows[1]).toHaveTextContent(/^Фоновый ассистент\d/);
   });
 
-  it("раздел «Фоновый ассистент»: форма и «Запуски» — отдельными блоками", async () => {
+  it("раздел «Фоновый ассистент»: форма и «Запуски» — отдельными блоками; цены Ollama Cloud — в блоке «Запусков»", async () => {
     vi.mocked(api.getMcpStatus).mockResolvedValue(mcpStatus());
     const { container } = renderWithClient(<McpAgentSection />);
     expect(await screen.findByRole("checkbox", { name: "Запускать ассистента в фоне" })).toBeInTheDocument();
@@ -206,6 +209,8 @@ describe("McpSection", () => {
     expect(blocks).toHaveLength(2);
     expect(within(blocks[0] as HTMLElement).getByRole("button", { name: "Проверить" })).toBeInTheDocument();
     expect(within(blocks[1] as HTMLElement).getByRole("heading", { level: 4, name: "Запуски" })).toBeInTheDocument();
+    expect(await within(blocks[1] as HTMLElement).findByRole("button", { name: "Обновить цены" })).toBeEnabled();
+    expect(blocks[1]).toHaveTextContent("оценка по ценам Ollama Cloud на 07.11.2026, встроенным в Glafira");
   });
 
   it("политика запрещает MCP: раздел «Фоновый ассистент» есть, его выключатель неактивен с пометкой", async () => {

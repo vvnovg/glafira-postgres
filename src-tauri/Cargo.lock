@@ -1536,6 +1536,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "glafira-llm-pricing"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "time",
+]
+
+[[package]]
 name = "glafira-mcp-core"
 version = "0.1.0"
 dependencies = [
@@ -1556,6 +1565,7 @@ dependencies = [
  "dirs",
  "futures-util",
  "getrandom 0.3.4",
+ "glafira-llm-pricing",
  "glafira-mcp-core",
  "glafira-pg-mcp",
  "keyring",

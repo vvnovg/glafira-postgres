@@ -1196,10 +1196,39 @@ export interface AgentRun {
   /** Стоимость, если CLI её сообщил (Claude Code без Ollama). */
   costUsd?: number | null;
   /**
+   * Оценка стоимости облачного запуска через Ollama по ценам Ollama Cloud (Qwen Code, Claude Code через Ollama; смоук P4c,
+   * sf-T6). У записей до sf-T6 поля нет.
+   */
+  costEstimate?: CostEstimate | null;
+  /**
    * Предупреждения запуска. `evict <другие модели через запятую> <модель запуска>` — Ollama может выгрузить другую модель;
    * `unsafe <имена через запятую>` / `unsafe no-init` — проверка инструментов остановила запуск. Прочие — как есть.
    */
   warnings: string[];
+}
+/** Оценка стоимости запуска по таблице цен Ollama Cloud (`agent::runs::CostEstimate`). */
+export interface CostEstimate {
+  /** Сумма, $. */
+  usd: number;
+  /** День цен таблицы, `ГГГГ-ММ-ДД`. */
+  pricesDate: string;
+  /** Цены «вне пика» (будни вне 12:00–18:00 UTC и выходные по началу запуска). */
+  offPeak: boolean;
+}
+/** Действующая таблица цен Ollama Cloud (`agent::pricing::OllamaPrices`). */
+export interface OllamaPrices {
+  /** День цен, `ГГГГ-ММ-ДД`. */
+  date: string;
+  /** Адрес страницы цен. */
+  source: string;
+  /** Загружена «Обновить цены»; иначе — встроенная. */
+  saved: boolean;
+  /** Когда загружена (мс эпохи); у встроенной — нет. */
+  fetchedAtMs?: number | null;
+  /** Моделей в таблице. */
+  models: number;
+  /** «Обновить цены» разрешена политикой (`updatesEnabled`). */
+  refreshAllowed: boolean;
 }
 /** Фильтр `list_agent_runs`: поля — пересечение; без полей — все запуски (последние 50). */
 export interface RunFilter {

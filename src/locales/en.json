@@ -307,7 +307,11 @@
       "busy": "Wait for the background run to finish",
       "noModel": "No model to unload: choose the model of the background assistant",
       "notManaged": "Glafira does not manage the model: “Keep the model in memory” is 0, Claude Code runs without Ollama, or the Ollama address is not local",
-      "ollamaUnavailable": "Ollama did not answer: {{error}}"
+      "ollamaUnavailable": "Ollama did not answer: {{error}}",
+      "pricesPolicy": "Updating prices is disabled by your organization",
+      "pricesFetch": "Could not load the Ollama price page",
+      "pricesParse": "Could not parse the Ollama price page",
+      "pricesSave": "Could not save the Ollama price table"
     }
   },
   "connections": {
@@ -697,6 +701,9 @@
           "colDuration": "Duration",
           "colCalls": "Calls",
           "colCost": "Cost",
+          "costEstimate": "≈ {{cost}}",
+          "costEstimateHint": "Estimate based on Ollama Cloud prices as of {{date}} (ollama.com/pricing)",
+          "costEstimateHintOffPeak": "Estimate based on Ollama Cloud off-peak prices as of {{date}} (ollama.com/pricing)",
           "colActions": "Actions",
           "check": "Check",
           "summaryAria": "Assistant's answer, run {{id}}",
@@ -715,6 +722,14 @@
             "interrupted": "interrupted",
             "skipped": "skipped"
           }
+        },
+        "prices": {
+          "builtin": "Cloud runs via Ollama are estimated at Ollama Cloud prices as of {{date}}, built into Glafira",
+          "saved": "Cloud runs via Ollama are estimated at Ollama Cloud prices as of {{date}}, loaded from ollama.com/pricing",
+          "refresh": "Update prices",
+          "refreshing": "Loading prices…",
+          "updated": "Prices updated: {{n}} models",
+          "policy": "Your organization does not allow loading prices: estimates use this table"
         }
       }
     }
@@ -2398,7 +2413,8 @@
           "timeout": "From 2 to 60 minutes from the start of a run; then Glafira stops the agent.",
           "keepWarm": "Glafira keeps the local Ollama model loaded this many minutes after a run, so the next request starts faster. 0: do not manage.",
           "ollamaUrl": "A remote address is allowed: Claude Code via Ollama talks to it itself. Glafira talks to Ollama and manages the model only at localhost, 127.0.0.1 or ::1.",
-          "check": "A short run without a connection: the agent calls list_connections and answers OK. Checks the program, the model, the MCP configuration and the run ticket."
+          "check": "A short run without a connection: the agent calls list_connections and answers OK. Checks the program, the model, the MCP configuration and the run ticket.",
+          "prices": "Loaded from ollama.com/pricing only by “Update prices”; until then, prices built into this version. Estimate: agent tokens × model prices; off-peak: weekdays outside 12–18 UTC, weekends."
         }
       }
     },

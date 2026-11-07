@@ -10,6 +10,7 @@ import { ErrorBanner } from "../../common/ErrorBanner";
 import { Hint } from "../../common/Hint";
 import { AgentLogDialog } from "./AgentLogDialog";
 import { AgentRuns } from "./AgentRuns";
+import { OllamaPrices } from "./OllamaPrices";
 import { type AgentDraft, type FieldError, fromDraft, hiddenErrorPreset, isLoopbackUrl, MIN_VERSION, needsModel, pathRules, toDraft, unloadOff, validateDraft } from "./agentForm";
 import { checkResultText } from "./agentText";
 
@@ -506,6 +507,7 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
       </div>
       <div className="settings-block">
         <AgentRuns runs={runs} state={runsState} error={runsError} onRetry={refreshRuns} onShowLog={setLogRun} />
+        <OllamaPrices />
       </div>
       {logRun && <AgentLogDialog runId={logRun} onClose={() => setLogRun(null)} />}
     </>

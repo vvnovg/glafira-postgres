@@ -758,6 +758,18 @@ pub fn final_text(output: OutputFormat, stdout_tail: &str) -> (Option<String>, O
     }
 }
 
+/// Объект `usage` итога агента — того же события `"type": "result"`, что и `final_text` (смоук P4c, sf-T6): по нему
+/// оценивается стоимость облачного запуска через Ollama (`agent::pricing`). Нет события или `usage` — `None`.
+pub fn result_usage(output: OutputFormat, stdout_tail: &str) -> Option<Value> {
+    match output {
+        OutputFormat::StreamJson => result_event(stdout_tail)?
+            .get_mut("usage")
+            .map(Value::take)
+            .filter(Value::is_object),
+        OutputFormat::Text => None,
+    }
+}
+
 /// Предел CLI сработал (спец. §3.2 `limit`, итог проверки CLI): Qwen Code — код 55 (`FatalBudgetExceededError`); Claude
 /// Code — код ≠ 0 и `subtype` итога, начинающийся с `error_max` (`error_max_budget_usd`).
 pub fn cli_limit(preset: Preset, code: Option<i32>, stdout_tail: &str) -> bool {
@@ -977,6 +989,39 @@ mod tests {
             final_text(OutputFormat::StreamJson, object),
             (Some("Done".to_string()), Some(0.5))
         );
+    }
+
+    /// Смоук P4c, sf-T6: токены — из `usage` того же события `result`, что и итог (журналы `a946948` Qwen Code и `a718ae5`
+    /// Claude Code через Ollama); нет события или `usage` — `None`.
+    #[test]
+    fn the_usage_comes_from_the_result_event() {
+        let qwen = format!(
+            "{INIT}\n{}\n",
+            r#"{"type":"result","subtype":"success","num_turns":4,"result":"Done","usage":{"input_tokens":61077,"output_tokens":19408,"cache_read_input_tokens":33920,"total_tokens":80485}}"#
+        );
+        assert_eq!(
+            result_usage(OutputFormat::StreamJson, &qwen),
+            Some(
+                serde_json::json!({"input_tokens":61077,"output_tokens":19408,"cache_read_input_tokens":33920,"total_tokens":80485})
+            )
+        );
+        let claude = r#"{"total_cost_usd":0.272146,"usage":{"input_tokens":11010,"cache_creation_input_tokens":0,"cache_read_input_tokens":84992,"output_tokens":6984},"type":"result","result":"Done"}"#;
+        assert_eq!(
+            result_usage(OutputFormat::StreamJson, claude).unwrap()["cache_read_input_tokens"],
+            84992
+        );
+        for tail in [
+            INIT.to_string(),
+            r#"{"type":"result","result":"Done"}"#.to_string(),
+            r#"{"type":"result","result":"Done","usage":null}"#.to_string(),
+        ] {
+            assert_eq!(
+                result_usage(OutputFormat::StreamJson, &tail),
+                None,
+                "{tail}"
+            );
+        }
+        assert_eq!(result_usage(OutputFormat::Text, &qwen), None);
     }
 
     #[test]

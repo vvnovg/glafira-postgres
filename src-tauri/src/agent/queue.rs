@@ -19,10 +19,11 @@ use tokio::sync::{oneshot, watch};
 
 use super::models::effective_model;
 use super::presets::{self, RunInputs};
+use super::pricing;
 use super::process::{self, AgentProcess, AgentSpawner, ExitInfo, InitTools, TokioSpawner};
 use super::prompt;
 pub use super::runs::RunFilter;
-use super::runs::{self, AgentRun, FailReason, NewRun, RunKind, RunStatus, RunStore};
+use super::runs::{self, AgentRun, CostEstimate, FailReason, NewRun, RunKind, RunStatus, RunStore};
 use super::settings::{AgentSettings, Preset, disabled_by_policy, not_configured};
 use super::tickets::{MAX_RUN_CALLS, RunObserver, RunScope, Tickets};
 use super::warmth::{ModelWarmth, NoWarmth};
@@ -324,6 +325,8 @@ struct Final {
     code: Option<i32>,
     summary: Option<String>,
     cost: Option<f64>,
+    /// Оценка по ценам Ollama Cloud (`agent::pricing`).
+    estimate: Option<CostEstimate>,
     proposals: Vec<String>,
     /// Дописываются к предупреждениям запуска (`unsafe …`).
     warnings: Vec<String>,
@@ -337,6 +340,7 @@ impl Final {
             code: None,
             summary: None,
             cost: None,
+            estimate: None,
             proposals: Vec::new(),
             warnings: Vec::new(),
         }
@@ -626,11 +630,11 @@ impl AgentQueue {
             .await
             .ok()
             .flatten();
-        let (preset, started_model) = (s.preset, model.clone());
+        let (preset, started_model, started_at) = (s.preset, model.clone(), now_ms());
         if let Some(r) = self
             .update(&id, move |r| {
                 r.status = RunStatus::Starting;
-                r.started_at_ms = Some(now_ms());
+                r.started_at_ms = Some(started_at);
                 r.preset = preset;
                 r.model = started_model;
                 r.path = Some(path);
@@ -744,6 +748,7 @@ impl AgentQueue {
             }
         };
         self.cleanup(&id);
+        let run_model = model.clone();
         if stopped != Some(Stopped::Shutdown) {
             let warmth = self.d.runtime.warmth.clone();
             tokio::spawn(async move { warmth.after_run(model.as_deref()).await });
@@ -770,8 +775,31 @@ impl AgentQueue {
         } else {
             process::final_text(spec.output, &exit.stdout_tail)
         };
-        // Стоимость — только у Claude Code без Ollama: через Ollama она выдуманная (§4.1, §4.5).
-        let cost = cost.filter(|_| s.preset == Preset::Claude && !s.claude.via_ollama);
+        // Стоимость — только у Claude Code без Ollama: через Ollama она выдуманная (§4.1, §4.5). У остальных — оценка по
+        // `usage` итога и ценам Ollama Cloud, если модель облачная (смоук P4c, sf-T6).
+        let exact = s.preset == Preset::Claude && !s.claude.via_ollama;
+        let cost = cost.filter(|_| exact);
+        let usage = (!unsafe_tools && !exact)
+            .then(|| process::result_usage(spec.output, &exit.stdout_tail))
+            .flatten();
+        let estimate = match usage {
+            Some(usage) => {
+                let (dir, preset) = (self.d.data_dir.clone(), s.preset);
+                off_thread(move || {
+                    Ok(pricing::estimate_run(
+                        &dir,
+                        preset,
+                        run_model.as_deref(),
+                        Some(&usage),
+                        Some(started_at),
+                    ))
+                })
+                .await
+                .ok()
+                .flatten()
+            }
+            None => None,
+        };
         self.finish(
             &id,
             Final {
@@ -780,6 +808,7 @@ impl AgentQueue {
                 code: exit.code,
                 summary,
                 cost,
+                estimate,
                 proposals,
                 warnings: unsafe_warning.into_iter().collect(),
             },
@@ -931,6 +960,7 @@ impl AgentQueue {
                 r.proposal_ids = f.proposals;
                 r.summary = f.summary;
                 r.cost_usd = f.cost;
+                r.cost_estimate = f.estimate;
                 r.warnings.extend(f.warnings);
             })
             .await;
@@ -1971,6 +2001,77 @@ mod tests {
                     .find(|e| e["event"] == "agentRunFinished")
                     .unwrap();
             assert_eq!(finished.get("costUsd").and_then(Value::as_f64), cost);
+        }
+    }
+
+    /// Смоук P4c, sf-T6: облачный запуск через Ollama (Qwen Code, Claude Code через Ollama) получает оценку по `usage`
+    /// итога и ценам Ollama Cloud; Claude Code без Ollama — точную стоимость CLI без оценки; локальная модель — ничего.
+    /// glm-5.3-flash — без цен «вне пика»: оценка не зависит от времени запуска теста.
+    #[tokio::test(start_paused = true)]
+    async fn cloud_runs_via_ollama_get_an_estimate_by_ollama_cloud_prices() {
+        const QWEN: &str = r#"{"type":"result","subtype":"success","result":"Done","usage":{"input_tokens":61077,"output_tokens":19408,"cache_read_input_tokens":33920,"total_tokens":80485}}"#;
+        const CLAUDE: &str = r#"{"type":"result","subtype":"success","result":"Done","total_cost_usd":0.272146,"usage":{"input_tokens":11010,"cache_creation_input_tokens":0,"cache_read_input_tokens":84992,"output_tokens":6984}}"#;
+        let qwen_usd = (27157.0 * 0.15 + 33920.0 * 0.03 + 19408.0 * 0.50) / 1e6;
+        let claude_usd = (11010.0 * 0.15 + 84992.0 * 0.03 + 6984.0 * 0.50) / 1e6;
+        for (preset, model, via_ollama, out, cost, estimate) in [
+            (
+                Preset::Qwen,
+                "glm-5.3-flash:cloud",
+                false,
+                QWEN,
+                None,
+                Some(qwen_usd),
+            ),
+            (
+                Preset::Claude,
+                "glm-5.3-flash:cloud",
+                true,
+                CLAUDE,
+                None,
+                Some(claude_usd),
+            ),
+            (
+                Preset::Claude,
+                "claude-sonnet-5",
+                false,
+                CLAUDE,
+                Some(0.272146),
+                None,
+            ),
+            (Preset::Qwen, MODEL, false, QWEN, None, None),
+        ] {
+            let h = harness_with(Arc::new(NoWarmth), |a| {
+                a.preset = preset;
+                a.qwen.model = model.into();
+                a.claude = ClaudeSettings {
+                    path: "/opt/agents/claude".into(),
+                    model: model.into(),
+                    via_ollama,
+                    budget_usd: Some(1.0),
+                };
+            });
+            h.fake.script(vec![
+                Step::Connect,
+                Step::Call("get_optimization_request"),
+                Step::Out(out),
+                Step::Exit(0),
+            ]);
+            let run = h.q().start(&request(&h)).unwrap();
+            let run = until(&h, &run.id, done).await;
+            assert_eq!(
+                (run.status, run.model.as_deref(), run.cost_usd),
+                (RunStatus::Done, Some(model), cost),
+                "{preset:?} {model}"
+            );
+            let got = run.cost_estimate.clone();
+            assert_eq!(
+                got.as_ref().map(|e| (e.prices_date.as_str(), e.off_peak)),
+                estimate.map(|_| ("2026-11-07", false)),
+                "{preset:?} {model}: {got:?}"
+            );
+            if let (Some(e), Some(usd)) = (got, estimate) {
+                assert!((e.usd - usd).abs() < 1e-12, "{preset:?} {model}: {}", e.usd);
+            }
         }
     }
 

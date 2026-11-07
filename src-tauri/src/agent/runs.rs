@@ -144,12 +144,28 @@ pub struct AgentRun {
     pub summary: Option<String>,
     /// Стоимость запуска — только у Claude Code без Ollama (через Ollama она выдуманная, §4.1).
     pub cost_usd: Option<f64>,
+    /// Оценка стоимости облачного запуска через Ollama по ценам Ollama Cloud (`agent::pricing`, смоук P4c, sf-T6): у
+    /// Qwen Code и у Claude Code через Ollama с облачной моделью. У записей до sf-T6 поля нет.
+    #[serde(default)]
+    pub cost_estimate: Option<CostEstimate>,
     /// Предупреждения запуска; строку переводит интерфейс (задача 9), прочие он показывает как есть:
     /// - `evict <другие модели через запятую> <модель запуска>` — Ollama может выгрузить другую модель (§6.3);
     /// - `unsafe <имена через запятую>` — агенту доступны не только инструменты Glafira, запуск остановлен до первого
     ///   хода; `unsafe no-init` — агент не сообщил список своих инструментов (§4.1 «Проверка инструментов»).
     #[serde(default)]
     pub warnings: Vec<String>,
+}
+
+/// Оценка стоимости запуска по таблице цен Ollama Cloud (встроенной или загруженной «Обновить цены»).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CostEstimate {
+    /// Сумма, $.
+    pub usd: f64,
+    /// День цен таблицы, по которой считали: `ГГГГ-ММ-ДД` (подсказка «Оценка по ценам Ollama Cloud на …»).
+    pub prices_date: String,
+    /// Взяты цены «вне пика» (будни вне 12:00–18:00 UTC и выходные по времени начала запуска).
+    pub off_peak: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -237,6 +253,7 @@ impl RunStore {
                 proposal_ids: Vec::new(),
                 summary: None,
                 cost_usd: None,
+                cost_estimate: None,
                 warnings: Vec::new(),
             };
             items.push(run.clone());
@@ -587,6 +604,7 @@ mod tests {
             "proposalIds",
             "summary",
             "costUsd",
+            "costEstimate",
             "warnings",
         ] {
             assert!(v.get(key).is_some(), "{key}: {v}");
@@ -595,7 +613,25 @@ mod tests {
             v["warnings"],
             json!(["evict qwen3.8:27b qwen3.6-64k:35b-a3b"])
         );
+        // Запись до sf-T6 (без `costEstimate`) читается: оценки нет.
+        let mut old = v.clone();
+        old.as_object_mut().unwrap().remove("costEstimate");
+        assert_eq!(
+            serde_json::from_value::<AgentRun>(old)
+                .unwrap()
+                .cost_estimate,
+            None
+        );
         assert_eq!(serde_json::from_value::<AgentRun>(v).unwrap(), r);
+        r.cost_estimate = Some(CostEstimate {
+            usd: 0.0148,
+            prices_date: "2026-11-07".into(),
+            off_peak: true,
+        });
+        assert_eq!(
+            serde_json::to_value(&r).unwrap()["costEstimate"],
+            json!({"usd": 0.0148, "pricesDate": "2026-11-07", "offPeak": true})
+        );
         for (s, name) in [
             (RunStatus::Queued, "queued"),
             (RunStatus::Starting, "starting"),

@@ -67,13 +67,17 @@ openssl = { version = "0.10", features = ["vendored"] }
 openssl-sys = "0.9"
 rustls-native-certs = "0.8"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "socks"] }
+# `system-proxy` — системный прокси, как у проверки обновлений (tauri-plugin-updater включает его в том же reqwest):
+# «Обновить цены» фонового ассистента ходит на ollama.com тем же путём.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "socks", "system-proxy"] }
 futures-util = "0.3"
 socket2 = { version = "0.6", features = ["all"] }
 pg-advisor = { path = "../crates/pg-advisor" }
 # MCP-шлюз (P4): ядро (транспорт, сессии, подтверждение, журнал) и инструменты PostgreSQL.
 glafira-mcp-core = { path = "../crates/glafira-mcp-core" }
 glafira-pg-mcp = { path = "../crates/glafira-pg-mcp" }
+# Цены Ollama Cloud для оценки стоимости облачных запусков фонового ассистента через Ollama (смоук P4c, sf-T6).
+glafira-llm-pricing = { path = "../crates/glafira-llm-pricing" }
 # Токен `mcp.json`: 32 байта из генератора ОС (версия уже в дереве зависимостей).
 getrandom = "0.3"
 # Клиент MCP фальшивого агента (`glafira-fake-agent`, feature `fake-agent`): бинарю dev-зависимости не видны. Версия — как у

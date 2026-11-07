@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { api } from "../../../api/client";
 import type { AgentRun } from "../../../api/types";
 import { currentLocale } from "../../../i18n";
-import { formatDuration, formatTimestamp } from "../../../lib/format";
+import { formatDay, formatDuration, formatTimestamp } from "../../../lib/format";
 import { AGENT_RUNS_KEY, isActive, type RunsState } from "../../../lib/useAgentRuns";
 import { ErrorBanner } from "../../common/ErrorBanner";
 import { AgentSummary } from "./AgentSummary";
@@ -13,17 +13,34 @@ import { agentLabel, runResultText, runSeconds } from "./agentText";
 /** Сколько последних запусков показывает подраздел (спец. P4c §8.3). */
 export const RUNS_SHOWN = 20;
 
-/** Стоимость запуска, как её сообщил CLI: доллары с двумя знаками, знак — по правилам языка (`$0.42`, `0,42 $`). */
-function cost(usd: number): string {
-  return new Intl.NumberFormat(currentLocale(), { style: "currency", currency: "USD" }).format(usd);
+/**
+ * Доллары по правилам языка (`$0.42`, `0,42 $`): два знака; у оценки меньше цента — одна значащая цифра (`0,006 $`), а не
+ * «0,00 $».
+ */
+function usd(v: number, estimate = false): string {
+  const small = estimate && v > 0 && v < 0.01;
+  return new Intl.NumberFormat(currentLocale(), { style: "currency", currency: "USD", ...(small ? { maximumSignificantDigits: 1 } : {}) }).format(v);
+}
+
+/**
+ * Стоимость запуска: точная, как её сообщил CLI (Claude Code без Ollama), — как есть; оценка облачного запуска через Ollama
+ * по ценам Ollama Cloud (смоук P4c, sf-T6) — «≈ 0,01 $» с подсказкой о дне цен таблицы (и «вне пика»).
+ */
+function RunCost({ run }: { run: AgentRun }) {
+  const { t } = useTranslation();
+  if (run.costUsd != null) return <>{usd(run.costUsd)}</>;
+  const e = run.costEstimate;
+  if (!e) return null;
+  const hint = e.offPeak ? "settings.mcp.agent.runs.costEstimateHintOffPeak" : "settings.mcp.agent.runs.costEstimateHint";
+  return <span title={t(hint, { date: formatDay(e.pricesDate) })}>{t("settings.mcp.agent.runs.costEstimate", { cost: usd(e.usd, true) })}</span>;
 }
 
 /**
  * «Запуски» подраздела «Фоновый ассистент» (спец. P4c §8.3): последние 20 запусков всех подключений, новые первыми —
  * время постановки в очередь, подключение, запрос (у «Проверить» — «Проверка»), агент и модель, итог, длительность, вызовы,
- * стоимость (если CLI её сообщил). «Ответ ассистента» раскрывает итог (`AgentSummary`: без разметки, свёрнут до пяти
- * строк), «Показать журнал» — у
- * начавшихся запусков, «Остановить» — у ждущего и идущего (запрос остаётся ждущим; итог `cancelled` приходит событием).
+ * стоимость (если CLI её сообщил, или оценка облачного запуска через Ollama — `RunCost`). «Ответ ассистента» раскрывает
+ * итог (`AgentSummary`: без разметки, свёрнут до пяти строк), «Показать журнал» — у начавшихся запусков, «Остановить» — у
+ * ждущего и идущего (запрос остаётся ждущим; итог `cancelled` приходит событием).
  * Подписи кнопок с id запуска — для скринридера. Пока список читается — «Загрузка…», не прочитался — ошибка с «Повторить»
  * (`state`, `error`, `onRetry` — из `useAgentRuns`), а не «Запусков пока нет». «Остановить» во время записи — `aria-disabled`;
  * когда кнопка исчезает (запуск остановлен), фокус переходит на «Показать журнал» того же запуска или на заголовок списка.
@@ -122,7 +139,9 @@ export function AgentRuns({
                       <td>{runResultText(run, t)}</td>
                       <td>{seconds === null ? "—" : formatDuration(seconds)}</td>
                       <td>{run.calls}</td>
-                      <td>{run.costUsd != null ? cost(run.costUsd) : ""}</td>
+                      <td>
+                        <RunCost run={run} />
+                      </td>
                       <td>
                         <span className="agent-run-actions">
                           {run.summary && (

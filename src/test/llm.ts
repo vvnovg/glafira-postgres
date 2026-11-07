@@ -85,6 +85,7 @@ export function agentRun(patch: Partial<AgentRun> = {}): AgentRun {
     proposalIds: [],
     summary: null,
     costUsd: null,
+    costEstimate: null,
     warnings: [],
     ...patch,
   };

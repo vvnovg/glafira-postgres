@@ -11,6 +11,7 @@ use super::blocking;
 use crate::agent::detect::{self, Detected};
 use crate::agent::models::{self, AgentModels};
 use crate::agent::ollama;
+use crate::agent::pricing::{self, OllamaPrices};
 use crate::agent::queue::{RunFilter, log_missing};
 use crate::agent::runs::AgentRun;
 use crate::agent::settings::{AgentSettings, Preset, check_path, disabled_by_policy};
@@ -162,6 +163,27 @@ pub fn reveal_agent_log(state: State<'_, AppState>, run_id: String) -> AppResult
 pub async fn check_agent(state: State<'_, AppState>) -> AppResult<AgentRun> {
     let st = state.inner().clone();
     blocking(move || st.agent.check()).await
+}
+
+/// Цены Ollama Cloud, по которым оцениваются облачные запуски через Ollama (подраздел «Фоновый ассистент», смоук P4c,
+/// sf-T6): день цен, встроенные или загруженные, можно ли «Обновить цены» по политике.
+#[tauri::command]
+pub async fn get_ollama_prices(state: State<'_, AppState>) -> AppResult<OllamaPrices> {
+    let st = state.inner().clone();
+    blocking(move || Ok(pricing::info(st.mcp.data_dir(), &st.policy.status))).await
+}
+
+/// «Обновить цены»: https://ollama.com/pricing загружается только здесь, по кнопке; разбор, `ollama-prices.json`. Политика
+/// `updatesEnabled = false` запрещает загрузку.
+#[tauri::command]
+pub async fn refresh_ollama_prices(state: State<'_, AppState>) -> AppResult<OllamaPrices> {
+    let st = state.inner().clone();
+    pricing::refresh_with(
+        st.mcp.data_dir().to_path_buf(),
+        &st.policy.status,
+        pricing::fetch_page,
+    )
+    .await
 }
 
 #[cfg(test)]

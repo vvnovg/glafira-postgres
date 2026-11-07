@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { i18n } from "../i18n";
-import { formatAas, formatBytes, formatCount, formatDuration, formatInt64, formatMs, formatPercent, formatScheduled, formatShortTimestamp, formatTimestamp } from "./format";
+import { formatAas, formatBytes, formatCount, formatDay, formatDuration, formatInt64, formatMs, formatPercent, formatScheduled, formatShortTimestamp, formatTimestamp } from "./format";
 
 describe("format", () => {
   it("timestamp в UTC с миллисекундами", () => {
@@ -162,6 +162,20 @@ describe("formatShortTimestamp", () => {
     expect(formatShortTimestamp(at(2026, 11, 7, 12, 20), now)).toBe("12:20");
     expect(formatShortTimestamp(at(2026, 11, 6, 1, 53), now)).toBe("11/06 01:53");
     expect(formatShortTimestamp(at(2025, 11, 7, 13, 53), now)).toBe("11/07/2025 13:53");
+  });
+});
+
+describe("formatDay", () => {
+  afterEach(() => i18n.changeLanguage("ru"));
+
+  it("день «ГГГГ-ММ-ДД» — по правилам языка, без сдвига часового пояса; не день — как есть", async () => {
+    await i18n.changeLanguage("ru");
+    expect(formatDay("2026-11-07")).toBe("07.11.2026");
+    expect(formatDay("2027-01-01")).toBe("01.01.2027");
+    await i18n.changeLanguage("en");
+    expect(formatDay("2026-11-07")).toBe("11/07/2026");
+    expect(formatDay("07.11.2026")).toBe("07.11.2026");
+    expect(formatDay("")).toBe("");
   });
 });
 

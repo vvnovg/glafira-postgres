@@ -35,6 +35,7 @@ import type {
   MemberFacts,
   ObjectKind,
   ObjectPage,
+  OllamaPrices,
   OptimizationRequest,
   ParsedConnection,
   PatroniAction,
@@ -232,6 +233,10 @@ export const api = {
   checkAgent: () => call<AgentRun>("check_agent"),
   /** «Выгрузить модель»: keep_alive 0 у модели фонового ассистента в локальной Ollama. */
   unloadAgentModel: () => call<void>("unload_agent_model"),
+  /** Действующая таблица цен Ollama Cloud для оценки облачных запусков через Ollama (смоук P4c, sf-T6). */
+  getOllamaPrices: () => call<OllamaPrices>("get_ollama_prices"),
+  /** «Обновить цены»: Glafira загружает ollama.com/pricing (только здесь) и сохраняет таблицу; ответ — новая действующая. */
+  refreshOllamaPrices: () => call<OllamaPrices>("refresh_ollama_prices"),
 
   /** Снимок pgss узла на диск пользователя; второй снимок узла в ту же секунду — `errors.snapshots.exists`. */
   snapshotTake: (id: string, member: string) => call<SnapshotInfo>("snapshot_take", { id, member }),

@@ -42,6 +42,14 @@ export function formatShortTimestamp(ms: number, now = Date.now()): string {
   return `${day.format(d)} ${time}`;
 }
 
+/** День `ГГГГ-ММ-ДД` (UTC) по правилам языка интерфейса: ru — «07.11.2026», en — «11/07/2026». */
+export function formatDay(ymd: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
+  if (!m) return ymd;
+  const day = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  return new Intl.DateTimeFormat(currentLocale(), { day: "2-digit", month: "2-digit", year: "numeric", timeZone: "UTC" }).format(day);
+}
+
 const num = (n: number, digits = 0) =>
   n.toLocaleString(currentLocale(), { minimumFractionDigits: digits, maximumFractionDigits: digits });
 

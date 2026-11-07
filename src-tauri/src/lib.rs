@@ -252,6 +252,8 @@ pub fn run() {
             commands::agent::reveal_agent_log,
             commands::agent::check_agent,
             commands::agent::unload_agent_model,
+            commands::agent::get_ollama_prices,
+            commands::agent::refresh_ollama_prices,
             commands::topology::connect,
             commands::topology::disconnect,
             commands::topology::reconnect,

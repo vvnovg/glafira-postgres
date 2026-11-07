@@ -135,6 +135,35 @@ describe("AgentRuns", () => {
     expect(screen.getByText("Запусков пока нет")).toBeInTheDocument();
   });
 
+  it("оценка по ценам Ollama Cloud — «≈ 0,01 $» с подсказкой о дне цен; точная стоимость Claude Code — без «≈» и подсказки", async () => {
+    const runs = [
+      agentRun({ id: "a0000e1", status: "done", startedAtMs: 0, endedAtMs: 1_000, costEstimate: { usd: 0.0148, pricesDate: "2026-11-07", offPeak: false } }),
+      agentRun({ id: "a0000e2", preset: "claude", status: "done", startedAtMs: 0, endedAtMs: 1_000, costEstimate: { usd: 0.0061, pricesDate: "2026-12-01", offPeak: true } }),
+      agentRun({ id: "a0000e3", preset: "claude", status: "done", startedAtMs: 0, endedAtMs: 1_000, costUsd: 0.42 }),
+      agentRun({ id: "a0000e4", status: "done", startedAtMs: 0, endedAtMs: 1_000 }),
+    ];
+    const ru = renderWithClient(<AgentRuns runs={runs} onShowLog={onShowLog} />);
+    const costCell = (i: number) => within(within(screen.getByRole("table")).getAllByRole("row")[i + 1]).getAllByRole("cell")[7];
+    expect(costCell(0)).toHaveTextContent(/^≈ 0,01 \$$/);
+    expect(costCell(0).querySelector("[title]")?.getAttribute("title")).toBe("Оценка по ценам Ollama Cloud на 07.11.2026 (ollama.com/pricing)");
+    // Меньше цента — одна значащая цифра, а не «0,00 $»; вне пика — сказано в подсказке.
+    expect(costCell(1)).toHaveTextContent(/^≈ 0,006 \$$/);
+    expect(costCell(1).querySelector("[title]")?.getAttribute("title")).toBe("Оценка по ценам Ollama Cloud вне пика на 01.12.2026 (ollama.com/pricing)");
+    expect(costCell(2)).toHaveTextContent(/^0,42 \$$/);
+    expect(costCell(2).querySelector("[title]")).toBeNull();
+    expect(costCell(3)).toHaveTextContent(/^$/);
+    ru.unmount();
+    try {
+      await act(() => i18n.changeLanguage("en"));
+      renderWithClient(<AgentRuns runs={runs} onShowLog={onShowLog} />);
+      expect(costCell(0)).toHaveTextContent(/^≈ \$0\.01$/);
+      expect(costCell(0).querySelector("[title]")?.getAttribute("title")).toBe("Estimate based on Ollama Cloud prices as of 11/07/2026 (ollama.com/pricing)");
+      expect(costCell(2)).toHaveTextContent(/^\$0\.42$/);
+    } finally {
+      await act(() => i18n.changeLanguage("ru"));
+    }
+  });
+
   it("стоимость — валютой по правилам языка: «0,42 $» в ru, «$0.42» в en", async () => {
     const runs = [agentRun({ id: "a0000a2", preset: "claude", status: "done", startedAtMs: 0, endedAtMs: 1_000, costUsd: 0.42 })];
     const ru = renderWithClient(<AgentRuns runs={runs} onShowLog={onShowLog} />);

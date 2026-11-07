@@ -38,6 +38,8 @@ vi.mock("../../api/client", async (importOriginal) => {
       checkAgent: vi.fn(),
       unloadAgentModel: vi.fn(),
       listAgentRuns: vi.fn(),
+      getOllamaPrices: vi.fn(),
+      refreshOllamaPrices: vi.fn(),
       stopAgentRun: vi.fn(),
       readAgentLog: vi.fn(),
       revealAgentLog: vi.fn(),
@@ -60,6 +62,7 @@ beforeEach(() => {
   vi.mocked(api.getAgentSettings).mockResolvedValue(agentSettings());
   vi.mocked(api.listAgentModels).mockResolvedValue({ ids: [], default: null, source: "none" });
   vi.mocked(api.listAgentRuns).mockResolvedValue([]);
+  vi.mocked(api.getOllamaPrices).mockResolvedValue({ date: "2026-11-07", source: "https://ollama.com/pricing", saved: false, models: 24, refreshAllowed: true });
   vi.mocked(api.getAppInfo).mockResolvedValue({ name: "Glafira for PostgreSQL", version: "0.6.0", commit: "abc1234", os: "macos", arch: "aarch64", dataDir: "/d", logDir: "/l" });
 });
 
