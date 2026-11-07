@@ -1,6 +1,7 @@
-//! Команды подраздела «Фоновый ассистент» (спец. P4c §8.3, §8.4). Логика — `agent::*`; настройки читаются и пишутся в
-//! фоновом потоке (запись `settings.json` с fsync держит блокировку), поиск программы и модели — тоже (логин-оболочка,
-//! `--version`, чтение файлов).
+//! Команды фонового ассистента (спец. P4c §8.3, §8.4): подраздел «Фоновый ассистент» и запуски. Логика — `agent::*`;
+//! настройки читаются и пишутся в фоновом потоке (запись `settings.json` с fsync держит блокировку), поиск программы и
+//! модели — тоже (логин-оболочка, `--version`, чтение файлов); очередь пишет `agent-runs.json` — тоже в фоновом потоке, а
+//! сам запуск идёт задачей tokio.
 
 use std::path::Path;
 
@@ -9,6 +10,8 @@ use tauri::State;
 use super::blocking;
 use crate::agent::detect::{self, Detected};
 use crate::agent::models::{self, AgentModels};
+use crate::agent::queue::{RunFilter, log_missing};
+use crate::agent::runs::AgentRun;
 use crate::agent::settings::{AgentSettings, Preset, disabled_by_policy};
 use crate::agent::shell_env::shell_env;
 use crate::error::AppResult;
@@ -41,10 +44,13 @@ pub async fn set_agent_settings(
     settings: AgentSettings,
 ) -> AppResult<AgentSettings> {
     let st = state.inner().clone();
-    let saved = blocking(move || apply_agent_settings(&st, settings)).await?;
-    // Подраздел и индикатор читают `McpStatus.agent` (задача 6).
-    state.mcp.emit_state();
-    Ok(saved)
+    blocking(move || {
+        let saved = apply_agent_settings(&st, settings)?;
+        // Выключенный режим снимает очередь (`skipped`); `McpStatus.agent` уходит в интерфейс (`mcp://state`).
+        st.agent.settings_changed();
+        Ok(saved)
+    })
+    .await
 }
 
 /// «Найти»: логин-оболочка, `PATH`, известные места. С `path` — только версия этой программы (путь, исправленный руками).
@@ -72,6 +78,57 @@ pub async fn list_agent_models(preset: Preset) -> AppResult<AgentModels> {
         })
     })
     .await
+}
+
+/// «Передать LLM-ассистенту» в режиме фона и «Повторить».
+#[tauri::command]
+pub async fn start_agent_run(
+    state: State<'_, AppState>,
+    request_id: String,
+) -> AppResult<AgentRun> {
+    let st = state.inner().clone();
+    blocking(move || st.agent.start(&request_id)).await
+}
+
+/// «Остановить»: итог `cancelled` приходит событием `agent://runs`.
+#[tauri::command]
+pub async fn stop_agent_run(state: State<'_, AppState>, run_id: String) -> AppResult<AgentRun> {
+    let st = state.inner().clone();
+    blocking(move || st.agent.stop(&run_id)).await
+}
+
+/// Запуски для строки статуса и «Настроек», сначала новые; пустой фильтр — все, вместе с «Проверкой».
+#[tauri::command]
+pub async fn list_agent_runs(
+    state: State<'_, AppState>,
+    filter: RunFilter,
+) -> AppResult<Vec<AgentRun>> {
+    let st = state.inner().clone();
+    blocking(move || Ok(st.agent.list(&filter))).await
+}
+
+/// «Показать журнал»: хвост до 256 КБ; у идущего запуска — то, что уже записано.
+#[tauri::command]
+pub async fn read_agent_log(state: State<'_, AppState>, run_id: String) -> AppResult<String> {
+    let st = state.inner().clone();
+    blocking(move || st.agent.read_log(&run_id)).await
+}
+
+/// «Показать файл» журнала запуска.
+#[tauri::command]
+pub fn reveal_agent_log(state: State<'_, AppState>, run_id: String) -> AppResult<()> {
+    let path = state.agent.log_file(&run_id)?;
+    tauri_plugin_opener::reveal_item_in_dir(path).map_err(|e| {
+        tracing::warn!("reveal agent log: {e}");
+        log_missing(&run_id)
+    })
+}
+
+/// «Проверить» в подразделе «Фоновый ассистент».
+#[tauri::command]
+pub async fn check_agent(state: State<'_, AppState>) -> AppResult<AgentRun> {
+    let st = state.inner().clone();
+    blocking(move || st.agent.check()).await
 }
 
 #[cfg(test)]

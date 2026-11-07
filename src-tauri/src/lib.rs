@@ -75,6 +75,23 @@ fn shutdown_mcp(st: &AppState) {
     }
 }
 
+/// Сколько ждать остановки фонового ассистента при выходе: SIGTERM группе, через 5 с — SIGKILL, затем запись итога.
+const AGENT_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Фоновый ассистент при выходе (спец. P4c §4.4): очередь и текущий запуск — `interrupted`, процесс агента
+/// останавливается; на Windows Job Object закрывается и сам.
+fn shutdown_agent(st: &AppState) {
+    let agent = st.agent.clone();
+    let stopped = tauri::async_runtime::block_on(async move {
+        tokio::time::timeout(AGENT_EXIT_GRACE, agent.shutdown())
+            .await
+            .is_ok()
+    });
+    if !stopped {
+        tracing::warn!("background agent did not stop within {AGENT_EXIT_GRACE:?}");
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Один провайдер TLS на процесс: плагин updater при первой проверке ставит `ring`, а reqwest
@@ -125,6 +142,13 @@ pub fn run() {
             }
             st.mcp.set_app_handle(app.handle().clone());
             st.llm.set_app_handle(app.handle().clone());
+            st.agent.set_app_handle(app.handle().clone());
+            // Окружение логин-оболочки для фонового ассистента снимается заранее (до 5 с), если режим включён.
+            if st.settings.agent().enabled {
+                tauri::async_runtime::spawn_blocking(|| {
+                    crate::agent::shell_env::shell_env();
+                });
+            }
             st.runtimes
                 .set_sink(Arc::new(crate::commands::topology::TauriSink(
                     app.handle().clone(),
@@ -215,6 +239,12 @@ pub fn run() {
             commands::agent::set_agent_settings,
             commands::agent::detect_agent_cli,
             commands::agent::list_agent_models,
+            commands::agent::start_agent_run,
+            commands::agent::stop_agent_run,
+            commands::agent::list_agent_runs,
+            commands::agent::read_agent_log,
+            commands::agent::reveal_agent_log,
+            commands::agent::check_agent,
             commands::topology::connect,
             commands::topology::disconnect,
             commands::topology::reconnect,
@@ -229,7 +259,9 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event
                 && let Some(st) = app.try_state::<AppState>()
             {
-                // MCP — первым: клиенты отключаются до закрытия подключений, `mcp.json` удаляется.
+                // Фоновый ассистент — первым: агент останавливается, пока его сессия MCP ещё жива.
+                shutdown_agent(&st);
+                // MCP — затем: клиенты отключаются до закрытия подключений, `mcp.json` удаляется.
                 shutdown_mcp(&st);
                 // Длительные сессии (сэмплеры), затем опросы и туннели; процессы ssh завершаются без рантайма —
                 // по PID из `tunnels.json`.

@@ -58,6 +58,8 @@ pub struct AppState {
     pub llm: Arc<crate::mcp::llm::LlmStores>,
     /// Билеты фоновых запусков (P4c §3.3): область сессии запуска, счёт вызовов, сессия запуска.
     pub tickets: Arc<crate::agent::tickets::Tickets>,
+    /// Очередь фонового ассистента (P4c): запуски агента, `agent-runs.json`, журналы, событие `agent://runs`.
+    pub agent: Arc<crate::agent::queue::AgentQueue>,
     /// MCP-шлюз (P4): сервер и `mcp.json`, подтверждение клиентов, статус для интерфейса.
     pub mcp: Arc<crate::mcp::McpController>,
 }
@@ -118,6 +120,18 @@ impl AppState {
             policy.clone(),
             connections.clone(),
         ));
+        let llm = Arc::new(crate::mcp::llm::LlmStores::open(data_dir));
+        let tickets: Arc<crate::agent::tickets::Tickets> = Arc::default();
+        let agent = crate::agent::queue::AgentQueue::open(crate::agent::queue::AgentDeps {
+            data_dir: data_dir.to_path_buf(),
+            settings: settings.clone(),
+            policy: policy.clone(),
+            connections: connections.clone(),
+            llm: llm.clone(),
+            mcp: mcp.clone(),
+            tickets: tickets.clone(),
+            runtime: crate::agent::queue::AgentRuntime::app()?,
+        });
         Ok(Self {
             connections,
             secrets,
@@ -138,8 +152,9 @@ impl AppState {
             kcache_probes,
             query_texts,
             role_warnings: Arc::default(),
-            llm: Arc::new(crate::mcp::llm::LlmStores::open(data_dir)),
-            tickets: Arc::default(),
+            llm,
+            tickets,
+            agent,
             mcp,
         })
     }
@@ -208,8 +223,8 @@ impl AppState {
         Ok(())
     }
 
-    /// Политика администратора (читается при запуске в lib.rs). Контроллер MCP решает по политике, поэтому
-    /// пересоздаётся с новой: `with_policy` вызывается до первого запуска сервера.
+    /// Политика администратора (читается при запуске в lib.rs). Контроллер MCP и очередь фонового ассистента решают по
+    /// политике, поэтому пересоздаются с новой: `with_policy` вызывается до первого запуска сервера.
     pub fn with_policy(mut self, policy: crate::policy::Policy) -> Self {
         self.policy = Arc::new(policy);
         self.mcp = Arc::new(crate::mcp::McpController::new(
@@ -218,6 +233,22 @@ impl AppState {
             self.policy.clone(),
             self.connections.clone(),
         ));
+        // Очередь решает по политике и сообщает статус через контроллер: пересоздаётся вместе с ним.
+        self.agent = crate::agent::queue::AgentQueue::open(crate::agent::queue::AgentDeps {
+            policy: self.policy.clone(),
+            mcp: self.mcp.clone(),
+            ..self.agent.deps()
+        });
+        self
+    }
+
+    /// Фоновый ассистент с другими процессами, тёплой моделью, путём шима или сроком (тёплая модель Ollama в `lib.rs`,
+    /// unit-тесты очереди, интеграция `it_agent`). Вызывается после `with_policy`, до запуска MCP-сервера.
+    pub fn with_agent(mut self, rt: crate::agent::queue::AgentRuntime) -> Self {
+        self.agent = crate::agent::queue::AgentQueue::open(crate::agent::queue::AgentDeps {
+            runtime: rt,
+            ..self.agent.deps()
+        });
         self
     }
 }

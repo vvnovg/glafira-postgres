@@ -1,5 +1,6 @@
-//! Общий каркас файлов `llm-requests.json` и `llm-proposals.json`: `{ "schemaVersion": 1, "<key>": [ … ] }`, 0600,
-//! атомарная запись. Хранилища запросов и предложений различаются только элементом и ключом списка.
+//! Общий каркас файлов `llm-requests.json`, `llm-proposals.json` и `agent-runs.json` (P4c): `{ "schemaVersion": 1,
+//! "<key>": [ … ] }`, 0600, атомарная запись. Хранилища запросов, предложений и запусков фонового ассистента различаются
+//! только элементом и ключом списка.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -32,7 +33,7 @@ struct FileBodyRef<'a, T> {
 }
 
 /// Список элементов в файле под мьютексом: чтение из памяти, правка — копия → запись → замена.
-pub(super) struct ListFile<T> {
+pub(crate) struct ListFile<T> {
     path: PathBuf,
     key: &'static str,
     items: Mutex<Vec<T>>,
@@ -41,7 +42,7 @@ pub(super) struct ListFile<T> {
 }
 
 impl<T: Clone + Serialize + DeserializeOwned> ListFile<T> {
-    pub(super) fn open(dir: &Path, file: &str, key: &'static str) -> Self {
+    pub(crate) fn open(dir: &Path, file: &str, key: &'static str) -> Self {
         let path = dir.join(file);
         let (items, blocked) = match read_json_or_quarantine::<FileBody<T>>(&path, SCHEMA_VERSION) {
             Ok(Some(f)) if f.schema_version > SCHEMA_VERSION => (
@@ -64,7 +65,7 @@ impl<T: Clone + Serialize + DeserializeOwned> ListFile<T> {
     }
 
     /// Правка под блокировкой. Если запись не удалась, в памяти остаётся прежнее состояние.
-    pub(super) fn update<R>(&self, f: impl FnOnce(&mut Vec<T>) -> AppResult<R>) -> AppResult<R> {
+    pub(crate) fn update<R>(&self, f: impl FnOnce(&mut Vec<T>) -> AppResult<R>) -> AppResult<R> {
         if let Some(e) = &self.blocked {
             return Err(e.clone());
         }
@@ -83,7 +84,7 @@ impl<T: Clone + Serialize + DeserializeOwned> ListFile<T> {
     }
 
     /// Чтение из памяти; блокировка держится только на время `f`.
-    pub(super) fn read<R>(&self, f: impl FnOnce(&[T]) -> R) -> R {
+    pub(crate) fn read<R>(&self, f: impl FnOnce(&[T]) -> R) -> R {
         f(&self.items.lock_safe())
     }
 }

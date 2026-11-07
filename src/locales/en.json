@@ -298,7 +298,12 @@
       "badOllamaUrl": "Invalid Ollama address “{{url}}”: use http://host:port",
       "disabledByPolicy": "The background assistant is disabled by your organization",
       "notConfigured": "The background assistant is not set up: choose the program in Settings → LLM assistants (MCP)",
-      "modelRequired": "Choose the model: Claude Code through Ollama needs a model name"
+      "modelRequired": "Choose the model: Claude Code through Ollama needs a model name",
+      "off": "The background assistant is off: turn it on in Settings → LLM assistants (MCP)",
+      "queueFull": "The background assistant queue is full",
+      "requestNotWaiting": "Optimization request {{id}} is not waiting for an answer",
+      "runNotFound": "Background run {{id}} not found",
+      "logMissing": "The log of background run {{id}} is not available"
     }
   },
   "connections": {

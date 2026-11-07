@@ -59,6 +59,13 @@ getrandom = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
+# Job Object процесса фонового агента (спец. P4c §4.4): остановка вместе с дочерними процессами и при выходе Glafira.
+# Версия — та же, что у tokio в дереве зависимостей.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+[target.'cfg(unix)'.dependencies]
+# Сигнал группе процессов фонового агента (`killpg`); версия уже в дереве зависимостей.
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

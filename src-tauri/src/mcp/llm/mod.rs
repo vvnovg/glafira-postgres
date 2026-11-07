@@ -3,7 +3,7 @@
 //! «Сравнить планы» — `compare` (`compare_proposal`).
 
 pub mod compare;
-mod list_file;
+pub(crate) mod list_file;
 pub mod proposals;
 pub mod requests;
 pub mod tools;
@@ -259,13 +259,20 @@ pub async fn create_request(
 }
 
 /// «Отменить» запрос: модель получит `request_closed`. Меняет только `Waiting`; у `Answered` и
-/// `Cancelled` ничего не меняется, события нет.
+/// `Cancelled` ничего не меняется, события нет. Фоновый запуск запроса (P4c) снимается с очереди или останавливается.
 pub async fn cancel_request(st: &AppState, request_id: &str) -> AppResult<OptimizationRequest> {
     let (stores, id) = (st.llm.clone(), request_id.to_string());
     let (r, changed) = off_thread(move || stores.requests.cancel_changed(&id)).await?;
     if changed {
         st.llm.emit(ProposalsEvent::request(&r));
     }
+    // Фоновый запуск этого запроса снимается с очереди или останавливается (спец. P4c §7).
+    let (agent, id) = (st.agent.clone(), request_id.to_string());
+    off_thread(move || {
+        agent.request_cancelled(&id);
+        Ok(())
+    })
+    .await?;
     Ok(r)
 }
 

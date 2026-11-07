@@ -2,7 +2,7 @@
 //! «другой экземпляр Glafira», статус для интерфейса (`mcp://state`), ответы на подтверждение, отзыв клиентов.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, Weak};
 
 use glafira_mcp_core::audit::{AuditEvent, AuditLog};
 use glafira_mcp_core::endpoint::{self, Endpoint};
@@ -14,13 +14,14 @@ use serde_json::Value;
 use super::approvals::{Approvals, PendingApproval};
 use super::backend::AppBackend;
 use super::files::{self, McpFile};
+use crate::agent::queue::{AgentQueue, AgentStatus};
 use crate::error::{AppResult, ErrorCode};
 use crate::policy::{McpMaxAccess, Policy};
 use crate::product::MCP_SERVER_NAME;
 use crate::settings::{ApprovedClient, SettingsStore};
 use crate::state::AppState;
 use crate::storage::connections::ConnectionStore;
-use crate::sync::MutexExt;
+use crate::sync::{MutexExt, RwLockExt};
 use crate::topology::model::now_ms;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -53,6 +54,8 @@ pub struct McpStatus {
     pub policy_enabled: bool,
     /// Потолок уровня доступа по политике (`mcpMaxAccess`).
     pub max_access: McpMaxAccess,
+    /// Фоновый ассистент (P4c §8.4): политика, выключатель, настроен ли, идущий запуск и очередь.
+    pub agent: AgentStatus,
 }
 
 /// Связь с окном: событие статуса и привлечение внимания. В приложении — окно Tauri, в тестах — запись вызовов.
@@ -100,6 +103,8 @@ pub struct McpController {
     inner: Mutex<Inner>,
     /// Запуск и остановка не пересекаются.
     ops: tokio::sync::Mutex<()>,
+    /// Очередь фонового ассистента — источник `McpStatus.agent` (без цикла `Arc`: очередь держит контроллер).
+    agent: RwLock<Weak<AgentQueue>>,
 }
 
 impl McpController {
@@ -124,6 +129,7 @@ impl McpController {
                 error: None,
             }),
             ops: tokio::sync::Mutex::new(()),
+            agent: RwLock::new(Weak::new()),
         }
     }
 
@@ -185,6 +191,7 @@ impl McpController {
             data_connections,
             policy_enabled: policy.mcp_allowed(),
             max_access: policy.mcp_max_access,
+            agent: self.agent_status(),
         }
     }
 
@@ -193,6 +200,30 @@ impl McpController {
         if let Some(ui) = self.ui.get() {
             ui.status_changed(&self.status());
         }
+    }
+
+    /// Очередь фонового ассистента — источник `McpStatus.agent`; при пересоздании очереди заменяется.
+    pub(crate) fn set_agent(&self, q: Weak<AgentQueue>) {
+        *self.agent.write_safe() = q;
+    }
+
+    fn agent_status(&self) -> AgentStatus {
+        let queue = self.agent.read_safe().upgrade();
+        match queue {
+            Some(q) => q.status(),
+            None => AgentStatus::idle(&self.settings.agent(), &self.policy.status),
+        }
+    }
+
+    /// Сервер MCP этого окна работает: фоновый запуск возможен (§3.2).
+    pub fn is_running(&self) -> bool {
+        self.inner().server == McpServerState::Running
+    }
+
+    /// Тесты очереди: состояние сервера без настоящего сокета.
+    #[cfg(test)]
+    pub(crate) fn force_server(&self, server: McpServerState) {
+        self.set_server(server, None);
     }
 
     pub(crate) fn request_attention(&self) {
@@ -357,6 +388,19 @@ impl McpController {
                     h.disconnect(id);
                 }
                 None => h.disconnect_all(),
+            }
+        }
+    }
+
+    /// Конец фонового запуска (P4c §3.2): его сессии закрываются. Билет к этому времени уже отозван — новых сессий нет.
+    pub fn disconnect_run(&self, run_id: &str) {
+        if let Some(h) = &self.inner().handle {
+            for s in h
+                .sessions()
+                .into_iter()
+                .filter(|s| s.run_id.as_deref() == Some(run_id))
+            {
+                h.disconnect(&s.id);
             }
         }
     }
@@ -564,9 +608,13 @@ mod tests {
             "openConnections",
             "dataConnections",
             "policyEnabled",
+            "agent",
         ] {
             assert!(v.get(key).is_some(), "{key}: {v}");
         }
+        assert_eq!(v["agent"]["queued"], 0);
+        assert_eq!(v["agent"]["policyEnabled"], true);
+        assert_eq!(v["agent"]["preset"], "qwen");
     }
 
     #[tokio::test]
@@ -912,6 +960,52 @@ mod tests {
         })
         .await;
         drop(client);
+        c.shutdown().await;
+    }
+
+    /// Конец фонового запуска (P4c §3.2): очередь закрывает его сессии; сессии других запусков остаются.
+    #[tokio::test]
+    async fn the_end_of_a_run_closes_its_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _rec) = state(dir.path(), true);
+        let c = st.mcp.clone();
+        c.set_enabled(st.clone(), true).await.unwrap();
+        let f = files::read_mcp_file(dir.path()).expect("mcp.json");
+        let mut clients = Vec::new();
+        for run in ["a000001", "a000002"] {
+            let ticket = st.tickets.issue(RunScope {
+                run_id: run.into(),
+                connection_id: None,
+                request_id: None,
+            });
+            let mut s = endpoint::connect(&f.endpoint).await.unwrap();
+            handshake::client_with_run(&mut s, &f.token, Some(&ticket))
+                .await
+                .unwrap();
+            let client = rmcp::ServiceExt::serve((), s).await.unwrap();
+            client
+                .call_tool(CallToolRequestParams::new("list_connections"))
+                .await
+                .unwrap();
+            clients.push(client);
+        }
+        until("две сессии запусков", || {
+            c.status().sessions.len() == 2
+        })
+        .await;
+        c.disconnect_run("a000009");
+        st.tickets.revoke("a000001");
+        c.disconnect_run("a000001");
+        until("сессия запуска a000001 закрыта", || {
+            c.status()
+                .sessions
+                .iter()
+                .all(|s| s.run_id.as_deref() != Some("a000001"))
+        })
+        .await;
+        let left: Vec<Option<String>> = c.status().sessions.into_iter().map(|s| s.run_id).collect();
+        assert_eq!(left, [Some("a000002".to_string())]);
+        drop(clients);
         c.shutdown().await;
     }
 }
