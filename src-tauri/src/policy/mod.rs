@@ -13,6 +13,7 @@ pub const KEY_UPDATE_URL: &str = "updateUrl";
 pub const KEY_LANGUAGE: &str = "language";
 pub const KEY_MCP_ENABLED: &str = "mcpEnabled";
 pub const KEY_MCP_MAX_ACCESS: &str = "mcpMaxAccess";
+pub const KEY_MCP_AGENT_ENABLED: &str = "mcpAgentEnabled";
 
 /// Потолок уровня доступа LLM, заданный администратором (спец. P4 §4.2): действующий уровень подключения —
 /// минимум из `llmAccess` и потолка.
@@ -95,6 +96,9 @@ pub struct PolicyStatus {
     pub mcp_enabled: bool,
     /// Потолок уровня доступа LLM к подключениям.
     pub mcp_max_access: McpMaxAccess,
+    /// `false` — фоновый ассистент запрещён администратором (спец. P4c §9.1): подраздел неактивен, `start_agent_run`
+    /// отвечает ошибкой, билеты не выдаются. Действует только вместе с `mcp_enabled` (`agent_allowed`).
+    pub mcp_agent_enabled: bool,
     pub errors: Vec<LocalizedText>,
 }
 
@@ -102,6 +106,11 @@ impl PolicyStatus {
     /// MCP разрешён политикой.
     pub fn mcp_allowed(&self) -> bool {
         self.mcp_enabled
+    }
+
+    /// Фоновый ассистент разрешён политикой: разрешены и MCP, и сам ассистент (спец. P4c §9.1).
+    pub fn agent_allowed(&self) -> bool {
+        self.mcp_enabled && self.mcp_agent_enabled
     }
 }
 
@@ -115,6 +124,7 @@ impl Default for PolicyStatus {
             language: None,
             mcp_enabled: true,
             mcp_max_access: McpMaxAccess::Data,
+            mcp_agent_enabled: true,
             errors: Vec::new(),
         }
     }
@@ -126,7 +136,8 @@ pub struct Policy {
 }
 
 /// Политика, которую задал администратор, но которую не удалось понять, выключает обновления и MCP:
-/// раз политика есть, администратор хотел ограничений. Неверный ключ MCP запрещает только MCP.
+/// раз политика есть, администратор хотел ограничений. Неверный ключ MCP запрещает только MCP (и вместе с ним фонового
+/// ассистента), неверный `mcpAgentEnabled` — только фонового ассистента.
 pub fn resolve(source: &str, raw: RawPolicy) -> Policy {
     let map = match raw {
         RawPolicy::Absent => return Policy::default(),
@@ -137,6 +148,7 @@ pub fn resolve(source: &str, raw: RawPolicy) -> Policy {
                     source: Some(source.to_string()),
                     updates_enabled: false,
                     mcp_enabled: false,
+                    mcp_agent_enabled: false,
                     errors: vec![ltext!(
                         "errors.policy.unreadable",
                         "Policy cannot be read: {{reason}}",
@@ -155,6 +167,7 @@ pub fn resolve(source: &str, raw: RawPolicy) -> Policy {
     };
     let mut broken = false;
     let mut mcp_broken = false;
+    let mut agent_broken = false;
     for (key, value) in map {
         match (key.as_str(), value) {
             (KEY_UPDATES_ENABLED, PolicyValue::Bool(b)) => status.updates_enabled = b,
@@ -197,6 +210,15 @@ pub fn resolve(source: &str, raw: RawPolicy) -> Policy {
                 mcp_broken = true;
                 status.errors.push(other.invalid(&key));
             }
+            (KEY_MCP_AGENT_ENABLED, PolicyValue::Bool(b)) => status.mcp_agent_enabled = b,
+            (KEY_MCP_AGENT_ENABLED, PolicyValue::Int(i @ (0 | 1))) => {
+                status.mcp_agent_enabled = i == 1
+            }
+            // Непонятое значение запрещает только фонового ассистента: MCP и обновления остаются, как заданы.
+            (KEY_MCP_AGENT_ENABLED, other) => {
+                agent_broken = true;
+                status.errors.push(other.invalid(&key));
+            }
             (KEY_UPDATES_ENABLED | KEY_UPDATE_URL, other) => {
                 broken = true;
                 status.errors.push(other.invalid(&key));
@@ -209,6 +231,9 @@ pub fn resolve(source: &str, raw: RawPolicy) -> Policy {
     }
     if mcp_broken {
         status.mcp_enabled = false;
+    }
+    if agent_broken {
+        status.mcp_agent_enabled = false;
     }
     Policy { status }
 }
@@ -473,5 +498,85 @@ mod tests {
             serde_json::to_value(PolicyStatus::default()).unwrap()["mcpMaxAccess"],
             "data"
         );
+    }
+
+    #[test]
+    fn the_background_assistant_is_allowed_by_default_and_needs_mcp() {
+        for p in [
+            resolve("src", RawPolicy::Absent),
+            resolve("src", values(&[])),
+        ] {
+            assert!(p.status.mcp_agent_enabled);
+            assert!(p.status.agent_allowed());
+        }
+        let p = resolve(
+            "src",
+            values(&[("mcpAgentEnabled", PolicyValue::Bool(false))]),
+        );
+        assert!(!p.status.agent_allowed());
+        assert!(p.status.mcp_allowed(), "MCP остаётся разрешён");
+        assert!(p.status.errors.is_empty());
+        // Реестр Windows: dword 0/1.
+        let p = resolve("src", values(&[("mcpAgentEnabled", PolicyValue::Int(0))]));
+        assert!(!p.status.mcp_agent_enabled);
+        let p = resolve("src", values(&[("mcpAgentEnabled", PolicyValue::Int(1))]));
+        assert!(p.status.agent_allowed());
+        // Запрет MCP запрещает и фонового ассистента.
+        let p = resolve(
+            "src",
+            values(&[
+                ("mcpEnabled", PolicyValue::Bool(false)),
+                ("mcpAgentEnabled", PolicyValue::Bool(true)),
+            ]),
+        );
+        assert!(p.status.mcp_agent_enabled);
+        assert!(!p.status.agent_allowed());
+    }
+
+    #[test]
+    fn unreadable_policy_or_a_bad_value_forbid_the_assistant() {
+        let p = resolve("src", RawPolicy::Unreadable("plist: unexpected EOF".into()));
+        assert!(!p.status.mcp_agent_enabled);
+        assert!(!p.status.agent_allowed());
+        for (value, error) in [
+            (
+                PolicyValue::Str("yes".into()),
+                "errors.policy.invalidString",
+            ),
+            (PolicyValue::Int(2), "errors.policy.invalidNumber"),
+            (
+                PolicyValue::Other("array".into()),
+                "errors.policy.invalidType",
+            ),
+        ] {
+            let p = resolve("src", values(&[("mcpAgentEnabled", value.clone())]));
+            assert!(!p.status.mcp_agent_enabled, "{value:?}");
+            assert!(p.status.mcp_enabled, "{value:?}: MCP не выключается");
+            assert!(
+                p.status.updates_enabled,
+                "{value:?}: обновления не выключаются"
+            );
+            assert_eq!(p.status.errors.len(), 1, "{:?}", p.status.errors);
+            assert_eq!(p.status.errors[0].key, error);
+            assert_eq!(p.status.errors[0].params["key"], "mcpAgentEnabled");
+        }
+        // Неверное значение рядом с `mcpAgentEnabled = true` (ключи читаются по алфавиту) — всё равно запрет.
+        let p = resolve(
+            "src",
+            values(&[
+                ("mcpAgentEnabled", PolicyValue::Bool(true)),
+                ("mcpMaxAccess", PolicyValue::Str("full".into())),
+            ]),
+        );
+        assert!(
+            !p.status.agent_allowed(),
+            "запрет MCP запрещает и ассистента"
+        );
+    }
+
+    #[test]
+    fn agent_policy_wire_format() {
+        let v = serde_json::to_value(PolicyStatus::default()).unwrap();
+        assert_eq!(v["mcpAgentEnabled"], true);
     }
 }

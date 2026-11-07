@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod agent;
 pub mod app;
 pub mod catalog;
 pub mod connections;

@@ -288,6 +288,17 @@
       "disabledByPolicy": "MCP is disabled by your organization",
       "noExe": "Cannot find the Glafira executable: {{error}}",
       "auditMissing": "The MCP log is not available yet: {{error}}"
+    },
+    "agent": {
+      "pathNotAbsolute": "The program path must be absolute: {{path}}",
+      "badModel": "Invalid model name “{{model}}”: use letters, digits and ._:/@+- (up to 128 characters)",
+      "badTimeout": "The run time limit must be from {{min}} to {{max}} minutes",
+      "badKeepWarm": "Keeping the model in memory must be from {{min}} to {{max}} minutes",
+      "badBudget": "The spending limit per run must be from {{min}} to {{max}} $",
+      "badOllamaUrl": "Invalid Ollama address “{{url}}”: use http://host:port",
+      "disabledByPolicy": "The background assistant is disabled by your organization",
+      "notConfigured": "The background assistant is not set up: choose the program in Settings → LLM assistants (MCP)",
+      "modelRequired": "Choose the model: Claude Code through Ollama needs a model name"
     }
   },
   "connections": {

@@ -327,4 +327,29 @@ mod tests {
             crate::policy::McpMaxAccess::Diagnostics
         );
     }
+
+    #[test]
+    fn agent_key_is_read_from_json_and_plist() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = dir.path().join("policy.json");
+        std::fs::write(&json, r#"{"mcpEnabled": true, "mcpAgentEnabled": false}"#).unwrap();
+        let p = crate::policy::resolve("json", read_json_file(&json));
+        assert!(p.status.errors.is_empty(), "{:?}", p.status.errors);
+        assert!(p.status.mcp_allowed());
+        assert!(!p.status.agent_allowed());
+
+        let plist = dir.path().join("p.plist");
+        std::fs::write(
+            &plist,
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>mcpAgentEnabled</key><false/>
+</dict></plist>"#,
+        )
+        .unwrap();
+        let p = crate::policy::resolve("plist", read_plist_file(&plist));
+        assert!(p.status.errors.is_empty(), "{:?}", p.status.errors);
+        assert!(!p.status.mcp_agent_enabled);
+    }
 }

@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::error::{AppResult, ErrorCode};
 use crate::storage::fs::{read_json, read_json_or_quarantine, write_json};
@@ -91,14 +91,31 @@ pub struct ApprovedClient {
     pub last_seen_ms: i64,
 }
 
-/// Раздел `mcp` файла `settings.json` (спец. P4 §3.3): выключатель сервера и подтверждённые клиенты.
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+/// Раздел `mcp` файла `settings.json` (спец. P4 §3.3): выключатель сервера, подтверждённые клиенты и фоновый ассистент
+/// (P4c §8.3). Без `Eq`: в настройках ассистента есть `f64`.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct McpSettings {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
     pub approved_clients: Vec<ApprovedClient>,
+    /// Фоновый ассистент (спец. P4c §8.3); в старых файлах раздела нет — значения по умолчанию.
+    #[serde(default, deserialize_with = "agent_or_default")]
+    pub agent: crate::agent::settings::AgentSettings,
+}
+
+/// Раздел `agent`, который не читается (файл новой версии Glafira: другой пресет, иной тип поля), — значения по
+/// умолчанию с предупреждением в лог: иначе в карантин ушёл бы весь `settings.json` (язык, выключатель MCP,
+/// подтверждённые клиенты), а шим счёл бы MCP выключенным.
+fn agent_or_default<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<crate::agent::settings::AgentSettings, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).unwrap_or_else(|e| {
+        tracing::warn!("settings.json: mcp.agent not read, defaults are used: {e}");
+        Default::default()
+    }))
 }
 
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -178,6 +195,16 @@ impl SettingsStore {
     /// Блокирующий вызов (запись файла).
     pub fn set_mcp_enabled(&self, on: bool) -> AppResult<()> {
         self.update(|d| d.mcp.enabled = on)
+    }
+
+    /// Настройки фонового ассистента (спец. P4c §8.3).
+    pub fn agent(&self) -> crate::agent::settings::AgentSettings {
+        self.data.read_safe().mcp.agent.clone()
+    }
+
+    /// Блокирующий вызов (запись файла). Значения проверяет вызывающий (`AgentSettings::validated`).
+    pub fn set_agent(&self, a: crate::agent::settings::AgentSettings) -> AppResult<()> {
+        self.update(|d| d.mcp.agent = a)
     }
 
     pub fn is_client_approved(&self, name: &str) -> bool {
@@ -509,6 +536,7 @@ mod tests {
                 first_seen_ms: 1,
                 last_seen_ms: 2,
             }],
+            agent: Default::default(),
         };
         assert_eq!(
             serde_json::to_value(&m).unwrap(),
@@ -516,7 +544,8 @@ mod tests {
                 "enabled": true,
                 "approvedClients": [
                     {"name": "qwen-code", "version": "0.26.7", "firstSeenMs": 1, "lastSeenMs": 2}
-                ]
+                ],
+                "agent": serde_json::to_value(crate::agent::settings::AgentSettings::default()).unwrap(),
             })
         );
         assert_eq!(
@@ -538,6 +567,55 @@ mod tests {
             McpSettings::default()
         );
         assert!(!mcp_enabled_in(dir.path()));
+    }
+
+    #[test]
+    fn agent_settings_live_next_to_mcp() {
+        use crate::agent::settings::{AgentSettings, Preset};
+        let dir = tempfile::tempdir().unwrap();
+        let s = SettingsStore::open(dir.path());
+        assert_eq!(s.agent(), AgentSettings::default());
+        s.set_mcp_enabled(true).unwrap();
+        s.approve_client("qwen-code", "0.26.5", 1).unwrap();
+        let mut a = AgentSettings {
+            enabled: true,
+            preset: Preset::Claude,
+            ..AgentSettings::default()
+        };
+        a.claude.via_ollama = true;
+        a.claude.model = "qwen3.6-64k:35b-a3b".into();
+        s.set_agent(a.clone()).unwrap();
+        let reopened = SettingsStore::open(dir.path());
+        assert_eq!(reopened.agent(), a);
+        let mcp = reopened.mcp();
+        assert!(mcp.enabled, "раздел agent не затирает выключатель MCP");
+        assert_eq!(mcp.approved_clients.len(), 1);
+        assert!(
+            mcp_enabled_in(dir.path()),
+            "шим по-прежнему читает выключатель"
+        );
+    }
+
+    #[test]
+    fn an_unknown_agent_section_does_not_break_the_settings_file() {
+        // Файл новой версии Glafira (другой пресет, иной тип поля) читает старая: раздел `agent` — по умолчанию,
+        // язык, выключатель MCP и подтверждённые клиенты остаются, файл не уходит в карантин, шим видит выключатель.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"schemaVersion":1,"language":"ru","mcp":{"enabled":true,
+               "approvedClients":[{"name":"q","version":"1","firstSeenMs":1,"lastSeenMs":2}],
+               "agent":{"enabled":true,"preset":"gemini","timeoutMin":"x"}}}"#,
+        )
+        .unwrap();
+        assert!(mcp_enabled_in(dir.path()));
+        let s = SettingsStore::open(dir.path());
+        assert_eq!(s.language().as_deref(), Some("ru"));
+        assert!(s.mcp().enabled);
+        assert_eq!(s.mcp().approved_clients.len(), 1);
+        assert_eq!(s.agent(), crate::agent::settings::AgentSettings::default());
+        assert!(path.exists(), "файл не переименован в .corrupt");
     }
 
     #[test]
