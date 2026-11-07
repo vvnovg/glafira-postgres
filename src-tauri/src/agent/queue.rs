@@ -19,7 +19,7 @@ use tokio::sync::{oneshot, watch};
 
 use super::models::effective_model;
 use super::presets::{self, RunInputs};
-use super::process::{self, AgentProcess, AgentSpawner, TokioSpawner};
+use super::process::{self, AgentProcess, AgentSpawner, ExitInfo, TokioSpawner};
 use super::prompt;
 pub use super::runs::RunFilter;
 use super::runs::{self, AgentRun, FailReason, NewRun, RunKind, RunStatus, RunStore};
@@ -191,6 +191,8 @@ pub(crate) struct EndFacts {
     pub stopped: Option<Stopped>,
     /// Проверка инструментов не прошла: процесс остановлен до первого хода (§4.1).
     pub unsafe_tools: bool,
+    /// Процесс сам закончился до события `init` с кодом ≠ 0 (решение контроллера к задаче 6).
+    pub exited_before_init: bool,
     pub code: Option<i32>,
     /// Сессия с билетом хоть раз подключилась.
     pub connected: bool,
@@ -216,6 +218,9 @@ pub(crate) fn outcome(f: &EndFacts) -> (RunStatus, Option<FailReason>) {
     }
     if f.unsafe_tools {
         return (S::Failed, Some(R::UnsafeTools));
+    }
+    if f.exited_before_init {
+        return (S::Failed, Some(R::Exit));
     }
     if !f.connected {
         return (
@@ -256,8 +261,11 @@ pub(crate) fn outcome(f: &EndFacts) -> (RunStatus, Option<FailReason>) {
 enum InitCheck {
     /// Только инструменты Glafira: запуск идёт дальше.
     Safe,
-    /// Лишние инструменты или списка нет: предупреждение запуска (`unsafe …`).
+    /// Лишние инструменты, или списка нет, а процесс жив (или вышел с кодом 0): предупреждение запуска (`unsafe …`).
     Unsafe(String),
+    /// Процесс сам закончился до события `init` с кодом ≠ 0 (ранняя ошибка CLI: неизвестный флаг, нет входа) —
+    /// `failed` / `exit`, как у любой ошибки CLI; инструменты модели не работали.
+    Exited(ExitInfo),
     /// Пока ждали, запуск остановили или вышел срок.
     Stopped(Stopped),
 }
@@ -313,6 +321,14 @@ impl Final {
             proposals: Vec::new(),
             warnings: Vec::new(),
         }
+    }
+}
+
+/// Сигнал остановки запуска; брошенный отправитель (такого не бывает, пока запуск идёт) — не сигнал.
+async fn stop_signal(stop_rx: &mut oneshot::Receiver<Stopped>) -> Stopped {
+    match stop_rx.await {
+        Ok(why) => why,
+        Err(_) => std::future::pending().await,
     }
 }
 
@@ -645,6 +661,7 @@ impl AgentQueue {
                 }
             };
         // До первого хода: модели доступны только инструменты Glafira (§4.1 «Проверка инструментов»).
+        let mut exited_before_init = false;
         let (exit, stopped, unsafe_warning) = match Self::check_tools(
             proc.as_mut(),
             &mut stop_rx,
@@ -654,17 +671,10 @@ impl AgentQueue {
         {
             InitCheck::Safe => {
                 let ended = {
-                    let mut wait = proc.wait();
-                    let stop = async {
-                        match (&mut stop_rx).await {
-                            Ok(why) => why,
-                            Err(_) => std::future::pending().await,
-                        }
-                    };
                     tokio::select! {
-                        exit = &mut wait => Ok(exit),
+                        exit = proc.wait() => Ok(exit),
                         () = tokio::time::sleep_until(deadline) => Err(Stopped::Timeout),
-                        why = stop => Err(why),
+                        why = stop_signal(&mut stop_rx) => Err(why),
                     }
                 };
                 match ended {
@@ -679,6 +689,15 @@ impl AgentQueue {
                 tracing::warn!(run = %id, "{warning}: the agent is stopped before its first turn");
                 proc.stop().await;
                 (proc.wait().await, None, Some(warning))
+            }
+            InitCheck::Exited(exit) => {
+                tracing::warn!(
+                    run = %id,
+                    code = ?exit.code,
+                    "the agent exited before it listed its tools"
+                );
+                exited_before_init = true;
+                (exit, None, None)
             }
             InitCheck::Stopped(why) => {
                 proc.stop().await;
@@ -697,6 +716,7 @@ impl AgentQueue {
             kind: run.kind,
             stopped,
             unsafe_tools,
+            exited_before_init,
             code: exit.code,
             connected: live.connected,
             calls: live.calls,
@@ -728,37 +748,52 @@ impl AgentQueue {
         .await;
     }
 
-    /// Событие `init` — не дольше `INIT_TIMEOUT` (и не дольше срока запуска); остановка запуска прерывает ожидание. Имя
-    /// без префикса `mcp__glafira-pg__` — `unsafe <имена через запятую>`; нет события — `unsafe no-init`.
+    /// Событие `init` — не дольше `INIT_TIMEOUT` (и не дольше срока запуска); остановка запуска прерывает ожидание (решение
+    /// контроллера к задаче 6):
+    /// - имя без префикса `mcp__glafira-pg__` — `unsafe <имена через запятую>`;
+    /// - поток stdout кончился без события, и процесс сам вышел в том же окне: код ≠ 0 — ранняя ошибка CLI (`exit`), код 0 —
+    ///   запуск прошёл без проверки инструментов (`unsafe no-init`);
+    /// - живой процесс без события дольше окна — `unsafe no-init`.
     async fn check_tools(
         proc: &mut dyn AgentProcess,
         stop_rx: &mut oneshot::Receiver<Stopped>,
         deadline: tokio::time::Instant,
     ) -> InitCheck {
         let init_deadline = (tokio::time::Instant::now() + process::INIT_TIMEOUT).min(deadline);
-        let stop = async {
-            match stop_rx.await {
-                Ok(why) => why,
-                Err(_) => std::future::pending().await,
+        // Окно вышло: по сроку запуска (короче минуты — тесты) или без события `init`.
+        let window_over = || {
+            if tokio::time::Instant::now() >= deadline {
+                InitCheck::Stopped(Stopped::Timeout)
+            } else {
+                InitCheck::Unsafe(UNSAFE_NO_INIT.to_string())
             }
         };
-        tokio::select! {
-            tools = tokio::time::timeout_at(init_deadline, proc.init_tools()) => match tools {
-                Ok(Some(tools)) => {
-                    let foreign = process::foreign_tools(&tools);
-                    if foreign.is_empty() {
-                        InitCheck::Safe
-                    } else {
-                        InitCheck::Unsafe(format!("unsafe {}", foreign.join(",")))
-                    }
+        let tools = tokio::select! {
+            tools = tokio::time::timeout_at(init_deadline, proc.init_tools()) => tools,
+            why = stop_signal(stop_rx) => return InitCheck::Stopped(why),
+        };
+        match tools {
+            Ok(Some(tools)) => {
+                let foreign = process::foreign_tools(&tools);
+                if foreign.is_empty() {
+                    InitCheck::Safe
+                } else {
+                    InitCheck::Unsafe(format!("unsafe {}", foreign.join(",")))
                 }
-                // Срок запуска короче минуты (тесты) и вышел раньше.
-                Err(_) if tokio::time::Instant::now() >= deadline => {
-                    InitCheck::Stopped(Stopped::Timeout)
+            }
+            Err(_) => window_over(),
+            Ok(None) => {
+                // Поток кончился без `init`: обычно процесс вышел сам. Ждём его конца в том же окне.
+                let exit = tokio::select! {
+                    exit = tokio::time::timeout_at(init_deadline, proc.wait()) => exit,
+                    why = stop_signal(stop_rx) => return InitCheck::Stopped(why),
+                };
+                match exit {
+                    Ok(exit) if exit.code != Some(0) => InitCheck::Exited(exit),
+                    Ok(_) => InitCheck::Unsafe(UNSAFE_NO_INIT.to_string()),
+                    Err(_) => window_over(),
                 }
-                Ok(None) | Err(_) => InitCheck::Unsafe(UNSAFE_NO_INIT.to_string()),
-            },
-            why = stop => InitCheck::Stopped(why),
+            }
         }
     }
 
@@ -1256,6 +1291,8 @@ mod tests {
 
     const MODEL: &str = "qwen3.6-64k:35b-a3b";
     const RESULT: &str = r#"{"type":"result","subtype":"success","is_error":false,"result":"No better plan: the index on orders(status) is already used","total_cost_usd":0.0123}"#;
+    /// Ход модели в потоке JSON — не итог.
+    const TURN: &str = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Looking at the plan"}]}}"#;
 
     /// Шаг сценария фальшивого агента.
     #[derive(Debug, Clone)]
@@ -1265,6 +1302,8 @@ mod tests {
         Init(Vec<String>),
         /// Агент не сообщает список инструментов: событие `init` не приходит.
         NoInit,
+        /// Поток stdout закрыт (событие `init` уже не придёт), процесс работает дальше.
+        EndStream,
         /// Сессия с билетом подтверждена.
         Connect,
         Call(&'static str),
@@ -1436,6 +1475,9 @@ mod tests {
                     }
                 }
                 Step::NoInit => {}
+                Step::EndStream => {
+                    init_tx.take();
+                }
                 Step::Connect => {
                     if let Some(q) = q.upgrade() {
                         q.run_session(&run_id, true);
@@ -1954,7 +1996,7 @@ mod tests {
         );
         assert_eq!(run.warnings, ["unsafe no-init"]);
         assert_eq!(h.fake.stops.load(Ordering::SeqCst), 1);
-        // Поток кончился без события `init` — то же сразу.
+        // Процесс сам вышел с кодом 0, не сообщив инструментов: запуск прошёл без проверки — то же сразу.
         h.fake.script(vec![
             Step::NoInit,
             Step::Connect,
@@ -1985,6 +2027,57 @@ mod tests {
         assert_eq!((run.status, run.reason), (RunStatus::Cancelled, None));
         assert!(run.warnings.is_empty());
         assert_eq!(h.fake.stops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cli_that_fails_before_listing_its_tools_is_an_exit() {
+        // Ранняя ошибка CLI (неизвестный флаг старой версии, нет входа): процесс сам вышел до `init` с кодом ≠ 0.
+        let h = harness();
+        h.fake
+            .script(vec![Step::NoInit, Step::Out(TURN), Step::Exit(1)]);
+        let req = request(&h);
+        let run = h.q().start(&req).unwrap();
+        let run = until(&h, &run.id, done).await;
+        assert_eq!(
+            (run.status, run.reason, run.exit_code),
+            (RunStatus::Failed, Some(FailReason::Exit), Some(1))
+        );
+        assert!(run.warnings.is_empty(), "{:?}", run.warnings);
+        assert_eq!(run.summary, None);
+        assert_eq!(h.fake.stops.load(Ordering::SeqCst), 0, "процесс вышел сам");
+        let s = &h.fake.spawned()[0];
+        assert_eq!(h.st.tickets.resolve(&s.ticket), None);
+        assert!(!s.config.exists());
+        assert_eq!(
+            h.st.llm.requests.get(&req).unwrap().status,
+            RequestStatus::Waiting
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_live_agent_that_closed_its_output_without_init_is_stopped_after_a_minute() {
+        let h = harness();
+        h.fake
+            .script(vec![Step::NoInit, Step::EndStream, Step::Hang]);
+        let started = tokio::time::Instant::now();
+        let run = h.q().start(&request(&h)).unwrap();
+        let run = until(&h, &run.id, done).await;
+        let waited = started.elapsed();
+        assert!(
+            waited >= process::INIT_TIMEOUT
+                && waited < process::INIT_TIMEOUT + Duration::from_secs(2),
+            "{waited:?}"
+        );
+        assert_eq!(
+            (run.status, run.reason, run.warnings.as_slice()),
+            (
+                RunStatus::Failed,
+                Some(FailReason::UnsafeTools),
+                &["unsafe no-init".to_string()][..]
+            )
+        );
+        assert_eq!(h.fake.stops.load(Ordering::SeqCst), 1, "группа остановлена");
+        assert_eq!(h.fake.alive.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2232,6 +2325,7 @@ mod tests {
                 Ok(vec![
                     Step::Connect,
                     Step::Call("explain_query"),
+                    Step::Out(TURN),
                     Step::Exit(2),
                 ]),
                 RunStatus::Failed,
@@ -2305,7 +2399,12 @@ mod tests {
                 .status,
             RequestStatus::Answered
         );
-        assert_eq!(h.q().get(&started[1].id).unwrap().exit_code, Some(2));
+        let failed = h.q().get(&started[1].id).unwrap();
+        assert_eq!(
+            (failed.exit_code, failed.summary),
+            (Some(2), None),
+            "без события `result` итога нет: сырой поток JSON — не ответ ассистента"
+        );
         let missing = h.q().get(&started[6].id).unwrap();
         assert_eq!(
             (missing.exit_code, missing.path.as_deref()),
@@ -2325,6 +2424,7 @@ mod tests {
             kind: RunKind::Optimize,
             stopped: None,
             unsafe_tools: false,
+            exited_before_init: false,
             code: Some(0),
             connected: true,
             calls: 5,
@@ -2378,6 +2478,15 @@ mod tests {
             }),
             (S::Cancelled, None),
             "остановка пользователя важнее"
+        );
+        assert_eq!(
+            f(&|x| {
+                x.exited_before_init = true;
+                x.connected = false;
+                x.code = Some(1);
+            }),
+            (S::Failed, Some(R::Exit)),
+            "ранняя ошибка CLI — не «не подключился»"
         );
         assert_eq!(
             f(&|x| x.connected = false),
@@ -2556,7 +2665,7 @@ mod tests {
         h.fake.script(vec![
             Step::Connect,
             Step::Call("list_connections"),
-            Step::Out("OK"),
+            Step::Out(r#"{"type":"result","subtype":"success","result":"OK"}"#),
             Step::Exit(0),
         ]);
         let run = h.q().check().unwrap();

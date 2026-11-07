@@ -484,6 +484,7 @@ impl AgentSpawner for TokioSpawner {
             log,
             init,
             grace: self.grace,
+            tail: None,
             exit: None,
         }))
     }
@@ -501,6 +502,8 @@ struct TokioProcess {
     log: Arc<Mutex<RunLog>>,
     init: InitWatch,
     grace: Duration,
+    /// Хвост stdout, когда чтение уже закончилось (`wait` прервали после него).
+    tail: Option<Vec<u8>>,
     exit: Option<ExitInfo>,
 }
 
@@ -537,15 +540,21 @@ impl AgentProcess for TokioProcess {
             if let Some(e) = &self.exit {
                 return e.clone();
             }
+            // Прерывать можно на любом `await`: `Child::wait` и `join_reader` это допускают, а прочитанный хвост stdout
+            // сразу запоминается (очередь ждёт конца процесса со сроком, пока проверяет событие `init`).
             let status = self.child.wait().await;
             self.kill_leftovers();
             let code = status.ok().and_then(|s| s.code());
-            let tail = join_reader(&mut self.out).await;
+            if self.tail.is_none() {
+                let tail = join_reader(&mut self.out).await;
+                self.tail = Some(tail);
+            }
             join_reader(&mut self.err).await;
             self.log.lock_safe().finish(code);
             let info = ExitInfo {
                 code,
-                stdout_tail: String::from_utf8_lossy(&tail).into_owned(),
+                stdout_tail: String::from_utf8_lossy(self.tail.as_deref().unwrap_or_default())
+                    .into_owned(),
             };
             self.exit = Some(info.clone());
             info
@@ -663,22 +672,29 @@ mod job {
 
 /// Итоговый текст агента и стоимость (спец. §4.5): поле `result` последнего события `"type": "result"` потока JSON по
 /// строке (у обоих CLI) и `total_cost_usd`; запасной разбор — весь хвост JSON-массивом (`-o json` Qwen Code) или объектом
-/// (`--output-format json` Claude Code); нет события — последние 4 КБ stdout. Управляющие последовательности терминала и
-/// символы убираются; до `MAX_SUMMARY_BYTES`. Стоимость показывается только у Claude Code без Ollama — это решает очередь.
+/// (`--output-format json` Claude Code). Нет события (срок, остановка, падение) — итога нет: сырой хвост потока JSON —
+/// не ответ ассистента, вывод целиком — в «Показать журнал» (решение контроллера к задаче 6). У простого текста итог —
+/// последние 4 КБ stdout. Управляющие последовательности терминала и символы убираются; до `MAX_SUMMARY_BYTES`.
+/// Стоимость показывается только у Claude Code без Ollama — это решает очередь.
 pub fn final_text(output: OutputFormat, stdout_tail: &str) -> (Option<String>, Option<f64>) {
-    if output == OutputFormat::StreamJson
-        && let Some(obj) = result_event(stdout_tail)
-    {
-        let text = obj
-            .get("result")
-            .and_then(Value::as_str)
-            .map(|s| clean(s, false))
-            .filter(|s| !s.is_empty());
-        let cost = obj.get("total_cost_usd").and_then(Value::as_f64);
-        return (text, cost);
+    match output {
+        OutputFormat::StreamJson => {
+            let Some(obj) = result_event(stdout_tail) else {
+                return (None, None);
+            };
+            let text = obj
+                .get("result")
+                .and_then(Value::as_str)
+                .map(|s| clean(s, false))
+                .filter(|s| !s.is_empty());
+            let cost = obj.get("total_cost_usd").and_then(Value::as_f64);
+            (text, cost)
+        }
+        OutputFormat::Text => {
+            let text = clean(stdout_tail, true);
+            ((!text.is_empty()).then_some(text), None)
+        }
     }
-    let text = clean(stdout_tail, true);
-    ((!text.is_empty()).then_some(text), None)
 }
 
 /// Предел CLI сработал (спец. §3.2 `limit`, итог проверки CLI): Qwen Code — код 55 (`FatalBudgetExceededError`); Claude
@@ -902,20 +918,27 @@ mod tests {
             "{}",
             text.len()
         );
-        // Нет события `result` — последние 4 КБ stdout, как у `text`.
+        // Поток JSON без события `result` (срок, остановка, падение) — итога нет: сырой хвост — не ответ ассистента.
         assert_eq!(
-            final_text(OutputFormat::StreamJson, "plain words")
-                .0
-                .as_deref(),
-            Some("plain words")
+            final_text(OutputFormat::StreamJson, "plain words"),
+            (None, None)
         );
-        let no_result = format!("{INIT}\n{}", "y".repeat(5000));
-        let text = final_text(OutputFormat::StreamJson, &no_result).0.unwrap();
+        let no_result = format!(
+            "{INIT}\n{}\n{}",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Looking"}]}}"#,
+            "y".repeat(5000)
+        );
+        assert_eq!(
+            final_text(OutputFormat::StreamJson, &no_result),
+            (None, None)
+        );
+        assert_eq!(final_text(OutputFormat::StreamJson, "  \n"), (None, None));
+        // У простого текста итог — конец хвоста.
+        let text = final_text(OutputFormat::Text, &no_result).0.unwrap();
         assert!(
             text.len() == MAX_SUMMARY_BYTES && text.chars().all(|c| c == 'y'),
             "конец хвоста"
         );
-        assert_eq!(final_text(OutputFormat::StreamJson, "  \n"), (None, None));
         let json = serde_json::json!({ "type": "result", "result": "r".repeat(5000) }).to_string();
         assert_eq!(
             final_text(OutputFormat::StreamJson, &json).0.unwrap().len(),
@@ -1314,6 +1337,37 @@ mod tests {
             }
         );
         assert!(until_dead(pid_from(&pidfile).await).await);
+    }
+
+    /// Очередь ждёт конца процесса со сроком (поток кончился без `init`): прерванное ожидание не теряет хвост stdout.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_interrupted_wait_keeps_the_exit_and_the_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = sh(
+            dir.path(),
+            "printf 'tail of stdout'; echo 'to stderr' >&2; sleep 0.2; exit 4",
+            &[],
+        );
+        let mut p = spawner()
+            .spawn(&spec, String::new(), dir.path().join("a.log"))
+            .unwrap();
+        let mut interrupted = 0;
+        let exit = loop {
+            match tokio::time::timeout(Duration::from_micros(200), p.wait()).await {
+                Ok(exit) => break exit,
+                Err(_) => interrupted += 1,
+            }
+        };
+        assert!(interrupted > 0);
+        assert_eq!(
+            exit,
+            ExitInfo {
+                code: Some(4),
+                stdout_tail: "tail of stdout".into()
+            }
+        );
+        assert_eq!(p.wait().await, exit);
     }
 
     #[cfg(unix)]
