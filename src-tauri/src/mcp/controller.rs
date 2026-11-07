@@ -404,8 +404,10 @@ mod tests {
 
     use glafira_mcp_core::handshake;
     use rmcp::model::{CallToolRequestParams, CallToolResult};
+    use serde_json::json;
 
     use super::*;
+    use crate::agent::tickets::RunScope;
     use crate::conn::profile::{LlmAccess, sample_profile};
     use crate::secrets::MemoryStore;
 
@@ -760,6 +762,155 @@ mod tests {
         .await;
         assert!(c.status().approved_clients.is_empty());
         assert!(logged(&c, "revoked"));
+        drop(client);
+        c.shutdown().await;
+    }
+
+    /// Сессия фонового запуска через настоящий сервер (P4c §3.3, §5):
+    /// - билет в рукопожатии, подтверждение без диалога, `approved` с `run`;
+    /// - девять инструментов, подключение запуска, `runId` в статусе;
+    /// - `propose_query_rewrite` с `requestId` запуска и `connectionId` его подключения — форма запроса (M6);
+    /// - «Отозвать» клиента её не закрывает;
+    /// - после конца запуска билет не действует.
+    #[tokio::test]
+    async fn background_run_session_goes_through_the_real_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, rec) = state(dir.path(), true);
+        for id in ["c1", "c2"] {
+            let mut p = sample_profile(id);
+            p.llm_access = LlmAccess::Diagnostics;
+            st.connections.upsert(p).unwrap();
+        }
+        let request = st
+            .llm
+            .requests
+            .create(crate::mcp::llm::requests::tests::new("c1"))
+            .unwrap();
+        let c = st.mcp.clone();
+        c.set_enabled(st.clone(), true).await.unwrap();
+        let ticket = st.tickets.issue(RunScope {
+            run_id: "a1b2c3d".into(),
+            connection_id: Some("c1".into()),
+            request_id: Some(request.id.clone()),
+        });
+        let f = files::read_mcp_file(dir.path()).expect("mcp.json");
+        let mut s = endpoint::connect(&f.endpoint).await.unwrap();
+        handshake::client_with_run(&mut s, &f.token, Some(&ticket))
+            .await
+            .unwrap();
+        let client = rmcp::ServiceExt::serve((), s).await.unwrap();
+
+        let r = client
+            .call_tool(CallToolRequestParams::new("list_connections"))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&text(&r)).unwrap();
+        assert_eq!(v["connections"].as_array().unwrap().len(), 1, "{v}");
+        assert_eq!(
+            v["connections"][0]["id"], "c1",
+            "только подключение запуска"
+        );
+        let s = c.status();
+        assert!(
+            s.pending.is_empty() && s.approved_clients.is_empty(),
+            "без диалога и без запоминания клиента"
+        );
+        assert_eq!(rec.attention.load(Ordering::SeqCst), 0);
+        assert_eq!(s.sessions[0].run_id.as_deref(), Some("a1b2c3d"));
+        assert_eq!(
+            serde_json::to_value(&s).unwrap()["sessions"][0]["runId"],
+            "a1b2c3d"
+        );
+        let log = c.audit_tail(50);
+        let approved: Vec<&Value> = log.iter().filter(|e| e["event"] == "approved").collect();
+        assert_eq!(approved.len(), 1);
+        assert_eq!(
+            (approved[0]["run"].as_str(), approved[0]["by"].as_str()),
+            (Some("a1b2c3d"), Some("run"))
+        );
+        assert!(
+            log.iter()
+                .any(|e| e["event"] == "sessionStarted" && e["run"] == "a1b2c3d")
+        );
+
+        assert_eq!(client.list_all_tools().await.unwrap().len(), 9);
+        assert!(client.list_all_prompts().await.unwrap().is_empty());
+        assert_eq!(
+            client.peer_info().unwrap().instructions.as_deref(),
+            Some(glafira_pg_mcp::server::INSTRUCTIONS_RUN)
+        );
+        for (tool, args) in [
+            ("get_health_summary", json!({"connectionId": "c1"})),
+            (
+                "explain_query",
+                json!({"connectionId": "c2", "sql": "SELECT 1"}),
+            ),
+            (
+                "propose_query_rewrite",
+                json!({"connectionId": "c1", "sql": "SELECT 1", "rewrittenSql": "SELECT 1",
+                       "rationale": "faster"}),
+            ),
+        ] {
+            let p =
+                CallToolRequestParams::new(tool).with_arguments(args.as_object().unwrap().clone());
+            let r = client.call_tool(p).await.unwrap();
+            assert_eq!(
+                text(&r),
+                "not_allowed: Not available to a background run",
+                "{tool}"
+            );
+        }
+        // Сверка с feat/p4b (M6): requestId запуска и connectionId его подключения — форма запроса, не отказ области.
+        // UPDATE — не тот вид, что у SELECT запроса: отказ до сервера (стенд не нужен).
+        let p = CallToolRequestParams::new("propose_query_rewrite").with_arguments(
+            json!({"requestId": request.id, "connectionId": "c1",
+                   "rewrittenSql": "UPDATE orders SET status = 'x'", "rationale": "faster"})
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        let r = client.call_tool(p).await.unwrap();
+        assert!(
+            text(&r).starts_with("invalid_sql: ") && text(&r).contains("same kind"),
+            "{}",
+            text(&r)
+        );
+        let r = client
+            .call_tool(CallToolRequestParams::new("get_optimization_request"))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&text(&r)).unwrap();
+        assert_eq!(v["id"], request.id.as_str(), "запрос запуска без id");
+
+        let c2 = c.clone();
+        tokio::task::spawn_blocking(move || c2.revoke_client("rmcp"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            c.status().sessions.len(),
+            1,
+            "«Отозвать» клиента фоновый запуск не останавливает"
+        );
+
+        st.tickets.revoke("a1b2c3d");
+        let mut again = endpoint::connect(&f.endpoint).await.unwrap();
+        let e = handshake::client_with_run(&mut again, &f.token, Some(&ticket))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&e, handshake::HandshakeError::Rejected { code, .. } if code == "bad_ticket"),
+            "{e:?}"
+        );
+        let r = client
+            .call_tool(CallToolRequestParams::new("list_connections"))
+            .await
+            .unwrap();
+        assert_eq!(r.is_error, Some(true), "запуск закончился");
+        until("сессия запуска закрыта", || {
+            c.status().sessions.is_empty()
+        })
+        .await;
         drop(client);
         c.shutdown().await;
     }

@@ -144,7 +144,10 @@ pub const VALUE_STATS_HINT: &str = "Value statistics (mostCommonVals, mostCommon
 /// Операция чтения.
 pub async fn read_op(st: &AppState, op: PgRead) -> Result<PgAnswer, ToolError> {
     match op {
-        PgRead::ListConnections { .. } => Ok(answer(PgOutput::Connections(list_connections(st)))),
+        PgRead::ListConnections { run } => Ok(answer(PgOutput::Connections(list_connections(
+            st,
+            run.as_deref(),
+        )))),
         PgRead::ListDiagnostics => Ok(answer(PgOutput::Diagnostics(diag_catalog()))),
         PgRead::Topology(p) => topology(st, &p.connection_id).await,
         PgRead::HealthSummary(p) => health_summary(st, &p.connection_id).await,
@@ -214,11 +217,18 @@ fn folder_path(folders: &[ConnectionFolder], id: &str) -> Vec<String> {
 }
 
 /// `list_connections`: только подключения с действующим уровнем ≠ `off`; строк подключения и секретов нет (§6.2).
-fn list_connections(st: &AppState) -> Vec<ConnectionInfo> {
+/// Сессия фонового запуска (`run`, P4c §5.2) видит только подключение своего запуска; у «Проверить» и у
+/// закончившегося запуска список пуст.
+fn list_connections(st: &AppState, run: Option<&str>) -> Vec<ConnectionInfo> {
+    let only = run.map(|r| st.tickets.scope(r).and_then(|s| s.connection_id));
     let folders = st.connections.list_folders();
     st.connections
         .list()
         .into_iter()
+        .filter(|p| {
+            only.as_ref()
+                .is_none_or(|c| c.as_deref() == Some(p.id.as_str()))
+        })
         .filter_map(|p| {
             let access = effective_access(&p, &st.policy.status);
             if access.is_off() {
@@ -1627,6 +1637,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::agent::tickets::RunScope;
     use crate::catalog::table::Partitioning;
     use crate::conn::profile::{ConnectionProfile, sample_profile};
     use crate::diag::pulse::PulseData;
@@ -1721,6 +1732,53 @@ mod tests {
                 && v[0].get("username").is_none()
                 && v[0].get("hosts").is_none(),
             "хосты и пользователь не отдаются (§6.2): {v}"
+        );
+    }
+
+    async fn listed(st: &AppState, run: Option<&str>) -> Vec<String> {
+        let a = ok(read_op(
+            st,
+            PgRead::ListConnections {
+                run: run.map(String::from),
+            },
+        )
+        .await);
+        let PgOutput::Connections(list) = a.body else {
+            panic!("не список подключений")
+        };
+        let mut ids: Vec<String> = list.into_iter().map(|c| c.id).collect();
+        ids.sort();
+        ids
+    }
+
+    /// Сессия фонового запуска видит только подключение своего запуска (P4c §5.2). У «Проверить» и у закончившегося
+    /// запуска список пуст.
+    #[tokio::test]
+    async fn background_run_lists_only_the_connection_of_its_run() {
+        let (_dir, st) = state_with(vec![member("pg-1", Role::Primary)]);
+        let mut other = sample_profile("on2");
+        other.llm_access = LlmAccess::Diagnostics;
+        st.connections.upsert(other).unwrap();
+        assert_eq!(listed(&st, None).await, ["on", "on2"]);
+        let scope = |run: &str, c: Option<&str>| RunScope {
+            run_id: run.into(),
+            connection_id: c.map(String::from),
+            request_id: c.map(|_| "r1".to_string()),
+        };
+        st.tickets.issue(scope("a1", Some("on2")));
+        assert_eq!(listed(&st, Some("a1")).await, ["on2"]);
+        // Подключение запуска закрыто для LLM — пусто, как у любой сессии.
+        st.tickets.issue(scope("a2", Some("off")));
+        assert!(listed(&st, Some("a2")).await.is_empty());
+        st.tickets.issue(scope("a3", None));
+        assert!(
+            listed(&st, Some("a3")).await.is_empty(),
+            "«Проверить» — без подключения"
+        );
+        st.tickets.revoke("a1");
+        assert!(
+            listed(&st, Some("a1")).await.is_empty(),
+            "запуск закончился"
         );
     }
 

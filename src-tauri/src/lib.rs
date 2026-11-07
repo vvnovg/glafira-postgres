@@ -3,6 +3,7 @@ pub mod i18n;
 #[macro_use]
 pub mod product;
 pub mod actions;
+pub mod agent;
 pub mod catalog;
 pub mod commands;
 pub mod conn;

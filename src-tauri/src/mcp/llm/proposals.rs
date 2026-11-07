@@ -106,6 +106,10 @@ pub struct LlmProposal {
     pub comparison: Option<Comparison>,
     pub created_at_ms: i64,
     pub answered_at_ms: Option<i64>,
+    /// Фоновый запуск, приславший предложение (спец. P4c §7): панель пишет «От фонового ассистента». `None` — чат,
+    /// приложение или запись P4b (`"runId": null`, как прочие необязательные поля).
+    #[serde(default)]
+    pub run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -122,6 +126,8 @@ pub struct NewProposal {
     pub indexes: Vec<String>,
     pub rationale: String,
     pub expected_effect: Option<String>,
+    /// Фоновый запуск (спец. P4c §7); `None` — чат и приложение.
+    pub run_id: Option<String>,
 }
 
 /// Чьи предложения показывать. `connection_id` — всегда условие. Остальное — «или»: по запросам (`request_ids`), по
@@ -294,6 +300,7 @@ impl ProposalStore {
                 comparison: None,
                 created_at_ms: now_ms(),
                 answered_at_ms: None,
+                run_id: n.run_id,
             };
             items.push(proposal.clone());
             evict(items);
@@ -392,6 +399,7 @@ pub(crate) mod tests {
             indexes: indexes.iter().map(|s| s.to_string()).collect(),
             rationale: "An index on status avoids the Seq Scan".into(),
             expected_effect: Some("cost 12000 → 40".into()),
+            run_id: None,
         }
     }
 
@@ -601,6 +609,7 @@ pub(crate) mod tests {
             comparison: None,
             created_at_ms: 1,
             answered_at_ms: None,
+            run_id: None,
         };
         let console = ProposalFilter {
             connection_id: Some("c1".into()),
@@ -636,6 +645,40 @@ pub(crate) mod tests {
         let f: ProposalFilter =
             serde_json::from_value(json!({ "connectionId": "c1", "requestIds": ["r1"] })).unwrap();
         assert_eq!(f.request_ids, Some(vec!["r1".to_string()]));
+    }
+
+    /// Предложение фонового запуска (спец. P4c §7) хранит `runId`; запись P4b без поля читается как предложение чата.
+    #[test]
+    fn background_run_proposal_keeps_its_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = ProposalStore::open(dir.path());
+        let (p, _) = s
+            .add_or_existing(NewProposal {
+                run_id: Some("a1b2c3d".into()),
+                ..new(Some("r1"), "SELECT 1", &[])
+            })
+            .unwrap();
+        assert_eq!(p.run_id.as_deref(), Some("a1b2c3d"));
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["runId"], "a1b2c3d");
+        assert_eq!(
+            ProposalStore::open(dir.path())
+                .get(&p.id)
+                .unwrap()
+                .run_id
+                .as_deref(),
+            Some("a1b2c3d")
+        );
+        let mut old = v.clone();
+        old.as_object_mut().unwrap().remove("runId");
+        assert_eq!(
+            serde_json::from_value::<LlmProposal>(old).unwrap().run_id,
+            None
+        );
+        // Предложение не из фонового запуска — `"runId": null`, как прочие необязательные поля (файл, фронтенд).
+        let (chat, _) = s.add_or_existing(new(Some("r2"), "SELECT 2", &[])).unwrap();
+        let chat = serde_json::to_value(&chat).unwrap();
+        assert_eq!(chat.get("runId"), Some(&json!(null)));
     }
 
     #[test]

@@ -56,6 +56,8 @@ pub struct AppState {
     pub role_warnings: Arc<crate::mcp::access::RoleWarnings>,
     /// Запросы на оптимизацию и предложения LLM (P4b): `llm-requests.json`, `llm-proposals.json`.
     pub llm: Arc<crate::mcp::llm::LlmStores>,
+    /// Билеты фоновых запусков (P4c §3.3): область сессии запуска, счёт вызовов, сессия запуска.
+    pub tickets: Arc<crate::agent::tickets::Tickets>,
     /// MCP-шлюз (P4): сервер и `mcp.json`, подтверждение клиентов, статус для интерфейса.
     pub mcp: Arc<crate::mcp::McpController>,
 }
@@ -137,6 +139,7 @@ impl AppState {
             query_texts,
             role_warnings: Arc::default(),
             llm: Arc::new(crate::mcp::llm::LlmStores::open(data_dir)),
+            tickets: Arc::default(),
             mcp,
         })
     }

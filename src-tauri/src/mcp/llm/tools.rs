@@ -4,6 +4,8 @@
 //! `prepare` и проба плана в слоях §7.3 (`GuardTx`); ошибки сервера уходят модели его текстом (`invalid_sql`).
 //! Снимок запроса на оптимизацию модель получает без маскирования (его отправил пользователь, §8.1), уложенным в
 //! предел ответа (решение владельца Q3, `request_for_model`).
+//! Сессия фонового запуска (P4c §5.2) видит только запрос своего запуска (`run_request`): подключение и инструмент
+//! проверяет `AppBackend::check_call` до операции.
 
 use glafira_mcp_core::error::ToolError;
 use glafira_mcp_core::limits::HARD_LIMIT_BYTES;
@@ -18,6 +20,7 @@ use super::compare::params_for;
 use super::proposals::{LlmProposal, NewProposal, ProposalFilter, ProposalSource};
 use super::requests::{OptimizationRequest, RequestSource, RequestStatus};
 use super::{ProposalsEvent, off_thread, plain_text};
+use crate::agent::tickets::not_in_run;
 use crate::diag::caps::V16;
 use crate::error::AppError;
 use crate::explain::Params;
@@ -42,9 +45,13 @@ const TRUNCATED_MARK: &str = "…[truncated]";
 pub async fn handle(st: &AppState, op: LlmOp) -> Result<PgAnswer, ToolError> {
     // `validate` — и при вызове не через шлюз (тесты, будущие вызовы приложения): пустые строки — «не заданы» (E2).
     let body = match op {
-        LlmOp::GetRequest { params, .. } => get_request(st, params.validate()?)?,
-        LlmOp::Propose { params, client, .. } => propose(st, params.validate()?, client).await?,
-        LlmOp::ListProposals { params, .. } => list(st, params.validate()?)?,
+        LlmOp::GetRequest { params, run } => get_request(st, params.validate()?, run.as_deref())?,
+        LlmOp::Propose {
+            params,
+            client,
+            run,
+        } => propose(st, params.validate()?, client, run).await?,
+        LlmOp::ListProposals { params, run } => list(st, params.validate()?, run.as_deref())?,
     };
     Ok(PgAnswer::new(body))
 }
@@ -60,6 +67,23 @@ fn request_not_found(id: &str) -> ToolError {
     ToolError::not_found(format!(
         "Optimization request {id} not found: Glafira keeps the last 50; ask the user to send the query again with “Send to LLM assistant”"
     ))
+}
+
+/// Запрос сессии фонового запуска (P4c §5.2): `None` — обычная сессия. У запуска — его запрос. Другой `asked` и
+/// запуск без запроса («Проверить») — `not_allowed`, закончившийся запуск — `run_over`.
+fn run_request(
+    st: &AppState,
+    run: Option<&str>,
+    asked: Option<&str>,
+) -> Result<Option<String>, ToolError> {
+    let Some(scope) = st.tickets.scope_of(run)? else {
+        return Ok(None);
+    };
+    let id = scope.request_id.ok_or_else(not_in_run)?;
+    if asked.is_some_and(|a| a != id) {
+        return Err(not_in_run());
+    }
+    Ok(Some(id))
 }
 
 /// Запрос по id для модели: есть, подключение открыто для модели (иначе `not_allowed`, §4.3), не отменён.
@@ -290,18 +314,27 @@ pub fn proposal_for_model(p: &LlmProposal) -> Value {
     Value::Object(m)
 }
 
-fn get_request(st: &AppState, p: GetRequestParams) -> Result<PgOutput, ToolError> {
-    let mut r = match p.request_id.as_deref().map(str::trim) {
-        Some(id) => open_request(st, id)?,
-        None => st
-            .llm
-            .requests
-            .latest_waiting(&|id| check_connection(st, id).is_ok())
-            .ok_or_else(|| {
-                ToolError::not_found(
-                    "No optimization request is waiting: ask the user to press “Send to LLM assistant” in the EXPLAIN console or the query card in Glafira",
-                )
-            })?,
+fn get_request(
+    st: &AppState,
+    p: GetRequestParams,
+    run: Option<&str>,
+) -> Result<PgOutput, ToolError> {
+    let asked = p.request_id.as_deref().map(str::trim);
+    // Сессия запуска — только запрос своего запуска, без id — он же (P4c §5.2).
+    let mut r = match run_request(st, run, asked)? {
+        Some(id) => open_request(st, &id)?,
+        None => match asked {
+            Some(id) => open_request(st, id)?,
+            None => st
+                .llm
+                .requests
+                .latest_waiting(&|id| check_connection(st, id).is_ok())
+                .ok_or_else(|| {
+                    ToolError::not_found(
+                        "No optimization request is waiting: ask the user to press “Send to LLM assistant” in the EXPLAIN console or the query card in Glafira",
+                    )
+                })?,
+        },
     };
     // Вытесненные предложения остаются в списке запроса (хранилища независимы) — модели уходят только существующие.
     r.proposal_ids
@@ -501,12 +534,20 @@ fn direct_form_hint(e: ToolError, request_id: Option<&str>, member: Option<&str>
 
 /// `propose_query_rewrite` (§8.2): доступ и исходный запрос, SQL модели и индексы до сервера, вид выражения; затем
 /// `prepare` и проба плана предложенного SQL в слоях §7.3 на узле снимка (без запроса — «за лидером»); сохранение и
-/// события (`store_proposal`).
+/// события (`store_proposal`). Сессия фонового запуска (P4c §5.2) предлагает только к запросу своего запуска.
 async fn propose(
     st: &AppState,
     p: ProposeParams,
     client: Option<String>,
+    run: Option<String>,
 ) -> Result<PgOutput, ToolError> {
+    // Область запуска — до сверки полей с запросом (M6) и с ней не спорит: «прямая форма» — это `requestId` не задан;
+    // `requestId` запуска с совпадающими `connectionId` / `database` / `sql` — форма запроса. Чужой запрос — вне
+    // области.
+    let asked = p.request_id.as_deref().map(str::trim);
+    if run_request(st, run.as_deref(), asked)?.is_some() && asked.is_none() {
+        return Err(not_in_run());
+    }
     let o = origin(st, &p)?;
     // До сервера — те же проверки, что у explain_query и hypothetical_index (типизированные литералы — приведения,
     // `PlanText`); позиции — в тексте модели (§16.17).
@@ -582,6 +623,7 @@ async fn propose(
             .as_deref()
             .map(plain_text)
             .filter(|e| !e.is_empty()),
+        run_id: run,
     };
     Ok(PgOutput::Proposed(store_proposal(st, new).await?))
 }
@@ -626,8 +668,11 @@ async fn store_proposal(st: &AppState, new: NewProposal) -> Result<ProposedOut, 
 }
 
 /// `list_proposals` (§8.2): предложения подключений, открытых для модели, сначала новые; фильтр по подключению и
-/// запросу (закрытое для модели — `not_allowed`, как у остальных инструментов).
-fn list(st: &AppState, p: ListProposalsParams) -> Result<PgOutput, ToolError> {
+/// запросу (закрытое для модели — `not_allowed`, как у остальных инструментов). Сессия фонового запуска (P4c §5.2)
+/// видит только предложения своего запроса.
+fn list(st: &AppState, p: ListProposalsParams, run: Option<&str>) -> Result<PgOutput, ToolError> {
+    let asked = p.request_id.as_deref().map(str::trim);
+    let request = run_request(st, run, asked)?.or_else(|| asked.map(str::to_string));
     let mut filter = ProposalFilter::default();
     if let Some(id) = p.connection_id.as_deref() {
         check_connection(st, id)?;
@@ -635,8 +680,8 @@ fn list(st: &AppState, p: ListProposalsParams) -> Result<PgOutput, ToolError> {
     }
     // Запрос могли вытеснить из последних 50, а его предложения остаются: фильтр по `request_id` напрямую, доступ —
     // по подключению каждого предложения.
-    if let Some(rid) = p.request_id.as_deref().map(str::trim) {
-        filter.request_ids = Some(vec![rid.to_string()]);
+    if let Some(rid) = request {
+        filter.request_ids = Some(vec![rid]);
     }
     let items = st
         .llm
@@ -656,6 +701,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::agent::tickets::{RunScope, run_over};
     use crate::conn::profile::{LlmAccess, sample_profile};
     use crate::mcp::llm::proposals::{Comparison, IndexUse, ProposalStatus};
     use crate::mcp::llm::{ProposalsEvent, ProposalsEventKind, ProposalsSink};
@@ -1152,6 +1198,216 @@ mod tests {
         assert!(st.llm.proposals.list(&ProposalFilter::default()).is_empty());
     }
 
+    /// Сессия фонового запуска (P4c §5.2): только запрос своего запуска. Без id — он же; прямая форма предложения и
+    /// чужой запрос — `not_allowed`; `list_proposals` — только предложения запроса запуска.
+    #[tokio::test]
+    async fn background_run_sees_only_the_request_of_its_run() {
+        let (_d, st) = state();
+        let mine = st.llm.requests.create(new_request("c1")).unwrap();
+        let newer = st.llm.requests.create(new_request("c1")).unwrap();
+        st.tickets.issue(RunScope {
+            run_id: "a1".into(),
+            connection_id: Some("c1".into()),
+            request_id: Some(mine.id.clone()),
+        });
+        let run = Some("a1".to_string());
+        let get = |id: Option<&str>| {
+            handle(
+                &st,
+                LlmOp::GetRequest {
+                    params: GetRequestParams {
+                        request_id: id.map(String::from),
+                    },
+                    run: run.clone(),
+                },
+            )
+        };
+        // Без id — запрос запуска, а не последний ожидающий.
+        for id in [None, Some(mine.id.as_str())] {
+            let PgOutput::Request(v) = get(id).await.unwrap().body else {
+                panic!()
+            };
+            assert_eq!(v["id"], mine.id.as_str());
+        }
+        assert_eq!(get(Some(&newer.id)).await.unwrap_err(), not_in_run());
+
+        let propose = |p: ProposeParams| {
+            handle(
+                &st,
+                LlmOp::Propose {
+                    params: p,
+                    client: None,
+                    run: run.clone(),
+                },
+            )
+        };
+        assert_eq!(
+            propose(direct_params("c1", "SELECT 1", "SELECT 1"))
+                .await
+                .unwrap_err(),
+            not_in_run()
+        );
+        assert_eq!(
+            propose(propose_params(&newer.id, "SELECT 1"))
+                .await
+                .unwrap_err(),
+            not_in_run()
+        );
+        // Свой запрос проходит область и падает дальше — на проверке SQL до сервера.
+        assert_eq!(
+            propose(propose_params(&mine.id, "DROP TABLE orders"))
+                .await
+                .unwrap_err()
+                .code,
+            "invalid_sql"
+        );
+
+        for (r, sql) in [(&mine, "SELECT 1"), (&newer, "SELECT 2")] {
+            st.llm
+                .proposals
+                .add_or_existing(crate::mcp::llm::proposals::tests::new(
+                    Some(&r.id),
+                    sql,
+                    &[],
+                ))
+                .unwrap();
+        }
+        let list = |request_id: Option<String>| {
+            handle(
+                &st,
+                LlmOp::ListProposals {
+                    params: ListProposalsParams {
+                        connection_id: None,
+                        request_id,
+                    },
+                    run: run.clone(),
+                },
+            )
+        };
+        let PgOutput::Proposals(items) = list(None).await.unwrap().body else {
+            panic!()
+        };
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0]["requestId"], mine.id.as_str());
+        let PgOutput::Proposals(same) = list(Some(mine.id.clone())).await.unwrap().body else {
+            panic!()
+        };
+        assert_eq!(same, items, "свой запрос явно — то же");
+        assert_eq!(
+            list(Some(newer.id.clone())).await.unwrap_err(),
+            not_in_run()
+        );
+
+        // «Проверить»: запуск без запроса — ни запроса, ни предложений, ни предложения в прямой форме.
+        st.tickets.issue(RunScope {
+            run_id: "a2".into(),
+            connection_id: None,
+            request_id: None,
+        });
+        let check = Some("a2".to_string());
+        assert_eq!(
+            handle(
+                &st,
+                LlmOp::GetRequest {
+                    params: GetRequestParams { request_id: None },
+                    run: check.clone(),
+                },
+            )
+            .await
+            .unwrap_err(),
+            not_in_run()
+        );
+        assert_eq!(
+            handle(
+                &st,
+                LlmOp::ListProposals {
+                    params: ListProposalsParams {
+                        connection_id: None,
+                        request_id: None,
+                    },
+                    run: check.clone(),
+                },
+            )
+            .await
+            .unwrap_err(),
+            not_in_run()
+        );
+        assert_eq!(
+            handle(
+                &st,
+                LlmOp::Propose {
+                    params: direct_params("c1", "SELECT 1", "SELECT 1"),
+                    client: None,
+                    run: check,
+                },
+            )
+            .await
+            .unwrap_err(),
+            not_in_run()
+        );
+        // Запуск закончился.
+        st.tickets.revoke("a1");
+        assert_eq!(get(None).await.unwrap_err(), run_over());
+        assert_eq!(
+            propose(propose_params(&mine.id, "SELECT 1"))
+                .await
+                .unwrap_err(),
+            run_over()
+        );
+    }
+
+    /// Сверка с `feat/p4b` (M6): «прямая форма» — это `requestId` не задан. С `requestId` своего запуска поля прямой
+    /// формы, совпадающие с запросом (`connectionId` своего подключения, база, тот же SQL), — форма запроса: область
+    /// запуска её пропускает, дальше — обычные проверки (здесь — вид выражения до сервера), а не `not_allowed`.
+    #[tokio::test]
+    async fn background_run_proposes_with_its_request_and_matching_fields() {
+        let (_d, st) = state();
+        let mine = st.llm.requests.create(new_request("c1")).unwrap();
+        st.tickets.issue(RunScope {
+            run_id: "a1".into(),
+            connection_id: Some("c1".into()),
+            request_id: Some(mine.id.clone()),
+        });
+        let propose = |f: &dyn Fn(&mut ProposeParams)| {
+            // UPDATE — не тот вид, что у SELECT запроса: отказ после области и сверки с запросом, до сервера.
+            let mut p = propose_params(&mine.id, "UPDATE orders SET status = 'x'");
+            f(&mut p);
+            handle(
+                &st,
+                LlmOp::Propose {
+                    params: p,
+                    client: None,
+                    run: Some("a1".into()),
+                },
+            )
+        };
+        for f in [
+            &(|p: &mut ProposeParams| p.connection_id = Some("c1".into()))
+                as &dyn Fn(&mut ProposeParams),
+            &|p: &mut ProposeParams| {
+                p.connection_id = Some(" c1 ".into());
+                p.database = Some("shop".into());
+                p.sql = Some("SELECT * FROM orders WHERE status = $1;".into());
+            },
+        ] {
+            let e = propose(f).await.unwrap_err();
+            assert_ne!(e.code, "not_allowed", "{}", e.message);
+            assert_eq!(
+                (e.code.as_str(), e.message.contains("same kind")),
+                ("invalid_sql", true),
+                "{}",
+                e.message
+            );
+        }
+        // Несовпадающее поле — та же подсказка M6, что у обычной сессии (подключение чужое — его отклоняет ещё шлюз,
+        // `check_call`).
+        let e = propose(&|p| p.database = Some("other".into()))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, "invalid_argument", "{}", e.message);
+        assert!(e.message.ends_with(WITH_REQUEST_ONLY), "{}", e.message);
+    }
+
     /// Снимок, который не проходит проверку шлюза (консоль принимает и другое), — предложение в прямой форме.
     #[tokio::test]
     async fn an_unchecked_original_points_to_the_direct_form() {
@@ -1453,6 +1709,7 @@ mod tests {
             comparison: None,
             created_at_ms: 3,
             answered_at_ms: Some(4),
+            run_id: None,
         };
         assert_eq!(
             proposal_for_model(&p),
