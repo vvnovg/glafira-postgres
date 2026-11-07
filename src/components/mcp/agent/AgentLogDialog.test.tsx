@@ -27,7 +27,10 @@ describe("AgentLogDialog", () => {
     const { unmount } = renderWithClient(<AgentLogDialog runId="a1b2c3d" onClose={onClose} />);
     expect(screen.getByRole("dialog", { name: "Журнал запуска a1b2c3d" })).toHaveFocus();
     expect(screen.getByText("Показан конец журнала (до 256 КБ). Модели журнал не передаётся.")).toBeInTheDocument();
-    expect(await screen.findByText((_, el) => el?.tagName === "PRE" && el.textContent === LOG)).toBeInTheDocument();
+    const pre = await screen.findByText((_, el) => el?.tagName === "PRE" && el.textContent === LOG);
+    // Прокручиваемый журнал в порядке Tab — с именем окна и описанием «Показан конец журнала…».
+    expect(pre).toHaveAccessibleName("Журнал запуска a1b2c3d");
+    expect(pre).toHaveAccessibleDescription("Показан конец журнала (до 256 КБ). Модели журнал не передаётся.");
     expect(api.readAgentLog).toHaveBeenCalledWith("a1b2c3d");
     await user.click(screen.getByRole("button", { name: "Показать файл" }));
     expect(api.revealAgentLog).toHaveBeenCalledWith("a1b2c3d");

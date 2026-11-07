@@ -1212,7 +1212,7 @@ export interface AgentStatus {
   policyEnabled: boolean;
   /** Выключатель «Запускать ассистента в фоне». */
   enabled: boolean;
-  /** Путь программы выбранного пресета задан. */
+  /** Агент настроен (`AgentSettings::configured`): путь программы выбранного пресета задан, у Claude Code через Ollama — и модель. */
   configured: boolean;
   preset: AgentPreset;
   /** Идущий запуск (`starting` или `running`). */

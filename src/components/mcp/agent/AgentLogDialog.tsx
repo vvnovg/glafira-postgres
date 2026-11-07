@@ -17,6 +17,7 @@ export function AgentLogDialog({ runId, onClose }: { runId: string; onClose: () 
   const reveal = useMutation({ mutationFn: () => api.revealAgentLog(runId) });
   const rootRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
+  const tailId = useId();
   useEffect(() => {
     // Запоминаем элемент в фокусе до того, как диалог его заберёт.
     const returnTo = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -36,7 +37,9 @@ export function AgentLogDialog({ runId, onClose }: { runId: string; onClose: () 
     <div className="modal-backdrop">
       <div className="modal agent-log-dialog" role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} ref={rootRef} onKeyDown={onKeyDown}>
         <h3 id={titleId}>{t("llmAssist.agent.log.title", { id: runId })}</h3>
-        <p className="muted">{t("llmAssist.agent.log.tail")}</p>
+        <p className="muted" id={tailId}>
+          {t("llmAssist.agent.log.tail")}
+        </p>
         {log.error ? (
           <ErrorBanner error={log.error} onRetry={() => void log.refetch()} />
         ) : log.data === undefined ? (
@@ -44,8 +47,8 @@ export function AgentLogDialog({ runId, onClose }: { runId: string; onClose: () 
         ) : log.data === "" ? (
           <p className="muted">{t("llmAssist.agent.log.empty")}</p>
         ) : (
-          // tabIndex — длинный журнал прокручивается с клавиатуры.
-          <pre className="agent-log" tabIndex={0}>
+          // tabIndex — длинный журнал прокручивается с клавиатуры; имя и описание — заголовок окна и строка о хвосте журнала.
+          <pre className="agent-log" tabIndex={0} aria-labelledby={titleId} aria-describedby={tailId}>
             {log.data}
           </pre>
         )}

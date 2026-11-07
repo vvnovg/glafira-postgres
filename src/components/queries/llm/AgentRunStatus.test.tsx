@@ -118,15 +118,25 @@ describe("AgentRunStatus", () => {
     ["лишние инструменты", { reason: "unsafeTools", warnings: ["unsafe run_shell_command"] }, "агенту доступны не только инструменты Glafira: run_shell_command; запуск остановлен до первого хода"],
     ["нет init", { reason: "unsafeTools", warnings: ["unsafe no-init"] }, "агент не сообщил список своих инструментов; запуск остановлен"],
   ])("ошибка (%s): причина текстом, «Показать журнал», «Повторить»", (_name, patch, reason) => {
-    view({ run: agentRun({ status: "failed", ...patch }) });
+    // Запуск начался (`starting` ставит startedAtMs) — журнал есть.
+    view({ run: agentRun({ status: "failed", startedAtMs: NOW - 10_000, endedAtMs: NOW, ...patch }) });
     expect(screen.getByRole("status")).toHaveTextContent(new RegExp(`^Ошибка фонового ассистента: ${reason.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`));
     expect(buttons()).toEqual(["Показать журнал", "Повторить", "Скопировать строку для чата", "Отменить запрос"]);
+  });
+
+  it.each<[string, Partial<AgentRun>]>([
+    ["политика", { reason: "policy" }],
+    ["MCP-сервер выключили", { reason: "mcpOff" }],
+    ["не настроен", { reason: "notConfigured" }],
+  ])("ошибка до старта процесса (%s): журнала нет — без «Показать журнал»", (_name, patch) => {
+    view({ run: agentRun({ status: "failed", startedAtMs: null, endedAtMs: NOW, ...patch }) });
+    expect(buttons()).toEqual(["Повторить", "Скопировать строку для чата", "Отменить запрос"]);
   });
 
   it("«Показать журнал» открывает журнал запуска, «Закрыть» закрывает", async () => {
     vi.mocked(api.readAgentLog).mockResolvedValue("stderr: model not found");
     const user = userEvent.setup();
-    view({ run: agentRun({ status: "failed", reason: "exit", exitCode: 1 }) });
+    view({ run: agentRun({ status: "failed", reason: "exit", exitCode: 1, startedAtMs: NOW - 10_000, endedAtMs: NOW }) });
     await user.click(screen.getByRole("button", { name: "Показать журнал" }));
     expect(await screen.findByRole("dialog", { name: "Журнал запуска a1b2c3d" })).toBeInTheDocument();
     expect(await screen.findByText("stderr: model not found")).toBeInTheDocument();

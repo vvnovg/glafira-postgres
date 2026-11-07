@@ -26,8 +26,14 @@ export function byQueuedDesc(a: AgentRun, b: AgentRun): number {
   return b.queuedAtMs - a.queuedAtMs || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
 }
 
-/** Список после события: запуск с тем же id заменяется, новый добавляется; порядок — новые первыми. */
+/**
+ * Список после события: запуск с тем же id заменяется, новый добавляется; порядок — новые первыми. Итог запуска
+ * (`done`, `failed`, `cancelled`, `interrupted`, `skipped`) не заменяется неитоговым состоянием того же запуска: событие хода
+ * работы могло прийти позже итога (ревью задачи 6), а запуск назад не возвращается.
+ */
 export function upsertRun(list: AgentRun[], run: AgentRun): AgentRun[] {
+  const prev = list.find((r) => r.id === run.id);
+  if (prev !== undefined && !isActive(prev) && isActive(run)) return list;
   return [run, ...list.filter((r) => r.id !== run.id)].sort(byQueuedDesc);
 }
 

@@ -55,6 +55,20 @@ function phaseText(request: OptimizationRequest, run: AgentRun | null, ahead: nu
   }
 }
 
+/** Предложения запуска, которые панель «Предложения LLM» ещё не показала, у отвеченного запроса — «Ассистент прислал N». */
+function unseenProposals(request: OptimizationRequest, run: AgentRun | null, shown: Record<string, true>): boolean {
+  return run !== null && request.status === "answered" && run.proposalIds.some((id) => !shown[id]);
+}
+
+/**
+ * Строке статуса есть что сказать (её фаза не пуста или есть непоказанные предложения): иначе `AgentRunStatus` ничего не
+ * рисует, а кнопка не отдаёт ей ряд (правило P4b: пустой блок строк ряда не занимает). Фаза пуста ровно тогда, когда запрос
+ * не ждёт ответа, а запуска нет или он кончился (`phaseText`). `shown` — `useShownProposals().shown`.
+ */
+export function agentRunVisible(request: OptimizationRequest, run: AgentRun | null, shown: Record<string, true>): boolean {
+  return request.status === "waiting" || (run !== null && isActive(run)) || unseenProposals(request, run, shown);
+}
+
 /** Ход работы: время с начала запуска, вызовы и последний инструмент; пока процесс запускается — только время. */
 function progressText(run: AgentRun, now: number, t: TFunction): string {
   const elapsed = elapsedText(now - (run.startedAtMs ?? now));
@@ -72,7 +86,8 @@ function progressText(run: AgentRun, now: number, t: TFunction): string {
  * текстом, без разметки), «Показать журнал», «Повторить» / «Запустить фонового ассистента», «Скопировать строку для чата»
  * (видна и во время работы: чат и фон работают с одним запросом), «Отменить запрос». О присланных предложениях строка
  * пишет, пока панель «Предложения LLM» их не показала (`useShownProposals`); дальше у отвеченного запроса — обычное
- * состояние (ничего). После «Повторить» кнопка исчезает (запуск снова в очереди), и фокус переходит на саму строку, а не
+ * состояние (ничего, `agentRunVisible`). «Показать журнал» — у ошибки начавшегося запуска (`startedAtMs`): журнал создаёт
+ * запуск процесса. После «Повторить» кнопка исчезает (запуск снова в очереди), и фокус переходит на саму строку, а не
  * теряется на <body>.
  */
 export function AgentRunStatus({ request, run, ahead, chatLine, busy, onRetry, onCancel }: AgentRunStatusProps) {
@@ -97,10 +112,9 @@ export function AgentRunStatus({ request, run, ahead, chatLine, busy, onRetry, o
   });
 
   const waiting = request.status === "waiting";
+  if (!agentRunVisible(request, run, shown)) return null;
   const phase = phaseText(request, run, ahead, t);
-  const unseen = run !== null && request.status === "answered" && run.proposalIds.some((id) => !shown[id]);
-  const arrived = run !== null && unseen ? t("llmAssist.agent.arrived", { count: run.proposalIds.length }) : "";
-  if (!phase && !arrived) return null;
+  const arrived = run !== null && unseenProposals(request, run, shown) ? t("llmAssist.agent.arrived", { count: run.proposalIds.length }) : "";
   const finished = run !== null && !active && run.status !== "skipped";
   const summary = waiting && run !== null && finished && run.summary ? run.summary : null;
 
@@ -141,7 +155,8 @@ export function AgentRunStatus({ request, run, ahead, chatLine, busy, onRetry, o
               {t("llmAssist.agent.summary")}
             </button>
           )}
-          {run?.status === "failed" && (
+          {/* Журнал создаётся при запуске процесса: у ошибки до старта (политика, MCP выключен…) его нет. */}
+          {run?.status === "failed" && run.startedAtMs != null && (
             <button type="button" className="link" onClick={() => setLogOpen(true)}>
               {t("llmAssist.agent.showLog")}
             </button>

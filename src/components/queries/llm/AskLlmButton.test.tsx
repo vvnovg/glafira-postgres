@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentStatus, AppError, LlmAccess, McpStatus } from "../../../api/types";
+import { useShownProposals } from "../../../state/shownProposals";
 import { emitEvent, listeners, resetEventBus } from "../../../test/events";
 import { connection } from "../../../test/fixtures";
 import { agentRun, optimizationRequest } from "../../../test/llm";
@@ -524,6 +525,25 @@ describe("AskLlmButton: фоновый ассистент", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: LABEL })).toBeEnabled());
     await waitFor(() => expect(api.listAgentRuns).toHaveBeenCalled());
     expect(screen.queryByText("Не удалось прочитать запуски фонового ассистента")).toBeNull();
+  });
+
+  it.each<[string, Parameters<typeof agentRun>[0]]>([
+    ["предложения уже показаны панелью", { status: "done", proposalIds: ["p1"], startedAtMs: 1, endedAtMs: 2 }],
+    ["запуск пропущен: ответил чат", { status: "skipped" }],
+    ["запуск упал после ответа", { status: "failed", reason: "exit", exitCode: 1, startedAtMs: 1, endedAtMs: 2 }],
+  ])("отвеченный запрос, строке статуса нечего сказать (%s) — блок строк не занимает ряд", async (_name, patch) => {
+    useShownProposals.setState({ shown: { p1: true } });
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest({ status: "answered", proposalIds: ["p1"] })]);
+    vi.mocked(api.listAgentRuns).mockResolvedValue([agentRun(patch)]);
+    const { container, client } = renderWithClient(<AskLlmButton {...props} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: LABEL })).toBeEnabled());
+    // Запуски прочитаны: иначе строки статуса не было бы и без правки.
+    await waitFor(() => expect(client.getQueryData(["agentRuns"])).toBeDefined());
+    const notes = container.querySelector(".llm-ask-notes")!;
+    expect(notes).not.toHaveClass("shown");
+    expect(notes).toHaveTextContent("");
+    expect(screen.queryByRole("group", { name: "Фоновый ассистент: запрос r3a9f1c" })).toBeNull();
+    useShownProposals.setState({ shown: {} });
   });
 
   it("отвеченный запрос: «Ассистент прислал N предложений», пока панель их не показала; кнопка снова активна", async () => {

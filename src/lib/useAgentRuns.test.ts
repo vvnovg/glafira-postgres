@@ -46,6 +46,19 @@ describe("запуски: чистые функции", () => {
     expect(upsertRun([a], b).map((r) => r.id)).toEqual(["a2", "a1"]);
   });
 
+  it("запоздалое событие хода работы не возвращает кончившийся запуск в работу; итог сменяется итогом", () => {
+    const run = agentRun({ id: "a1", status: "running", calls: 3 });
+    for (const status of ["done", "failed", "cancelled", "interrupted", "skipped"] as const) {
+      const ended = { ...run, status, calls: 4 };
+      const list = [ended];
+      expect(upsertRun(list, { ...run, status: "running", calls: 3 })).toBe(list);
+      expect(upsertRun(list, { ...run, status: "queued" })).toBe(list);
+    }
+    // Неитоговое сменяет неитоговое, итог — итог (так приходит «отменён» после «прерван» и т. п.).
+    expect(upsertRun([run], { ...run, calls: 5 })[0].calls).toBe(5);
+    expect(upsertRun([{ ...run, status: "done" }], { ...run, status: "failed" })[0].status).toBe("failed");
+  });
+
   it("время работы — «м:сс»", () => {
     expect(elapsedText(83_400)).toBe("1:23");
     expect(elapsedText(5_000)).toBe("0:05");

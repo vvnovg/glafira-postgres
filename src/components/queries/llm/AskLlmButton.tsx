@@ -9,7 +9,8 @@ import { useConnectionProfile } from "../../../lib/useConnectionProfile";
 import { sourceMatches, useOptimizationRequests, waitingRequest } from "../../../lib/useLlmProposals";
 import { useMcpStatus } from "../../../lib/useMcpStatus";
 import { Hint } from "../../common/Hint";
-import { AgentRunStatus } from "./AgentRunStatus";
+import { useShownProposals } from "../../../state/shownProposals";
+import { AgentRunStatus, agentRunVisible } from "./AgentRunStatus";
 
 /** Почему запрос не отправить. Ключи подсказок — литералами (правило словарей и проверка подсказок `i18n:check`). */
 type Off = "policy" | "server" | "otherInstance" | "error" | "access" | "status" | "requests";
@@ -46,7 +47,8 @@ function serverOff(status: McpStatus): Off | null {
 
 /**
  * Режим фона (спец. P4c §8.1): политика разрешает фонового ассистента, выключатель «Запускать ассистента в фоне» включён
- * и путь программы задан. Иначе кнопка работает как в P4b — копирует строку для чата.
+ * и агент настроен (`configured`: путь программы задан, а у Claude Code через Ollama — ещё и модель). Иначе кнопка работает
+ * как в P4b — копирует строку для чата.
  */
 export function backgroundMode(status: McpStatus | undefined): boolean {
   const a = status?.agent;
@@ -121,6 +123,7 @@ export function AskLlmButton({ connectionId, member, database, source, sql, para
   const agent = status?.agent;
   const runsWanted = background || (agent !== undefined && (agent.running != null || agent.queued > 0));
   const { all: runs, state: runsState, refresh: refreshRuns } = useAgentRuns(connectionId, { enabled: runsWanted });
+  const shownProposals = useShownProposals((s) => s.shown);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<AppError | null>(null);
   const [ownSent, setOwnSent] = useState<SentNotice | null>(null);
@@ -149,13 +152,17 @@ export function AskLlmButton({ connectionId, member, database, source, sql, para
   const can = ready && off === null && sql.trim() !== "" && !busy && waiting === null && !justSent;
 
   // Строка статуса запуска. У ждущего запроса — в режиме фона, а без него — пока его запуск ещё идёт (режим выключили во
-  // время запуска); у отвеченного — если у него был запуск (идущий или с непоказанными предложениями — это решает
-  // AgentRunStatus). Пока список запросов не перечитан после создания, прежний запрос источника не показывается.
+  // время запуска); у отвеченного — если у него был запуск и строке есть что сказать (идущий запуск или непоказанные
+  // предложения, `agentRunVisible`): иначе пустой блок строк занял бы ряд. Пока список запросов не перечитан после
+  // создания, прежний запрос источника не показывается.
   const current = justSent ? null : (waiting ?? latestRequest(requests, source, database));
   const runsReady = runsWanted && runsState === "ready";
   const run = current !== null && runsReady ? latestRunFor(runs, current.id) : null;
   const showRun =
-    current !== null && runsReady && (current.status === "waiting" ? background || (run !== null && isActive(run)) : current.status === "answered" && run !== null);
+    current !== null &&
+    runsReady &&
+    (current.status === "waiting" ? background || (run !== null && isActive(run)) : current.status === "answered" && run !== null) &&
+    agentRunVisible(current, run, shownProposals);
 
   const ask = async () => {
     setBusy(true);
