@@ -1,5 +1,5 @@
 import type { TFunction } from "i18next";
-import type { AgentRun, FailReason } from "../../../api/types";
+import type { AgentRun, FailReason, McpAuditEntry, RunStatus } from "../../../api/types";
 import { formatDuration } from "../../../lib/format";
 import { isActive, PRESET_NAMES } from "../../../lib/useAgentRuns";
 
@@ -122,4 +122,32 @@ export function checkResultText(run: AgentRun, t: TFunction): string {
   if (isActive(run)) return t("settings.mcp.agent.checking");
   if (run.status === "done") return t("settings.mcp.agent.checkOk", { agent: agentVersionLabel(run), duration: formatDuration(runSeconds(run)) });
   return t("settings.mcp.agent.checkFailed", { reason: run.status === "failed" ? failReasonText(run, t) : runResultText(run, t) });
+}
+
+const RUN_STATUSES: readonly RunStatus[] = ["queued", "starting", "running", "done", "failed", "cancelled", "interrupted", "skipped"];
+
+/**
+ * Итог записи журнала MCP `agentRunFinished` (спец. P4c §9.2: `status`, `reason`, `exitCode`, `ms`, `proposals`) — тем же
+ * текстом, что в «Запусках»; срок — по `ms`. Статус, которого эта версия не знает, — как в файле.
+ */
+export function finishedRunText(e: McpAuditEntry, t: TFunction): string {
+  const status = RUN_STATUSES.find((s) => s === e.status);
+  if (status === undefined) return e.status ?? "";
+  const run: AgentRun = {
+    id: e.runId ?? "",
+    kind: e.requestId ? "optimize" : "check",
+    requestId: e.requestId ?? null,
+    connectionId: e.connection?.id ?? null,
+    preset: "qwen",
+    status,
+    reason: (e.reason as FailReason | undefined) ?? null,
+    exitCode: e.exitCode ?? null,
+    queuedAtMs: e.ts,
+    startedAtMs: e.ms != null ? 0 : null,
+    endedAtMs: e.ms ?? null,
+    calls: e.calls ?? 0,
+    proposalIds: Array.from({ length: e.proposals ?? 0 }, (_, i) => String(i)),
+    warnings: [],
+  };
+  return runResultText(run, t);
 }

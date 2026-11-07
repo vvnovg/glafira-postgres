@@ -54,12 +54,12 @@ export function elapsedText(ms: number): string {
  * запуски подключения (`runs`; `null` — все). Событие `agent://runs` заменяет запуск в кэше на месте: ход работы приходит
  * до раза в секунду, перечитывать весь список незачем. Событие новее любого ответа, запрошенного до него: идущее чтение
  * отменяется с откатом (как в `useMcpEvents`), а пока список не прочитан, событие его перечитывает. `enabled: false` — ни
- * чтения, ни подписки. Вне Tauri подписка отклоняется — это не ошибка.
+ * чтения, ни подписки. Вне Tauri подписка отклоняется — это не ошибка. `error` — ошибка чтения (для `ErrorBanner`).
  */
 export function useAgentRuns(
   connectionId: string | null,
   { enabled = true }: { enabled?: boolean } = {},
-): { runs: AgentRun[]; all: AgentRun[]; state: RunsState; refresh(): void } {
+): { runs: AgentRun[]; all: AgentRun[]; state: RunsState; error: unknown; refresh(): void } {
   const qc = useQueryClient();
   // retry: false — «не прочиталось» должно показаться сразу (кнопка предлагает «Повторить»).
   const q = useQuery({ queryKey: AGENT_RUNS_KEY, queryFn: async () => (await api.listAgentRuns({})).sort(byQueuedDesc), enabled, retry: false });
@@ -84,5 +84,5 @@ export function useAgentRuns(
   const all = q.data ?? NO_RUNS;
   const runs = useMemo(() => (connectionId === null ? all : all.filter((r) => r.connectionId === connectionId)), [all, connectionId]);
   const state: RunsState = q.data !== undefined ? "ready" : q.isError ? "failed" : "loading";
-  return { runs, all, state, refresh };
+  return { runs, all, state, error: q.error, refresh };
 }

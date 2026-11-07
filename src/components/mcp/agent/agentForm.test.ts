@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { agentSettings } from "../../../test/mcp";
-import { fromDraft, hiddenErrorPreset, isLoopbackUrl, parseDecimal, toDraft, validateDraft } from "./agentForm";
+import { fromDraft, hiddenErrorPreset, isAbsolutePath, isLoopbackUrl, parseDecimal, toDraft, unloadOff, validateDraft } from "./agentForm";
 
 const base = toDraft(agentSettings());
 
@@ -42,12 +42,19 @@ describe("agentForm", () => {
     expect(validateDraft(base)).toEqual({});
   });
 
-  it("путь — пусто или абсолютный (Unix и Windows), без управляющих символов, до 1024; модель — пусто или допустимые символы до 128", () => {
+  it("путь — пусто или абсолютный по правилам ОС Glafira (как Path::is_absolute), без управляющих символов, до 1024", () => {
     expect(validateDraft({ ...base, qwenPath: "qwen" }).qwenPath).toEqual({ key: "settings.mcp.agent.errors.path" });
     expect(validateDraft({ ...base, qwenPath: "/usr/local/bin/qwen" }).qwenPath).toBeUndefined();
     expect(validateDraft({ ...base, qwenPath: "  " }).qwenPath).toBeUndefined();
-    expect(validateDraft({ ...base, claudePath: "C:\\Users\\me\\.local\\bin\\claude.exe" }).claudePath).toBeUndefined();
-    expect(validateDraft({ ...base, claudePath: "\\\\server\\share\\claude.cmd" }).claudePath).toBeUndefined();
+    // macOS и Linux (jsdom — не Windows): путь Windows не абсолютный.
+    expect(validateDraft({ ...base, claudePath: "C:\\Users\\me\\.local\\bin\\claude.exe" }).claudePath).toBeDefined();
+    // Windows: буква диска или UNC; путь с «/» — нет.
+    expect(validateDraft({ ...base, claudePath: "C:\\Users\\me\\.local\\bin\\claude.exe" }, true).claudePath).toBeUndefined();
+    expect(validateDraft({ ...base, claudePath: "\\\\server\\share\\claude.cmd" }, true).claudePath).toBeUndefined();
+    expect(validateDraft({ ...base, qwenPath: "/usr/local/bin/qwen" }, true).qwenPath).toBeDefined();
+    expect(isAbsolutePath("C:/tools/qwen.cmd", true)).toBe(true);
+    expect(isAbsolutePath("C:qwen.cmd", true)).toBe(false);
+    expect(isAbsolutePath("\\\\server\\share\\qwen.cmd", false)).toBe(false);
     expect(validateDraft({ ...base, qwenPath: "/usr/local/bin/qw\nen" }).qwenPath).toBeDefined();
     expect(validateDraft({ ...base, qwenPath: `/${"x".repeat(1024)}` }).qwenPath).toBeDefined();
     expect(validateDraft({ ...base, qwenModel: "qwen3.6-64k:35b-a3b" }).qwenModel).toBeUndefined();
@@ -56,13 +63,29 @@ describe("agentForm", () => {
     expect(validateDraft({ ...base, claudeModel: "x".repeat(129) }).claudeModel).toBeDefined();
   });
 
-  it("адрес Ollama: http(s) с хостом, до 256 символов; локальный — localhost, 127.0.0.1, ::1", () => {
+  it("адрес Ollama — как settings::parse_ollama_url в Rust: только http(s)://хост[:порт], до 256 байт; локальный — localhost, 127.0.0.1, ::1", () => {
     expect(validateDraft({ ...base, ollamaUrl: "127.0.0.1:11434" }).ollamaUrl).toEqual({ key: "settings.mcp.agent.errors.url" });
-    expect(validateDraft({ ...base, ollamaUrl: "localhost:11434" }).ollamaUrl).toBeDefined();
-    expect(validateDraft({ ...base, ollamaUrl: "ftp://127.0.0.1" }).ollamaUrl).toBeDefined();
-    expect(validateDraft({ ...base, ollamaUrl: `http://${"a".repeat(250)}.com` }).ollamaUrl).toBeDefined();
-    expect(validateDraft({ ...base, ollamaUrl: "http://10.0.0.5:11434" }).ollamaUrl).toBeUndefined();
-    expect(validateDraft({ ...base, ollamaUrl: "https://ollama.example.com" }).ollamaUrl).toBeUndefined();
+    // Те же адреса, что в тесте Rust the_ollama_address_is_only_a_scheme_a_host_and_a_port.
+    for (const ok of ["http://127.0.0.1:11434", "http://127.0.0.1:11434/", "HTTP://LocalHost:11434", "http://[::1]:11434", "http://10.0.0.5:11434", "https://ollama.example.com", "https://ollama.example.com:443/", " http://127.0.0.1:11434 "])
+      expect(validateDraft({ ...base, ollamaUrl: ok }).ollamaUrl, ok).toBeUndefined();
+    for (const bad of [
+      "localhost:11434",
+      "ftp://127.0.0.1",
+      "file:///tmp/ollama",
+      "http://127.0.0.1:11434/v1",
+      "http://127.0.0.1:11434/api/",
+      "http://127.0.0.1:11434?x=1",
+      "http://127.0.0.1:11434/?",
+      "http://127.0.0.1:11434#top",
+      "http://user@127.0.0.1:11434",
+      "http://user:secret@127.0.0.1:11434",
+      "http://:secret@127.0.0.1:11434",
+      "http://127.0.0.1:11\n434",
+      "http://127.0.0.1:11434\t/",
+      "http://127.0.0.1:99999",
+      `http://${"a".repeat(250)}.example.com`,
+    ])
+      expect(validateDraft({ ...base, ollamaUrl: bad }).ollamaUrl, JSON.stringify(bad)).toEqual({ key: "settings.mcp.agent.errors.url" });
     expect(isLoopbackUrl("http://127.0.0.1:11434")).toBe(true);
     expect(isLoopbackUrl("http://localhost:11434")).toBe(true);
     expect(isLoopbackUrl("http://[::1]:11434")).toBe(true);
@@ -78,5 +101,13 @@ describe("agentForm", () => {
     const v = { ...base, preset: "claude" as const, viaOllama: true, budget: "abc" };
     expect(validateDraft(v).budget).toBeUndefined();
     expect(fromDraft(v, agentSettings()).claude.budgetUsd).toBe(1);
+  });
+
+  it("«Выгрузить модель»: Glafira управляет моделью только у локальной Ollama, при «держать модель» > 0 и не у Claude Code без Ollama", () => {
+    expect(unloadOff(agentSettings())).toBeNull();
+    expect(unloadOff(agentSettings({ preset: "claude" }))).toBe("noLocalModel");
+    expect(unloadOff(agentSettings({ preset: "claude", claude: { path: "", model: "m", viaOllama: true, budgetUsd: 1 } }))).toBeNull();
+    expect(unloadOff(agentSettings({ keepWarmMin: 0 }))).toBe("keepWarmOff");
+    expect(unloadOff(agentSettings({ ollamaUrl: "http://10.0.0.5:11434" }))).toBe("remote");
   });
 });

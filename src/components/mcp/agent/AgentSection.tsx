@@ -11,7 +11,7 @@ import { ErrorBanner } from "../../common/ErrorBanner";
 import { Hint } from "../../common/Hint";
 import { AgentLogDialog } from "./AgentLogDialog";
 import { AgentRuns } from "./AgentRuns";
-import { type AgentDraft, type FieldError, fromDraft, hiddenErrorPreset, isLoopbackUrl, MIN_VERSION, needsModel, toDraft, validateDraft } from "./agentForm";
+import { type AgentDraft, type FieldError, fromDraft, hiddenErrorPreset, isLoopbackUrl, MIN_VERSION, needsModel, toDraft, unloadOff, validateDraft } from "./agentForm";
 import { checkResultText } from "./agentText";
 
 /** Ключ настроек фонового ассистента в кэше запросов. */
@@ -19,19 +19,37 @@ export const AGENT_SETTINGS_KEY = ["agentSettings"] as const;
 const PRESETS: AgentPreset[] = ["qwen", "claude"];
 
 /** Почему выключатель неактивен (спец. P4c §8.3). Ключи — литералами. */
-type Block = "policy" | "server" | "otherInstance";
+type Block = "policy" | "server" | "serverError" | "otherInstance";
 const BLOCK_KEYS: Record<Block, string> = {
   policy: "settings.mcp.policy",
   server: "settings.mcp.agent.serverOff",
+  serverError: "settings.mcp.agent.serverError",
   otherInstance: "settings.mcp.agent.otherInstance",
 };
 
-/** Политика, затем MCP-сервер: фоновый ассистент работает только в окне, которое обслуживает MCP (спец. P4c §14). */
+/**
+ * Политика, затем MCP-сервер: фоновый ассистент работает только в окне, которое обслуживает MCP (спец. P4c §14). Сервер
+ * включён, но не запустился (`error`), — своя пометка: «включите» тут не поможет.
+ */
 function toggleBlock(s: McpStatus): Block | null {
   if (!s.agent.policyEnabled) return "policy";
-  if (s.server === "otherInstance") return "otherInstance";
-  return s.server === "running" ? null : "server";
+  switch (s.server) {
+    case "running":
+      return null;
+    case "otherInstance":
+      return "otherInstance";
+    case "error":
+      return "serverError";
+    default:
+      return "server";
+  }
 }
+
+/** Пояснение, почему «Выгрузить модель» неактивна (кроме нелокального адреса — о нём пометка у поля). Ключи — литералами. */
+const UNLOAD_OFF_KEYS = {
+  noLocalModel: "settings.mcp.agent.unloadNoLocalModel",
+  keepWarmOff: "settings.mcp.agent.unloadKeepWarmOff",
+} as const;
 
 /** Атрибуты поля с ошибкой: `aria-invalid` и связь с текстом ошибки. */
 function invalid(id: string, e: FieldError | undefined) {
@@ -101,9 +119,13 @@ export function AgentSection({ status }: { status: McpStatus }) {
  * «Сохранить» (проверка — по пределам Rust, `agentForm.ts`); после сохранения статус MCP перечитывается: кнопка
  * «Передать» смотрит на `agent.enabled` и `agent.configured`. Поля не зависят от выключателя и политики: путь и модель можно
  * готовить заранее, а запрет политикой Rust применяет только к включению. «Найти» подставляет путь и показывает версию.
- * Список моделей — по сохранённым «Через Ollama» и адресу. «Проверить» — по сохранённым настройкам: итог приходит событием
- * запуска. «Выгрузить модель» неактивна, пока идёт запуск, и у нелокальной Ollama. Кнопки, занятые своим действием, —
- * `aria-disabled` (фокус остаётся на них), неактивные по состоянию формы — `disabled`.
+ * Путь, указанный руками, при уходе из поля проверяется так же (`detect_agent_cli` с `path` — версия этой программы).
+ * Список моделей — по сохранённым «Через Ollama» и адресу; что значит пустое поле «Модель» (модель по умолчанию или
+ * обязательная модель Ollama), написано текстом под полем. «Проверить» — по сохранённым настройкам: итог приходит событием
+ * запуска. «Выгрузить модель» неактивна, пока идёт запуск, и когда Glafira моделью не управляет (`unloadOff`). Запись
+ * настроек — одна за раз: пока пишется выключатель, «Сохранить» ждёт, и наоборот (иначе запись с прежним снимком могла бы
+ * прийти в Rust второй и затереть первую). Кнопки, занятые своим действием, — `aria-disabled` (фокус остаётся на них),
+ * неактивные по состоянию формы — `disabled`.
  */
 function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings }) {
   const { t } = useTranslation();
@@ -115,8 +137,11 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
   const [savedNote, setSavedNote] = useState(false);
   const modelsId = useId();
   const saveRef = useRef<HTMLButtonElement>(null);
+  // Путь правили руками: при уходе из поля — версия этой программы (`pathNow` — путь в поле сейчас).
+  const pathEdited = useRef(false);
+  const pathNow = useRef("");
   const linesRef = useRef<HTMLDivElement>(null);
-  const { all: runs, refresh: refreshRuns } = useAgentRuns(null);
+  const { all: runs, state: runsState, error: runsError, refresh: refreshRuns } = useAgentRuns(null);
   const errors = validateDraft(draft);
   const hasErrors = Object.keys(errors).length > 0;
   const hidden = hiddenErrorPreset(draft, errors);
@@ -124,6 +149,7 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
   const block = toggleBlock(status);
   const qwen = draft.preset === "qwen";
   const path = qwen ? draft.qwenPath : draft.claudePath;
+  pathNow.current = path;
   const model = qwen ? draft.qwenModel : draft.claudeModel;
   const pathError = qwen ? errors.qwenPath : errors.claudePath;
   const modelError = qwen ? errors.qwenModel : errors.claudeModel;
@@ -145,11 +171,19 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
       setSavedNote(true);
     },
   });
+  // «Найти»: поиск программы, найденный путь подставляется в поле.
   const detect = useMutation({
     mutationFn: (preset: AgentPreset) => api.detectAgentCli(preset),
     onSuccess: (result, preset) => {
       setDetected({ preset, result });
       if (result.path) update(preset === "qwen" ? { qwenPath: result.path } : { claudePath: result.path });
+    },
+  });
+  // Путь, указанный руками: версия этой программы. Ответ, пришедший после новой правки или «Найти», уже не о поле — не нужен.
+  const version = useMutation({
+    mutationFn: ({ preset, path }: { preset: AgentPreset; path: string }) => api.detectAgentCli(preset, path),
+    onSuccess: (result, { preset, path }) => {
+      if (pathNow.current.trim() === path) setDetected({ preset, result });
     },
   });
   const models = useQuery({
@@ -173,11 +207,13 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
   }, [savedNote]);
 
   const det = detected?.preset === draft.preset ? detected.result : null;
-  const modelPlaceholder = models.data?.default
+  // Что значит пустое поле «Модель» — видимым текстом под полем (у плейсхолдера контраст ниже AA).
+  const modelEmptyNote = models.data?.default
     ? t("settings.mcp.agent.modelDefault", { model: models.data.default })
     : !qwen && draft.viaOllama
       ? t("settings.mcp.agent.modelOllama")
       : t("settings.mcp.agent.modelClientDefault");
+  const writing = toggle.isPending || save.isPending;
   const runActive = status.agent.running != null;
   const checkRun = checkId === null ? null : (runs.find((r) => r.id === checkId) ?? (check.data?.id === checkId ? check.data : null));
   const checkBusy = check.isPending || (checkRun !== null && isActive(checkRun));
@@ -200,7 +236,13 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
       : saved.enabled && needs === "path"
         ? t("settings.mcp.agent.notConfigured")
         : "";
-  const unloadBlocked = runActive || !isLoopbackUrl(saved.ollamaUrl);
+  const unloadReason = unloadOff(saved);
+  const checkPath = () => {
+    if (!pathEdited.current) return;
+    pathEdited.current = false;
+    const p = path.trim();
+    if (p !== "" && !pathError) version.mutate({ preset: draft.preset, path: p });
+  };
 
   return (
     <>
@@ -216,10 +258,10 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
               type="checkbox"
               checked={status.agent.policyEnabled && saved.enabled}
               disabled={block !== null}
-              aria-disabled={toggle.isPending || undefined}
+              aria-disabled={writing || undefined}
               aria-describedby={toggleNote ? "agent-enabled-note" : undefined}
               onChange={(e) => {
-                if (!toggle.isPending) toggle.mutate(e.target.checked);
+                if (!writing) toggle.mutate(e.target.checked);
               }}
             />
           </span>
@@ -254,7 +296,8 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
                 <p className="diag-warn">{t("settings.mcp.agent.belowMinimum", { version: det.version, min: MIN_VERSION[draft.preset] })}</p>
               )}
               {det && !det.path && <p className="agent-error">{t("settings.mcp.agent.notFound")}</p>}
-              {det?.error && <p className="muted">{t("settings.mcp.agent.detectError", { error: det.error })}</p>}
+              {/* error бывает только у найденной программы: --version не удался — программа, скорее всего, не запустится. */}
+              {det?.path && det.error && <p className="diag-warn">{t("settings.mcp.agent.versionError", { error: det.error })}</p>}
             </div>
           }
         >
@@ -267,10 +310,12 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
             value={path}
             {...invalid("agent-path", pathError)}
             onChange={(e) => {
-              // Итог «Найти» относится к найденному пути: правка руками его снимает.
+              // Итог «Найти» относится к найденному пути: правка руками его снимает, а уход из поля проверит новый путь.
               setDetected(null);
+              pathEdited.current = true;
               update(qwen ? { qwenPath: e.target.value } : { claudePath: e.target.value });
             }}
+            onBlur={checkPath}
           />
           <button type="button" aria-disabled={detect.isPending || undefined} onClick={() => !detect.isPending && detect.mutate(draft.preset)}>
             {detect.isPending ? t("settings.mcp.agent.finding") : t("settings.mcp.agent.find")}
@@ -282,7 +327,12 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
           label={t("settings.mcp.agent.model")}
           hint="hints.settings.mcp.agent.model"
           error={modelError}
-          below={models.error ? <p className="muted agent-note">{t("settings.mcp.agent.modelsFailed")}</p> : null}
+          below={
+            <>
+              {model.trim() === "" && <p className="muted agent-note">{modelEmptyNote}</p>}
+              {models.error && <p className="muted agent-note">{t("settings.mcp.agent.modelsFailed")}</p>}
+            </>
+          }
         >
           <input
             id="agent-model"
@@ -292,7 +342,6 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
             autoComplete="off"
             list={modelsId}
             value={model}
-            placeholder={modelPlaceholder}
             {...invalid("agent-model", modelError)}
             onChange={(e) => update(qwen ? { qwenModel: e.target.value } : { claudeModel: e.target.value })}
           />
@@ -362,6 +411,7 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
           below={
             <>
               {!errors.ollamaUrl && !isLoopbackUrl(draft.ollamaUrl) && <p className="muted agent-note">{t("settings.mcp.agent.remoteOllama")}</p>}
+              {unloadReason !== null && unloadReason !== "remote" && <p className="muted agent-note">{t(UNLOAD_OFF_KEYS[unloadReason])}</p>}
               <div role="status" className="agent-lines">
                 {unload.isSuccess && <p className="muted">{t("settings.mcp.agent.unloaded")}</p>}
               </div>
@@ -379,14 +429,14 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
             {...invalid("agent-ollama", errors.ollamaUrl)}
             onChange={(e) => update({ ollamaUrl: e.target.value })}
           />
-          <button type="button" disabled={unloadBlocked} aria-disabled={unload.isPending || undefined} onClick={() => !unload.isPending && unload.mutate()}>
+          <button type="button" disabled={runActive || unloadReason !== null} aria-disabled={unload.isPending || undefined} onClick={() => !unload.isPending && unload.mutate()}>
             {t("settings.mcp.agent.unload")}
           </button>
         </Field>
       </div>
 
       <div className="toolbar agent-actions">
-        <button type="button" ref={saveRef} className="primary" disabled={!dirty || hasErrors} aria-disabled={save.isPending || undefined} onClick={() => !save.isPending && save.mutate()}>
+        <button type="button" ref={saveRef} className="primary" disabled={!dirty || hasErrors} aria-disabled={writing || undefined} onClick={() => !writing && save.mutate()}>
           {t("common.save")}
         </button>
         <button type="button" disabled={!canCheck} aria-disabled={checkBusy || undefined} onClick={() => !checkBusy && check.mutate()}>
@@ -409,8 +459,9 @@ function AgentForm({ status, saved }: { status: McpStatus; saved: AgentSettings 
       {toggle.error && <ErrorBanner error={toggle.error} />}
       {save.error && <ErrorBanner error={save.error} />}
       {detect.error && <ErrorBanner error={detect.error} />}
+      {version.error && <ErrorBanner error={version.error} />}
       {check.error && <ErrorBanner error={check.error} />}
-      <AgentRuns runs={runs} onShowLog={setLogRun} />
+      <AgentRuns runs={runs} state={runsState} error={runsError} onRetry={refreshRuns} onShowLog={setLogRun} />
       {logRun && <AgentLogDialog runId={logRun} onClose={() => setLogRun(null)} />}
     </>
   );

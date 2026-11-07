@@ -44,21 +44,35 @@ export function parseDecimal(s: string): number {
   return /^\d+(\.\d+)?$/.test(v) ? Number(v) : NaN;
 }
 
-/** Путь абсолютный: Unix — с «/», Windows — с буквы диска или «\\» (спец. P4c §4.2); какой из них годится, решает Rust. */
-export function isAbsolutePath(p: string): boolean {
-  return p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("\\\\");
+/** Glafira работает в Windows (по User-Agent WebView, как `isMacOS` в `useAppMenu`). */
+export function isWindows(): boolean {
+  return typeof navigator !== "undefined" && navigator.userAgent.includes("Windows");
+}
+
+/**
+ * Путь абсолютный — как `Path::is_absolute` в Rust той ОС, где работает Glafira (спец. P4c §4.2): в Windows — с буквы диска
+ * (`C:\`) или UNC (`\\сервер\…`), в macOS и Linux — с «/».
+ */
+export function isAbsolutePath(p: string, windows = isWindows()): boolean {
+  return windows ? /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("\\\\") : p.startsWith("/");
 }
 
 /** Управляющие символы (Unicode Cc), как `char::is_control` в Rust. */
 const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
 
-/** Адрес Ollama: http(s) с хостом, не длиннее 256 байт; иначе null. */
+/**
+ * Адрес Ollama — как `settings::parse_ollama_url` в Rust: только `http(s)://хост[:порт]` (можно с «/» в конце), без пути,
+ * query, фрагмента, логина и пароля, без управляющих символов, не длиннее 256 байт; иначе null. Rust сохраняет его в виде
+ * `scheme://хост[:порт]` — так он и вернётся в форму после «Сохранить».
+ */
 export function parseOllamaUrl(s: string): URL | null {
   const v = s.trim();
-  if (new TextEncoder().encode(v).length > MAX_URL_BYTES) return null;
+  if (new TextEncoder().encode(v).length > MAX_URL_BYTES || CONTROL.test(v)) return null;
   try {
     const u = new URL(v);
-    return (u.protocol === "http:" || u.protocol === "https:") && u.hostname !== "" ? u : null;
+    // href без лишнего — ровно origin и «/»: путь, «?», «#», логин и пароль его меняют.
+    const bare = u.href === `${u.origin}/`;
+    return (u.protocol === "http:" || u.protocol === "https:") && u.hostname !== "" && bare ? u : null;
   } catch {
     return null;
   }
@@ -111,12 +125,12 @@ export function fromDraft(d: AgentDraft, saved: AgentSettings): AgentSettings {
   };
 }
 
-/** Проверка черновика по правилам Rust; поля обоих агентов (скрытые тоже — `hiddenErrorPreset`). */
-export function validateDraft(d: AgentDraft): DraftErrors {
+/** Проверка черновика по правилам Rust; поля обоих агентов (скрытые тоже — `hiddenErrorPreset`). `windows` — ОС Glafira. */
+export function validateDraft(d: AgentDraft, windows = isWindows()): DraftErrors {
   const e: DraftErrors = {};
   const path = (field: "qwenPath" | "claudePath") => {
     const v = d[field].trim();
-    if (v !== "" && (!isAbsolutePath(v) || CONTROL.test(v) || [...v].length > MAX_PATH_CHARS)) e[field] = { key: "settings.mcp.agent.errors.path" };
+    if (v !== "" && (!isAbsolutePath(v, windows) || CONTROL.test(v) || [...v].length > MAX_PATH_CHARS)) e[field] = { key: "settings.mcp.agent.errors.path" };
   };
   const model = (field: "qwenModel" | "claudeModel") => {
     const v = d[field].trim();
@@ -145,4 +159,17 @@ export function hiddenErrorPreset(d: AgentDraft, e: DraftErrors): AgentPreset | 
  */
 export function needsModel(s: AgentSettings): boolean {
   return s.preset === "claude" && s.claude.viaOllama && s.claude.path.trim() !== "" && s.claude.model.trim() === "";
+}
+
+/** Почему «Выгрузить модель» неактивна по сохранённым настройкам: Glafira моделью не управляет (спец. P4c §6.1). */
+export type UnloadOff = "noLocalModel" | "keepWarmOff" | "remote";
+
+/**
+ * Glafira управляет моделью только у локальной Ollama, при «Держать модель в памяти» больше 0 (0 — Glafira в Ollama не
+ * ходит) и не у Claude Code без Ollama (у него локальной модели нет) — как `ollama::managed` в Rust. Иначе — причина.
+ */
+export function unloadOff(s: AgentSettings): UnloadOff | null {
+  if (s.preset === "claude" && !s.claude.viaOllama) return "noLocalModel";
+  if (s.keepWarmMin === 0) return "keepWarmOff";
+  return isLoopbackUrl(s.ollamaUrl) ? null : "remote";
 }

@@ -84,6 +84,7 @@ describe("AgentSection", () => {
     ["политика", mcpStatus({ agent: agentStatus({ policyEnabled: false, configured: true }) }), "Отключено вашей организацией"],
     ["MCP-сервер выключен", mcpStatus({ server: "stopped", agent: agentStatus({ configured: true }) }), "Включите MCP-сервер выше: фоновый ассистент работает через него"],
     ["MCP-сервер в другом окне", mcpStatus({ server: "otherInstance", agent: agentStatus({ configured: true }) }), "MCP-сервер работает в другом окне Glafira: фоновым ассистентом управляет то окно"],
+    ["MCP-сервер не запустился", mcpStatus({ server: "error", error: "Address already in use", agent: agentStatus({ configured: true }) }), "MCP-сервер не запустился: фоновый ассистент работает через него"],
   ])("выключатель и «Проверить» неактивны: %s", async (_name, status, note) => {
     vi.mocked(api.getAgentSettings).mockResolvedValue(configured);
     renderWithClient(<AgentSection status={status} />);
@@ -114,20 +115,27 @@ describe("AgentSection", () => {
     await user.click(await screen.findByRole("radio", { name: "Claude Code" }));
     await waitFor(() => expect(api.listAgentModels).toHaveBeenLastCalledWith("claude"));
     expect(screen.getByRole("textbox", { name: "Предел расходов на запуск, $" })).toHaveValue("1");
-    expect(screen.getByRole("combobox", { name: "Модель" })).toHaveAttribute("placeholder", "Пусто — модель клиента по умолчанию");
+    // Что значит пустое поле «Модель» — видимым текстом под полем, а не плейсхолдером (контраст AA).
+    expect(screen.getByText("Пусто — модель клиента по умолчанию")).toHaveClass("muted");
+    expect(screen.getByRole("combobox", { name: "Модель" })).not.toHaveAttribute("placeholder");
     await user.click(screen.getByRole("checkbox", { name: "Через Ollama" }));
     expect(screen.queryByRole("textbox", { name: "Предел расходов на запуск, $" })).toBeNull();
-    expect(screen.getByRole("combobox", { name: "Модель" })).toHaveAttribute("placeholder", "Нужна модель Ollama");
+    expect(screen.getByText("Нужна модель Ollama")).toBeInTheDocument();
+    await user.type(screen.getByRole("combobox", { name: "Модель" }), "qwen3.6-64k:35b-a3b");
+    expect(screen.queryByText("Нужна модель Ollama")).toBeNull();
     await user.click(screen.getByRole("radio", { name: "Qwen Code" }));
     expect(screen.queryByRole("checkbox", { name: "Через Ollama" })).toBeNull();
     expect(screen.queryByRole("textbox", { name: "Предел расходов на запуск, $" })).toBeNull();
   });
 
-  it("«Найти» подставляет путь и показывает версию; ниже минимальной — предупреждение; не нашлась — просьба указать путь", async () => {
+  it("«Найти» подставляет путь и показывает версию; ниже минимальной — предупреждение; версию не узнать — пометка; не нашлась — просьба указать путь", async () => {
+    // Ответы — как у Rust (`agent::detect`): `error` бывает только у найденной программы (не удался `--version`), не
+    // нашлась — `Detected::default()`.
     vi.mocked(api.detectAgentCli)
       .mockResolvedValueOnce({ path: "/opt/homebrew/bin/qwen", version: "0.26.5", belowMinimum: false, error: null })
       .mockResolvedValueOnce({ path: "/usr/local/bin/qwen", version: "0.25.1", belowMinimum: true, error: null })
-      .mockResolvedValueOnce({ path: null, version: null, belowMinimum: false, error: "command -v qwen: not found" });
+      .mockResolvedValueOnce({ path: "/Users/me/.npm-global/bin/qwen", version: null, belowMinimum: false, error: "/Users/me/.npm-global/bin/qwen --version did not answer within 10s" })
+      .mockResolvedValueOnce({ path: null, version: null, belowMinimum: false, error: null });
     const user = userEvent.setup();
     renderWithClient(<AgentSection status={mcpStatus()} />);
     const path = await screen.findByRole("textbox", { name: "Программа" });
@@ -138,10 +146,15 @@ describe("AgentSection", () => {
     await user.click(await screen.findByRole("button", { name: "Найти" }));
     expect(await screen.findByText("Версия 0.25.1 ниже минимальной 0.26: флаги запуска могут не сработать")).toBeInTheDocument();
     await user.click(await screen.findByRole("button", { name: "Найти" }));
+    const versionError = await screen.findByText("Версию не узнать: /Users/me/.npm-global/bin/qwen --version did not answer within 10s");
+    expect(versionError).toHaveClass("diag-warn");
+    expect(path).toHaveValue("/Users/me/.npm-global/bin/qwen");
+    expect(screen.queryByText(/Программа не найдена/)).toBeNull();
+    await user.click(await screen.findByRole("button", { name: "Найти" }));
     expect(await screen.findByText("Программа не найдена: укажите путь вручную")).toBeInTheDocument();
-    expect(screen.getByText("Поиск не удался: command -v qwen: not found")).toBeInTheDocument();
+    expect(screen.queryByText(/Версию не узнать/)).toBeNull();
     // Не нашлось — введённый путь остаётся.
-    expect(path).toHaveValue("/usr/local/bin/qwen");
+    expect(path).toHaveValue("/Users/me/.npm-global/bin/qwen");
     // Итог «Найти» — у своего агента: у Claude Code его нет.
     await user.click(screen.getByRole("radio", { name: "Claude Code" }));
     expect(screen.queryByText("Программа не найдена: укажите путь вручную")).toBeNull();
@@ -152,7 +165,7 @@ describe("AgentSection", () => {
     const user = userEvent.setup();
     const { container } = renderWithClient(<AgentSection status={mcpStatus()} />);
     const model = await screen.findByRole("combobox", { name: "Модель" });
-    await waitFor(() => expect(model).toHaveAttribute("placeholder", "По умолчанию: qwen3.6-64k:35b-a3b"));
+    expect(await screen.findByText("По умолчанию: qwen3.6-64k:35b-a3b")).toBeInTheDocument();
     expect(Array.from(container.querySelectorAll("datalist option")).map((o) => o.getAttribute("value"))).toEqual(["qwen3.6-64k:35b-a3b", "qwen3.8:27b"]);
     await user.type(model, "bad model");
     expect(model).toHaveAttribute("aria-invalid", "true");
@@ -206,21 +219,68 @@ describe("AgentSection", () => {
   });
 
   it("отказ Rust при сохранении — ошибка, черновик остаётся", async () => {
-    vi.mocked(api.setAgentSettings).mockRejectedValue({
-      code: "INVALID_INPUT",
-      key: "errors.agent.pathNotAbsolute",
-      params: { path: "C:\\qwen.cmd" },
-      message: "The program path must be absolute: C:\\qwen.cmd",
-      retryable: false,
-    });
+    vi.mocked(api.setAgentSettings).mockRejectedValue({ code: "INTERNAL", message: "settings.json: disk full", retryable: false });
     const user = userEvent.setup();
     renderWithClient(<AgentSection status={mcpStatus()} />);
     const path = await screen.findByRole("textbox", { name: "Программа" });
-    await user.type(path, "C:\\qwen.cmd");
+    await user.type(path, "/opt/homebrew/bin/qwen");
     await user.click(screen.getByRole("button", { name: "Сохранить" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("C:\\qwen.cmd");
-    expect(path).toHaveValue("C:\\qwen.cmd");
+    expect(await screen.findByRole("alert")).toHaveTextContent("settings.json: disk full");
+    expect(path).toHaveValue("/opt/homebrew/bin/qwen");
     expect(screen.getByRole("button", { name: "Сохранить" })).toBeEnabled();
+  });
+
+  it("путь Windows в macOS и Linux — ошибка у поля, как у Rust (Path::is_absolute)", async () => {
+    const user = userEvent.setup();
+    renderWithClient(<AgentSection status={mcpStatus()} />);
+    await user.type(await screen.findByRole("textbox", { name: "Программа" }), "C:\\Tools\\qwen.cmd");
+    expect(screen.getByText("Нужен абсолютный путь")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Сохранить" })).toBeDisabled();
+  });
+
+  it("путь, указанный руками, при уходе из поля — версия этой программы (detect_agent_cli с path); путь не меняется", async () => {
+    vi.mocked(api.detectAgentCli).mockResolvedValue({ path: "/usr/local/bin/qwen", version: "0.25.1", belowMinimum: true, error: null });
+    const user = userEvent.setup();
+    renderWithClient(<AgentSection status={mcpStatus()} />);
+    const path = await screen.findByRole("textbox", { name: "Программа" });
+    // Уход из поля без правки — без проверки.
+    await user.click(path);
+    await user.tab();
+    expect(api.detectAgentCli).not.toHaveBeenCalled();
+    await user.type(path, "/usr/local/bin/qwen");
+    // Пока набирается — не проверяется.
+    expect(api.detectAgentCli).not.toHaveBeenCalled();
+    await user.tab();
+    expect(api.detectAgentCli).toHaveBeenCalledWith("qwen", "/usr/local/bin/qwen");
+    expect(await screen.findByText("Версия 0.25.1 ниже минимальной 0.26: флаги запуска могут не сработать")).toBeInTheDocument();
+    expect(path).toHaveValue("/usr/local/bin/qwen");
+    // Неверный путь не проверяется: ошибка у поля.
+    await user.clear(path);
+    await user.type(path, "qwen");
+    await user.tab();
+    expect(api.detectAgentCli).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/Версия 0.25.1/)).toBeNull();
+  });
+
+  it("запись настроек — одна за раз: пока пишется выключатель, «Сохранить» не отправляет прежний снимок", async () => {
+    let finish: (s: AgentSettings) => void = () => {};
+    vi.mocked(api.setAgentSettings)
+      .mockImplementationOnce(() => new Promise<AgentSettings>((r) => (finish = r)))
+      .mockImplementation(async (s) => s);
+    const user = userEvent.setup();
+    renderWithClient(<AgentSection status={mcpStatus()} />);
+    await user.type(await screen.findByRole("textbox", { name: "Программа" }), "/opt/homebrew/bin/qwen");
+    await user.click(screen.getByRole("checkbox", { name: TOGGLE }));
+    const save = screen.getByRole("button", { name: "Сохранить" });
+    expect(save).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByRole("checkbox", { name: TOGGLE })).toHaveAttribute("aria-disabled", "true");
+    await user.click(save);
+    expect(api.setAgentSettings).toHaveBeenCalledTimes(1);
+    finish(agentSettings({ enabled: true }));
+    await waitFor(() => expect(save).not.toHaveAttribute("aria-disabled"));
+    await user.click(save);
+    // «Сохранить» берёт выключатель из сохранённых настроек — уже включённый.
+    expect(api.setAgentSettings).toHaveBeenLastCalledWith(agentSettings({ enabled: true, qwen: { path: "/opt/homebrew/bin/qwen", model: "" } }));
   });
 
   it("ошибка в полях другого агента названа у «Сохранить»", async () => {
@@ -247,6 +307,16 @@ describe("AgentSection", () => {
     await user.clear(url);
     await user.type(url, "http://10.0.0.5:11434");
     expect(screen.getByText("Адрес не локальный: Glafira не управляет моделью (только localhost, 127.0.0.1, ::1)")).toBeInTheDocument();
+  });
+
+  it.each<[string, AgentSettings, string]>([
+    ["Claude Code без Ollama", agentSettings({ preset: "claude" }), "У Claude Code без Ollama локальной модели нет: выгружать нечего"],
+    ["«держать модель» = 0", agentSettings({ keepWarmMin: 0 }), "«Держать модель в памяти» — 0: Glafira моделью не управляет"],
+  ])("Glafira моделью не управляет (%s) — «Выгрузить модель» неактивна с пояснением", async (_name, saved, note) => {
+    vi.mocked(api.getAgentSettings).mockResolvedValue(saved);
+    renderWithClient(<AgentSection status={mcpStatus()} />);
+    expect(await screen.findByRole("button", { name: "Выгрузить модель" })).toBeDisabled();
+    expect(screen.getByText(note)).toBeInTheDocument();
   });
 
   it("сохранённый адрес Ollama не локальный — «Выгрузить модель» неактивна", async () => {
@@ -323,6 +393,16 @@ describe("AgentSection", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Укажите модель и сохраните, чтобы проверить")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Проверить" })).toBeDisabled();
+  });
+
+  it("запуски читаются — «Загрузка…», не прочитались — ошибка с «Повторить», а не «Запусков пока нет»", async () => {
+    vi.mocked(api.listAgentRuns).mockRejectedValueOnce({ code: "INTERNAL", message: "agent-runs.json: broken", retryable: false }).mockResolvedValue([]);
+    const user = userEvent.setup();
+    renderWithClient(<AgentSection status={mcpStatus()} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("agent-runs.json: broken");
+    expect(screen.queryByText("Запусков пока нет")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Повторить" }));
+    expect(await screen.findByText("Запусков пока нет")).toBeInTheDocument();
   });
 
   it("настройки не прочитались — ошибка с «Повторить»", async () => {

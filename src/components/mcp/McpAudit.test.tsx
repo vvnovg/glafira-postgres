@@ -80,7 +80,10 @@ describe("McpAudit", () => {
   it("записи фонового ассистента: начало и конец запуска — подписями, а не именами из файла", async () => {
     vi.mocked(api.getMcpAudit).mockResolvedValue([
       { ts: 1_700_000_000_500, event: "agentRunStarted", connection: { id: "c1", name: "perf" } },
-      { ts: 1_700_000_000_600, event: "agentRunFinished", connection: { id: "c1", name: "perf" }, calls: 7, ms: 83_000 },
+      { ts: 1_700_000_000_600, event: "agentRunFinished", runId: "a1", requestId: "r1", connection: { id: "c1", name: "perf" }, status: "done", calls: 7, proposals: 2, ms: 83_000 },
+      { ts: 1_700_000_000_700, event: "agentRunFinished", runId: "a2", requestId: "r2", connection: { id: "c1", name: "perf" }, status: "failed", reason: "timeout", calls: 3, proposals: 0, ms: 15 * 60_000 + 3_000 },
+      { ts: 1_700_000_000_800, event: "agentRunFinished", runId: "a3", requestId: null, connection: null, status: "done", calls: 1, proposals: 0, ms: 23_000 },
+      { ts: 1_700_000_000_900, event: "agentRunFinished", runId: "a4", requestId: "r4", connection: null, status: "exploded", calls: 0, proposals: 0, ms: 0 },
     ]);
     renderWithClient(<McpAudit status={mcpStatus()} />);
     const table = await screen.findByRole("table", { name: "Журнал" });
@@ -88,6 +91,12 @@ describe("McpAudit", () => {
     expect(rows[0]).toHaveTextContent("Фоновый запуск начат");
     expect(rows[0]).toHaveTextContent("perf");
     expect(rows[1]).toHaveTextContent("Фоновый запуск завершён");
+    // Итог запуска — тем же текстом, что в «Запусках»; статус, которого версия не знает, — как в файле.
+    expect(rows[1]).toHaveTextContent("предложений: 2");
+    expect(rows[2]).toHaveTextContent("ошибка: превышен срок 15 мин");
+    expect(rows[3]).toHaveTextContent("проверка пройдена");
+    expect(rows[4]).toHaveTextContent("exploded");
+    expect(rows[0]).not.toHaveTextContent("успешно");
     expect(table).not.toHaveTextContent("agentRunStarted");
     expect(table).not.toHaveTextContent("agentRunFinished");
   });

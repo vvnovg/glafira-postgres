@@ -1,4 +1,4 @@
-import { screen, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { connection } from "../../../test/fixtures";
@@ -78,6 +78,45 @@ describe("AgentRuns", () => {
     renderWithClient(<AgentRuns runs={[agentRun({ id: "a0000a1", status: "running", startedAtMs: 1 })]} onShowLog={onShowLog} />);
     await user.click(screen.getByRole("button", { name: "Остановить запуск a0000a1" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Background run a0000a1 not found");
+  });
+
+  it("«Остановить» во время записи — aria-disabled (фокус остаётся); запуск остановлен — фокус на его журнал или на заголовок", async () => {
+    let finish: () => void = () => {};
+    vi.mocked(api.stopAgentRun).mockImplementation(() => new Promise((r) => (finish = () => r(agentRun({ id: "a0000a1", status: "cancelled" })))));
+    const user = userEvent.setup();
+    const running = agentRun({ id: "a0000a1", status: "running", startedAtMs: 1 });
+    const queued = agentRun({ id: "a0000a2", status: "queued", queuedAtMs: 0 });
+    const { rerender } = renderWithClient(<AgentRuns runs={[running, queued]} onShowLog={onShowLog} />);
+    const stop = screen.getByRole("button", { name: "Остановить запуск a0000a1" });
+    await user.click(stop);
+    expect(stop).toHaveAttribute("aria-disabled", "true");
+    expect(stop).toHaveFocus();
+    await user.click(stop);
+    expect(api.stopAgentRun).toHaveBeenCalledTimes(1);
+    finish();
+    await waitFor(() => expect(stop).not.toHaveAttribute("aria-disabled"));
+    // Итог `cancelled` пришёл событием: кнопки нет, фокус — на «Показать журнал» того же запуска.
+    rerender(<AgentRuns runs={[{ ...running, status: "cancelled", endedAtMs: 2 }, queued]} onShowLog={onShowLog} />);
+    expect(screen.getByRole("button", { name: "Показать журнал запуска a0000a1" })).toHaveFocus();
+    // У ждущего журнала нет — фокус на заголовок списка.
+    vi.mocked(api.stopAgentRun).mockResolvedValue(agentRun({ id: "a0000a2", status: "cancelled" }));
+    await user.click(screen.getByRole("button", { name: "Остановить запуск a0000a2" }));
+    rerender(<AgentRuns runs={[{ ...running, status: "cancelled", endedAtMs: 2 }, { ...queued, status: "cancelled" }]} onShowLog={onShowLog} />);
+    expect(screen.getByRole("heading", { level: 5, name: "Запуски" })).toHaveFocus();
+  });
+
+  it("список читается — «Загрузка…»; не прочитался — ошибка с «Повторить»; не «Запусков пока нет»", async () => {
+    const onRetry = vi.fn();
+    const user = userEvent.setup();
+    const first = renderWithClient(<AgentRuns runs={[]} state="loading" onShowLog={onShowLog} />);
+    expect(screen.getByText("Загрузка…")).toBeInTheDocument();
+    expect(screen.queryByText("Запусков пока нет")).toBeNull();
+    first.unmount();
+    renderWithClient(<AgentRuns runs={[]} state="failed" error={{ code: "INTERNAL", message: "boom", retryable: false }} onRetry={onRetry} onShowLog={onShowLog} />);
+    expect(screen.getByRole("alert")).toHaveTextContent("boom");
+    expect(screen.queryByText("Запусков пока нет")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Повторить" }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
   });
 
   it(`показывает не больше ${RUNS_SHOWN} последних; без запусков — пояснение`, () => {

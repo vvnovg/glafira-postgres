@@ -1,11 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../../../api/client";
 import type { AgentRun } from "../../../api/types";
 import { currentLocale } from "../../../i18n";
 import { formatDuration, formatTimestamp } from "../../../lib/format";
-import { AGENT_RUNS_KEY, isActive } from "../../../lib/useAgentRuns";
+import { AGENT_RUNS_KEY, isActive, type RunsState } from "../../../lib/useAgentRuns";
 import { ErrorBanner } from "../../common/ErrorBanner";
 import { agentLabel, runResultText, runSeconds } from "./agentText";
 
@@ -22,9 +22,23 @@ function cost(usd: number): string {
  * время постановки в очередь, подключение, запрос (у «Проверить» — «Проверка»), агент и модель, итог, длительность, вызовы,
  * стоимость (если CLI её сообщил). «Ответ ассистента» раскрывает итоговый текст простым текстом, «Показать журнал» — у
  * начавшихся запусков, «Остановить» — у ждущего и идущего (запрос остаётся ждущим; итог `cancelled` приходит событием).
- * Подписи кнопок с id запуска — для скринридера.
+ * Подписи кнопок с id запуска — для скринридера. Пока список читается — «Загрузка…», не прочитался — ошибка с «Повторить»
+ * (`state`, `error`, `onRetry` — из `useAgentRuns`), а не «Запусков пока нет». «Остановить» во время записи — `aria-disabled`;
+ * когда кнопка исчезает (запуск остановлен), фокус переходит на «Показать журнал» того же запуска или на заголовок списка.
  */
-export function AgentRuns({ runs, onShowLog }: { runs: AgentRun[]; onShowLog: (runId: string) => void }) {
+export function AgentRuns({
+  runs,
+  state = "ready",
+  error,
+  onRetry,
+  onShowLog,
+}: {
+  runs: AgentRun[];
+  state?: RunsState;
+  error?: unknown;
+  onRetry?: () => void;
+  onShowLog: (runId: string) => void;
+}) {
   const { t } = useTranslation();
   const qc = useQueryClient();
   const connections = useQuery({ queryKey: ["connections"], queryFn: () => api.listConnections() });
@@ -33,17 +47,41 @@ export function AgentRuns({ runs, onShowLog }: { runs: AgentRun[]; onShowLog: (r
     onSuccess: () => void qc.invalidateQueries({ queryKey: AGENT_RUNS_KEY, exact: true }),
   });
   const [open, setOpen] = useState<string | null>(null);
+  const tableRef = useRef<HTMLTableElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  // «Остановить» нажата: когда её кнопка исчезнет и фокус окажется на <body>, он перейдёт на журнал запуска или заголовок.
+  const refocus = useRef<string | null>(null);
+  useEffect(() => {
+    const id = refocus.current;
+    if (id === null) return;
+    const a = document.activeElement;
+    if (a === null || a === document.body) {
+      refocus.current = null;
+      (tableRef.current?.querySelector<HTMLElement>(`[data-run-log="${id}"]`) ?? headingRef.current)?.focus();
+    } else if (!tableRef.current?.contains(a)) refocus.current = null;
+  });
   const shown = runs.slice(0, RUNS_SHOWN);
   // Подключения уже нет (или список не прочитан) — показываем его id.
   const connectionName = (id: string | null | undefined) => (id ? (connections.data?.find((c) => c.id === id)?.name ?? id) : "—");
+  const stopRun = (id: string) => {
+    if (stop.isPending) return;
+    refocus.current = id;
+    stop.mutate(id);
+  };
   return (
     <>
-      <h5>{t("settings.mcp.agent.runs.title")}</h5>
-      {shown.length === 0 ? (
+      <h5 ref={headingRef} tabIndex={-1}>
+        {t("settings.mcp.agent.runs.title")}
+      </h5>
+      {state === "loading" ? (
+        <p className="muted">{t("common.loading")}</p>
+      ) : state === "failed" ? (
+        <ErrorBanner error={error} onRetry={onRetry} />
+      ) : shown.length === 0 ? (
         <p className="muted">{t("settings.mcp.agent.runs.none")}</p>
       ) : (
         <div className="table-scroll">
-          <table className="agent-runs" aria-label={t("settings.mcp.agent.runs.title")}>
+          <table className="agent-runs" aria-label={t("settings.mcp.agent.runs.title")} ref={tableRef}>
             <thead>
               <tr>
                 <th>{t("settings.mcp.agent.runs.colTime")}</th>
@@ -94,7 +132,13 @@ export function AgentRuns({ runs, onShowLog }: { runs: AgentRun[]; onShowLog: (r
                             </button>
                           )}
                           {run.startedAtMs != null && (
-                            <button type="button" className="link" aria-label={t("settings.mcp.agent.runs.logAria", { id: run.id })} onClick={() => onShowLog(run.id)}>
+                            <button
+                              type="button"
+                              className="link"
+                              data-run-log={run.id}
+                              aria-label={t("settings.mcp.agent.runs.logAria", { id: run.id })}
+                              onClick={() => onShowLog(run.id)}
+                            >
                               {t("llmAssist.agent.showLog")}
                             </button>
                           )}
@@ -103,8 +147,8 @@ export function AgentRuns({ runs, onShowLog }: { runs: AgentRun[]; onShowLog: (r
                               type="button"
                               className="link"
                               aria-label={t("settings.mcp.agent.runs.stopAria", { id: run.id })}
-                              disabled={stop.isPending}
-                              onClick={() => stop.mutate(run.id)}
+                              aria-disabled={stop.isPending || undefined}
+                              onClick={() => stopRun(run.id)}
                             >
                               {t("settings.mcp.agent.runs.stop")}
                             </button>

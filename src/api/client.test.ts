@@ -137,6 +137,9 @@ describe("api client", () => {
     // «Найти» ищет программу: необязательный `path` команды (версия одной программы) не передаётся — Rust получает None.
     await api.detectAgentCli("claude");
     expect(invoke).toHaveBeenLastCalledWith("detect_agent_cli", { preset: "claude" });
+    // Путь, указанный руками: версия этой программы.
+    await api.detectAgentCli("qwen", "/usr/local/bin/qwen");
+    expect(invoke).toHaveBeenLastCalledWith("detect_agent_cli", { preset: "qwen", path: "/usr/local/bin/qwen" });
     await api.listAgentModels("qwen");
     expect(invoke).toHaveBeenLastCalledWith("list_agent_models", { preset: "qwen" });
     await api.checkAgent();

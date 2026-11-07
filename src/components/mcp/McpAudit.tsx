@@ -7,6 +7,7 @@ import { formatCount, formatTimestamp } from "../../lib/format";
 import { MCP_AUDIT_KEY } from "../../lib/useMcpStatus";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { isConsoleCall, openBlocked } from "./auditOpen";
+import { finishedRunText } from "./agent/agentText";
 
 /** Сколько последних записей журнала показывает раздел (спец. P4 §11). */
 export const AUDIT_LIMIT = 200;
@@ -43,8 +44,12 @@ function whatText(e: McpAuditEntry, t: TFunction): string {
   }
 }
 
-/** Итог вызова: «успешно» или код ошибки (`not_allowed`, `forbidden_function`…); у событий — пусто. */
+/**
+ * Итог вызова: «успешно» или код ошибки (`not_allowed`, `forbidden_function`…); у конца фонового запуска — его итог, как в
+ * «Запусках» (спец. P4c §9.2); у прочих событий — пусто.
+ */
 function resultText(e: McpAuditEntry, t: TFunction): string {
+  if (e.event === "agentRunFinished") return finishedRunText(e, t);
   if (e.outcome === "ok") return t("settings.mcp.audit.ok");
   return e.outcome === "error" ? (e.code ?? "") : "";
 }

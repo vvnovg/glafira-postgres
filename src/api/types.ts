@@ -1252,7 +1252,10 @@ export interface AgentDetected {
   version?: string | null;
   /** Версия ниже минимальной пресета (`agent::presets::min_version`). */
   belowMinimum: boolean;
-  /** Почему не нашлась или версию не узнать (технический английский текст). */
+  /**
+   * Почему версию не узнать (технический английский текст): бывает только у найденной или заданной программы, когда
+   * `<путь> --version` не запустился, не ответил за 10 с или ответил ошибкой. Не нашлась — `path` пуст, а `error` нет.
+   */
   error?: string | null;
 }
 /** Модели для поля «Модель» (`agent::models::AgentModels`): `source` — откуда список (`none` — только свободный ввод). */
@@ -1975,6 +1978,14 @@ export interface McpAuditEntry {
   rows?: number;
   calls?: number;
   endpoint?: string;
+  /** Записи фонового ассистента `agentRunStarted` / `agentRunFinished` (спец. P4c §9.2). */
+  runId?: string;
+  requestId?: string | null;
+  /** Итог запуска (`agentRunFinished`): статус и причина — строки `RunStatus` / `FailReason`. */
+  status?: string;
+  reason?: string;
+  exitCode?: number;
+  proposals?: number;
 }
 
 /** Фрагменты конфигураций MCP-клиентов (`get_mcp_client_configs`): путь — к установленному приложению (AppImage — `$APPIMAGE`). */

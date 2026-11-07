@@ -221,8 +221,11 @@ export const api = {
   getAgentSettings: () => call<AgentSettings>("get_agent_settings"),
   /** Сохраняет настройки целиком; ответ — сохранённые (проверенные Rust) настройки. Политика запрещает только включение. */
   setAgentSettings: (settings: AgentSettings) => call<AgentSettings>("set_agent_settings", { settings }),
-  /** «Найти»: путь и версия программы пресета (логин-оболочка, PATH, известные места). */
-  detectAgentCli: (preset: AgentPreset) => call<AgentDetected>("detect_agent_cli", { preset }),
+  /**
+   * «Найти»: путь и версия программы пресета (логин-оболочка, PATH, известные места). С `path` — только версия этой программы
+   * (путь, указанный руками).
+   */
+  detectAgentCli: (preset: AgentPreset, path?: string) => call<AgentDetected>("detect_agent_cli", path === undefined ? { preset } : { preset, path }),
   /** Модели для поля «Модель»; список зависит от сохранённых «Через Ollama» и адреса Ollama. */
   listAgentModels: (preset: AgentPreset) => call<AgentModels>("list_agent_models", { preset }),
   /** «Проверить»: короткий запуск без подключения; ответ — запуск с kind check, итог приходит событием запусков. */
