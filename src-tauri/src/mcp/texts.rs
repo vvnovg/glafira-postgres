@@ -20,13 +20,18 @@ static EN: LazyLock<Value> = LazyLock::new(|| {
         .expect("src/locales/en.json is valid JSON")
 });
 
-/// Строка словаря по пути через точку (`findings.longQuery.title`); нет — `None`.
-fn en(path: &str) -> Option<&'static str> {
-    let mut v: &'static Value = &EN;
+/// Строка словаря `dict` по пути через точку (`findings.longQuery.title`); нет — `None`.
+pub(crate) fn lookup(dict: &'static Value, path: &str) -> Option<&'static str> {
+    let mut v = dict;
     for part in path.split('.') {
         v = v.get(part)?;
     }
     v.as_str()
+}
+
+/// Строка словаря en по пути через точку; нет — `None`.
+pub(crate) fn en(path: &str) -> Option<&'static str> {
+    lookup(&EN, path)
 }
 
 /// Число без лишних нулей: не больше `digits` знаков после точки.

@@ -17,6 +17,7 @@ use crate::params::{
     ProposeParams, QueryDetailsParams, RunDiagnosticParams, RunSelectParams, SettingsParams,
     TableDetailsParams, TopQueriesParams,
 };
+use crate::server::glossary::UiGlossary;
 
 /// Подсказка `more` после подсказки `first` (поле `hint` отчёта): у каждой части — точка в конце, если её нет, между
 /// ними — пробел, чтобы модель видела границу предложений. Тексты подсказок пишутся без точки; одна подсказка идёт как
@@ -65,6 +66,11 @@ pub trait PgBackend: Gate {
                 "Optimization requests and proposals are not supported by this Glafira build",
             ))
         })
+    }
+    /// Подписи интерфейса на языке пользователя (смоук 2026-11-07, R8) — для `instructions` сессии и текстов prompts.
+    /// Крейт спрашивает их в начале сессии и при каждом `prompts/get`. `None` — интерфейс английский, тексты как есть.
+    fn ui_glossary(&self) -> Option<UiGlossary> {
+        None
     }
 }
 

@@ -844,11 +844,13 @@ mod tests {
     /// - девять инструментов, подключение запуска, `runId` в статусе;
     /// - `propose_query_rewrite` с `requestId` запуска и `connectionId` его подключения — форма запроса (M6);
     /// - «Отозвать» клиента её не закрывает;
-    /// - после конца запуска билет не действует.
+    /// - после конца запуска билет не действует;
+    /// - при русском интерфейсе `instructions` запуска — с подписями интерфейса (смоук 2026-11-07, R8).
     #[tokio::test]
     async fn background_run_session_goes_through_the_real_server() {
         let dir = tempfile::tempdir().unwrap();
         let (st, rec) = state(dir.path(), true);
+        st.settings.set_language(Some("ru")).unwrap();
         for id in ["c1", "c2"] {
             let mut p = sample_profile(id);
             p.llm_access = LlmAccess::Diagnostics;
@@ -908,9 +910,17 @@ mod tests {
 
         assert_eq!(client.list_all_tools().await.unwrap().len(), 9);
         assert!(client.list_all_prompts().await.unwrap().is_empty());
+        let instructions = client.peer_info().unwrap().instructions.clone().unwrap();
         assert_eq!(
-            client.peer_info().unwrap().instructions.as_deref(),
-            Some(glafira_pg_mcp::server::INSTRUCTIONS_RUN)
+            instructions,
+            glafira_pg_mcp::server::glossary::with_glossary(
+                glafira_pg_mcp::server::INSTRUCTIONS_RUN.to_string(),
+                crate::mcp::glossary::glossary("ru").as_ref()
+            )
+        );
+        assert!(
+            instructions.contains("“Send to LLM assistant” — «Передать LLM-ассистенту»"),
+            "{instructions}"
         );
         for (tool, args) in [
             ("get_health_summary", json!({"connectionId": "c1"})),

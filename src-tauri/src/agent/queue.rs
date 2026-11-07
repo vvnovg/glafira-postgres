@@ -1145,12 +1145,7 @@ impl AgentQueue {
 
     /// Язык итога агента — язык интерфейса Glafira (политика → выбор → ОС).
     fn ui_language(&self) -> String {
-        crate::settings::resolve(
-            crate::settings::system_locale().as_deref(),
-            self.d.settings.language().as_deref(),
-            self.d.policy.status.language.as_deref(),
-        )
-        .0
+        crate::settings::ui_language(&self.d.settings, &self.d.policy.status)
     }
 
     fn emit(&self, r: &AgentRun) {

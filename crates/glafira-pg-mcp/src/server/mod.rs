@@ -3,7 +3,8 @@
 //! Kafka; 14 инструментов P4a — в `tools.rs`, `run_select` P4b — в `select_tool.rs`, инструменты предложений P4b — в
 //! `proposal_tools.rs`. Ядро строит `PgServer` на каждую сессию через [`PgFactory`]. Сессия фонового запуска (P4c
 //! §5.2–§5.3) получает [`INSTRUCTIONS_RUN`], видит [`RUN_TOOL_NAMES`] (решает `Gate` приложения) и передаёт приложению
-//! id запуска в операциях.
+//! id запуска в операциях. При интерфейсе не на английском `instructions` и тексты prompts получают абзац с подписями
+//! интерфейса (`glossary`, смоук 2026-11-07, R8).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,6 +48,7 @@ macro_rules! screens_map {
     };
 }
 
+pub mod glossary;
 pub mod prompts;
 mod proposal_tools;
 pub mod select_tool;
@@ -399,11 +401,16 @@ impl ServerHandler for PgServer {
                 .build(),
         );
         c.server_info = Implementation::new(&o.name, &o.version);
-        // Сессия фонового запуска (P4c §5.3) — свои instructions: один запрос, узкий набор инструментов.
-        c.instructions = Some(match self.ctx.run() {
+        // Сессия фонового запуска (P4c §5.3) — свои instructions: один запрос, узкий набор инструментов. Интерфейс не на
+        // английском — с подписями интерфейса (R8) по языку на момент начала сессии.
+        let instructions = match self.ctx.run() {
             Some(_) => INSTRUCTIONS_RUN.to_string(),
             None => o.instructions.clone(),
-        });
+        };
+        c.instructions = Some(glossary::with_glossary(
+            instructions,
+            self.backend.ui_glossary().as_ref(),
+        ));
         c
     }
 

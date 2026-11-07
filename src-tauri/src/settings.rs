@@ -302,6 +302,17 @@ pub fn system_locale() -> Option<String> {
     sys_locale::get_locale()
 }
 
+/// Действующий язык интерфейса сейчас (политика → выбор → ОС): на нём фоновый ассистент пишет итог, по нему тексты для
+/// модели получают подписи интерфейса (смоук 2026-11-07, R8).
+pub fn ui_language(settings: &SettingsStore, policy: &crate::policy::PolicyStatus) -> String {
+    resolve(
+        system_locale().as_deref(),
+        settings.language().as_deref(),
+        policy.language.as_deref(),
+    )
+    .0
+}
+
 pub fn language_settings(
     system: Option<String>,
     chosen: Option<String>,

@@ -10,6 +10,7 @@ use glafira_mcp_core::error::{BoxFuture, ToolError};
 use glafira_mcp_core::gate::{Gate, SessionAccess, SessionView};
 use glafira_pg_mcp::model::{LlmOp, ObserveCtx, PgAnswer, PgBackend, PgObserve, PgRead, SelectOp};
 use glafira_pg_mcp::server::RUN_TOOL_NAMES;
+use glafira_pg_mcp::server::glossary::UiGlossary;
 
 use super::approvals::Approvals;
 use crate::agent::tickets::{Attach, not_in_run};
@@ -146,6 +147,14 @@ impl PgBackend for AppBackend {
     fn llm(&self, op: LlmOp) -> BoxFuture<'_, Result<PgAnswer, ToolError>> {
         Box::pin(super::llm::tools::handle(&self.st, op))
     }
+
+    /// Подписи интерфейса для `instructions` и prompts (смоук 2026-11-07, R8) — по языку интерфейса сейчас.
+    fn ui_glossary(&self) -> Option<UiGlossary> {
+        super::glossary::glossary(&crate::settings::ui_language(
+            &self.st.settings,
+            &self.st.policy.status,
+        ))
+    }
 }
 
 /// Отчёт инструмента для модели (`mcp::read::report_out`): имя из плана P4a.
@@ -214,6 +223,25 @@ mod tests {
             assert_eq!(rec.0.load(Ordering::SeqCst), 0, "диалога нет");
             assert!(b.approvals.pending().is_empty());
         }
+    }
+
+    /// Смоук 2026-11-07, R8: подписи интерфейса для текстов модели — по действующему языку интерфейса (политика →
+    /// выбор → ОС) на момент вопроса; у английского интерфейса их нет.
+    #[test]
+    fn the_glossary_follows_the_language_of_the_interface() {
+        let dir = tempfile::tempdir().unwrap();
+        let (b, _) = backend(dir.path(), true, true);
+        b.st.settings.set_language(Some("ru")).unwrap();
+        assert_eq!(b.ui_glossary(), crate::mcp::glossary::glossary("ru"));
+        assert!(b.ui_glossary().is_some());
+        b.st.settings.set_language(Some("en")).unwrap();
+        assert_eq!(b.ui_glossary(), None);
+        let mut policy = crate::policy::Policy::default();
+        policy.status.mcp_enabled = true;
+        policy.status.language = Some("ru".into());
+        let st = b.st.clone().with_policy(policy);
+        let b = AppBackend::new(st, b.approvals.clone());
+        assert!(b.ui_glossary().is_some(), "язык политики важнее выбора");
     }
 
     #[test]

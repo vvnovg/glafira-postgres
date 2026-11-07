@@ -2,7 +2,8 @@
 //! - сторожок — 18 инструментов в обычной сессии и 9 в сессии запуска (`RUN_TOOL_NAMES`);
 //! - свои `instructions`;
 //! - пустой список prompts и отказ `prompts/get`;
-//! - `run` в операциях приложения.
+//! - `run` в операциях приложения;
+//! - глоссарий подписей интерфейса (смоук 2026-11-07, R8) в `instructions` обеих сессий и в текстах prompts.
 //!
 //! Правила видимости даёт фальшивый `Gate`, как у приложения. Ответ инструмента — один текстовый блок с JSON без
 //! `structuredContent` (хелпер `ok` обвязки `p4b`).
@@ -19,6 +20,7 @@ use glafira_mcp_core::server::{GatewayOptions, serve_run_stream, serve_stream};
 use glafira_pg_mcp::model::{
     LlmOp, ObserveCtx, PgAnswer, PgBackend, PgObserve, PgOutput, PgRead, ProposedOut,
 };
+use glafira_pg_mcp::server::glossary::{UiGlossary, with_glossary};
 use glafira_pg_mcp::server::{
     INSTRUCTIONS, INSTRUCTIONS_RUN, PgFactory, RUN_TOOL_NAMES, TOOL_NAMES,
 };
@@ -32,11 +34,12 @@ use serde_json::json;
 const RUN: &str = "a1b2c3d";
 
 /// Бэкенд с правилами сессии запуска, как у приложения: девять инструментов `RUN_TOOL_NAMES`, без prompts. Операции
-/// запоминаются.
+/// запоминаются. `glossary` — подписи интерфейса не на английском (R8).
 #[derive(Default)]
 struct RunFake {
     reads: Mutex<Vec<PgRead>>,
     llm_ops: Mutex<Vec<LlmOp>>,
+    glossary: Option<UiGlossary>,
 }
 
 impl Gate for RunFake {
@@ -86,6 +89,10 @@ impl PgBackend for RunFake {
         };
         self.llm_ops.lock().unwrap().push(op);
         Box::pin(async move { Ok(PgAnswer::new(body)) })
+    }
+
+    fn ui_glossary(&self) -> Option<UiGlossary> {
+        self.glossary.clone()
     }
 }
 
@@ -175,6 +182,80 @@ async fn background_run_has_its_instructions_and_no_prompts() {
         Some(INSTRUCTIONS)
     );
     assert_eq!(chat.list_all_prompts().await.unwrap().len(), 4);
+}
+
+/// Смоук 2026-11-07, R8: при интерфейсе не на английском `instructions` обеих сессий и тексты prompts получают абзац с
+/// подписями интерфейса — каждый со своими подписями; английские подписи в тексте остаются. Без глоссария тексты прежние
+/// (`background_run_has_its_instructions_and_no_prompts`).
+#[tokio::test]
+async fn the_ui_glossary_goes_into_the_instructions_and_the_prompts() {
+    let g = UiGlossary {
+        language: "Russian".into(),
+        labels: [
+            ("Send to LLM assistant", "Peredat"),
+            ("Wait profile", "Profil"),
+            ("LLM proposals", "Predlozheniya"),
+            ("Compare plans", "Sravnit"),
+        ]
+        .into_iter()
+        .map(|(en, ui)| (en.to_string(), ui.to_string()))
+        .collect(),
+    };
+    let fake = || {
+        Arc::new(RunFake {
+            glossary: Some(g.clone()),
+            ..RunFake::default()
+        })
+    };
+    let run = session(fake(), Some(RUN)).await;
+    let instructions = run.peer_info().unwrap().instructions.clone().unwrap();
+    assert_eq!(
+        instructions,
+        with_glossary(INSTRUCTIONS_RUN.to_string(), Some(&g))
+    );
+    assert!(
+        instructions.ends_with(
+            "use their interface labels: “Send to LLM assistant” — «Peredat». Answer the user in Russian."
+        ),
+        "{instructions}"
+    );
+    let chat = session(fake(), None).await;
+    let instructions = chat.peer_info().unwrap().instructions.clone().unwrap();
+    assert_eq!(
+        instructions,
+        with_glossary(INSTRUCTIONS.to_string(), Some(&g))
+    );
+    assert!(
+        instructions.contains("“Wait profile” — «Profil»"),
+        "{instructions}"
+    );
+    for (name, args) in [
+        ("optimize_query", json!({})),
+        ("triage_incident", json!({ "connectionId": "c1" })),
+        ("analyze_top_queries", json!({ "connectionId": "c1" })),
+        ("review_config", json!({ "connectionId": "c1" })),
+    ] {
+        let r = chat
+            .get_prompt(
+                GetPromptRequestParams::new(name).with_arguments(args.as_object().unwrap().clone()),
+            )
+            .await
+            .unwrap();
+        let text: String = r
+            .messages
+            .iter()
+            .filter_map(|m| m.content.as_text().map(|t| t.text.clone()))
+            .collect();
+        assert!(
+            text.contains("\n\nThe user's Glafira interface is in Russian.")
+                && text.ends_with("Answer the user in Russian."),
+            "{name}: {text}"
+        );
+        assert!(
+            text.contains("“Send to LLM assistant” — «Peredat»"),
+            "{name}: {text}"
+        );
+    }
 }
 
 #[tokio::test]

@@ -1,6 +1,7 @@
 //! MCP prompts (спец. P4 §9): сценарии для слэш-команд клиентов («MCP: glafira-pg» в Qwen Code). Тексты — по-английски
 //! с просьбой отвечать на языке пользователя; аргументы prompts в MCP — строки. Данных prompts не читают: сценарий
-//! выполняет модель вызовами инструментов, у которых свои проверки доступа.
+//! выполняет модель вызовами инструментов, у которых свои проверки доступа. При интерфейсе не на английском к тексту
+//! сценария добавляется абзац с подписями интерфейса (`glossary`, смоук 2026-11-07, R8).
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{GetPromptResult, PromptMessage, Role};
@@ -9,6 +10,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PgServer;
+use super::glossary::with_glossary;
 use crate::params::{DEFAULT_WINDOW_S, WINDOWS_S};
 
 const MAX_ID_CHARS: usize = 128;
@@ -272,6 +274,16 @@ fn user_prompt(description: &str, text: String) -> GetPromptResult {
         .with_description(description)
 }
 
+impl PgServer {
+    /// Сценарий для клиента: текст с подписями интерфейса (R8) по языку на момент `prompts/get`.
+    fn scenario(&self, description: &str, text: String) -> GetPromptResult {
+        user_prompt(
+            description,
+            with_glossary(text, self.backend.ui_glossary().as_ref()),
+        )
+    }
+}
+
 #[prompt_router(vis = "pub(crate)")]
 impl PgServer {
     #[prompt(
@@ -282,7 +294,7 @@ impl PgServer {
         Parameters(a): Parameters<OptimizeQueryArgs>,
     ) -> Result<GetPromptResult, ErrorData> {
         let id = ident("requestId", a.request_id.as_deref())?;
-        Ok(user_prompt(
+        Ok(self.scenario(
             "Optimize a query sent from Glafira",
             optimize_query_text(id.as_deref()),
         ))
@@ -297,7 +309,7 @@ impl PgServer {
     ) -> Result<GetPromptResult, ErrorData> {
         let id = required("connectionId", &a.connection_id)?;
         let symptom = symptom(a.symptom.as_deref());
-        Ok(user_prompt(
+        Ok(self.scenario(
             "Triage an incident",
             triage_incident_text(&id, symptom.as_deref()),
         ))
@@ -313,7 +325,7 @@ impl PgServer {
         let id = required("connectionId", &a.connection_id)?;
         let member = ident("member", a.member.as_deref())?;
         let window_s = window(a.window_s.as_deref())?;
-        Ok(user_prompt(
+        Ok(self.scenario(
             "Analyze the top queries",
             analyze_top_queries_text(&id, member.as_deref(), window_s),
         ))
@@ -328,7 +340,7 @@ impl PgServer {
     ) -> Result<GetPromptResult, ErrorData> {
         let id = required("connectionId", &a.connection_id)?;
         let member = ident("member", a.member.as_deref())?;
-        Ok(user_prompt(
+        Ok(self.scenario(
             "Review the configuration",
             review_config_text(&id, member.as_deref()),
         ))
@@ -371,13 +383,7 @@ mod tests {
         ]
     }
 
-    /// Подписи в “…”.
-    fn quoted(text: &str) -> Vec<&str> {
-        text.split('“')
-            .skip(1)
-            .filter_map(|part| part.split_once('”').map(|(label, _)| label))
-            .collect()
-    }
+    use crate::server::glossary::quoted_labels as quoted;
 
     fn strings(v: &serde_json::Value, out: &mut std::collections::HashSet<String>) {
         match v {

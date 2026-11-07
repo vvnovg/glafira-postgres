@@ -7,6 +7,7 @@ pub mod approvals;
 pub mod backend;
 pub mod controller;
 pub mod files;
+pub mod glossary;
 pub mod guard;
 pub mod llm;
 pub mod mask;
