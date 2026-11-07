@@ -109,6 +109,7 @@
     "readiness.pgssTrackPlanning.title",
     "readiness.trackActivityQuerySize.title",
     "readiness.trackIoTiming.title",
+    "settings.mcp.agent.ollamaModel",
     "sidebar.timeline",
     "tabs.diag",
     "tabs.explain",
