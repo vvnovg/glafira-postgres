@@ -137,15 +137,16 @@ describe("AgentRuns", () => {
   it("стоимость — валютой по правилам языка: «0,42 $» в ru, «$0.42» в en", async () => {
     const runs = [agentRun({ id: "a0000a2", preset: "claude", status: "done", startedAtMs: 0, endedAtMs: 1_000, costUsd: 0.42 })];
     const ru = renderWithClient(<AgentRuns runs={runs} onShowLog={onShowLog} />);
-    const row = () => within(screen.getByRole("table")).getAllByRole("row")[1];
+    // Восьмой столбец — «Стоимость».
+    const costCell = () => within(within(screen.getByRole("table")).getAllByRole("row")[1]).getAllByRole("cell")[7];
     // Между числом и знаком — неразрывный пробел (toHaveTextContent сводит его к обычному).
-    expect(row().cells[7]).toHaveTextContent(/^0,42 \$$/);
-    expect(row().cells[7].textContent).toBe("0,42\u00a0$");
+    expect(costCell()).toHaveTextContent(/^0,42 \$$/);
+    expect(costCell().textContent).toBe("0,42\u00a0$");
     ru.unmount();
     try {
       await act(() => i18n.changeLanguage("en"));
       renderWithClient(<AgentRuns runs={runs} onShowLog={onShowLog} />);
-      expect(row().cells[7]).toHaveTextContent(/^\$0\.42$/);
+      expect(costCell()).toHaveTextContent(/^\$0\.42$/);
     } finally {
       await act(() => i18n.changeLanguage("ru"));
     }
