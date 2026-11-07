@@ -255,7 +255,7 @@ Safeguard refusals (read-only, a wrong confirmation), unmet preconditions and th
 
 ## Findings {#findings}
 
-Above the data of each tab is the [[ui:diag.findings.title]] block: rules check the data of the tool and name what needs attention. The block collapses; if there are no problems, it says “No problems found”.
+Above the data of each tab is the [[ui:diag.findings.title]] block: rules check the data of the tool and name what needs attention. Findings go by severity, and the first three are shown; if there are more, the “N more” button under the list shows the rest, and [[ui:diag.findings.less]] goes back to three. A click on the “Findings (N)” heading collapses the whole block; Glafira remembers this for each tool (the query card has its own) and keeps it after a restart. If there are no problems, the block says “No problems found”.
 
 A finding has a severity — [[ui:diag.severity.info]], [[ui:diag.severity.warning]] or [[ui:diag.severity.critical]] (color and a text label), a title with numbers and an expandable [[ui:diag.findings.fix]] hint. The buttons under a finding open the right tool on the right node; some findings have a ready command with the [[ui:diag.findings.copy]] button. The app does not run such commands: you copy and run them yourself. The exception is two findings with an action button: the one about idle in transaction (“Terminate idle in transaction older than 5 min”, the warning threshold) and the one about a root blocker (“Terminate session N”). The button opens the same preview as in the tool ([Actions](diagnostics.md#actions)); a read-only connection does not have it. Severity does not depend on the environment of the connection.
 
