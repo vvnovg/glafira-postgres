@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, Weak};
 use glafira_mcp_core::audit::{AuditEvent, AuditLog};
 use glafira_mcp_core::endpoint::{self, Endpoint};
 use glafira_mcp_core::server::{GatewayOptions, McpServerHandle, SessionSnapshot};
+use glafira_pg_mcp::model::PgBackend;
 use glafira_pg_mcp::server::{INSTRUCTIONS, PgFactory};
 use serde::Serialize;
 use serde_json::Value;
@@ -248,6 +249,31 @@ impl McpController {
     }
 
     async fn start(&self, st: &AppState) {
+        let backend = Arc::new(AppBackend::new(st.clone(), self.approvals.clone()));
+        self.start_with(backend).await;
+    }
+
+    /// Интеграционный тест фонового ассистента (`tests/it_agent.rs`): сервер с обёрткой `wrap` над `AppBackend` — она
+    /// заменяет проверку предложения на сервере PostgreSQL (в CI на трёх ОС стенда нет). MCP в `settings.json` включает
+    /// тест. Только в сборке с feature `fake-agent`.
+    #[cfg(feature = "fake-agent")]
+    pub async fn start_wrapped<B: PgBackend>(
+        &self,
+        st: &AppState,
+        wrap: impl FnOnce(AppBackend) -> B,
+    ) -> McpStatus {
+        let _op = self.ops.lock().await;
+        if self.inner().handle.is_none() {
+            let backend = Arc::new(wrap(AppBackend::new(st.clone(), self.approvals.clone())));
+            self.start_with(backend).await;
+        }
+        self.emit_state();
+        self.status()
+    }
+
+    /// Запуск сервера с бэкендом `backend`: в приложении — `AppBackend`, в тесте `it_agent` — обёртка над ним
+    /// (`start_wrapped`). Сервер из чужого `mcp.json` ещё отвечает — статус «в другом окне», сервер не запускается.
+    async fn start_with<B: PgBackend>(&self, backend: Arc<B>) {
         if let Some(f) = files::read_mcp_file(&self.data_dir) {
             if endpoint::connect(&f.endpoint).await.is_ok() {
                 self.set_server(McpServerState::OtherInstance, None);
@@ -262,7 +288,6 @@ impl McpController {
             Err(e) => return self.failed(e),
         };
         let endpoint = Endpoint::for_app(&self.data_dir, MCP_SERVER_NAME);
-        let backend = Arc::new(AppBackend::new(st.clone(), self.approvals.clone()));
         let factory = Arc::new(PgFactory::new(backend.clone()));
         let options = GatewayOptions::new(MCP_SERVER_NAME, env!("CARGO_PKG_VERSION"), INSTRUCTIONS);
         let started = glafira_mcp_core::server::start(

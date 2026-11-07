@@ -201,11 +201,29 @@ fn launch(exe: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Каталог данных шима в интеграционном тесте фонового ассистента (`tests/it_agent.rs`): на Windows `dirs::data_dir()`
+/// берётся из API оболочки (переменная `APPDATA` на него не действует), а на Unix путь сокета во временном `HOME` длиннее
+/// 100 байт. Только в сборке с feature `fake-agent`: в приложении и установщиках переменной нет.
+#[cfg(feature = "fake-agent")]
+pub const TEST_DATA_DIR_ENV: &str = "GLAFIRA_TEST_DATA_DIR";
+
+#[cfg(feature = "fake-agent")]
+fn test_data_dir() -> Option<PathBuf> {
+    std::env::var_os(TEST_DATA_DIR_ENV)
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+}
+
+#[cfg(not(feature = "fake-agent"))]
+fn test_data_dir() -> Option<PathBuf> {
+    None
+}
+
 struct RealEnv;
 
 impl ShimEnv for RealEnv {
     fn data_dir(&self) -> Option<PathBuf> {
-        super::files::data_dir()
+        test_data_dir().or_else(super::files::data_dir)
     }
 
     fn policy_allows(&self) -> bool {

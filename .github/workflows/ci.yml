@@ -70,6 +70,8 @@ jobs:
           cargo test --manifest-path crates/glafira-pg-mcp/Cargo.toml
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      # Фальшивый агент и it_agent собираются только с feature fake-agent (фоновый ассистент P4c).
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --features fake-agent --all-targets -- -D warnings
       - name: Лицензии зависимостей (cargo deny, белый список — deny.toml)
         run: |
           cargo deny --version 2>/dev/null | grep -q ' 0\.20\.2$' || cargo install cargo-deny --locked --version 0.20.2 --force
@@ -86,7 +88,8 @@ jobs:
           scripts/wait-stand.sh
           scripts/wait-matrix.sh
       - name: Тесты Rust (unit + интеграционные)
-        run: cargo test --manifest-path src-tauri/Cargo.toml --lib --tests -- --test-threads=1
+        # --features fake-agent: в --tests входит it_agent (фоновый ассистент через настоящий шим и сокет, без стенда).
+        run: cargo test --manifest-path src-tauri/Cargo.toml --features fake-agent --lib --tests -- --test-threads=1
         env:
           GPG_IT_SINGLE: localhost:5460
           GPG_IT_PRIMARY: localhost:5451
@@ -151,8 +154,9 @@ jobs:
       # Парсер SQL (pg_query) — C-код, собранный на этой ОС: тесты pg-advisor проверяют, что он не только собирается.
       - name: pg-advisor (pg_query на платформе)
         run: cargo test --manifest-path crates/pg-advisor/Cargo.toml
-      - name: Unit-тесты Rust
-        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+      # it_agent: группа процессов (macOS) и Job Object (Windows) на фальшивом агенте через настоящий шим, сокет и named pipe.
+      - name: Unit-тесты Rust и фоновый ассистент
+        run: cargo test --manifest-path src-tauri/Cargo.toml --features fake-agent --lib --test it_agent
       - name: MCP-шлюз — ядро (Unix socket / named pipe, stdio GUI-процесса)
         run: cargo test --manifest-path crates/glafira-mcp-core/Cargo.toml
       - run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets

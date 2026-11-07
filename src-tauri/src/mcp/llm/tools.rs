@@ -630,11 +630,9 @@ async fn propose(
 
 /// Сохранение проверенного предложения: такое же (§8.2: тот же исходный запрос, SQL и индексы) — возвращается
 /// существующее, без событий; новое прикрепляется к запросу (статус `answered`) и даёт события запроса и предложения.
-/// Запрос могли отменить, пока шла проверка на сервере, — тогда предложение не сохраняется (`request_closed`).
-pub(crate) async fn store_proposal(
-    st: &AppState,
-    new: NewProposal,
-) -> Result<ProposedOut, ToolError> {
+/// Запрос могли отменить, пока шла проверка на сервере, — тогда предложение не сохраняется (`request_closed`). `pub`:
+/// интеграционный тест `it_agent` сохраняет предложение фонового запуска этим же путём, без проверки на сервере.
+pub async fn store_proposal(st: &AppState, new: NewProposal) -> Result<ProposedOut, ToolError> {
     if let Some(rid) = &new.request_id
         && st
             .llm

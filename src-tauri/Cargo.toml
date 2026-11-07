@@ -6,6 +6,8 @@ authors = ["Glafira for PostgreSQL contributors"]
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/vvnovg/glafira-postgres"
+# Второй бинарь (`glafira-fake-agent`, только с feature `fake-agent`): `cargo run` без `--bin` запускает приложение.
+default-run = "glafira-pg"
 
 [lib]
 # Суффикс _lib нужен, чтобы имя библиотеки не совпало с именем бинаря (Windows, cargo#8519).
@@ -14,6 +16,24 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+[features]
+# Интеграционный тест фонового ассистента P4c (`tests/it_agent.rs`): фальшивый агентский CLI `glafira-fake-agent` (клиент
+# rmcp, `tokio::signal`), каталог данных шима из `GLAFIRA_TEST_DATA_DIR`, `McpController::start_wrapped`. В сборку
+# приложения и установщики не входит: `pnpm tauri build` собирает без неё.
+fake-agent = ["dep:rmcp", "tokio/signal"]
+
+[[bin]]
+name = "glafira-fake-agent"
+path = "tests/bin/fake_agent.rs"
+required-features = ["fake-agent"]
+test = false
+bench = false
+
+[[test]]
+name = "it_agent"
+path = "tests/it_agent.rs"
+required-features = ["fake-agent"]
 
 [dependencies]
 tauri = { version = "2", features = [] }
@@ -56,6 +76,9 @@ glafira-mcp-core = { path = "../crates/glafira-mcp-core" }
 glafira-pg-mcp = { path = "../crates/glafira-pg-mcp" }
 # Токен `mcp.json`: 32 байта из генератора ОС (версия уже в дереве зависимостей).
 getrandom = "0.3"
+# Клиент MCP фальшивого агента (`glafira-fake-agent`, feature `fake-agent`): бинарю dev-зависимости не видны. Версия — как у
+# крейтов шлюза и dev-зависимости ниже (3.5.1 закреплена в Cargo.lock).
+rmcp = { version = "3.5.1", optional = true, features = ["client", "transport-async-rw"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
