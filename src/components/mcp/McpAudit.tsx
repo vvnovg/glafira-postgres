@@ -8,6 +8,7 @@ import { MCP_AUDIT_KEY } from "../../lib/useMcpStatus";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { isConsoleCall, openBlocked } from "./auditOpen";
 import { finishedRunText } from "./agent/agentText";
+import { AuditCost } from "./agent/RunCost";
 
 /** Сколько последних записей журнала показывает раздел (спец. P4 §11). */
 export const AUDIT_LIMIT = 200;
@@ -54,7 +55,10 @@ function resultText(e: McpAuditEntry, t: TFunction): string {
   return e.outcome === "error" ? (e.code ?? "") : "";
 }
 
-/** Счётчики приложения: строк `run_select` (P4b) или замаскированных литералов (уровень «Диагностика»). */
+/**
+ * Счётчики приложения: строк `run_select` (P4b) или замаскированных литералов (уровень «Диагностика»). Стоимость конца фонового
+ * запуска рисует `AuditCost` в той же ячейке.
+ */
 function detailsText(e: McpAuditEntry, t: TFunction): string {
   if (e.rows !== undefined) return t("settings.mcp.audit.rows", { n: formatCount(e.rows) });
   if (e.masked !== undefined) return t("settings.mcp.audit.masked", { n: formatCount(e.masked) });
@@ -112,6 +116,7 @@ export function McpAudit({ status, onOpenInConsole }: { status: McpStatus; onOpe
                     <td>{e.ms ?? ""}</td>
                     <td>
                       {detailsText(e, t)}
+                      <AuditCost entry={e} />
                       {onOpenInConsole && blocked !== undefined && (
                         <>
                           {" "}

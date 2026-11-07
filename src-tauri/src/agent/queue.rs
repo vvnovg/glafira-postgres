@@ -1316,7 +1316,8 @@ impl AgentQueue {
 
     /// `agentRunFinished` (спец. §9.2); итоговый текст в журнал не пишется. Стоимость — `costUsd`: точная у Claude Code без
     /// Ollama; у облачного запуска через Ollama — оценка по ценам Ollama Cloud с признаком `costEstimated: true`
-    /// (дополнение владельца к sf-T7). Цен и токенов в журнале нет; нет стоимости — нет и полей.
+    /// (дополнение владельца к sf-T7), днём цен таблицы `pricesDate` и `offPeak` — для подсказки у «≈ …» в «Журнале»
+    /// «Настроек» (итоговая волна правок смоука P4c). Самих цен и токенов в журнале нет; нет стоимости — нет и полей.
     fn audit_finished(&self, r: &AgentRun) {
         let mut f = Map::new();
         f.insert("runId".into(), r.id.clone().into());
@@ -1344,6 +1345,8 @@ impl AgentQueue {
         } else if let Some(e) = &r.cost_estimate {
             f.insert("costUsd".into(), json!(e.usd));
             f.insert("costEstimated".into(), true.into());
+            f.insert("pricesDate".into(), e.prices_date.clone().into());
+            f.insert("offPeak".into(), e.off_peak.into());
         }
         self.d.mcp.record_audit(AuditEvent::App {
             kind: "agentRunFinished".into(),
@@ -2095,8 +2098,9 @@ mod tests {
             if let (Some(e), Some(usd)) = (got, estimate) {
                 assert!((e.usd - usd).abs() < 1e-12, "{preset:?} {model}: {}", e.usd);
             }
-            // Журнал MCP (дополнение владельца к sf-T7): оценка — `costUsd` с признаком `costEstimated`; точная стоимость
-            // Claude Code без Ollama — `costUsd` без признака; нет ни того ни другого — полей нет (цен и токенов там нет).
+            // Журнал MCP (дополнение владельца к sf-T7): оценка — `costUsd` с признаком `costEstimated`, днём цен и «вне пика»
+            // (подсказка у «≈ …» в «Журнале» «Настроек», итоговая волна); точная стоимость Claude Code без Ollama — `costUsd`
+            // без признака; нет ни того ни другого — полей нет. Самих цен и токенов там нет.
             let finished =
                 h.st.mcp
                     .audit_tail(20)
@@ -2111,13 +2115,20 @@ mod tests {
                         "{preset:?} {model}: {finished}"
                     );
                     assert_eq!(finished["costEstimated"], true, "{finished}");
+                    assert_eq!(
+                        (&finished["pricesDate"], &finished["offPeak"]),
+                        (&json!("2026-11-07"), &json!(false)),
+                        "{finished}"
+                    );
                 }
                 (exact, None) => {
                     assert_eq!(usd, exact, "{preset:?} {model}: {finished}");
-                    assert!(finished.get("costEstimated").is_none(), "{finished}");
+                    for k in ["costEstimated", "pricesDate", "offPeak"] {
+                        assert!(finished.get(k).is_none(), "{k}: {finished}");
+                    }
                 }
             }
-            for k in ["usage", "prices", "pricesDate", "offPeak", "inputTokens"] {
+            for k in ["usage", "prices", "inputTokens", "outputTokens"] {
                 assert!(finished.get(k).is_none(), "{k}: {finished}");
             }
         }

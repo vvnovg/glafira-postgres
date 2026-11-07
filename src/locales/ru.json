@@ -710,6 +710,7 @@
           "costEstimate": "≈ {{cost}}",
           "costEstimateHint": "Оценка по ценам Ollama Cloud на {{date}} (ollama.com/pricing)",
           "costEstimateHintOffPeak": "Оценка по ценам Ollama Cloud вне пика на {{date}} (ollama.com/pricing)",
+          "costEstimateHintNoDate": "Оценка по ценам Ollama Cloud (ollama.com/pricing)",
           "colActions": "Действия",
           "check": "Проверка",
           "summaryAria": "Ответ ассистента, запуск {{id}}",

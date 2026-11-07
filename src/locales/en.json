@@ -706,6 +706,7 @@
           "costEstimate": "≈ {{cost}}",
           "costEstimateHint": "Estimate based on Ollama Cloud prices as of {{date}} (ollama.com/pricing)",
           "costEstimateHintOffPeak": "Estimate based on Ollama Cloud off-peak prices as of {{date}} (ollama.com/pricing)",
+          "costEstimateHintNoDate": "Estimate based on Ollama Cloud prices (ollama.com/pricing)",
           "colActions": "Actions",
           "check": "Check",
           "summaryAria": "Assistant's answer, run {{id}}",
