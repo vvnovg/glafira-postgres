@@ -6,6 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use glafira_mcp_core::compact::compact;
 use glafira_mcp_core::{CallOk, SessionCtx, SessionFactory, ToolError};
 use rmcp::handler::server::prompt::PromptContext;
 use rmcp::handler::server::router::prompt::PromptRouter;
@@ -291,9 +292,12 @@ pub(crate) fn fixes_once(value: &mut Value) {
 
 /// Отчёт с усечением массивов `data` до 100 КБ (§10.1): `truncated: true` и `hint` (подсказка приложения, если она
 /// была, остаётся первой); не помещается — `response_too_large`. Тексты исправлений находок — один раз (`fixes_once`).
+/// Размер меряется по сжатому отчёту (`compact`, как его отдаёт ядро; ревью правки A, #1): отчёт, который помещается
+/// после сжатия, строк не теряет. Повторное сжатие в ядре ничего не меняет.
 fn report_value(r: &Report) -> Result<Value, ToolError> {
     let mut v = to_value(r)?;
     fixes_once(&mut v);
+    compact(&mut v);
     let (mut v, truncated) = truncate::fit(v, FIT_LIMIT).map_err(|()| {
         ToolError::new(
             "response_too_large",

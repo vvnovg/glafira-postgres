@@ -26,19 +26,20 @@ pub fn compact(v: &mut Value) {
     }
 }
 
-/// Округление дробного числа: |x| ≥ 100 — до одного знака после запятой, иначе — до трёх. Ненулевое число, которое
-/// округлилось бы в ноль (|x| < 0,0005, например частоты `mostCommonFreqs`), сохраняет три значащие цифры: ноль сказал
-/// бы модели неправду. Целые по значению и нечисловые (`inf`, `NaN`) — как есть.
+/// Округление дробного числа: |x| ≥ 100 — до одного знака после запятой, 1 ≤ |x| < 100 — до трёх, |x| < 1 — до трёх
+/// значащих цифр (ревью правки A, #6: `0.0014` остаётся `0.0014`, а не `0.001`; ненулевое малое число — например
+/// частоты `mostCommonFreqs` — никогда не становится ложным нулём). Целые по значению и нечисловые (`inf`, `NaN`) — как
+/// есть.
 pub fn round(x: f64) -> f64 {
     if !x.is_finite() || x.fract() == 0.0 {
         return x;
     }
-    let scale = if x.abs() >= 100.0 { 10.0 } else { 1000.0 };
-    let r = (x * scale).round() / scale;
-    if r != 0.0 {
-        return r;
+    if x.abs() < 1.0 {
+        // Три значащие цифры через десятичную запись: `0.1 + 0.2` даёт ровно `0.3`, а не соседнее двоичное число.
+        return format!("{x:.2e}").parse().unwrap_or(x);
     }
-    format!("{x:.2e}").parse().unwrap_or(x)
+    let scale = if x.abs() >= 100.0 { 10.0 } else { 1000.0 };
+    (x * scale).round() / scale
 }
 
 #[cfg(test)]
@@ -129,16 +130,45 @@ mod tests {
         assert_eq!(compacted(v.clone()), v);
     }
 
+    /// |x| < 1 — три значащие цифры (ревью правки A, #6): полоса [0,0005; 0,0015) больше не сливается в `0.001`.
     #[test]
-    fn tiny_non_zero_fractions_keep_three_significant_digits() {
+    fn fractions_below_one_keep_three_significant_digits() {
+        assert_eq!(round(0.0014), 0.0014);
+        assert_eq!(round(0.000_51), 0.000_51);
+        assert_eq!(round(0.0005), 0.0005);
+        assert_eq!(round(0.001_234_5), 0.001_23);
+        assert_eq!(round(0.012_345), 0.012_3);
+        assert_eq!(round(0.123_45), 0.123);
+        assert_eq!(round(-0.123_45), -0.123);
+        assert_eq!(round(0.999_49), 0.999);
+        assert_eq!(round(0.999_6), 1.0);
         assert_eq!(round(0.000_123_45), 0.000_123);
         assert_eq!(round(-0.000_444_4), -0.000_444);
         assert_eq!(round(0.0004), 0.0004);
         assert_eq!(round(1.0e-300), 1.0e-300);
-        assert_eq!(round(0.0005), 0.001);
         assert_eq!(round(0.0), 0.0);
-        let v = compacted(json!({"mostCommonFreqs": [0.000_133_33, 0.5]}));
-        assert_eq!(v, json!({"mostCommonFreqs": [0.000_133, 0.5]}));
+        let v = compacted(json!({"mostCommonFreqs": [0.000_133_33, 0.5], "nullFrac": 0.001_4}));
+        assert_eq!(
+            v,
+            json!({"mostCommonFreqs": [0.000_133, 0.5], "nullFrac": 0.001_4})
+        );
+        assert!(v.to_string().contains("\"nullFrac\":0.0014"), "{v}");
+    }
+
+    /// 1 ≤ |x| < 100 — три знака после запятой, |x| ≥ 100 — один; округление идемпотентно на всех полосах.
+    #[test]
+    fn rounding_bands_and_idempotence() {
+        assert_eq!(round(1.234_56), 1.235);
+        assert_eq!(round(-1.000_4), -1.0);
+        assert_eq!(round(99.999_4), 99.999);
+        assert_eq!(round(99.999_6), 100.0);
+        assert_eq!(round(100.04), 100.0);
+        assert_eq!(round(1905.98), 1906.0);
+        for x in [
+            0.0014, 0.000_51, 0.123_45, 0.999_6, 1.234_56, 99.999_6, 1905.98, -0.012_345, 3.0e-7,
+        ] {
+            assert_eq!(round(round(x)), round(x), "{x}");
+        }
     }
 
     #[test]

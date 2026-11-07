@@ -265,8 +265,9 @@ fn proposed(id: &str) -> PgAnswer {
     }
 }
 
-/// Смоук P4b, G1, G2, G4: описания говорят модели, что убрано из ответов — нулевые счётчики, `own: false`, хвосты
-/// длинных текстов топа, интервалы ожиданий без сэмплов — и что история карточки не длиннее 12 точек.
+/// Смоук P4b, G1, G2, G4 и ревью правки A (#3, #5, #7): описания говорят модели, что убрано из ответов — нулевые
+/// счётчики, `own: false`, хвосты длинных текстов топа (поиск смотрит полный текст), интервалы ожиданий без сэмплов, а
+/// простой узла — одной записью `idle` — и что история карточки — не больше 12 равных интервалов времени.
 #[tokio::test]
 async fn descriptions_say_what_compact_answers_omit() {
     let c = client(Arc::new(Fake::new())).await;
@@ -285,16 +286,28 @@ async fn descriptions_say_what_compact_answers_omit() {
         "calls, totalExecMs, meanExecMs and rows are always present",
         "own is present only when true",
         "first 500 characters with textTruncated true",
+        // Ревью правки A, #7: совпадение может быть за обрезкой текста строки.
+        "search matches the full text",
+        "the match may lie after the cut",
     ] {
         assert!(top.contains(phrase), "{phrase}: {top}");
     }
     let card = description("get_query_details");
-    for phrase in ["counters that are 0 are omitted", "at most 12 points"] {
+    for phrase in [
+        "counters that are 0 are omitted",
+        "at most 12 points",
+        // Ревью правки A, #5: точки — равные интервалы времени.
+        "equal time bins",
+        "historyBinS",
+        "bins without points are omitted",
+    ] {
         assert!(card.contains(phrase), "{phrase}: {card}");
     }
     let diag = description("run_diagnostic");
     for phrase in [
-        "waits omits intervals without samples",
+        // Ревью правки A, #3: подряд идущие интервалы без активных сессий — одна запись.
+        "waits omits intervals in which the sampler did not run",
+        "{startMs, endMs, sampledS, idle: true}",
         "the form of get_top_queries rows",
     ] {
         assert!(diag.contains(phrase), "{phrase}: {diag}");

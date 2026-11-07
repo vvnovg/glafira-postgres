@@ -129,10 +129,14 @@ const ZERO_OMITTED_COUNTERS: [&str; 26] = [
     "diskReadBytes",
     "diskWriteBytes",
 ];
-/// Точек истории в карточке запроса для модели (смоук P4b, G4): соседние минутные точки сливаются.
+/// Точек истории в карточке запроса для модели (смоук P4b, G4): минутные точки сливаются в равные интервалы времени.
 pub const MAX_HISTORY_POINTS: usize = 12;
+/// Шаг ряда истории карточки — тик сэмплера pgss (минута).
+const HISTORY_STEP_MS: i64 = crate::sampler::statements::INTERVAL.as_millis() as i64;
 /// Профиль ожиданий без единого сэмпла и без тиков сэмплера в окне (смоук P4b, G1).
 const NO_WAIT_SAMPLES_HINT: &str = "The wait sampler collected no samples in this window (it runs while the wait profile or the sessions of this node are open in Glafira, or during observe_activity): call observe_activity for a live sample";
+/// Продолжение подсказки о простое узла, когда сэмплер покрыл не всё окно или сейчас не работает (ревью правки A, #4).
+const PARTLY_SAMPLED_ADVICE: &str = ", but it did not cover the whole window or is not running now: call observe_activity for a live sample";
 /// `get_table_details` на уровне `diagnostics` (смоук P4b, M2): статистика значений не читается — модель не должна
 /// придумывать иную причину их отсутствия.
 pub const VALUE_STATS_HINT: &str = "Value statistics (mostCommonVals, mostCommonFreqs, histogramBounds) are returned only when the connection's LLM access is \"diagnostics and data\" (llmAccess \"data\")";
@@ -350,8 +354,8 @@ fn hide_error_details(data: &mut DiagData) {
 
 /// Отчёт инструмента для модели: конверт P2, `data` — JSON-сериализация P2/P3 (та же форма, что у интерфейса, но
 /// ошибки узлов — без подробностей, `hide_error_details`; короче для модели, смоук P4b: профиль ожиданий — без
-/// интервалов без сэмплов, `waits_for_model`, строки `queries` — `top_rows_for_model`), находки — с английскими текстами,
-/// причины недоступности — английским текстом.
+/// интервалов без сэмплов и с простоем одной записью, `waits_for_model` и `buckets_for_model`, строки `queries` —
+/// `top_rows_for_model`), находки — с английскими текстами, причины недоступности — английским текстом.
 pub fn report_out(mut r: DiagReport) -> Report {
     hide_error_details(&mut r.data);
     let hint = match &mut r.data {
@@ -359,8 +363,10 @@ pub fn report_out(mut r: DiagReport) -> Report {
         _ => None,
     };
     let mut data = serde_json::to_value(&r.data).unwrap_or(Value::Null);
-    if matches!(r.data, DiagData::Queries(_)) {
-        top_rows_for_model(&mut data);
+    match &r.data {
+        DiagData::Queries(_) => top_rows_for_model(&mut data),
+        DiagData::Waits(d) => data["buckets"] = buckets_for_model(d),
+        _ => {}
     }
     Report {
         tool: tool_id(r.tool),
@@ -383,7 +389,9 @@ pub fn report_out(mut r: DiagReport) -> Report {
 
 /// Профиль ожиданий для модели (смоук P4b, G1): интервалы без сэмплов (`sampledS` 0 и пустой `aas`) не отдаются. Без
 /// единого сэмпла в окне интервалов нет совсем, а подсказка говорит почему: сэмплер не работал (`NO_WAIT_SAMPLES_HINT`)
-/// или работал, но активных сессий не видел. Итог — подсказка.
+/// или работал, но активных сессий не видел. Во втором случае совет вызвать `observe_activity` остаётся, если сэмплер
+/// покрыл не всё окно (без тиков больше одного интервала — пробел, усечённая история) или сейчас не работает (буфер
+/// прошлого запуска): об остальном окне неизвестно (ревью правки A, #4). Итог — подсказка.
 fn waits_for_model(d: &mut WaitsData) -> Option<String> {
     if d.total_samples > 0 {
         d.buckets.retain(|b| b.sampled_s > 0.0 || !b.aas.is_empty());
@@ -391,14 +399,51 @@ fn waits_for_model(d: &mut WaitsData) -> Option<String> {
     }
     let sampled_s: f64 = d.buckets.iter().map(|b| b.sampled_s).sum();
     d.buckets.clear();
-    Some(if sampled_s > 0.0 {
-        format!(
-            "The wait sampler ran for {} s of this window and saw no active sessions",
-            sampled_s.round()
-        )
-    } else {
-        NO_WAIT_SAMPLES_HINT.to_string()
-    })
+    if sampled_s <= 0.0 {
+        return Some(NO_WAIT_SAMPLES_HINT.to_string());
+    }
+    // Тик-другой без сэмпла (дрожание расписания) — не пробел: допуск — один интервал графика.
+    let partly = !d.sampler_running || sampled_s + f64::from(d.bucket_s) < f64::from(d.window_s);
+    Some(format!(
+        "The wait sampler ran for {} s of this window and saw no active sessions{}",
+        sampled_s.round(),
+        if partly { PARTLY_SAMPLED_ADVICE } else { "" }
+    ))
+}
+
+/// Интервалы профиля ожиданий для модели (`data.buckets`, после `waits_for_model`: остались интервалы, где сэмплер
+/// работал). Подряд идущие интервалы без активных сессий (пустой `aas`) — одна запись
+/// `{startMs, endMs, sampledS, idle: true}`: `endMs` — конец последнего, `sampledS` — сумма; интервал без тиков (убран)
+/// серию прерывает. Интервалы с нагрузкой — в форме P2. Ревью правки A, #3: окно 900 с при лёгкой нагрузке давало до 90
+/// записей `{"aas":{},"sampledS":10.0,…}` (~4,4 КБ).
+fn buckets_for_model(d: &WaitsData) -> Value {
+    let bucket_ms = i64::from(d.bucket_s) * 1000;
+    let mut out: Vec<Value> = Vec::new();
+    let mut run: Option<(i64, i64, f64)> = None;
+    for b in &d.buckets {
+        if !b.aas.is_empty() {
+            out.extend(run.take().map(idle_entry));
+            out.push(serde_json::to_value(b).unwrap_or_default());
+            continue;
+        }
+        match &mut run {
+            Some((_, end, sampled)) if *end == b.start_ms => {
+                *end += bucket_ms;
+                *sampled += b.sampled_s;
+            }
+            _ => {
+                out.extend(run.take().map(idle_entry));
+                run = Some((b.start_ms, b.start_ms + bucket_ms, b.sampled_s));
+            }
+        }
+    }
+    out.extend(run.map(idle_entry));
+    Value::Array(out)
+}
+
+/// Запись простоя профиля ожиданий: с `startMs` до `endMs` сэмплер работал `sampledS` секунд и активных сессий не видел.
+fn idle_entry((start, end, sampled): (i64, i64, f64)) -> Value {
+    json!({"startMs": start, "endMs": end, "sampledS": sampled, "idle": true})
 }
 
 /// Строка pgss для модели (смоук P4b, G2): счётчики `ZERO_OMITTED_COUNTERS`, равные 0, и `own: false` не отдаются
@@ -1035,10 +1080,14 @@ fn query_detail_answer(
         .into_iter()
         .map(|u| unavailable_out(None, u))
         .collect();
-    d.history = history_for_model(std::mem::take(&mut d.history));
+    let (history, history_bin_s) = history_for_model(std::mem::take(&mut d.history));
+    d.history = history;
     let mut v =
         serde_json::to_value(&d).map_err(|e| tool_error(AppError::internal_with(e.to_string())))?;
     card_rows_for_model(&mut v);
+    if !d.history.is_empty() {
+        v["historyBinS"] = json!(history_bin_s);
+    }
     v["member"] = json!(member);
     if running_total > MAX_RUNNING {
         v["runningTotal"] = json!(running_total);
@@ -1064,31 +1113,48 @@ fn card_rows_for_model(v: &mut Value) {
     }
 }
 
-/// История карточки для модели (смоук P4b, G4): не больше `MAX_HISTORY_POINTS` точек. Соседние точки сливаются в
-/// почти равные группы (размеры отличаются не больше чем на 1), порядок ряда сохраняется: `calls` и `totalExecMs`
-/// суммируются, `meanExecMs = totalExecMs / calls` (без вызовов — 0), `atMs` — начало слитого диапазона.
-pub fn history_for_model(points: Vec<HistoryPoint>) -> Vec<HistoryPoint> {
+/// История карточки для модели (смоук P4b, G4): не больше `MAX_HISTORY_POINTS` точек. Точки ряда — минуты, в которые
+/// запрос выполнялся (тики сэмплера pgss по порядку). Длиннее — сливаются по равным интервалам времени на покрытом
+/// диапазоне (от первой точки до последней; ревью правки A, #5: слияние по числу точек на редком ряду давало точки
+/// разной длительности): интервал — целое число минут, `atMs` — его начало, `calls` и `totalExecMs` суммируются,
+/// `meanExecMs = totalExecMs / calls` (без вызовов — 0), интервалы без точек не отдаются. Итог — ряд и длина интервала в
+/// секундах (`historyBinS`; ряд не длиннее 12 точек — как есть, интервал — минута).
+pub fn history_for_model(points: Vec<HistoryPoint>) -> (Vec<HistoryPoint>, i64) {
     let n = points.len();
     if n <= MAX_HISTORY_POINTS {
-        return points;
+        return (points, HISTORY_STEP_MS / 1000);
     }
-    (0..MAX_HISTORY_POINTS)
-        .map(|g| {
-            let part = &points[g * n / MAX_HISTORY_POINTS..(g + 1) * n / MAX_HISTORY_POINTS];
-            let calls: i64 = part.iter().map(|p| p.calls).sum();
-            let total_exec_ms: f64 = part.iter().map(|p| p.total_exec_ms).sum();
-            HistoryPoint {
-                at_ms: part[0].at_ms,
-                calls,
-                total_exec_ms,
-                mean_exec_ms: if calls > 0 {
-                    total_exec_ms / calls as f64
-                } else {
-                    0.0
-                },
+    let first = points[0].at_ms;
+    // Минута точки от первой: тики идут по расписанию, округление снимает их дрожание.
+    let minute =
+        |p: &HistoryPoint| ((p.at_ms - first) as f64 / HISTORY_STEP_MS as f64).round() as i64;
+    // Минут в диапазоне — последняя + 1; минут в интервале — столько, чтобы интервалов было не больше 12:
+    // ⌈(m + 1) / 12⌉ = ⌊m / 12⌋ + 1.
+    let per_bin = minute(&points[n - 1]).max(0) / MAX_HISTORY_POINTS as i64 + 1;
+    let mut bins: Vec<HistoryPoint> = Vec::new();
+    for p in &points {
+        let at_ms = first + minute(p) / per_bin * per_bin * HISTORY_STEP_MS;
+        match bins.last_mut() {
+            Some(b) if b.at_ms == at_ms => {
+                b.calls += p.calls;
+                b.total_exec_ms += p.total_exec_ms;
             }
-        })
-        .collect()
+            _ => bins.push(HistoryPoint {
+                at_ms,
+                calls: p.calls,
+                total_exec_ms: p.total_exec_ms,
+                mean_exec_ms: 0.0,
+            }),
+        }
+    }
+    for b in &mut bins {
+        b.mean_exec_ms = if b.calls > 0 {
+            b.total_exec_ms / b.calls as f64
+        } else {
+            0.0
+        };
+    }
+    (bins, per_bin * HISTORY_STEP_MS / 1000)
 }
 
 /// Статистика колонок без значений (уровень `diagnostics`): у таблицы с наследниками — строка по всей иерархии
@@ -3122,33 +3188,63 @@ mod tests {
         assert!(NO_WAIT_SAMPLES_HINT.contains("call observe_activity"));
     }
 
-    /// Сэмплер работал, но активных сессий не видел: интервалов тоже нет, а подсказка говорит, сколько секунд он
-    /// работал, — вызывать `observe_activity` незачем.
-    #[test]
-    fn waits_of_an_idle_node_have_no_buckets_and_say_so() {
-        let data = WaitsData {
+    /// Окно 300 с из интервалов по 5 с; у каждого интервала — `sampled_s(i)` секунд работы сэмплера, сэмплов нет.
+    fn idle_waits(running: bool, sampled_s: impl Fn(i64) -> f64) -> WaitsData {
+        WaitsData {
             window_s: 300,
             bucket_s: 5,
-            sampler_running: true,
-            buckets: vec![
-                bucket(0, 5.0, None),
-                bucket(5_000, 3.0, None),
-                bucket(10_000, 0.0, None),
-            ],
+            sampler_running: running,
+            buckets: (0..60)
+                .map(|i| bucket(i * 5_000, sampled_s(i), None))
+                .collect(),
             ..WaitsData::default()
-        };
-        let r = waits_out(data);
+        }
+    }
+
+    /// Сэмплер работал всё окно, но активных сессий не видел: интервалов нет, подсказка говорит, сколько секунд он
+    /// работал, — вызывать `observe_activity` незачем (тик-другой без сэмпла — не пробел).
+    #[test]
+    fn waits_of_an_idle_node_have_no_buckets_and_say_so() {
+        let r = waits_out(idle_waits(true, |i| if i == 7 { 4.0 } else { 5.0 }));
         assert!(bucket_starts(&r).is_empty(), "{}", r.data);
         assert_eq!(
             r.hint.as_deref(),
-            Some("The wait sampler ran for 8 s of this window and saw no active sessions")
+            Some("The wait sampler ran for 299 s of this window and saw no active sessions")
         );
     }
 
-    /// Сэмплы есть: уходят только интервалы без сэмплов (`sampledS` 0 и пустой `aas`); интервал, где сэмплер работал,
-    /// а активных сессий не было, остаётся (нагрузка 0); подсказки нет.
+    /// Ревью правки A, #4: сэмплер покрыл только часть окна (8 с из 300) или сейчас не работает (буфер прошлого
+    /// запуска) — об остальном окне неизвестно, и подсказка сохраняет совет вызвать `observe_activity`.
     #[test]
-    fn waits_drop_only_buckets_without_samples() {
+    fn idle_waits_of_a_partly_covered_window_keep_the_observe_advice() {
+        let partly = waits_out(idle_waits(true, |i| match i {
+            0 => 5.0,
+            1 => 3.0,
+            _ => 0.0,
+        }));
+        assert!(bucket_starts(&partly).is_empty(), "{}", partly.data);
+        assert_eq!(
+            partly.hint.as_deref(),
+            Some(
+                "The wait sampler ran for 8 s of this window and saw no active sessions, but it did not cover \
+                 the whole window or is not running now: call observe_activity for a live sample"
+            )
+        );
+        let stopped = waits_out(idle_waits(false, |_| 5.0));
+        assert_eq!(
+            stopped.hint.as_deref(),
+            Some(
+                "The wait sampler ran for 300 s of this window and saw no active sessions, but it did not cover \
+                 the whole window or is not running now: call observe_activity for a live sample"
+            )
+        );
+    }
+
+    /// Сэмплы есть: интервалы без сэмплов (`sampledS` 0 и пустой `aas`) уходят; ревью правки A, #3: подряд идущие
+    /// интервалы, где сэмплер работал, а активных сессий не было, — одна запись `{startMs, endMs, sampledS, idle}`
+    /// (`endMs` — конец последнего), интервал без тиков серию прерывает; интервалы с нагрузкой — как были; подсказки нет.
+    #[test]
+    fn waits_drop_unsampled_buckets_and_collapse_idle_runs() {
         let data = WaitsData {
             window_s: 300,
             bucket_s: 10,
@@ -3157,14 +3253,70 @@ mod tests {
                 bucket(0, 0.0, None),
                 bucket(10_000, 10.0, Some(0.4)),
                 bucket(20_000, 10.0, None),
-                bucket(30_000, 0.0, None),
+                bucket(30_000, 10.0, None),
+                bucket(40_000, 7.0, None),
+                bucket(50_000, 0.0, None),
+                bucket(60_000, 10.0, None),
+                bucket(70_000, 10.0, Some(1.5)),
+                bucket(80_000, 10.0, None),
             ],
             ..WaitsData::default()
         };
         let r = waits_out(data);
-        assert_eq!(bucket_starts(&r), [10_000, 20_000]);
-        assert_eq!(r.data["buckets"][0]["aas"]["cpu"], 0.4);
+        assert_eq!(
+            r.data["buckets"],
+            json!([
+                {"startMs": 10_000, "sampledS": 10.0, "aas": {"cpu": 0.4}},
+                {"startMs": 20_000, "endMs": 50_000, "sampledS": 27.0, "idle": true},
+                {"startMs": 60_000, "endMs": 70_000, "sampledS": 10.0, "idle": true},
+                {"startMs": 70_000, "sampledS": 10.0, "aas": {"cpu": 1.5}},
+                {"startMs": 80_000, "endMs": 90_000, "sampledS": 10.0, "idle": true},
+            ])
+        );
         assert!(r.hint.is_none(), "{:?}", r.hint);
+    }
+
+    /// Ревью правки A, #3, на профиле: окно 900 с, сэмплер работал всё окно, нагрузка — два сэмпла. Вместо 90
+    /// интервалов (~4,4 КБ) — интервалы с нагрузкой и записи простоя между ними.
+    #[test]
+    fn a_lightly_loaded_window_is_a_few_entries() {
+        let now = 1_000_000_000;
+        let from = now - 900_000;
+        let ticks: Vec<i64> = (0..900).map(|s| from + s * 1_000).collect();
+        let sample = |at_ms| pg_advisor::ash::Sample {
+            at_ms,
+            pid: 7,
+            leader_pid: None,
+            wait_type: None,
+            wait_event: None,
+            query_id: Some(1),
+            query: "SELECT 1",
+            application: "app",
+            user: "u",
+            database: "d",
+            client: "",
+        };
+        let samples = [sample(from + 305_000), sample(from + 612_000)];
+        let data = pg_advisor::ash::profile(&samples, &ticks, &[], 900, now, Some(from), true);
+        assert_eq!(data.buckets.len(), 90);
+        let r = waits_out(data);
+        let buckets = r.data["buckets"].as_array().unwrap();
+        assert_eq!(buckets.len(), 5, "{}", r.data["buckets"]);
+        assert_eq!(
+            (
+                &buckets[0]["startMs"],
+                &buckets[0]["endMs"],
+                &buckets[0]["idle"]
+            ),
+            (&json!(from), &json!(from + 300_000), &json!(true))
+        );
+        assert_eq!(buckets[1]["aas"]["cpu"], 0.1);
+        assert_eq!(buckets[4]["endMs"], json!(now));
+        assert!(
+            r.data["buckets"].to_string().len() < 400,
+            "{}",
+            r.data["buckets"]
+        );
     }
 
     /// Другие инструменты `run_diagnostic` интервалов не несут: отчёт отдаётся как был, без подсказки.
@@ -3293,8 +3445,8 @@ mod tests {
     /// G4: 60 минутных точек — 12 точек по 5 минут: вызовы и время суммируются, среднее — по сумме, `atMs` — начало.
     #[test]
     fn history_of_sixty_points_is_merged_into_twelve() {
-        let h = history_for_model((0..60).map(|m| point(m, m, m as f64 * 2.0)).collect());
-        assert_eq!(h.len(), MAX_HISTORY_POINTS);
+        let (h, bin_s) = history_for_model((0..60).map(|m| point(m, m, m as f64 * 2.0)).collect());
+        assert_eq!((h.len(), bin_s), (MAX_HISTORY_POINTS, 300));
         for (g, p) in (0i64..).zip(&h) {
             let calls = 25 * g + 10;
             assert_eq!(
@@ -3305,17 +3457,53 @@ mod tests {
         }
     }
 
-    /// Ряд не длиннее 12 точек — как есть; 13 точек — 12, порядок сохраняется, вызовы не теряются.
+    /// Ряд не длиннее 12 точек — как есть (точка — минута); 13 минут подряд — 7 интервалов по 2 минуты, порядок
+    /// сохраняется, вызовы не теряются.
     #[test]
     fn short_history_stays_as_it_is() {
         let seven: Vec<HistoryPoint> = (0..7).map(|m| point(m, 3, 1.5)).collect();
-        assert_eq!(history_for_model(seven.clone()), seven);
-        assert!(history_for_model(vec![]).is_empty());
-        let h = history_for_model((0..13).map(|m| point(m, 1, 1.0)).collect());
-        assert_eq!(h.len(), MAX_HISTORY_POINTS);
-        assert!(h.windows(2).all(|w| w[0].at_ms < w[1].at_ms));
-        assert_eq!(h.iter().map(|p| p.calls).sum::<i64>(), 13);
-        assert_eq!(h[0].at_ms, 0);
+        assert_eq!(history_for_model(seven.clone()), (seven, 60));
+        assert!(history_for_model(vec![]).0.is_empty());
+        let (h, bin_s) = history_for_model((0..13).map(|m| point(m, 1, 1.0)).collect());
+        assert_eq!(bin_s, 120);
+        assert_eq!(
+            h.iter()
+                .map(|p| (p.at_ms / 60_000, p.calls))
+                .collect::<Vec<_>>(),
+            [(0, 2), (2, 2), (4, 2), (6, 2), (8, 2), (10, 2), (12, 1)]
+        );
+    }
+
+    /// Ревью правки A, #5: точки есть только у минут с вызовами; редкий ряд сливается по равным интервалам времени на
+    /// покрытом диапазоне (а не по числу точек), пустые интервалы не отдаются. Дрожание тика (доли секунды) интервал
+    /// точки не меняет.
+    #[test]
+    fn sparse_history_is_merged_by_equal_time_bins() {
+        let jitter = [0, 700, -400, 300, -900, 150];
+        let minutes = (0..12).chain([40, 59]);
+        let points: Vec<HistoryPoint> = minutes
+            .zip(jitter.iter().cycle())
+            .map(|(m, j)| HistoryPoint {
+                at_ms: m * 60_000 + j,
+                ..point(m, 1, 3.0)
+            })
+            .collect();
+        assert_eq!(points.len(), 14);
+        let (h, bin_s) = history_for_model(points);
+        assert_eq!(bin_s, 300);
+        assert_eq!(
+            h.iter()
+                .map(|p| (p.at_ms / 60_000, p.calls, p.total_exec_ms, p.mean_exec_ms))
+                .collect::<Vec<_>>(),
+            [
+                (0, 5, 15.0, 3.0),
+                (5, 5, 15.0, 3.0),
+                (10, 2, 6.0, 3.0),
+                (40, 1, 3.0, 3.0),
+                (55, 1, 3.0, 3.0)
+            ]
+        );
+        assert!(h.iter().all(|p| p.at_ms % 60_000 == 0), "начала — на сетке");
     }
 
     /// Слитая точка без вызовов — среднее 0, а не NaN.
@@ -3323,7 +3511,7 @@ mod tests {
     fn merged_points_without_calls_have_a_zero_mean() {
         let mut points: Vec<HistoryPoint> = (0..24).map(|m| point(m, 0, 0.0)).collect();
         points[2] = point(2, 4, 10.0);
-        let h = history_for_model(points);
+        let (h, _) = history_for_model(points);
         assert_eq!(h.len(), MAX_HISTORY_POINTS);
         assert_eq!((h[0].calls, h[0].mean_exec_ms), (0, 0.0));
         assert_eq!(
@@ -3389,5 +3577,6 @@ mod tests {
         let history = v["history"].as_array().unwrap();
         assert_eq!(history.len(), MAX_HISTORY_POINTS);
         assert_eq!(history[1]["calls"], 5);
+        assert_eq!(v["historyBinS"], 300, "длина интервала истории");
     }
 }

@@ -103,6 +103,23 @@ fn sessions_data(n: usize) -> Value {
     json!({"kind": "sessions", "sessions": rows, "summary": {"total": n}})
 }
 
+/// `n` строк, длинных только из-за `null` и дробей с 16 знаками: 1500 строк — около 320 КБ, сжатые — около 72 КБ
+/// (ревью правки A, #1).
+fn loose_data(n: usize) -> Value {
+    let rows: Vec<Value> = (0..n)
+        .map(|i| {
+            json!({
+                "pid": i,
+                "meanExecMs": 1.234_567_890_123_456_7,
+                "hitRatio": 0.123_456_789_012_345_67,
+                "xmin": null, "backendXid": null, "waitEvent": null, "waitEventType": null,
+                "clientAddr": null, "leaderPid": null, "queryId": null, "stateChangeS": null,
+            })
+        })
+        .collect();
+    json!({"kind": "sessions", "sessions": rows, "summary": {"total": n}})
+}
+
 fn topology(events: usize) -> TopologyInfo {
     TopologyInfo {
         kind: "patroni".into(),
@@ -207,6 +224,7 @@ impl PgBackend for FakePg {
                             ..report("sessions", sessions_data(3000))
                         },
                         "blob" => report("blob", json!({"kind": "blob", "text": "x".repeat(200_000)})),
+                        "loose" => report("sessions", loose_data(1500)),
                         "repeated" => Report {
                             findings: vec![
                                 finding_fixed("query_temp", "Raise work_mem"),
@@ -1085,6 +1103,31 @@ async fn long_report_data_is_truncated_with_a_hint() {
         e.audit.tail(1)[0]["masked"],
         5,
         "счётчик маскирования — в журнале"
+    );
+}
+
+/// Ревью правки A, #1: предел 100 КБ меряется по сжатому отчёту (без `null`, дроби округлены) — отчёт, который
+/// помещается после сжатия, не урезается и не теряет строк.
+#[tokio::test]
+async fn report_that_fits_once_compacted_is_not_truncated() {
+    let e = env().await;
+    let v = ok(call(
+        &e.client,
+        "run_diagnostic",
+        json!({"connectionId": "c1", "tool": "loose"}),
+    )
+    .await);
+    assert_eq!(v["truncated"], false, "{}", v["hint"]);
+    assert!(v.get("hint").is_none(), "{}", v["hint"]);
+    let rows = v["data"]["sessions"].as_array().unwrap();
+    assert_eq!(rows.len(), 1500);
+    assert_eq!(
+        (
+            &rows[0]["meanExecMs"],
+            &rows[0]["hitRatio"],
+            rows[0].get("xmin")
+        ),
+        (&json!(1.235), &json!(0.123), None)
     );
 }
 
