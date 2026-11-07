@@ -54,6 +54,9 @@ pub struct SessionSnapshot {
     pub calls: u64,
     /// Идёт вызов (подсветка индикатора).
     pub active: bool,
+    /// Id фонового запуска (P4c §8.2: «Фоновый ассистент · запрос …»); у обычной сессии поля в JSON нет.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
 }
 
 /// Строит сервер rmcp одной сессии. Сервер проводит каждый вызов через `SessionCtx::call`, в `initialize` зовёт
@@ -84,10 +87,12 @@ impl McpServerHandle {
         self.shared.cancel_where(|sid, _| sid == id) > 0
     }
 
-    /// Отменяет все сессии клиента с этим именем; снятие сессий — как у [`Self::disconnect`]. Возвращает их число.
+    /// Отменяет все сессии клиента с этим именем, кроме сессий фоновых запусков (P4c §5.1: «Отозвать» клиента запуск
+    /// не останавливает); снятие сессий — как у [`Self::disconnect`]. Возвращает их число.
     pub fn disconnect_client(&self, name: &str) -> usize {
-        self.shared
-            .cancel_where(|_, e| e.client.as_ref().is_some_and(|c| c.name == name))
+        self.shared.cancel_where(|_, e| {
+            e.run.is_none() && e.client.as_ref().is_some_and(|c| c.name == name)
+        })
     }
 
     /// Отменяет все сессии; снятие — как у [`Self::disconnect`].
@@ -163,16 +168,23 @@ async fn handle_conn<F: SessionFactory>(
     token: String,
     ct: CancellationToken,
 ) {
+    // Билет фонового запуска (P4c §3.3) проверяет приложение. `TicketCheck` — объект `'static`: замыкание держит
+    // свою ссылку на `Gate`.
+    let gate = shared.gate.clone();
+    let tickets = move |t: &str| gate.run_for_ticket(t);
     // Остановка сервера не ждёт молчащее рукопожатие (до 5 с).
     let handshake = tokio::select! {
         _ = ct.cancelled() => return,
-        r = crate::handshake::server(&mut stream, &token) => r,
+        r = crate::handshake::server(&mut stream, &token, &tickets) => r,
     };
-    if let Err(e) = handshake {
-        tracing::debug!("mcp handshake failed: {e}");
-        return;
-    }
-    serve_session(shared, factory, stream, ct).await;
+    let run = match handshake {
+        Ok(run) => run,
+        Err(e) => {
+            tracing::debug!("mcp handshake failed: {e}");
+            return;
+        }
+    };
+    serve_session(shared, factory, stream, ct, run).await;
 }
 
 /// Одна сессия MCP поверх готового потока, без рукопожатия и без сокета (интеграционные тесты приложения).
@@ -185,7 +197,21 @@ pub async fn serve_stream<F: SessionFactory>(
     factory: Arc<F>,
 ) {
     let shared = Shared::new(gate, audit, options);
-    serve_session(shared, factory, stream, CancellationToken::new()).await;
+    serve_session(shared, factory, stream, CancellationToken::new(), None).await;
+}
+
+/// [`serve_stream`] для сессии фонового запуска `run` (P4c): билет считается проверенным. Так тесты крейтов и
+/// приложения получают сессию запуска без сокета и рукопожатия.
+pub async fn serve_run_stream<F: SessionFactory>(
+    stream: BoxStream,
+    run: String,
+    gate: Arc<dyn Gate>,
+    audit: Arc<AuditLog>,
+    options: GatewayOptions,
+    factory: Arc<F>,
+) {
+    let shared = Shared::new(gate, audit, options);
+    serve_session(shared, factory, stream, CancellationToken::new(), Some(run)).await;
 }
 
 async fn serve_session<F: SessionFactory>(
@@ -193,16 +219,18 @@ async fn serve_session<F: SessionFactory>(
     factory: Arc<F>,
     stream: BoxStream,
     ct: CancellationToken,
+    run: Option<String>,
 ) {
     let id = next_session_id();
     shared
         .sessions()
-        .insert(id.clone(), SessionEntry::new(ct.clone()));
+        .insert(id.clone(), SessionEntry::new(ct.clone(), run.clone()));
     shared.audit.record(AuditEvent::SessionStarted {
         session: id.clone(),
+        run: run.clone(),
     });
     shared.gate.sessions_changed();
-    let ctx = SessionCtx::new(shared.clone(), id.clone(), ct.clone());
+    let ctx = SessionCtx::new(shared.clone(), id.clone(), ct.clone(), run);
     let server = factory.create(ctx.clone());
     match server.serve_with_ct(stream, ct).await {
         Ok(running) => {

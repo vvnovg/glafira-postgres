@@ -125,6 +125,7 @@ mod tests {
                 name: name.into(),
                 version: "0.26.7".into(),
             }),
+            run: None,
         }
     }
 

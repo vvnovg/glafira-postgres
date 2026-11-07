@@ -198,6 +198,7 @@ mod tests {
                 name: n.into(),
                 version: "1.0".into(),
             }),
+            run: None,
         }
     }
 

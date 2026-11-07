@@ -26,11 +26,17 @@ fn data_dir(home: &Path) -> PathBuf {
     base.join(glafira_pg_lib::product::IDENTIFIER)
 }
 
+/// Обычное рукопожатие: фоновых запусков нет.
+fn no_runs(_: &str) -> Option<String> {
+    None
+}
+
 fn shim(home: &Path) -> Command {
     let mut c = Command::new(BIN);
     c.arg("mcp")
         .env("HOME", home)
         .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env_remove("GLAFIRA_AGENT_TICKET")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -58,33 +64,14 @@ async fn disabled_mcp_exits_with_a_message_and_a_clean_stdout() {
 #[tokio::test]
 async fn shim_pumps_bytes_between_stdio_and_the_app_socket() {
     let home = tempfile::tempdir().unwrap();
-    let dir = data_dir(home.path());
-    std::fs::create_dir_all(&dir).unwrap();
-    SettingsStore::open(&dir).set_mcp_enabled(true).unwrap();
-    // Короткий путь сокета: каталог данных внутри временного HOME мог бы превысить предел длины пути сокета.
-    let sock_dir = tempfile::Builder::new()
-        .prefix("gpm")
-        .tempdir_in("/tmp")
-        .unwrap();
-    let ep = Endpoint::Unix(sock_dir.path().join("s.sock"));
-    let mut listener = Listener::bind(&ep).await.unwrap();
-    files::write_mcp_file(
-        &dir,
-        &McpFile {
-            version: files::VERSION,
-            endpoint: ep,
-            token: "tok".into(),
-            pid: 1,
-        },
-    )
-    .unwrap();
+    let (_sock_dir, mut listener) = fake_app(home.path()).await;
 
     let mut child = shim(home.path()).spawn().unwrap();
     let mut app = tokio::time::timeout(Duration::from_secs(20), listener.accept())
         .await
         .expect("шим подключился")
         .unwrap();
-    handshake::server(&mut app, "tok").await.unwrap();
+    handshake::server(&mut app, "tok", &no_runs).await.unwrap();
 
     let mut stdin = child.stdin.take().unwrap();
     stdin.write_all(b"ping\n").await.unwrap();
@@ -105,6 +92,58 @@ async fn shim_pumps_bytes_between_stdio_and_the_app_socket() {
     assert_eq!(&got, b"pong\n");
 
     // Приложение закрыло соединение — шим выходит с кодом 0.
+    drop(app);
+    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .expect("шим вышел после закрытия сокета")
+        .unwrap();
+    assert_eq!(status.code(), Some(0));
+}
+
+/// Как запущенная Glafira: сокет в коротком каталоге `/tmp` и `mcp.json` с токеном `tok` в каталоге данных шима.
+async fn fake_app(home: &Path) -> (tempfile::TempDir, Listener) {
+    let dir = data_dir(home);
+    std::fs::create_dir_all(&dir).unwrap();
+    SettingsStore::open(&dir).set_mcp_enabled(true).unwrap();
+    // Короткий путь сокета: каталог данных внутри временного HOME мог бы превысить предел длины пути сокета.
+    let sock_dir = tempfile::Builder::new()
+        .prefix("gpm")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let ep = Endpoint::Unix(sock_dir.path().join("s.sock"));
+    let listener = Listener::bind(&ep).await.unwrap();
+    files::write_mcp_file(
+        &dir,
+        &McpFile {
+            version: files::VERSION,
+            endpoint: ep,
+            token: "tok".into(),
+            pid: 1,
+        },
+    )
+    .unwrap();
+    (sock_dir, listener)
+}
+
+/// Шим фонового запуска как процесс (P4c §3.3): билет из `GLAFIRA_AGENT_TICKET` (его ставит `env` MCP-конфига
+/// запуска) — в строке рукопожатия.
+#[tokio::test]
+async fn agent_ticket_from_the_environment_reaches_the_handshake() {
+    let home = tempfile::tempdir().unwrap();
+    let (_sock_dir, mut listener) = fake_app(home.path()).await;
+    let ticket = "cd".repeat(32);
+    let mut child = shim(home.path())
+        .env("GLAFIRA_AGENT_TICKET", &ticket)
+        .spawn()
+        .unwrap();
+    let mut app = tokio::time::timeout(Duration::from_secs(20), listener.accept())
+        .await
+        .expect("шим подключился")
+        .unwrap();
+    let expected = ticket.clone();
+    let check = move |t: &str| (t == expected).then(|| "a1b2c3d".to_string());
+    let run = handshake::server(&mut app, "tok", &check).await.unwrap();
+    assert_eq!(run.as_deref(), Some("a1b2c3d"));
     drop(app);
     let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
         .await

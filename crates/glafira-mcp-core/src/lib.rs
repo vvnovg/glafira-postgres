@@ -20,5 +20,6 @@ pub use endpoint::{BoxStream, Endpoint};
 pub use error::{BoxFuture, ToolError};
 pub use gate::{ClientIdent, Gate, SessionAccess, SessionView};
 pub use server::{
-    GatewayOptions, McpServerHandle, SessionFactory, SessionSnapshot, serve_stream, start,
+    GatewayOptions, McpServerHandle, SessionFactory, SessionSnapshot, serve_run_stream,
+    serve_stream, start,
 };

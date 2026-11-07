@@ -1,8 +1,8 @@
 //! Обвязка вызова инструмента (спец. P4 §4.3, §10): перенос `GatewayServer::{identify, admit, begin_long, slots, call}`
 //! и тела `list_tools` из `server/mod.rs` Glafira for Kafka в [`SessionCtx`] — его получает сервер сессии крейта
-//! приложения. Порядок вызова: опознание клиента → право (`Gate::access`) → лимит частоты → отметка «идёт вызов» →
-//! тело → JSON-объект, сжатый (`compact`) и не больше 100 КБ, одним текстовым блоком → ответ или ошибка → запись в
-//! журнал.
+//! приложения. Порядок вызова: опознание клиента → право (`Gate::access`) → область вызова (`Gate::check_call`, P4c)
+//! → лимит частоты → отметка «идёт вызов» → тело → JSON-объект, сжатый (`compact`) и не больше 100 КБ, одним
+//! текстовым блоком → ответ или ошибка → запись в журнал.
 //!
 //! Тело вызова и ожидание слотов живут не дольше сессии: rmcp выполняет обработчик запроса в отдельной задаче и при
 //! закрытии сессии её не обрывает, поэтому `call` и `db_slots` сами ждут отмены сессии (отключение, отклонение
@@ -72,6 +72,8 @@ impl CallOk {
 pub struct SessionCtx {
     shared: Arc<Shared>,
     id: String,
+    /// Id фонового запуска (P4c): сессия пришла с верным билетом; не меняется.
+    run: Option<String>,
     /// Слоты операций с базой этой сессии.
     local: Arc<Semaphore>,
     /// Отмена сессии (тот же токен, что у записи реестра и у `serve_with_ct`).
@@ -174,10 +176,16 @@ fn success(mut value: Value) -> Result<CallToolResult, ToolError> {
 }
 
 impl SessionCtx {
-    pub(crate) fn new(shared: Arc<Shared>, id: String, cancel: CancellationToken) -> Self {
+    pub(crate) fn new(
+        shared: Arc<Shared>,
+        id: String,
+        cancel: CancellationToken,
+        run: Option<String>,
+    ) -> Self {
         Self {
             shared,
             id,
+            run,
             local: Arc::new(Semaphore::new(SESSION_CONCURRENCY)),
             cancel,
             running: Arc::new(watch::Sender::new(0)),
@@ -200,6 +208,27 @@ impl SessionCtx {
 
     pub fn options(&self) -> &GatewayOptions {
         &self.shared.options
+    }
+
+    /// Id фонового запуска сессии (P4c §3.3); `None` — обычная сессия.
+    pub fn run(&self) -> Option<&str> {
+        self.run.as_deref()
+    }
+
+    /// P4c: сессии виден список prompts (`Gate::prompts_visible`); `get_prompt` сервера отказывает, если нет.
+    pub fn prompts_visible(&self, view: &SessionView) -> bool {
+        self.shared.gate.prompts_visible(view)
+    }
+
+    /// Подсказка кеша списка (2026-07-28): общий для всех клиентов список — `Public`. У сессии фонового запуска
+    /// список свой (P4c) — `Private`. Протокол 2026-07-28 требует подсказку у списка, и без неё rmcp 3.5.1 сам ставит
+    /// `Private` (`ServerResult::fill_missing_cache_hints`); здесь она задана явно, чтобы не зависеть от этого.
+    fn cache_scope(&self, hints: bool) -> Option<CacheScope> {
+        hints.then_some(if self.run.is_none() {
+            CacheScope::Public
+        } else {
+            CacheScope::Private
+        })
     }
 
     /// Клиент запоминается при первом запросе, где он известен (`initialize` или `_meta` протокола 2026-07-28), и
@@ -228,6 +257,7 @@ impl SessionCtx {
         SessionView {
             id: self.id.clone(),
             client: known,
+            run: self.run.clone(),
         }
     }
 
@@ -237,8 +267,13 @@ impl SessionCtx {
         let _ = self.shared.gate.access(view);
     }
 
-    /// Право, лимит частоты и отметка «идёт вызов».
-    fn admit(&self, view: &SessionView) -> Result<CallFlag, ToolError> {
+    /// Право, область вызова (P4c, `Gate::check_call`), лимит частоты и отметка «идёт вызов».
+    fn admit(
+        &self,
+        view: &SessionView,
+        tool: &str,
+        connection_id: Option<&str>,
+    ) -> Result<CallFlag, ToolError> {
         match self.shared.gate.access(view) {
             SessionAccess::Approved => {}
             SessionAccess::Pending => {
@@ -258,6 +293,9 @@ impl SessionCtx {
                 return Err(ToolError::new("mcp_disabled", "MCP is disabled in Glafira"));
             }
         }
+        // Область сессии (P4c): отказ уходит модели как есть и пишется в журнал. В счёт вызовов сессии и в лимит
+        // частоты он не идёт — как неподтверждённый вызов.
+        self.shared.gate.check_call(view, tool, connection_id)?;
         {
             let mut sessions = self.shared.sessions();
             let Some(e) = sessions.get_mut(&self.id) else {
@@ -334,7 +372,7 @@ impl SessionCtx {
         let _running = Running::new(&self.running);
         let started = tokio::time::Instant::now();
         let view = self.identify(rctx.client_info());
-        let result = match self.admit(&view) {
+        let result = match self.admit(&view, meta.tool, meta.connection_id) {
             Ok(_flag) => tokio::select! {
                 biased;
                 _ = self.cancel.cancelled() => Err(closed()),
@@ -356,6 +394,7 @@ impl SessionCtx {
         };
         self.shared.audit.record(AuditEvent::Call(CallRecord {
             session: self.id.clone(),
+            run: self.run.clone(),
             client: view.client.map(|c| format!("{} {}", c.name, c.version)),
             tool: meta.tool.to_string(),
             connection: meta.connection_id.map(|id| AuditConnection {
@@ -373,8 +412,9 @@ impl SessionCtx {
         out
     }
 
-    /// Ответ `prompts/list`: клиент опознаётся и подтверждение запрашивается так же, как в [`Self::list_tools_result`];
-    /// подсказки кеша — только для 2026-07-28 (тело — как у `#[prompt_handler]` rmcp 3.5).
+    /// Ответ `prompts/list`. Клиент опознаётся и подтверждение запрашивается так же, как в
+    /// [`Self::list_tools_result`]. Сессии, которой prompts не видны (P4c), — пустой список. Подсказки кеша — только
+    /// для 2026-07-28 (тело — как у `#[prompt_handler]` rmcp 3.5).
     pub fn list_prompts_result(
         &self,
         prompts: Vec<Prompt>,
@@ -382,6 +422,11 @@ impl SessionCtx {
     ) -> ListPromptsResult {
         let view = self.identify(rctx.client_info());
         self.request_approval(&view);
+        let prompts = if self.prompts_visible(&view) {
+            prompts
+        } else {
+            Vec::new()
+        };
         let cache_hints = rctx
             .protocol_version()
             .is_some_and(|v| v >= ProtocolVersion::V_2026_07_28);
@@ -391,20 +436,22 @@ impl SessionCtx {
             meta: None,
             next_cursor: None,
             ttl_ms: cache_hints.then_some(0),
-            cache_scope: cache_hints.then_some(CacheScope::Public),
+            cache_scope: self.cache_scope(cache_hints),
         }
     }
 
     /// Ответ `tools/list`. Клиент протокола 2026-07-28 не шлёт `initialize`, а список инструментов просит сразу после
-    /// подключения: клиент — из `_meta` запроса, подтверждение — здесь, как при `initialize`. Подсказки кеша — только
-    /// для 2026-07-28 (тело — как у `#[tool_handler]` rmcp 3.5).
+    /// подключения: клиент — из `_meta` запроса, подтверждение — здесь, как при `initialize`. Инструменты, которых
+    /// `Gate` сессии не показывает (P4c), в список не попадают. Подсказки кеша — только для 2026-07-28 (тело — как у
+    /// `#[tool_handler]` rmcp 3.5).
     pub fn list_tools_result(
         &self,
-        tools: Vec<Tool>,
+        mut tools: Vec<Tool>,
         rctx: &RequestContext<RoleServer>,
     ) -> ListToolsResult {
         let view = self.identify(rctx.client_info());
         self.request_approval(&view);
+        tools.retain(|t| self.shared.gate.tool_visible(&view, &t.name));
         let cache_hints = rctx
             .protocol_version()
             .is_some_and(|v| v >= ProtocolVersion::V_2026_07_28);
@@ -414,7 +461,7 @@ impl SessionCtx {
             meta: None,
             next_cursor: None,
             ttl_ms: cache_hints.then_some(0),
-            cache_scope: cache_hints.then_some(CacheScope::Public),
+            cache_scope: self.cache_scope(cache_hints),
         }
     }
 }

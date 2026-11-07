@@ -1,6 +1,8 @@
 //! Режим `glafira-pg mcp` (спец. P4 §3.3): тот же бинарь без Tauri и окна. Находит запущенную Glafira по `mcp.json`
 //! (при необходимости запускает её), проходит рукопожатие и перекачивает байты между stdin/stdout клиента MCP и
 //! сокетом (named pipe) приложения. В stdout — только протокол MCP, диагностика — в stderr.
+//! P4c §3.3: шим фонового запуска (переменная `GLAFIRA_AGENT_TICKET`) передаёт билет в рукопожатии и Glafira не
+//! запускает.
 
 use std::fmt;
 use std::io;
@@ -15,6 +17,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// Сколько шим ждёт, пока Glafira запустит MCP-сервер: у Qwen Code таймаут рукопожатия stdio — 30 с.
 pub const WAIT: Duration = Duration::from_secs(25);
 const POLL: Duration = Duration::from_millis(250);
+/// Переменная окружения с билетом фонового запуска (спец. P4c §3.3): её ставит `env` MCP-конфига запуска.
+pub const AGENT_TICKET_ENV: &str = "GLAFIRA_AGENT_TICKET";
 
 /// Окружение шима; в тестах подменяется.
 pub trait ShimEnv {
@@ -24,6 +28,11 @@ pub trait ShimEnv {
     fn policy_allows(&self) -> bool;
     /// Запускает Glafira отвязанным процессом.
     fn launch_app(&self) -> io::Result<()>;
+    /// Билет фонового запуска (`GLAFIRA_AGENT_TICKET`, без пробелов по краям); пустая или не заданная переменная —
+    /// `None`. Форму проверяет `connect`.
+    fn agent_ticket(&self) -> Option<String> {
+        None
+    }
 }
 
 #[derive(Debug)]
@@ -34,6 +43,10 @@ pub enum ShimError {
     Launch(io::Error),
     NotStarted,
     Handshake(HandshakeError),
+    /// `GLAFIRA_AGENT_TICKET` задан, но это не билет (P4c §3.3).
+    BadTicket,
+    /// Шим фонового запуска не нашёл работающую Glafira: запуска уже нет.
+    RunOver,
 }
 
 impl fmt::Display for ShimError {
@@ -52,13 +65,20 @@ impl fmt::Display for ShimError {
                 WAIT.as_secs()
             ),
             Self::Handshake(e) => write!(f, "{e}"),
+            Self::BadTicket => write!(
+                f,
+                "{AGENT_TICKET_ENV} is not a ticket of a background run: start the run again in Glafira"
+            ),
+            Self::RunOver => write!(f, "{}", handshake::BAD_TICKET_MESSAGE),
         }
     }
 }
 
-/// Проверки по порядку спец. §3.3 (каталог данных, политика, выключатель), затем соединение с запущенной Glafira:
-/// нет `mcp.json` или соединение не удаётся — Glafira запускается один раз, и шим пробует снова каждые 250 мс до `wait`.
-/// Отказ рукопожатия (`ERR bad_token …`) — ошибка сразу, без повторов.
+/// Проверки по порядку спец. P4 §3.3 (каталог данных, политика, выключатель) и форма билета фонового запуска (P4c).
+/// Затем — соединение с запущенной Glafira. Нет `mcp.json` или соединение не удаётся — Glafira запускается один раз,
+/// и шим пробует снова каждые 250 мс до `wait`. Шим фонового запуска Glafira не запускает: запуск живёт только в
+/// работающей Glafira (`RunOver`). Отказ рукопожатия (`ERR bad_token …`, `ERR bad_ticket …`) — ошибка сразу, без
+/// повторов.
 pub async fn connect(env: &dyn ShimEnv, wait: Duration) -> Result<BoxStream, ShimError> {
     let dir = env.data_dir().ok_or(ShimError::NoDataDir)?;
     if !env.policy_allows() {
@@ -67,16 +87,28 @@ pub async fn connect(env: &dyn ShimEnv, wait: Duration) -> Result<BoxStream, Shi
     if !crate::settings::mcp_enabled_in(&dir) {
         return Err(ShimError::DisabledInSettings);
     }
+    // Билет не той формы — отказ, а не обычная сессия: иначе фоновый агент получил бы все инструменты клиента,
+    // которого раньше подтвердили в чате.
+    let ticket = env.agent_ticket();
+    if ticket
+        .as_deref()
+        .is_some_and(|t| !handshake::valid_ticket(t))
+    {
+        return Err(ShimError::BadTicket);
+    }
     let deadline = tokio::time::Instant::now() + wait;
     let mut launched = false;
     loop {
         if let Some(f) = super::files::read_mcp_file(&dir)
             && let Ok(mut s) = endpoint::connect(&f.endpoint).await
         {
-            handshake::client(&mut s, &f.token)
+            handshake::client_with_run(&mut s, &f.token, ticket.as_deref())
                 .await
                 .map_err(ShimError::Handshake)?;
             return Ok(s);
+        }
+        if ticket.is_some() {
+            return Err(ShimError::RunOver);
         }
         if !launched {
             env.launch_app().map_err(ShimError::Launch)?;
@@ -180,6 +212,13 @@ impl ShimEnv for RealEnv {
         crate::policy::sources::load().status.mcp_allowed()
     }
 
+    fn agent_ticket(&self) -> Option<String> {
+        // `var_os`: значение не в UTF-8 — тоже «задано», и `connect` отвергнет его как не билет.
+        std::env::var_os(AGENT_TICKET_ENV)
+            .map(|v| v.to_string_lossy().trim().to_string())
+            .filter(|v| !v.is_empty())
+    }
+
     fn launch_app(&self) -> io::Result<()> {
         // Сборка разработки без dev-сервера Vite открыла бы пустое окно: её запускают вручную (`pnpm tauri dev`).
         if cfg!(debug_assertions) {
@@ -238,6 +277,7 @@ mod tests {
         policy: bool,
         launches: AtomicU32,
         on_launch: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        ticket: Option<String>,
     }
 
     impl ShimEnv for FakeEnv {
@@ -254,6 +294,9 @@ mod tests {
             }
             Ok(())
         }
+        fn agent_ticket(&self) -> Option<String> {
+            self.ticket.clone()
+        }
     }
 
     fn env(dir: &Path, policy: bool, mcp_enabled: bool) -> FakeEnv {
@@ -265,7 +308,16 @@ mod tests {
             policy,
             launches: AtomicU32::new(0),
             on_launch: Mutex::new(None),
+            ticket: None,
         }
+    }
+
+    fn no_runs(_: &str) -> Option<String> {
+        None
+    }
+
+    fn ticket() -> String {
+        "ab".repeat(32)
     }
 
     /// Как запущенная Glafira: слушает endpoint и пишет `mcp.json` с `token_in_file`.
@@ -288,7 +340,10 @@ mod tests {
     /// Принимает шим: рукопожатие со своим `server_token` и, если оно удалось, `from-app`.
     async fn serve_one(mut l: Listener, server_token: &'static str) {
         let mut s = l.accept().await.unwrap();
-        if handshake::server(&mut s, server_token).await.is_ok() {
+        if handshake::server(&mut s, server_token, &no_runs)
+            .await
+            .is_ok()
+        {
             s.write_all(b"from-app").await.unwrap();
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
@@ -301,6 +356,7 @@ mod tests {
             policy: true,
             launches: AtomicU32::new(0),
             on_launch: Mutex::new(None),
+            ticket: None,
         };
         assert!(matches!(connect(&e, WAIT).await, Err(ShimError::NoDataDir)));
 
@@ -338,6 +394,14 @@ mod tests {
             "Glafira did not start the MCP server within 25 s"
         );
         assert_eq!(WAIT, Duration::from_secs(25));
+        assert_eq!(
+            ShimError::RunOver.to_string(),
+            "The background run is over: start it again in Glafira"
+        );
+        assert_eq!(
+            ShimError::BadTicket.to_string(),
+            "GLAFIRA_AGENT_TICKET is not a ticket of a background run: start the run again in Glafira"
+        );
     }
 
     #[tokio::test]
@@ -392,6 +456,70 @@ mod tests {
         let r = connect(&e, Duration::from_millis(600)).await;
         assert!(matches!(r, Err(ShimError::NotStarted)));
         assert_eq!(e.launches.load(Ordering::SeqCst), 1);
+    }
+
+    /// Шим фонового запуска (P4c §3.3): билет — в строке рукопожатия, приложение узнаёт запуск.
+    #[tokio::test]
+    async fn agent_ticket_goes_into_the_handshake() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut e = env(dir.path(), true, true);
+        e.ticket = Some(ticket());
+        let mut l = listen(dir.path(), "tok").await;
+        let app = tokio::spawn(async move {
+            let mut s = l.accept().await.unwrap();
+            let check = |t: &str| (t == ticket()).then(|| "a1b2c3d".to_string());
+            let run = handshake::server(&mut s, "tok", &check).await.unwrap();
+            s.write_all(b"from-app").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            run
+        });
+        let mut s = connect(&e, Duration::from_secs(5)).await.unwrap();
+        let mut buf = [0u8; 8];
+        s.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"from-app");
+        assert_eq!(app.await.unwrap().as_deref(), Some("a1b2c3d"));
+    }
+
+    /// Билет не той формы — отказ сразу: обычной сессией с полным набором инструментов шим запуска не становится.
+    #[tokio::test]
+    async fn malformed_ticket_is_an_error_before_connecting() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut e = env(dir.path(), true, true);
+        e.ticket = Some("not-a-ticket run=x".into());
+        assert!(matches!(connect(&e, WAIT).await, Err(ShimError::BadTicket)));
+        assert_eq!(e.launches.load(Ordering::SeqCst), 0);
+    }
+
+    /// Фоновый запуск живёт только в работающей Glafira: шим запуска её не запускает и не ждёт.
+    #[tokio::test]
+    async fn background_run_does_not_launch_glafira() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut e = env(dir.path(), true, true);
+        e.ticket = Some(ticket());
+        assert!(matches!(connect(&e, WAIT).await, Err(ShimError::RunOver)));
+        assert_eq!(e.launches.load(Ordering::SeqCst), 0);
+    }
+
+    /// Отказ `bad_ticket` приложения — ошибка шима с текстом сервера, без повторов.
+    #[tokio::test]
+    async fn bad_ticket_from_the_app_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut e = env(dir.path(), true, true);
+        e.ticket = Some(ticket());
+        let l = listen(dir.path(), "tok").await;
+        tokio::spawn(serve_one(l, "tok"));
+        let Err(err) = connect(&e, Duration::from_secs(5)).await else {
+            panic!("ожидался отказ рукопожатия");
+        };
+        assert!(
+            matches!(&err, ShimError::Handshake(HandshakeError::Rejected { code, .. }) if code == "bad_ticket"),
+            "{err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "The background run is over: start it again in Glafira"
+        );
+        assert_eq!(e.launches.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

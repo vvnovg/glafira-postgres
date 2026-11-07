@@ -1,7 +1,8 @@
 //! Перенос из Glafira for Kafka (crates/glafira-mcp/src/handshake.rs): добавлена константа `PROTOCOL`, тесты —
 //! в `tests/handshake.rs`.
-//! Рукопожатие шима (спец. P4 §3.3): первая строка соединения — `GLAFIRA-MCP/1 <token>\n`, ответ — `OK\n` или
-//! `ERR <code> <message>\n`. Дальше по соединению идёт JSON-RPC MCP.
+//! Рукопожатие шима (спец. P4 §3.3, P4c §3.3). Первая строка соединения — `GLAFIRA-MCP/1 <token>\n`, у шима фонового
+//! запуска — `GLAFIRA-MCP/1 <token> run=<билет>\n`. Ответ — `OK\n` или `ERR <code> <message>\n`. Дальше по
+//! соединению идёт JSON-RPC MCP.
 
 use std::fmt;
 use std::time::Duration;
@@ -11,9 +12,19 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub const PROTOCOL: &str = "GLAFIRA-MCP/1";
 /// Начало строки рукопожатия: протокол и пробел.
 pub const PREFIX: &str = "GLAFIRA-MCP/1 ";
-/// Длиннее строка рукопожатия быть не может: префикс и 64 hex-символа токена, с запасом.
+/// P4c: необязательная часть строки после токена и пробела — билет фонового запуска.
+pub const RUN_PREFIX: &str = "run=";
+/// Билет — 32 случайных байта в hex.
+pub const TICKET_LEN: usize = 64;
+/// Длиннее строка рукопожатия быть не может: префикс, 64 hex-символа токена и билет (147 байт), с запасом.
 pub const MAX_LINE: usize = 256;
 pub const TIMEOUT: Duration = Duration::from_secs(5);
+const BAD_TOKEN_MESSAGE: &str = "Invalid MCP token: restart the MCP server in your client";
+/// Отказ `bad_ticket`: билет неизвестен, запуск закончился или после токена не билет.
+pub const BAD_TICKET_MESSAGE: &str = "The background run is over: start it again in Glafira";
+
+/// Проверка билета приложением (`Gate::run_for_ticket`): id запуска или `None`.
+pub type TicketCheck = dyn Fn(&str) -> Option<String> + Sync;
 
 #[derive(Debug)]
 pub enum HandshakeError {
@@ -69,6 +80,11 @@ pub fn tokens_equal(a: &str, b: &str) -> bool {
             == 0
 }
 
+/// Билет — ровно `TICKET_LEN` hex-символов.
+pub fn valid_ticket(s: &str) -> bool {
+    s.len() == TICKET_LEN && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 async fn write_line<W: AsyncWrite + Unpin>(w: &mut W, line: &str) -> Result<(), HandshakeError> {
     w.write_all(line.as_bytes())
         .await
@@ -81,7 +97,20 @@ pub async fn client<S: AsyncRead + AsyncWrite + Unpin>(
     s: &mut S,
     token: &str,
 ) -> Result<(), HandshakeError> {
-    write_line(s, &format!("{PREFIX}{token}\n")).await?;
+    client_with_run(s, token, None).await
+}
+
+/// Сторона шима фонового запуска (P4c): токен и билет `run_ticket`; без билета — как [`client`].
+pub async fn client_with_run<S: AsyncRead + AsyncWrite + Unpin>(
+    s: &mut S,
+    token: &str,
+    run_ticket: Option<&str>,
+) -> Result<(), HandshakeError> {
+    let line = match run_ticket {
+        Some(t) => format!("{PREFIX}{token} {RUN_PREFIX}{t}\n"),
+        None => format!("{PREFIX}{token}\n"),
+    };
+    write_line(s, &line).await?;
     let line = tokio::time::timeout(TIMEOUT, read_line(s))
         .await
         .map_err(|_| HandshakeError::Timeout)??;
@@ -100,23 +129,51 @@ pub async fn client<S: AsyncRead + AsyncWrite + Unpin>(
     }
 }
 
-/// Сторона приложения: принимает соединение только с верным токеном.
+/// Отказ: `ERR <code> <message>` клиенту и ошибка серверу.
+async fn reject<S: AsyncWrite + Unpin>(
+    s: &mut S,
+    code: &str,
+    message: &str,
+) -> Result<Option<String>, HandshakeError> {
+    write_line(s, &format!("ERR {code} {message}\n")).await?;
+    Err(HandshakeError::Rejected {
+        code: code.into(),
+        message: message.into(),
+    })
+}
+
+/// Сторона приложения: принимает соединение только с верным токеном. Билет фонового запуска (`run=<билет>` после
+/// токена) проверяет `run_for_ticket` — и только после верного токена. Итог — id запуска. Неизвестный или истёкший
+/// билет и любая другая часть после токена — `ERR bad_ticket`.
 pub async fn server<S: AsyncRead + AsyncWrite + Unpin>(
     s: &mut S,
     token: &str,
-) -> Result<(), HandshakeError> {
+    run_for_ticket: &TicketCheck,
+) -> Result<Option<String>, HandshakeError> {
     let line = tokio::time::timeout(TIMEOUT, read_line(s))
         .await
         .map_err(|_| HandshakeError::Timeout)??;
-    match line.strip_prefix(PREFIX) {
-        Some(t) if tokens_equal(t, token) => write_line(s, "OK\n").await,
-        _ => {
-            let message = "Invalid MCP token: restart the MCP server in your client";
-            write_line(s, &format!("ERR bad_token {message}\n")).await?;
-            Err(HandshakeError::Rejected {
-                code: "bad_token".into(),
-                message: message.into(),
-            })
-        }
+    let Some(rest) = line.strip_prefix(PREFIX) else {
+        return reject(s, "bad_token", BAD_TOKEN_MESSAGE).await;
+    };
+    let (t, tail) = match rest.split_once(' ') {
+        Some((t, tail)) => (t, Some(tail)),
+        None => (rest, None),
+    };
+    if !tokens_equal(t, token) {
+        return reject(s, "bad_token", BAD_TOKEN_MESSAGE).await;
     }
+    let run = match tail {
+        None => None,
+        Some(tail) => match tail
+            .strip_prefix(RUN_PREFIX)
+            .filter(|x| valid_ticket(x))
+            .and_then(run_for_ticket)
+        {
+            Some(id) => Some(id),
+            None => return reject(s, "bad_ticket", BAD_TICKET_MESSAGE).await,
+        },
+    };
+    write_line(s, "OK\n").await?;
+    Ok(run)
 }

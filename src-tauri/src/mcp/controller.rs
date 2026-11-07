@@ -317,6 +317,8 @@ impl McpController {
                     self.audit.record(AuditEvent::Approved {
                         session,
                         client: client.clone(),
+                        run: None,
+                        by: None,
                     });
                 }
             } else {

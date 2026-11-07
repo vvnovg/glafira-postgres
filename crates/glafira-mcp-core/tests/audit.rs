@@ -1,4 +1,5 @@
-//! Журнал MCP (спец. P4 §10.3): события, счётчики приложения, события P4b, ротация, усечение аргументов.
+//! Журнал MCP (спец. P4 §10.3): события, счётчики приложения, события P4b, ротация, усечение аргументов; поля
+//! фонового запуска (P4c §9.2).
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -13,6 +14,7 @@ use serde_json::{Map, Value, json};
 fn call(extra: Map<String, Value>) -> AuditEvent {
     AuditEvent::Call(CallRecord {
         session: "s1".into(),
+        run: None,
         client: Some("qwen-code 0.26.7".into()),
         tool: "get_activity".into(),
         connection: Some(AuditConnection {
@@ -36,6 +38,7 @@ fn records_lines_newest_first_with_app_counters() {
     assert_eq!(log.path(), dir.path().join(FILE_NAME).as_path());
     log.record(AuditEvent::SessionStarted {
         session: "s1".into(),
+        run: None,
     });
     let mut extra = Map::new();
     extra.insert("masked".into(), json!(4));
@@ -69,6 +72,8 @@ fn every_gateway_event_has_its_name() {
     log.record(AuditEvent::Approved {
         session: "s1".into(),
         client: Some("qwen-code".into()),
+        run: None,
+        by: None,
     });
     log.record(AuditEvent::Rejected {
         session: "s2".into(),
@@ -219,4 +224,54 @@ fn non_object_args_are_cut_to_a_string() {
     assert!(s.ends_with('…') && s.len() <= MAX_ARGS_AUDIT_BYTES + '…'.len_utf8());
     assert_eq!(truncate_args(json!([1, 2]), &["sql"]), json!([1, 2]));
     assert_eq!(truncate_args(Value::Null, &["sql"]), Value::Null);
+}
+
+/// P4c §9.2: `run` у записей сессии фонового запуска, `by: "run"` у подтверждения по билету; у обычных сессий полей нет.
+#[test]
+fn background_run_fields_are_written_only_when_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = AuditLog::new(dir.path());
+    log.record(AuditEvent::SessionStarted {
+        session: "s1".into(),
+        run: Some("a1b2c3d".into()),
+    });
+    log.record(AuditEvent::Approved {
+        session: "s1".into(),
+        client: Some("qwen-code".into()),
+        run: Some("a1b2c3d".into()),
+        by: Some("run".into()),
+    });
+    log.record(AuditEvent::Approved {
+        session: "s2".into(),
+        client: Some("cursor".into()),
+        run: None,
+        by: None,
+    });
+    let AuditEvent::Call(mut rec) = call(Map::new()) else {
+        unreachable!()
+    };
+    rec.run = Some("a1b2c3d".into());
+    log.record(AuditEvent::Call(rec));
+    let r = log.tail(4);
+    assert_eq!(
+        (r[0]["event"].as_str(), r[0]["run"].as_str()),
+        (Some("call"), Some("a1b2c3d"))
+    );
+    assert!(
+        r[1].get("run").is_none() && r[1].get("by").is_none(),
+        "подтверждение в диалоге — без полей запуска: {}",
+        r[1]
+    );
+    assert_eq!(
+        (r[2]["run"].as_str(), r[2]["by"].as_str()),
+        (Some("a1b2c3d"), Some("run"))
+    );
+    assert_eq!(r[3]["run"], "a1b2c3d");
+    assert!(
+        serde_json::to_value(call(Map::new()))
+            .unwrap()
+            .get("run")
+            .is_none(),
+        "у вызова обычной сессии поля нет"
+    );
 }

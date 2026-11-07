@@ -1,5 +1,6 @@
 //! Реестр сессий сервера (перенос `SessionEntry`, `Shared` и счётчика сессий из `server/mod.rs` Glafira for Kafka):
-//! клиент, время начала, число вызовов, «идёт вызов», «идёт длительная операция», лимитер частоты, отмена сессии.
+//! клиент, время начала, число вызовов, «идёт вызов», «идёт длительная операция», лимитер частоты, отмена сессии;
+//! P4c — id фонового запуска.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,6 +16,8 @@ use crate::server::{GatewayOptions, SessionSnapshot};
 
 pub(crate) struct SessionEntry {
     pub(crate) client: Option<ClientIdent>,
+    /// Id фонового запуска (P4c), если сессия пришла с билетом.
+    pub(crate) run: Option<String>,
     pub(crate) started_ms: u64,
     pub(crate) calls: u64,
     pub(crate) in_flight: u32,
@@ -25,9 +28,10 @@ pub(crate) struct SessionEntry {
 }
 
 impl SessionEntry {
-    pub(crate) fn new(cancel: CancellationToken) -> Self {
+    pub(crate) fn new(cancel: CancellationToken, run: Option<String>) -> Self {
         Self {
             client: None,
+            run,
             started_ms: now_ms(),
             calls: 0,
             in_flight: 0,
@@ -79,6 +83,7 @@ impl Shared {
                 started_ms: e.started_ms,
                 calls: e.calls,
                 active: e.in_flight > 0,
+                run_id: e.run.clone(),
             })
             .collect();
         v.sort_by(|a, b| {

@@ -3,6 +3,8 @@
 //! `member`, событие вызова — структура `CallRecord`, события приложения — `App`, имена файлов — параметр,
 //! `recent` → `tail`, поля `sql` / `rewrittenSql` пишутся целиком до 16 КБ.
 //! Журнал MCP (спец. P4 §10.3): строка — событие, ротация при 5 МБ во второй файл. Результаты вызовов не пишутся.
+//! P4c: у записей сессии фонового запуска — поле `run` (id запуска), у `approved` по билету — ещё `by: "run"`; у
+//! обычных сессий этих полей нет.
 //! Сбой записи журнала не ломает вызов (best effort).
 
 use std::fs::{File, OpenOptions};
@@ -33,12 +35,15 @@ pub struct AuditConnection {
     pub name: String,
 }
 
-/// Вызов инструмента. `client`, `connection`, `code` пишутся `null`, когда их нет; `member` и счётчики `extra`
-/// (`masked`, `rows`) — только когда есть, на верхнем уровне строки.
+/// Вызов инструмента. `client`, `connection`, `code` пишутся `null`, когда их нет; `run` (P4c), `member` и счётчики
+/// `extra` (`masked`, `rows`) — только когда есть, на верхнем уровне строки.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CallRecord {
     pub session: String,
+    /// Id фонового запуска (P4c §9.2); у обычной сессии поля нет.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
     pub client: Option<String>,
     pub tool: String,
     pub connection: Option<AuditConnection>,
@@ -64,11 +69,20 @@ pub enum AuditEvent {
     #[serde(rename_all = "camelCase")]
     SessionStarted {
         session: String,
+        /// Id фонового запуска (P4c §9.2).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        run: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     Approved {
         session: String,
         client: Option<String>,
+        /// Id фонового запуска (P4c §9.2).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        run: Option<String>,
+        /// Кто подтвердил: `"run"` — билет фонового запуска (P4c §5.1); без поля — пользователь в диалоге.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        by: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     Rejected {
