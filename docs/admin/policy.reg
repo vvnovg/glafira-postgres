@@ -6,3 +6,4 @@ Windows Registry Editor Version 5.00
 "language"="en"
 "mcpEnabled"=dword:00000001
 "mcpMaxAccess"="diagnostics"
+"mcpAgentEnabled"=dword:00000000

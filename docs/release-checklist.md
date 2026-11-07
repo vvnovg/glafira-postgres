@@ -77,6 +77,20 @@
       macOS — `.app` из `.dmg` в `/Applications`; Windows — `.msi` (путь с пробелами в `C:\Program Files\…`, GUI-бинарь работает
       как stdio-сервер, именованный канал, окно консоли не появляется); Linux — `.AppImage` (во фрагменте путь к AppImage) и
       `.deb` (`/usr/bin/glafira-pg`).
+- [ ] Фоновый ассистент с настоящими CLI. macOS — смоук `docs/smoke/p4c.md`, шаги 1–3 и 5, на установленном `.app`. Windows и
+      Linux — вручную: «Настройки» → «LLM-ассистенты (MCP)» → «Фоновый ассистент» → «Найти» для Qwen Code (Windows — `qwen.cmd`
+      из `%APPDATA%\npm`) и Claude Code — путь и версия; «Проверить» → «Работает…»; запрос из консоли → предложение в панели
+      «От фонового ассистента», окно консоли не появляется (Windows); «Отменить запрос» во время работы → процессов агента и
+      шима нет (Windows — `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*agent-runs*' -or
+      $_.CommandLine -like '*glafira-pg*mcp*' }` пуст; Linux — `pgrep -fa agent-runs/` пуст).
+- [ ] Проверка агентских CLI на текущих версиях Qwen Code и Claude Code (по слову владельца, M4 Pro, `ollama ps` до запуска;
+      `dev/agent-check/README.md`): `python3 -I dev/agent-check/agent_check.py run` и `run --canary`. Итог сверить с таблицей
+      пресетов (спека P4c, §4.1) и «Итогом проверки CLI» (§16): одобрение вызовов, коды выхода, событие `init` в начале
+      потока и `result` в конце, без строк не-JSON до `init`. Встроенные инструменты Qwen Code из описи `q-inventory`
+      (поле `builtin_tools` в `out/<время>/q-inventory.result.json`; в `context.json` прогона — `qwen_builtins`) сравнить с
+      `agent::presets::QWEN_BUILTIN_TOOLS`: новое имя — дописать в список (иначе каждый запуск кончится `unsafeTools`), лишнее —
+      убрать; поправить золотые тесты пресетов и спеку (§4.1, §16). Любое расхождение — правка `agent::presets` и спеки до тега;
+      минимальные версии в «Найти» (`presets::min_version`) — по проверенным версиям.
 - [ ] Политика `updatesEnabled = false` (по `docs/admin.md`): «Обновления управляются вашей организацией», в логе нет запросов к серверу обновлений.
 - [ ] Политика с `updateUrl: "http://…"`: в «О программе» ошибка политики, обновления выключены.
 - [ ] «Собрать диагностику» → архив открывается, паролей нет.

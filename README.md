@@ -28,7 +28,7 @@ https://github.com/vvnovg/glafira-postgres-releases/releases
 - Диагностика дежурного (группа «Диагностика» в дереве): пульс узлов кластера, сессии и idle in transaction, профиль ожиданий (сэмплер раз в секунду, история в памяти), дерево блокировок и DDL в очереди, горизонт xmin, реплики, слоты репликации и подписки; у кластера Patroni — готовность к failover и матрица health. Находки с порогами и подсказками «что сделать»; запланированные switchover и restart Patroni — в обзоре. Инструменты диагностики только читают (`SELECT` и `GET`; исключение — EXPLAIN ANALYZE запроса, который пишет данные: ярус записи с подтверждением, журналом и откатом), для полной картины нужна роль `pg_monitor`.
 - Действия дежурного: отмена запроса и завершение сессий (поштучно и пакетом «idle in transaction старше N минут»), удаление неактивного слота репликации; у кластера Patroni — switchover (сейчас и по расписанию), failover, restart, пауза и отмена запланированных действий, с наблюдением за ходом до «готово». Каждому действию предшествует предпросмотр и подтверждение (на prod — именем подключения); на подключении «только чтение» действий нет; журнал `actions.jsonl` и его вкладка «Журнал действий». Права и риски — в `docs/admin.md`.
 - Тяжёлые запросы (инструмент «Запросы» и консоль EXPLAIN в группе «Диагностика»): топ по `pg_stat_statements` с момента сброса и за 5, 15 или 60 минут, находки без плана (N+1, нестабильное время, низкий hit ratio, temp-файлы, планирование), карточка запроса с историей, выполняющимися экземплярами и ожиданиями, EXPLAIN и EXPLAIN ANALYZE с деревом плана (запрос на чтение — без подтверждения в транзакции `READ ONLY`, запрос с записью — в транзакции с откатом, подтверждением и записью в журнал), вставка JSON-плана, «Скопировать для LLM». Права и нагрузка — в `docs/admin.md`.
-- LLM-ассистенты по MCP (Qwen Code, Claude Code, Claude Desktop, Cursor): шлюз только для чтения — топология, сводка здоровья, отчёты диагностики с находками, активность и наблюдение, топ запросов и карточки, таблицы со статистикой колонок, параметры сервера, планы без выполнения и гипотезы индексов hypopg. Уровень доступа задаётся на каждом подключении (по умолчанию выключен), литералы в текстах запросов маскируются, SQL модели проверяется разбором; подтверждение клиентов, журнал `mcp-audit.jsonl`, политика `mcpEnabled` / `mcpMaxAccess`. Запрос на оптимизацию из консоли EXPLAIN и карточки запроса: модель присылает переписанный запрос и индексы, панель «Предложения LLM» сравнивает планы (EXPLAIN без выполнения, индексы — виртуальные через hypopg). Уровень «Диагностика и данные» для стендов: без маскирования, значения `pg_stats`, чтение данных `run_select`. Сценарии — MCP prompts `optimize_query`, `triage_incident`, `analyze_top_queries`, `review_config`.
+- LLM-ассистенты по MCP (Qwen Code, Claude Code, Claude Desktop, Cursor): шлюз только для чтения — топология, сводка здоровья, отчёты диагностики с находками, активность и наблюдение, топ запросов и карточки, таблицы со статистикой колонок, параметры сервера, планы без выполнения и гипотезы индексов hypopg. Уровень доступа задаётся на каждом подключении (по умолчанию выключен), литералы в текстах запросов маскируются, SQL модели проверяется разбором; подтверждение клиентов, журнал `mcp-audit.jsonl`, политика `mcpEnabled` / `mcpMaxAccess`. Запрос на оптимизацию из консоли EXPLAIN и карточки запроса: модель присылает переписанный запрос и индексы, панель «Предложения LLM» сравнивает планы (EXPLAIN без выполнения, индексы — виртуальные через hypopg). Уровень «Диагностика и данные» для стендов: без маскирования, значения `pg_stats`, чтение данных `run_select`. Сценарии — MCP prompts `optimize_query`, `triage_incident`, `analyze_top_queries`, `review_config`. Фоновый ассистент: кнопка «Передать LLM-ассистенту» сама запускает Qwen Code или Claude Code без окна на один запрос, предложения приходят в ту же панель; тёплая модель Ollama, политика `mcpAgentEnabled`.
 - Папки, экспорт и импорт подключений без секретов, дублирование подключения.
 - Интерфейс на английском и русском, встроенное руководство (вкладка «Справка», F1, меню Help на macOS), автообновление.
 
@@ -48,6 +48,15 @@ LLM-ассистент подключается к Glafira по MCP через �
 значения `pg_stats`, чтение данных `run_select` (одна инструкция `SELECT`, `READ ONLY`, 10 с, до 500 строк и 100 КБ, по
 умолчанию на реплике) и предупреждение о роли с опасными правами. Сценарии (MCP prompts): `optimize_query`, `triage_incident`,
 `analyze_top_queries`, `review_config`.
+
+Фоновый ассистент (P4c): с «Запускать ассистента в фоне» («Настройки» → «LLM-ассистенты (MCP)» → «Фоновый ассистент») кнопка
+«Передать LLM-ассистенту» ничего не копирует — Glafira сама запускает без окна Qwen Code или Claude Code на один запрос (по
+одному, срок 15 мин, 40 вызовов, остановка всей группы процессов или Job Object). Агент работает через тот же шлюз в сессии,
+опознанной по билету из MCP-конфига запуска: без диалога подтверждения, только подключение и запрос своего запуска и девять
+инструментов; до первого хода модели Glafira сверяет список её инструментов (событие `init` потока JSON) и останавливает запуск,
+если там есть что-то кроме инструментов Glafira. Предложения приходят в панель «Предложения LLM». Модель Ollama на этом
+компьютере Glafira держит тёплой (10 мин после запуска). Политика — ключ `mcpAgentEnabled`. Код — `src-tauri/src/agent/`; флаги
+пресетов проверяет `dev/agent-check` (спека P4c, §4.1 и §16).
 
 Разработка: из `pnpm tauri dev` шим приложение не запускает — сначала `pnpm tauri dev` и включённый MCP, фрагменты в «Настройках»
 тогда указывают на `src-tauri/target/debug/glafira-pg`. Крейты шлюза — `crates/glafira-mcp-core` (транспорт, рукопожатие, сессии,
@@ -136,6 +145,7 @@ cargo test --manifest-path crates/pg-advisor/Cargo.toml  # правила
 cargo test --manifest-path crates/glafira-mcp-core/Cargo.toml  # ядро MCP-шлюза
 cargo test --manifest-path crates/glafira-pg-mcp/Cargo.toml    # инструменты MCP
 cargo test --manifest-path src-tauri/Cargo.toml --lib    # Rust unit
+cargo test --manifest-path src-tauri/Cargo.toml --features fake-agent --test it_agent   # фоновый ассистент (без стенда)
 cargo deny --manifest-path src-tauri/Cargo.toml --config deny.toml check licenses   # лицензии зависимостей
 cargo deny --manifest-path crates/pg-advisor/Cargo.toml --config deny.toml check licenses
 cargo deny --manifest-path crates/glafira-mcp-core/Cargo.toml --config deny.toml check licenses
@@ -144,11 +154,16 @@ GPG_IT_SINGLE=localhost:5460 GPG_IT_PRIMARY=localhost:5451 GPG_IT_REPLICA=localh
 GPG_IT_PATRONI=http://localhost:8011,http://localhost:8012,http://localhost:8013 GPG_IT_LAB=localhost:5470 GPG_IT_PERF=localhost:5471 GPG_IT_DOCKER=1 \
 GPG_IT_BASTION=localhost:2222 GPG_IT_SSH_KEYS=$PWD/dev/ssh/keys \
 GPG_IT_MATRIX=localhost:5513,localhost:5514,localhost:5515,localhost:5516,localhost:5517,localhost:5518 \
-  cargo test --manifest-path src-tauri/Cargo.toml --tests -- --test-threads=1   # интеграционные (нужен стенд)
+  cargo test --manifest-path src-tauri/Cargo.toml --features fake-agent --tests -- --test-threads=1   # интеграционные (нужен стенд)
 ```
 Без переменной `GPG_IT_*` интеграционный тест пропускается (`it_ssh` — без `GPG_IT_BASTION` или `GPG_IT_SSH_KEYS`; он запускает
 настоящий OpenSSH 8.4+ из `PATH`; проход по матрице версий — без `GPG_IT_MATRIX`: по ней идут тесты каталога, `it_diag` (SQL каждого инструмента диагностики) и `it_sampler` (запрос сэмплера) на PG 13–18; сценарии лаборатории — без `GPG_IT_LAB`; тесты «Запросов» и EXPLAIN на `pg-perf` — без `GPG_IT_PERF`, нагрузка `heavy.sql` им не нужна; на CI они идут в отдельном workflow `perf` — ночью и по кнопке, а не на каждый push; MCP на стенде — `it_mcp` (сервер в том же процессе, клиент rmcp): сценарии лаборатории с `GPG_IT_LAB`, Patroni с `GPG_IT_PATRONI`, топ и EXPLAIN с `GPG_IT_PERF`, параметры и таблицы по матрице с `GPG_IT_MATRIX`; `it_mcp_backend` проверяет бэкенд MCP напрямую, без сервера и клиента — `explain_query`, `hypothetical_index`, наблюдение и обрезку значений `run_select` на pg-perf, с `GPG_IT_PERF`; MCP P4b — `it_mcp_data` (`run_select`, уровень данных, предупреждение о роли; с `GPG_IT_LAB`) и `it_mcp_proposals` (запрос на оптимизацию, предложения и сравнение планов; с `GPG_IT_PERF`, проверка списка инструментов и prompts идёт и без стенда)). `GPG_IT_DOCKER=1` разрешает тестам останавливать контейнеры,
 делать switchover и promote; после них стенд возвращается в исходное состояние.
+
+Фоновый ассистент: `it_agent` собирается только с `--features fake-agent` (без неё `--tests` его пропускает) — тестовый бинарь
+`glafira-fake-agent` (`src-tauri/tests/bin/fake_agent.rs`) запускается очередью приложения через настоящий шим и сокет на любой
+ОС без стенда; с `GPG_IT_PERF` — ещё предложение на pg-perf со «Сравнить планы». Настоящие Qwen Code и Claude Code с локальной
+моделью проверяет `dev/agent-check` (на M4 Pro, по слову владельца).
 
 Действия: `it_actions` (сессии и слоты; нужны `GPG_IT_SINGLE`, `GPG_IT_PRIMARY`, `GPG_IT_LAB`) и `it_patroni_actions` (Patroni; нужен `GPG_IT_PATRONI`). Сценарии `it_patroni_actions`, которые меняют кластер (switchover сейчас и по расписанию, restart реплики, пауза), идут только с `GPG_IT_DOCKER=1` и возвращают стенд сами: восстановление при любом выходе и ожидание, пока стенд придёт в норму. Failover останавливает PostgreSQL лидера и идёт только ещё и с `GPG_IT_FAILOVER=1`:
 ```bash
@@ -167,4 +182,6 @@ GPG_IT_PATRONI=http://localhost:8011,http://localhost:8012,http://localhost:8013
 - Настройки: `settings.json`.
 - MCP: `mcp.json` (адрес и токен работающего сервера, 0600), `mcp.sock`, журнал `mcp-audit.jsonl` — в каталоге данных (`docs/admin.md`, «Данные и логи»).
 - Запросы на оптимизацию и предложения LLM: `llm-requests.json`, `llm-proposals.json` (0600) — в каталоге данных.
+- Фоновый ассистент: `agent-runs.json` (запуски), `agent-runs/` (журналы запусков и MCP-конфиги на время запуска, 0600),
+  `agent-work/` (пустая рабочая папка агента) — в каталоге данных; настройки — раздел `mcp.agent` в `settings.json`.
 - Логи: `RUST_LOG=debug pnpm tauri dev`.

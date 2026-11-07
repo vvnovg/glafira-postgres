@@ -62,6 +62,8 @@ The client needs the address `http://127.0.0.1:11434/v1`, the model `qwen3.6-64k
 
 After 5 minutes of idling Ollama unloads the model from memory, and the next question waits for it to load again. To keep the model in memory longer, set the `OLLAMA_KEEP_ALIVE` environment variable, for example to `1h`.
 
+The background assistant of Glafira manages this itself (see [Local model for the background assistant](llm-mcp.md#background-ollama)): it loads the run's model at the start of a run and keeps it in memory for 10 minutes after the run (the [[ui:settings.mcp.agent.keepWarm]] field), without shortening a longer `OLLAMA_KEEP_ALIVE`. All that time the model takes as much memory as during a run; [[ui:settings.mcp.agent.unload]] frees it at once. If another model is loaded, Ollama may unload it to load the run's model, and Glafira warns about it.
+
 ## Clients {#clients}
 
 Two command-line clients were tested. In both, turn off the built-in shell, file-editing, file-reading and web tools: otherwise the model can bypass Glafira and reach the database or the internet by itself, or even wander off searching files instead of answering. Glafira shows a new client in the approval dialog under its name.
