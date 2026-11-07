@@ -2179,6 +2179,35 @@ mod tests {
         assert_eq!(h.fake.alive.load(Ordering::SeqCst), 0);
     }
 
+    /// Остановка во время короткого ожидания выхода после конца потока без `init` (`STREAM_END_GRACE`) прерывает и его:
+    /// итог — `cancelled` сразу, с паузой SIGTERM, а не `unsafeTools` через 5 с (повторное ревью задачи 6, замечание 3).
+    #[tokio::test(start_paused = true)]
+    async fn stopping_while_the_exit_is_awaited_cancels_the_run() {
+        let h = harness();
+        h.fake
+            .script(vec![Step::NoInit, Step::EndStream, Step::Hang]);
+        let started = tokio::time::Instant::now();
+        let run = h.q().start(&request(&h)).unwrap();
+        until(&h, &run.id, |r| r.status == RunStatus::Starting).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        h.q().stop(&run.id).unwrap();
+        let run = until(&h, &run.id, done).await;
+        assert!(
+            started.elapsed() < STREAM_END_GRACE,
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!((run.status, run.reason), (RunStatus::Cancelled, None));
+        assert!(run.warnings.is_empty(), "{:?}", run.warnings);
+        assert_eq!(
+            (
+                h.fake.stops.load(Ordering::SeqCst),
+                h.fake.kills.load(Ordering::SeqCst)
+            ),
+            (1, 0)
+        );
+    }
+
     /// Событие `init` без списка `tools` и строка не JSON до него (вывод не `stream-json`): модель уже работает, а
     /// проверить нечем — остановка сразу, а не через минуту (ревью задачи 6, замечание 1).
     #[tokio::test(start_paused = true)]
@@ -2492,6 +2521,7 @@ mod tests {
             Step::Call("get_optimization_request"),
             Step::Sleep(5),
             Step::Call("propose_query_rewrite"),
+            Step::Sleep(5),
             Step::Propose,
             Step::Out(RESULT),
             Step::Exit(0),
@@ -2506,7 +2536,19 @@ mod tests {
                 .unwrap();
         assert!(created && chat.run_id.is_none());
         h.st.llm.requests.attach_proposal(&req, &chat.id).unwrap();
+        // Ход работы до повтора уже отправлен (вызов `propose_query_rewrite`, затем пауза дольше `PROGRESS_EVERY`).
+        until(&h, &run.id, |r| r.calls == 2).await;
+        tokio::time::sleep(PROGRESS_EVERY * 2).await;
+        let before = h.events.0.lock().unwrap().len();
         let run = until(&h, &run.id, done).await;
+        let after: Vec<RunStatus> = h.events.0.lock().unwrap()[before..]
+            .iter()
+            .map(|r| r.status)
+            .collect();
+        assert!(
+            after.iter().all(|s| !s.is_active()),
+            "повтор чужого предложения — без события хода работы: {after:?}"
+        );
         assert_eq!(
             (run.status, run.reason, run.proposal_ids.len()),
             (RunStatus::Done, None, 0),
