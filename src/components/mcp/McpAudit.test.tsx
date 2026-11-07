@@ -1,10 +1,14 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { McpAuditEntry } from "../../api/types";
+import { emitEvent, listeners, resetEventBus } from "../../test/events";
 import { connection } from "../../test/fixtures";
+import { agentRun } from "../../test/llm";
 import { explainCall, mcpStatus } from "../../test/mcp";
 import { renderWithClient } from "../../test/render";
+
+vi.mock("@tauri-apps/api/event", async () => (await import("../../test/events")).tauriEventMock());
 
 vi.mock("../../api/client", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../../api/client")>();
@@ -34,6 +38,7 @@ const later: McpAuditEntry = { ts: 1_700_000_000_400, event: "futureEvent" };
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resetEventBus();
   vi.mocked(api.listConnections).mockResolvedValue([
     connection({ id: "c1", name: "perf", llmAccess: "diagnostics" }),
     connection({ id: "c2", name: "closed", llmAccess: "off" }),
@@ -139,6 +144,34 @@ describe("McpAudit", () => {
     expect(details(4)).toHaveTextContent(/^≈ 0,01 \$$/);
     expect(hintOf(details(4))).toHaveAccessibleName(/: Оценка по ценам Ollama Cloud \(ollama\.com\/pricing\)$/);
     expect(details(5)).toHaveTextContent(/^замаскировано: 3$/);
+  });
+
+  it("R24: перечитывается при каждом показе раздела и по концу фонового запуска, пока раздел открыт; скрытый не читает", async () => {
+    const finished: McpAuditEntry = { ts: 1_700_000_000_900, event: "agentRunFinished", runId: "a1", requestId: "r1", connection: { id: "c1", name: "perf" }, status: "done", calls: 7, proposals: 1, ms: 48_000 };
+    vi.mocked(api.getMcpAudit).mockResolvedValue([activity]);
+    const { rerender } = renderWithClient(<McpAudit status={mcpStatus()} shown={false} />);
+    // Дать запросам шанс начаться: скрытый раздел журнал всё равно не читает.
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+    expect(api.getMcpAudit).not.toHaveBeenCalled();
+    expect(listeners("agent://runs")).toHaveLength(0);
+    rerender(<McpAudit status={mcpStatus()} shown />);
+    await screen.findByRole("table", { name: "Журнал" });
+    expect(api.getMcpAudit).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(listeners("agent://runs")).toHaveLength(1));
+    // Ход работы журнал не трогает; конец запуска — перечитать (его запись `agentRunFinished` уже в файле).
+    vi.mocked(api.getMcpAudit).mockResolvedValue([finished, activity]);
+    emitEvent("agent://runs", agentRun({ status: "running", startedAtMs: 1, calls: 3 }));
+    expect(api.getMcpAudit).toHaveBeenCalledTimes(1);
+    emitEvent("agent://runs", agentRun({ status: "done", startedAtMs: 1, endedAtMs: 48_001, proposalIds: ["p1"] }));
+    expect(await screen.findByText("Фоновый запуск завершён")).toBeInTheDocument();
+    expect(api.getMcpAudit).toHaveBeenCalledTimes(2);
+    // Раздел скрыт — событий не слушает и не читает; показан снова — перечитан.
+    rerender(<McpAudit status={mcpStatus()} shown={false} />);
+    await waitFor(() => expect(listeners("agent://runs")).toHaveLength(0));
+    rerender(<McpAudit status={mcpStatus()} shown />);
+    await waitFor(() => expect(api.getMcpAudit).toHaveBeenCalledTimes(3));
+    // «Обновить» осталась.
+    expect(screen.getByRole("button", { name: "Обновить" })).toBeEnabled();
   });
 
   it("пустой журнал, «Обновить» и «Показать файл»", async () => {

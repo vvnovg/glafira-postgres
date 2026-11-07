@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
 import type { McpAuditEntry, McpStatus } from "../../api/types";
 import { formatCount, formatTimestamp } from "../../lib/format";
+import { useRunFinished } from "../../lib/useAgentRuns";
 import { MCP_AUDIT_KEY } from "../../lib/useMcpStatus";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { isConsoleCall, openBlocked } from "./auditOpen";
@@ -70,10 +71,14 @@ function detailsText(e: McpAuditEntry, t: TFunction): string {
  * Журнал MCP (спец. P4 §10.3, §11): последние записи `mcp-audit.jsonl`, «Обновить» и «Показать файл»; заголовок — у раздела
  * «Журнал» «Настроек». У успешных `explain_query` (и `run_select` P4b) — «Открыть в консоли EXPLAIN», если раздел передал
  * `onOpenInConsole`; неактивная кнопка называет причину в подсказке.
+ * `shown` — раздел виден (смоук P4c, R24: разделы «Настроек» смонтированы скрыто, и журнал оставался таким, каким был при
+ * первом открытии): скрытый журнал не читается, каждый показ перечитывает его (чтение включается заново, а прочитанное уже
+ * устарело), а пока он виден — и конец каждого фонового запуска (`agent://runs`: Rust пишет `agentRunFinished` до события).
  */
-export function McpAudit({ status, onOpenInConsole }: { status: McpStatus; onOpenInConsole?: (entry: McpAuditEntry) => void }) {
+export function McpAudit({ status, onOpenInConsole, shown = true }: { status: McpStatus; onOpenInConsole?: (entry: McpAuditEntry) => void; shown?: boolean }) {
   const { t } = useTranslation();
-  const audit = useQuery({ queryKey: MCP_AUDIT_KEY, queryFn: () => api.getMcpAudit(AUDIT_LIMIT) });
+  const audit = useQuery({ queryKey: MCP_AUDIT_KEY, queryFn: () => api.getMcpAudit(AUDIT_LIMIT), enabled: shown });
+  useRunFinished(() => void audit.refetch(), shown);
   // Уровень доступа подключений нужен только кнопке «Открыть в консоли».
   const connections = useQuery({ queryKey: ["connections"], queryFn: () => api.listConnections(), enabled: onOpenInConsole !== undefined });
   const reveal = useMutation({ mutationFn: () => api.revealMcpAudit() });

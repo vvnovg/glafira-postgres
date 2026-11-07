@@ -2,7 +2,6 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ProposalComparison } from "../../../api/types";
-import { useShownProposals } from "../../../state/shownProposals";
 import { useTabMarks } from "../../../state/tabMarks";
 import { useWorkspace } from "../../../state/workspace";
 import { agentRun, llmProposal, optimizationRequest } from "../../../test/llm";
@@ -35,7 +34,6 @@ describe("ProposalsPanel", () => {
     resetEventBus();
     useWorkspace.setState({ tabs: [], activeId: null });
     useTabMarks.setState({ marks: {} });
-    useShownProposals.setState({ shown: {} });
     vi.mocked(api.listOptimizationRequests).mockResolvedValue([
       optimizationRequest({ id: "r1", status: "answered" }),
       // Запрос консоли с id по умолчанию фикстуры `llmProposal`.
@@ -216,7 +214,7 @@ describe("ProposalsPanel", () => {
     expect(screen.getAllByRole("heading", { level: 4 }).map((h) => h.textContent)).toEqual(["Обоснование", "Индексы"]);
   });
 
-  it("предложение фонового запуска: «От фонового ассистента (Qwen Code, модель)»; показанные предложения отмечаются", async () => {
+  it("предложение фонового запуска: «От фонового ассистента (Qwen Code, модель)»", async () => {
     vi.mocked(api.listLlmProposals).mockResolvedValue([llmProposal({ client: "qwen-cli-mcp-client-glafira-pg", runId: "a1b2c3d" })]);
     vi.mocked(api.listAgentRuns).mockResolvedValue([agentRun()]);
     renderWithClient(panel());
@@ -225,17 +223,15 @@ describe("ProposalsPanel", () => {
     const items = within(screen.getByRole("list", { name: "Список предложений" })).getAllByRole("button");
     expect(items[0]).toHaveTextContent(/^Новое фоновый ассистент \(Qwen Code, qwen3\.6-64k:35b-a3b\) (\d\d\.\d\d(\.\d{4})? )?\d\d:\d\d /);
     expect(api.listAgentRuns).toHaveBeenCalledWith({});
-    expect(useShownProposals.getState().shown).toEqual({ p1b2c3d: true });
   });
 
-  it("запуска предложения уже нет в списке — «От фонового ассистента» без агента; консоль в фоне не отмечает показанным", async () => {
+  it("запуска предложения уже нет в списке — «От фонового ассистента» без агента", async () => {
     vi.mocked(api.listLlmProposals).mockResolvedValue([llmProposal({ runId: "a9f9f9f" })]);
     vi.mocked(api.listAgentRuns).mockResolvedValue([agentRun()]);
     renderWithClient(panel({ active: false }));
     expect(await screen.findByText(/^От фонового ассистента, /)).toBeInTheDocument();
     const items = within(screen.getByRole("list", { name: "Список предложений" })).getAllByRole("button");
     expect(items[0]).toHaveTextContent(/^Новое фоновый ассистент (\d\d\.\d\d(\.\d{4})? )?\d\d:\d\d /);
-    expect(useShownProposals.getState().shown).toEqual({});
   });
 
   it("без предложений фоновых запусков запуски не читаются", async () => {
@@ -243,23 +239,6 @@ describe("ProposalsPanel", () => {
     renderWithClient(panel());
     expect(await screen.findByText(/^От qwen-code, /)).toBeInTheDocument();
     expect(api.listAgentRuns).not.toHaveBeenCalled();
-  });
-
-  it("свёрнутая панель не отмечает показанным; раскрытие отмечает", async () => {
-    vi.mocked(api.listLlmProposals).mockResolvedValue([llmProposal({ id: "p1" })]);
-    const user = userEvent.setup();
-    renderWithClient(panel());
-    const toggle = await screen.findByRole("button", { name: "Предложения LLM (1)" });
-    await waitFor(() => expect(useShownProposals.getState().shown).toEqual({ p1: true }));
-    await user.click(toggle);
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
-    await waitFor(() => expect(eventBus.handlers.length).toBeGreaterThan(0));
-    vi.mocked(api.listLlmProposals).mockResolvedValue([llmProposal({ id: "p2", createdAtMs: 1_800_000_000_000 }), llmProposal({ id: "p1" })]);
-    emit({ kind: "proposal", connectionId: "c", proposalId: "p2" });
-    await screen.findByRole("button", { name: "Предложения LLM (2)" });
-    expect(useShownProposals.getState().shown).toEqual({ p1: true });
-    await user.click(screen.getByRole("button", { name: "Предложения LLM (2)" }));
-    await waitFor(() => expect(useShownProposals.getState().shown).toEqual({ p1: true, p2: true }));
   });
 
   it("Z4: причина отклонения — своей строкой под чипом, не в одной строке со статусом", async () => {

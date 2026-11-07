@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentRun, RunStatus } from "../../../api/types";
-import { useShownProposals } from "../../../state/shownProposals";
+import { useClosedResults } from "../../../state/closedResults";
 import { agentRun, optimizationRequest } from "../../../test/llm";
 import { renderWithClient } from "../../../test/render";
 
@@ -36,7 +36,7 @@ const buttons = () =>
 describe("AgentRunStatus", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    useShownProposals.setState({ shown: {} });
+    useClosedResults.setState({ closed: [] });
   });
   afterEach(() => vi.useRealTimers());
 
@@ -80,10 +80,10 @@ describe("AgentRunStatus", () => {
     expect(screen.getByText("0:05 · вызовов: 0")).toBeInTheDocument();
   });
 
-  it("закончил без предложений: «Ответ ассистента» раскрывает итог без разметки; «Повторить», копирование, отмена", async () => {
+  it("закончил без предложений: длительность в строке итога; «Ответ ассистента» раскрывает итог без разметки; «Повторить», копирование, отмена", async () => {
     const user = userEvent.setup();
     view({ run: agentRun({ status: "done", startedAtMs: NOW - 60_000, endedAtMs: NOW, summary: "**Индекс уже есть**: план не улучшить" }) });
-    expect(screen.getByRole("status")).toHaveTextContent(/^Ассистент закончил без предложений$/);
+    expect(screen.getByRole("status")).toHaveTextContent(/^Ассистент закончил без предложений · 1 мин$/);
     expect(buttons()).toEqual(["Ответ ассистента", "Повторить", "Скопировать строку для чата", "Отменить запрос"]);
     const toggle = screen.getByRole("button", { name: "Ответ ассистента" });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
@@ -122,18 +122,18 @@ describe("AgentRunStatus", () => {
     expect(await within(screen.getByRole("status")).findByText(`Скопировать строку не удалось, наберите её в чате: «${LINE}»`)).toBeInTheDocument();
   });
 
-  it.each<[string, Partial<AgentRun>, string]>([
-    ["срок", { reason: "timeout", startedAtMs: NOW - 15 * 60_000 - 4_000, endedAtMs: NOW }, "превышен срок 15 мин"],
-    ["программа не найдена", { reason: "cliNotFound" }, "программа не найдена: /opt/homebrew/bin/qwen"],
-    ["код выхода", { reason: "exit", exitCode: 3 }, "код выхода 3"],
-    ["не подключился", { reason: "notConnected" }, "агент не подключился к Glafira"],
-    ["предел", { reason: "limit" }, "достигнут предел вызовов или расходов"],
-    ["лишние инструменты", { reason: "unsafeTools", warnings: ["unsafe run_shell_command"] }, "агенту доступны не только инструменты Glafira: run_shell_command; запуск остановлен до первого хода"],
-    ["нет init", { reason: "unsafeTools", warnings: ["unsafe no-init"] }, "агент не сообщил список своих инструментов; запуск остановлен"],
-  ])("ошибка (%s): причина текстом, «Показать журнал», «Повторить», «Закрыть запрос»", (_name, patch, reason) => {
+  it.each<[string, Partial<AgentRun>, string, string]>([
+    ["срок", { reason: "timeout", startedAtMs: NOW - 15 * 60_000 - 4_000, endedAtMs: NOW }, "превышен срок 15 мин", "15 мин 4 с"],
+    ["программа не найдена", { reason: "cliNotFound" }, "программа не найдена: /opt/homebrew/bin/qwen", "10 с"],
+    ["код выхода", { reason: "exit", exitCode: 3 }, "код выхода 3", "10 с"],
+    ["не подключился", { reason: "notConnected" }, "агент не подключился к Glafira", "10 с"],
+    ["предел", { reason: "limit" }, "достигнут предел вызовов или расходов", "10 с"],
+    ["лишние инструменты", { reason: "unsafeTools", warnings: ["unsafe run_shell_command"] }, "агенту доступны не только инструменты Glafira: run_shell_command; запуск остановлен до первого хода", "10 с"],
+    ["нет init", { reason: "unsafeTools", warnings: ["unsafe no-init"] }, "агент не сообщил список своих инструментов; запуск остановлен", "10 с"],
+  ])("ошибка (%s): причина текстом и длительность, «Показать журнал», «Повторить», «Закрыть запрос»", (_name, patch, reason, duration) => {
     // Запуск начался (`starting` ставит startedAtMs) — журнал есть.
     view({ run: agentRun({ status: "failed", startedAtMs: NOW - 10_000, endedAtMs: NOW, ...patch }) });
-    expect(screen.getByRole("status")).toHaveTextContent(new RegExp(`^Ошибка фонового ассистента: ${reason.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`));
+    expect(screen.getByRole("status")).toHaveTextContent(new RegExp(`^Ошибка фонового ассистента: ${reason.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} · ${duration}$`));
     expect(buttons()).toEqual(["Показать журнал", "Повторить", "Скопировать строку для чата", "Закрыть запрос"]);
   });
 
@@ -220,12 +220,58 @@ describe("AgentRunStatus", () => {
     expect(group()).toHaveFocus();
   });
 
-  it("ассистент прислал предложения: строка видна, пока панель их не показала; у отвеченного запроса действий нет", () => {
-    view({ request: optimizationRequest({ status: "answered", proposalIds: ["p1", "p2"] }), run: agentRun({ status: "done", proposalIds: ["p1", "p2"], endedAtMs: NOW }) });
-    expect(screen.getByRole("status")).toHaveTextContent(/^Ассистент прислал 2 предложения$/);
-    expect(buttons()).toEqual([]);
-    act(() => useShownProposals.getState().markShown(["p1", "p2"]));
+  it("R20: итог запуска у отвеченного запроса остаётся — «Ассистент прислал N предложений · 48 с · ≈ …», «Ответ ассистента», «Закрыть запрос»", async () => {
+    const user = userEvent.setup();
+    view({
+      request: optimizationRequest({ status: "answered", proposalIds: ["p1", "p2"] }),
+      run: agentRun({
+        status: "done",
+        proposalIds: ["p1", "p2"],
+        startedAtMs: NOW - 48_000,
+        endedAtMs: NOW,
+        summary: "p1, p2: диапазон вместо date_trunc",
+        costEstimate: { usd: 0.0073, pricesDate: "2026-11-07", offPeak: false },
+      }),
+    });
+    expect(screen.getByRole("status")).toHaveTextContent(/^Ассистент прислал 2 предложения · 48 с · ≈ 0,007 \$$/);
+    // У отвеченного запроса нечего повторять и копировать: итог и закрытие строки (первая кнопка — подсказка у «≈ …»).
+    expect(buttons().slice(1)).toEqual(["Ответ ассистента", "Закрыть запрос"]);
+    await user.click(screen.getByRole("button", { name: "Ответ ассистента" }));
+    expect(screen.getByText("p1, p2: диапазон вместо date_trunc")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Закрыть запрос" }));
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    // Закрытый итог (`closedResults`) строку убирает.
+    act(() => useClosedResults.getState().close("r3a9f1c"));
     expect(screen.queryByRole("group")).toBeNull();
+  });
+
+  it("R20: точная стоимость Claude Code без Ollama — без «≈»; запуск упал после ответа — его итог тоже остаётся", () => {
+    view({
+      request: optimizationRequest({ status: "answered", proposalIds: ["p1"] }),
+      run: agentRun({ preset: "claude", status: "failed", reason: "limit", proposalIds: ["p1"], startedAtMs: NOW - 27_000, endedAtMs: NOW, costUsd: 0.42 }),
+    });
+    expect(screen.getByRole("status")).toHaveTextContent(/^Ошибка фонового ассистента: достигнут предел вызовов или расходов · 27 с · 0,42 \$$/);
+    expect(buttons()).toEqual(["Показать журнал", "Закрыть запрос"]);
+  });
+
+  it("R23: запрос к прежнему тексту — строка называет его и начало его текста; ссылка закрытия — «Закрыть запрос»", async () => {
+    const user = userEvent.setup();
+    const { unmount } = view({ run: agentRun({ status: "running", startedAtMs: Date.now() }), staleHead: "SELECT o.id, o.total," });
+    const status = screen.getByRole("status");
+    const stale = within(status).getByText("Запрос r3a9f1c к прежнему тексту: SELECT o.id, o.total,");
+    expect(stale.tagName).toBe("P");
+    expect(status.firstElementChild).toBe(stale);
+    expect(within(status).getByText("Ассистент работает")).toBeInTheDocument();
+    expect(buttons()).toEqual(["Скопировать строку для чата", "Закрыть запрос"]);
+    await user.click(screen.getByRole("button", { name: "Закрыть запрос" }));
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    unmount();
+    // «Повторить» повторяет тот запрос, как и раньше.
+    view({ run: agentRun({ status: "cancelled", startedAtMs: NOW - 6_000, endedAtMs: NOW }), staleHead: "… WHERE date_trunc('day', o.created_at) = date '2026-06-01'" });
+    expect(screen.getByRole("status")).toHaveTextContent(/^Запрос r3a9f1c к прежнему тексту: … WHERE date_trunc\('day', o\.created_at\) = date '2026-06-01'Запуск остановлен · 6 с$/);
+    expect(buttons()).toEqual(["Повторить", "Скопировать строку для чата", "Закрыть запрос"]);
+    await user.click(screen.getByRole("button", { name: "Повторить" }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
   });
 
   it("стоимость запуска — рядом с итогом: оценка облачного запуска через Ollama «≈ …» с подсказкой о дне цен, точная — без «≈»", () => {
@@ -237,20 +283,20 @@ describe("AgentRunStatus", () => {
     expect(screen.getByRole("status")).toHaveTextContent(/^Ассистент прислал 2 предложения · ≈ 0,01 \$$/);
     expect(within(screen.getByRole("status")).getByRole("button", { name: /Оценка по ценам Ollama Cloud на 07\.11\.2026 \(ollama\.com\/pricing\)$/ })).toHaveTextContent(/^≈ 0,01 \$$/);
     proposals.unmount();
-    const none = view({ run: agentRun({ status: "done", startedAtMs: 0, endedAtMs: NOW, costEstimate: { usd: 0.0061, pricesDate: "2026-11-07", offPeak: true } }) });
-    expect(screen.getByRole("status")).toHaveTextContent(/^Ассистент закончил без предложений · ≈ 0,006 \$$/);
+    const none = view({ run: agentRun({ status: "done", startedAtMs: NOW - 48_000, endedAtMs: NOW, costEstimate: { usd: 0.0061, pricesDate: "2026-11-07", offPeak: true } }) });
+    expect(screen.getByRole("status")).toHaveTextContent(/^Ассистент закончил без предложений · 48 с · ≈ 0,006 \$$/);
     expect(within(screen.getByRole("status")).getByRole("button", { name: /Оценка по ценам Ollama Cloud вне пика на 07\.11\.2026/ })).toBeInTheDocument();
     none.unmount();
     // Claude Code без Ollama: стоимость сообщил сам CLI — без «≈» и подсказки; у ошибки — тоже рядом с итогом.
-    const exact = view({ run: agentRun({ preset: "claude", status: "failed", reason: "limit", startedAtMs: 0, endedAtMs: NOW, costUsd: 0.42 }) });
+    const exact = view({ run: agentRun({ preset: "claude", status: "failed", reason: "limit", startedAtMs: NOW - 27_000, endedAtMs: NOW, costUsd: 0.42 }) });
     const status = screen.getByRole("status");
-    expect(status).toHaveTextContent(/ · 0,42 \$$/);
+    expect(status).toHaveTextContent(/ · 27 с · 0,42 \$$/);
     expect(status).not.toHaveTextContent("≈");
     expect(within(status).queryByRole("button")).toBeNull();
     exact.unmount();
     // Без стоимости — итог как был; пока запуск идёт, стоимости нет.
-    view({ run: agentRun({ status: "done", startedAtMs: 0, endedAtMs: NOW }) });
-    expect(screen.getByRole("status")).toHaveTextContent(/^Ассистент закончил без предложений$/);
+    view({ run: agentRun({ status: "done", startedAtMs: NOW - 5_000, endedAtMs: NOW }) });
+    expect(screen.getByRole("status")).toHaveTextContent(/^Ассистент закончил без предложений · 5 с$/);
   });
 
   it("у идущего запуска стоимости в строке нет", () => {

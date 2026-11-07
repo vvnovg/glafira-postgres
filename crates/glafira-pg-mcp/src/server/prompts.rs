@@ -127,8 +127,10 @@ fn member_arg(member: Option<&str>) -> String {
 }
 
 /// Шаги 1–4 сценария оптимизации — общие для `optimize_query` и промпта фонового запуска (P4c §4.3); `get` — начало
-/// шага 1. Строка заканчивается переводом строки.
-fn optimize_steps(get: &str) -> String {
+/// шага 1, `proposal_language` — язык `rationale` и `expectedEffect` (смоук 2026-11-07, R21: их читает пользователь, а
+/// модели писали их по-английски при русском интерфейсе): в чате — «the language the user writes in», у фонового запуска —
+/// язык интерфейса Glafira (`Russian`). Строка заканчивается переводом строки.
+fn optimize_steps(get: &str, proposal_language: &str) -> String {
     format!(
         "1. Call {get}. It returns the query text and parameter values, the plan, statistics, the server version and \
          the DDL of the tables, as the user saw them.\n\
@@ -137,8 +139,9 @@ fn optimize_steps(get: &str) -> String {
          3. When needed, check hypotheses on the same connection and database: explain_query for plans without \
          execution, hypothetical_index for up to 5 CREATE INDEX statements via hypopg.\n\
          4. Call propose_query_rewrite with the requestId for each variant worth comparing (one or several): \
-         rewrittenSql, indexes if any, rationale and expectedEffect. The rewritten query must return the same rows as \
-         the original: Glafira does not check that.\n"
+         rewrittenSql, indexes if any, rationale and expectedEffect. Write rationale and expectedEffect in \
+         {proposal_language}: the user reads them in Glafira. The rewritten query must return the same rows as the \
+         original: Glafira does not check that.\n"
     )
 }
 
@@ -148,7 +151,7 @@ pub fn optimize_query_text(request_id: Option<&str>) -> String {
         None => "get_optimization_request without requestId: it returns the latest waiting request"
             .to_string(),
     };
-    let steps = optimize_steps(&get);
+    let steps = optimize_steps(&get, "the language the user writes in");
     format!(
         "Optimize a PostgreSQL query that the user sent from Glafira with the “Send to LLM assistant” button.\n\n\
          {steps}\
@@ -162,7 +165,8 @@ pub fn optimize_query_text(request_id: Option<&str>) -> String {
 }
 
 /// Промпт фонового запуска (спец. P4c §4.3): Glafira подаёт его агенту через stdin.
-/// - Шаги 1–4 — те же, что у `optimize_query`, с явным `requestId`.
+/// - Шаги 1–4 — те же, что у `optimize_query`, с явным `requestId`; `rationale` и `expectedEffect` — на языке интерфейса
+///   Glafira, как итог (смоук 2026-11-07, R21).
 /// - После шагов — абзац о `requestId` (смоук P4b M5/M6, итог задачи 1 P4c): модели путали id запроса с `queryId` и
 ///   слали в `propose_query_rewrite` лишние поля.
 /// - Чата нет: агент не задаёт вопросов; если улучшить нечего, ничего не предлагает.
@@ -171,9 +175,10 @@ pub fn optimize_query_text(request_id: Option<&str>) -> String {
 ///   Glafira (`language`: `Russian` / `English`) простым текстом: id предложений или почему их нет и следующий шаг
 ///   пользователя (подписи экранов в “…” — для глоссария R8).
 pub fn optimize_query_run_text(request_id: &str, language: &str) -> String {
-    let steps = optimize_steps(&format!(
-        "get_optimization_request with requestId \"{request_id}\""
-    ));
+    let steps = optimize_steps(
+        &format!("get_optimization_request with requestId \"{request_id}\""),
+        language,
+    );
     format!(
         "Glafira started you in the background: the user pressed “Send to LLM assistant” in Glafira for optimization \
          request \"{request_id}\". Nobody reads this chat: do not ask questions and do not wait for an answer.\n\n\
@@ -500,7 +505,11 @@ mod tests {
         "Answer in the language the user writes in.",
     );
 
-    /// Шаги 1–4 вынесены в `optimize_steps`, а текст `optimize_query` остался байт в байт тем же.
+    /// Фраза R21 (смоук 2026-11-07): `rationale` и `expectedEffect` — на языке пользователя чата.
+    const R21_CHAT: &str = "Write rationale and expectedEffect in the language the user writes in: the user reads them in Glafira. ";
+
+    /// Шаги 1–4 вынесены в `optimize_steps`, а текст `optimize_query` остался байт в байт тем же, кроме фразы R21 в шаге 4
+    /// (смоук 2026-11-07: «Обоснование» и «Ожидаемый эффект» приходили по-английски при русском интерфейсе).
     #[test]
     fn optimize_query_text_is_the_same_as_before_the_background_run() {
         for (id, get) in [
@@ -515,7 +524,10 @@ mod tests {
         ] {
             assert_eq!(
                 optimize_query_text(id),
-                OPTIMIZE_QUERY_4068590.replace("{get}", get)
+                OPTIMIZE_QUERY_4068590.replace("{get}", get).replace(
+                    "and expectedEffect. The rewritten query",
+                    &format!("and expectedEffect. {R21_CHAT}The rewritten query")
+                )
             );
         }
     }
@@ -527,15 +539,30 @@ mod tests {
     /// текстом — id предложений или почему их нет и следующий шаг пользователя; рассуждения — не в нём.
     #[test]
     fn background_run_prompts() {
-        let steps = optimize_steps("get_optimization_request with requestId \"r3a9f1c\"");
+        let get = "get_optimization_request with requestId \"r3a9f1c\"";
         let chat = optimize_query_text(Some("r3a9f1c"));
         assert!(chat.starts_with(
             "Optimize a PostgreSQL query that the user sent from Glafira with the “Send to LLM assistant” button.\n\n1. Call "
         ));
-        assert!(chat.contains(&steps), "{chat}");
+        // Шаги 1–4 — общие; язык `rationale` и `expectedEffect` (R21): в чате — язык пользователя, у фонового запуска — язык
+        // интерфейса Glafira, как у итога.
+        assert!(
+            chat.contains(&optimize_steps(get, "the language the user writes in")),
+            "{chat}"
+        );
+        assert!(chat.contains(R21_CHAT), "{chat}");
         assert!(chat.contains(".\n5. In the chat"), "{chat}");
         let t = optimize_query_run_text("r3a9f1c", "Russian");
-        assert!(t.contains(&steps), "шаги 1–4 — те же: {t}");
+        assert!(
+            t.contains(&optimize_steps(get, "Russian")),
+            "шаги 1–4 — те же: {t}"
+        );
+        assert!(
+            t.contains(
+                "Write rationale and expectedEffect in Russian: the user reads them in Glafira."
+            ),
+            "{t}"
+        );
         for phrase in [
             "in the background",
             "do not ask questions",
@@ -566,10 +593,9 @@ mod tests {
         assert!(!t.contains(ANSWER_LANGUAGE), "язык итога задан явно");
         assert!(!t.contains(ANSWER_BUDGET), "объём итога задан явно");
         assert!(quoted(&t).contains(&"Send to LLM assistant"), "{t}");
-        assert!(
-            optimize_query_run_text("r3a9f1c", "English")
-                .contains("at most 5 short lines in English")
-        );
+        let en = optimize_query_run_text("r3a9f1c", "English");
+        assert!(en.contains("at most 5 short lines in English"));
+        assert!(en.contains("Write rationale and expectedEffect in English"));
         let c = check_run_text();
         assert!(c.contains("list_connections") && c.contains("OK"), "{c}");
         // Фоновый агент видит только инструменты запуска: другие имена в его промптах — вызовы мимо.

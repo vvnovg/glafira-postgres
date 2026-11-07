@@ -2,11 +2,12 @@ import type { TFunction } from "i18next";
 import { useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { AgentRun, OptimizationRequest } from "../../../api/types";
+import { formatDuration } from "../../../lib/format";
 import { elapsedText, isActive } from "../../../lib/useAgentRuns";
-import { useShownProposals } from "../../../state/shownProposals";
+import { useClosedResults } from "../../../state/closedResults";
 import { AgentLogDialog } from "../../mcp/agent/AgentLogDialog";
 import { AgentSummary } from "../../mcp/agent/AgentSummary";
-import { failReasonText, warningText } from "../../mcp/agent/agentText";
+import { failReasonText, runSeconds, warningText } from "../../mcp/agent/agentText";
 import { hasCost, RunCost } from "../../mcp/agent/RunCost";
 
 export interface AgentRunStatusProps {
@@ -22,7 +23,10 @@ export interface AgentRunStatusProps {
   busy: boolean;
   /** «Повторить» и «Запустить фонового ассистента»: новый запуск того же запроса. */
   onRetry: () => void;
+  /** «Отменить запрос» / «Закрыть запрос»: ждущий запрос закрывается (с запуском), у отвеченного — строка его итога. */
   onCancel: () => void;
+  /** Запрос — к прежнему тексту консоли (смоук P4c, R23): начало его текста; null или нет — к тексту редактора. */
+  staleHead?: string | null;
 }
 
 /** Текущее время для хода работы: обновляется раз в секунду, пока `ticking`. */
@@ -37,17 +41,11 @@ function useNow(ticking: boolean): number {
   return now;
 }
 
-/** Главная строка (спец. P4c §8.1): что с запросом и запуском сейчас; пусто — у отвеченного запроса после конца запуска. */
-function phaseText(request: OptimizationRequest, run: AgentRun | null, ahead: number, t: TFunction): string {
-  const waiting = request.status === "waiting";
-  if (run === null || run.status === "skipped") return waiting ? t("llmAssist.ask.waiting", { id: request.id }) : "";
-  if (run.status === "queued") return ahead > 0 ? t("llmAssist.agent.queued", { n: ahead }) : t("llmAssist.agent.queuedNext");
-  if (run.status === "starting") return t("llmAssist.agent.starting");
-  if (run.status === "running") return t("llmAssist.agent.running");
-  if (!waiting) return "";
+/** Итог кончившегося запуска (смоук P4c, R20): прислал N предложений, без предложений, ошибка, остановлен, прерван. */
+function resultText(run: AgentRun, t: TFunction): string {
   switch (run.status) {
     case "done":
-      return t("llmAssist.agent.noProposals");
+      return run.proposalIds.length > 0 ? t("llmAssist.agent.arrived", { count: run.proposalIds.length }) : t("llmAssist.agent.noProposals");
     case "failed":
       return t("llmAssist.agent.failed", { reason: failReasonText(run, t) });
     case "cancelled":
@@ -55,6 +53,18 @@ function phaseText(request: OptimizationRequest, run: AgentRun | null, ahead: nu
     default:
       return t("llmAssist.agent.interrupted");
   }
+}
+
+/**
+ * Главная строка (спец. P4c §8.1): что с запросом и запуском сейчас — ожидание, очередь, запуск, работа или итог запуска (и у
+ * отвеченного запроса, R20); пусто — у отвеченного запроса без запуска или с пропущенным.
+ */
+function phaseText(request: OptimizationRequest, run: AgentRun | null, ahead: number, t: TFunction): string {
+  if (run === null || run.status === "skipped") return request.status === "waiting" ? t("llmAssist.ask.waiting", { id: request.id }) : "";
+  if (run.status === "queued") return ahead > 0 ? t("llmAssist.agent.queued", { n: ahead }) : t("llmAssist.agent.queuedNext");
+  if (run.status === "starting") return t("llmAssist.agent.starting");
+  if (run.status === "running") return t("llmAssist.agent.running");
+  return resultText(run, t);
 }
 
 /**
@@ -66,18 +76,17 @@ function closesAfterFailure(run: AgentRun | null): boolean {
   return run !== null && (run.status === "failed" || run.status === "cancelled" || run.status === "interrupted");
 }
 
-/** Предложения запуска, которые панель «Предложения LLM» ещё не показала, у отвеченного запроса — «Ассистент прислал N». */
-function unseenProposals(request: OptimizationRequest, run: AgentRun | null, shown: Record<string, true>): boolean {
-  return run !== null && request.status === "answered" && run.proposalIds.some((id) => !shown[id]);
-}
-
 /**
- * Строке статуса есть что сказать (её фаза не пуста или есть непоказанные предложения): иначе `AgentRunStatus` ничего не
- * рисует, а кнопка не отдаёт ей ряд (правило P4b: пустой блок строк ряда не занимает). Фаза пуста ровно тогда, когда запрос
- * не ждёт ответа, а запуска нет или он кончился (`phaseText`). `shown` — `useShownProposals().shown`.
+ * Строке статуса есть что сказать: иначе `AgentRunStatus` ничего не рисует, а кнопка не отдаёт ей ряд (правило P4b: пустой
+ * блок строк ряда не занимает). Ждущий запрос — всегда; у отвеченного — идущий запуск или итог кончившегося (смоук P4c, R20:
+ * он остаётся и после того, как панель показала предложения), пока его не закрыли (`closed` — `useClosedResults().closed`).
+ * Пропущенный запуск (запрос ответил чат) сказать ничего не может.
  */
-export function agentRunVisible(request: OptimizationRequest, run: AgentRun | null, shown: Record<string, true>): boolean {
-  return request.status === "waiting" || (run !== null && isActive(run)) || unseenProposals(request, run, shown);
+export function agentRunVisible(request: OptimizationRequest, run: AgentRun | null, closed: readonly string[]): boolean {
+  if (request.status === "waiting") return true;
+  if (run === null) return false;
+  if (isActive(run)) return true;
+  return request.status === "answered" && run.status !== "skipped" && !closed.includes(request.id);
 }
 
 /** Ход работы: время с начала запуска, вызовы и последний инструмент; пока процесс запускается — только время. */
@@ -91,23 +100,25 @@ function progressText(run: AgentRun, now: number, t: TFunction): string {
 
 /**
  * Строка статуса фонового ассистента под «Передать LLM-ассистенту» (спец. P4c §8.1) — в консоли и в карточке. Каждое
- * сообщение — своей строкой (смоук P4b, Z1): фаза, предупреждения Ollama, «Ассистент прислал N предложений» и итог
- * копирования — в живой области; у кончившегося запуска к его итогу через « · » дописана стоимость (`RunCost`); ход работы (время, вызовы, инструмент) — отдельной строкой вне её, чтобы скринридер не
- * читал его каждую секунду. Действия — ссылками отдельным рядом, вне живой области: «Ответ ассистента» (итог простым
- * текстом без разметки, свёрнут до пяти строк, во всю ширину строки — `AgentSummary`, смоук P4c, R16), «Показать журнал»,
- * «Повторить» / «Запустить фонового ассистента», «Скопировать строку для чата»
- * (видна и во время работы: чат и фон работают с одним запросом), «Отменить запрос» (после ошибки, остановки или прерывания
- * запуска — «Закрыть запрос», `closesAfterFailure`). О присланных предложениях строка
- * пишет, пока панель «Предложения LLM» их не показала (`useShownProposals`); дальше у отвеченного запроса — обычное
- * состояние (ничего, `agentRunVisible`). «Показать журнал» — у ошибки начавшегося запуска (`startedAtMs`): журнал создаёт
- * запуск процесса. После «Повторить» кнопка исчезает (запуск снова в очереди), и фокус переходит на саму строку, а не
- * теряется на <body>.
+ * сообщение — своей строкой (смоук P4b, Z1): запрос к прежнему тексту (R23, `staleHead`: «Запрос r… к прежнему тексту: SELECT
+ * …»), фаза, предупреждения Ollama, «Ассистент прислал N предложений» (пока запуск ещё идёт) и итог копирования — в живой
+ * области; итог кончившегося запуска — «Ассистент прислал 2 предложения · 48 с · ≈ 0,007 $» (R20: длительность, если она не
+ * меньше секунды, и стоимость, `RunCost`, через « · »); ход работы (время, вызовы, инструмент) — отдельной строкой вне её,
+ * чтобы скринридер не читал его каждую секунду. Итог остаётся и у отвеченного запроса (R20) — до следующей отправки, до
+ * «Закрыть запрос» или до подстановки другого текста (тогда строка называет запрос к прежнему тексту, R23). Действия — ссылками
+ * отдельным рядом, вне живой области: «Ответ ассистента» (итог простым текстом без разметки, свёрнут до пяти строк, во всю
+ * ширину строки — `AgentSummary`, смоук P4c, R16), «Показать журнал», у ждущего запроса — «Повторить» / «Запустить фонового
+ * ассистента» и «Скопировать строку для чата» (видна и во время работы: чат и фон работают с одним запросом), «Отменить
+ * запрос» — пока запрос ждёт и запуск не кончился ошибкой; «Закрыть запрос» — после ошибки, остановки или прерывания запуска
+ * (R15, `closesAfterFailure`), у запроса к прежнему тексту (R23) и у отвеченного запроса (закрывает строку его итога, `onCancel`).
+ * «Показать журнал» — у ошибки начавшегося запуска (`startedAtMs`): журнал создаёт запуск процесса. После «Повторить» кнопка
+ * исчезает (запуск снова в очереди), и фокус переходит на саму строку, а не теряется на <body>.
  */
-export function AgentRunStatus({ request, run, ahead, chatLine, busy, onRetry, onCancel }: AgentRunStatusProps) {
+export function AgentRunStatus({ request, run, ahead, chatLine, busy, onRetry, onCancel, staleHead = null }: AgentRunStatusProps) {
   const { t } = useTranslation();
   const active = run !== null && isActive(run);
   const now = useNow(run !== null && (run.status === "starting" || run.status === "running"));
-  const shown = useShownProposals((s) => s.shown);
+  const closed = useClosedResults((s) => s.closed);
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [copied, setCopied] = useState<boolean | null>(null);
   const [logOpen, setLogOpen] = useState(false);
@@ -125,20 +136,29 @@ export function AgentRunStatus({ request, run, ahead, chatLine, busy, onRetry, o
   });
 
   const waiting = request.status === "waiting";
-  if (!agentRunVisible(request, run, shown)) return null;
+  if (!agentRunVisible(request, run, closed)) return null;
   const phase = phaseText(request, run, ahead, t);
-  const arrived = run !== null && unseenProposals(request, run, shown) ? t("llmAssist.agent.arrived", { count: run.proposalIds.length }) : "";
+  // Предложение пришло, а запуск ещё идёт: своей строкой под фазой; у кончившегося запуска это его итог (`resultText`).
+  const arrived = run !== null && active && run.proposalIds.length > 0 ? t("llmAssist.agent.arrived", { count: run.proposalIds.length }) : "";
   const finished = run !== null && !active && run.status !== "skipped";
-  const summary = waiting && run !== null && finished && run.summary ? run.summary : null;
-  // Стоимость кончившегося запуска — рядом с его итогом (фазой или «Ассистент прислал N»): «≈ 0,01 $» с подсказкой о дне
-  // цен у оценки, точная стоимость Claude Code без Ollama — как есть (дополнение владельца к sf-T7).
-  const cost =
-    run !== null && finished && hasCost(run) ? (
+  const summary = run !== null && finished && run.summary ? run.summary : null;
+  // Длительность и стоимость кончившегося запуска — рядом с его итогом (R20): «· 48 с · ≈ 0,01 $»; меньше секунды — без
+  // длительности. Оценка — «≈ …» с подсказкой о дне цен, точная стоимость Claude Code без Ollama — как есть (sf-T7).
+  const seconds = run !== null && finished ? runSeconds(run) : null;
+  const tail =
+    run !== null && finished ? (
       <>
-        {" · "}
-        <RunCost run={run} />
+        {seconds !== null && seconds >= 1 && ` · ${formatDuration(seconds)}`}
+        {hasCost(run) && (
+          <>
+            {" · "}
+            <RunCost run={run} />
+          </>
+        )}
       </>
     ) : null;
+  // Ссылка закрытия: «Отменить запрос» — только у ждущего запроса этого текста, пока запуск не кончился ошибкой.
+  const closes = !waiting || staleHead !== null || closesAfterFailure(run);
 
   const retry = () => {
     refocus.current = true;
@@ -158,10 +178,11 @@ export function AgentRunStatus({ request, run, ahead, chatLine, busy, onRetry, o
   return (
     <div className="agent-run" role="group" aria-label={t("llmAssist.agent.title", { id: request.id })} tabIndex={-1} ref={rootRef}>
       <div role="status" className="agent-run-lines">
+        {staleHead !== null && <p>{t("llmAssist.agent.stale", { id: request.id, head: staleHead })}</p>}
         {phase && (
           <p>
             {phase}
-            {cost}
+            {tail}
           </p>
         )}
         {run !== null &&
@@ -171,16 +192,11 @@ export function AgentRunStatus({ request, run, ahead, chatLine, busy, onRetry, o
               {warningText(w, t)}
             </p>
           ))}
-        {arrived && (
-          <p>
-            {arrived}
-            {!phase && cost}
-          </p>
-        )}
+        {arrived && <p>{arrived}</p>}
         {copied !== null && <p className="muted">{copied ? t("llmAssist.agent.copied", { line: chatLine }) : t("llmAssist.agent.copyFailed", { line: chatLine })}</p>}
       </div>
       {run !== null && (run.status === "starting" || run.status === "running") && <p className="muted agent-run-progress">{progressText(run, now, t)}</p>}
-      {waiting && (
+      {(waiting || finished) && (
         <div className="agent-run-actions">
           {summary && (
             <button type="button" className="link" aria-expanded={summaryOpen} aria-controls={summaryId} onClick={() => setSummaryOpen(!summaryOpen)}>
@@ -193,22 +209,25 @@ export function AgentRunStatus({ request, run, ahead, chatLine, busy, onRetry, o
               {t("llmAssist.agent.showLog")}
             </button>
           )}
-          {finished ? (
-            <button type="button" className="link" disabled={busy} onClick={retry}>
-              {t("common.retry")}
-            </button>
-          ) : (
-            !active && (
+          {waiting &&
+            (finished ? (
               <button type="button" className="link" disabled={busy} onClick={retry}>
-                {t("llmAssist.agent.start")}
+                {t("common.retry")}
               </button>
-            )
+            ) : (
+              !active && (
+                <button type="button" className="link" disabled={busy} onClick={retry}>
+                  {t("llmAssist.agent.start")}
+                </button>
+              )
+            ))}
+          {waiting && (
+            <button type="button" className="link" onClick={() => void copy()}>
+              {t("llmAssist.agent.copyLine")}
+            </button>
           )}
-          <button type="button" className="link" onClick={() => void copy()}>
-            {t("llmAssist.agent.copyLine")}
-          </button>
           <button type="button" className="link" disabled={busy} onClick={onCancel}>
-            {closesAfterFailure(run) ? t("llmAssist.ask.close") : t("llmAssist.ask.cancel")}
+            {closes ? t("llmAssist.ask.close") : t("llmAssist.ask.cancel")}
           </button>
         </div>
       )}

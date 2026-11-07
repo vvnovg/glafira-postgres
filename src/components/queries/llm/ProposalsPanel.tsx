@@ -8,7 +8,6 @@ import { formatShortTimestamp, formatTimestamp } from "../../../lib/format";
 import { type DiffCell, type DiffRow, lineDiff, sideBySide } from "../../../lib/lineDiff";
 import { useAgentRuns } from "../../../lib/useAgentRuns";
 import { consoleProposals, useLlmProposals } from "../../../lib/useLlmProposals";
-import { useShownProposals } from "../../../state/shownProposals";
 import { useTabMarks } from "../../../state/tabMarks";
 import { openExplainWithPrefill } from "../../../state/workspace";
 import { CopyButton } from "../../common/CopyButton";
@@ -71,8 +70,7 @@ function StatusChip({ status }: { status: ProposalStatus }) {
  * выбирается один раз на `nonce`. Свёрнута, пока предложений нет, если пользователь не раскрыл её сам. Новое предложение
  * приходит по событию `mcp://proposals`; пока консоль в фоне (`active = false`), предложения, которых она ещё не показала,
  * ставят пометку её вкладке (`tabId`) — строка вкладок рисует точку. Предложения фонового запуска подписаны «От фонового
- * ассистента (агент, модель)» (спец. P4c §7); показанные (консоль активна, панель раскрыта) отмечаются в
- * `useShownProposals` — строка статуса фонового ассистента о них больше не пишет.
+ * ассистента (агент, модель)» (спец. P4c §7).
  * `follow` — запрос, отправленный из этой консоли (смоук P4b, R2): первое пришедшее на него предложение выбирается само и
  * раскрывает панель, если пользователь после отправки не выбирал пункт сам; следующие предложения выбор не перехватывают.
  * Ручной выбор (и выбор ссылкой карточки) отменяет автовыбор до следующей отправки — нового `follow`.
@@ -147,11 +145,6 @@ export function ProposalsPanel({
 
   const bodyId = useId();
   const isOpen = open ?? list.length > 0;
-  // Видимые предложения (консоль активна, панель раскрыта) — показаны: строка статуса фонового ассистента о них молчит.
-  const markShown = useShownProposals((s) => s.markShown);
-  useEffect(() => {
-    if (active && isOpen) markShown(list.map((p) => p.id));
-  }, [active, isOpen, list, markShown]);
   const current = list.find((p) => p.id === selected) ?? list[0] ?? null;
   return (
     <section className="llm-proposals" aria-label={t("llmAssist.panel.title")}>

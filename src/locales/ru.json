@@ -673,9 +673,19 @@
         "modelClientDefault": "Пусто — модель клиента по умолчанию",
         "modelOllama": "Нужна модель Ollama",
         "modelsFailed": "Список моделей не прочитан: введите имя вручную",
-        "cloudModel": "Ollama Cloud · ≈ {{input}} / {{output}} за 1 млн токенов, вход / выход",
-        "cloudModelOffPeak": "Ollama Cloud · ≈ {{input}} / {{output}} за 1 млн токенов, вход / выход; вне пика — {{offInput}} / {{offOutput}}",
+        "modelDefaultOption": "По умолчанию ({{model}})",
+        "modelClientDefaultOption": "По умолчанию (модель клиента)",
+        "modelOllamaOption": "Не выбрана: нужна модель Ollama",
+        "modelOther": "Другая модель…",
+        "modelName": "Имя модели",
+        "groupQwen": "Настройки Qwen Code",
+        "groupCloud": "Ollama Cloud",
+        "cloudModel": "{{model}} · ≈ {{input}} / {{output}} за 1 млн токенов, вход / выход",
+        "cloudModelOffPeak": "{{model}} · ≈ {{input}} / {{output}} за 1 млн токенов, вход / выход; вне пика — {{offInput}} / {{offOutput}}",
         "ollamaModel": "Ollama",
+        "refresh": "Обновить модели и цены",
+        "refreshing": "Обновление моделей и цен…",
+        "modelsUpdated": "Список моделей обновлён",
         "viaOllama": "Через Ollama",
         "budget": "Предел расходов на запуск, $",
         "budgetEmpty": "Пусто — без предела",
@@ -720,12 +730,13 @@
           "costEstimateHintOffPeak": "Оценка по ценам Ollama Cloud вне пика на {{date}} (ollama.com/pricing)",
           "costEstimateHintNoDate": "Оценка по ценам Ollama Cloud (ollama.com/pricing)",
           "costEstimateLabel": "{{cost}}: {{hint}}",
-          "colActions": "Действия",
           "check": "Проверка",
           "summaryAria": "Ответ ассистента, запуск {{id}}",
           "logAria": "Показать журнал запуска {{id}}",
           "stop": "Остановить",
           "stopAria": "Остановить запуск {{id}}",
+          "showAll": "Показать все ({{n}})",
+          "showLess": "Свернуть",
           "result": {
             "queued": "в очереди",
             "starting": "запускается",
@@ -742,8 +753,6 @@
         "prices": {
           "builtin": "Стоимость облачных запусков через Ollama — оценка по ценам Ollama Cloud на {{date}}, встроенным в Glafira",
           "saved": "Стоимость облачных запусков через Ollama — оценка по ценам Ollama Cloud на {{date}}, загруженным с ollama.com/pricing",
-          "refresh": "Обновить цены",
-          "refreshing": "Загрузка цен…",
           "updated": "Цены обновлены: моделей {{n}}",
           "policy": "Политика организации не разрешает загружать цены: оценки — по этой таблице"
         }
@@ -2303,6 +2312,7 @@
       "copied": "Запрос {{id}} передан. Скажите ассистенту «оптимизируй запрос из Glafira» — он заберёт его сам (строка с id уже в буфере обмена).",
       "copyFailed": "Запрос {{id}} передан. Скажите ассистенту «оптимизируй запрос из Glafira» — он заберёт его сам (скопировать строку с id не удалось: «{{line}}»).",
       "waiting": "Ждёт ответа LLM: запрос {{id}}",
+      "waitingStale": "Ждёт ответа LLM: запрос {{id}} к прежнему тексту: {{head}}",
       "cancel": "Отменить запрос",
       "close": "Закрыть запрос",
       "statusUnavailable": "Статус MCP недоступен",
@@ -2378,6 +2388,7 @@
       "failed": "Ошибка фонового ассистента: {{reason}}",
       "stopped": "Запуск остановлен",
       "interrupted": "Запуск прерван: Glafira закрылась",
+      "stale": "Запрос {{id}} к прежнему тексту: {{head}}",
       "summary": "Ответ ассистента",
       "summaryAll": "Показать всё",
       "summaryLess": "Свернуть",
@@ -2482,7 +2493,7 @@
           "keepWarm": "Glafira держит локальную модель Ollama загруженной столько минут после запуска: следующий запрос начинается быстрее. 0 — не управлять.",
           "ollamaUrl": "Удалённый адрес допустим: Claude Code через Ollama обращается к нему сам. Glafira обращается к Ollama и управляет моделью только по адресу localhost, 127.0.0.1 или ::1.",
           "check": "Короткий запуск без подключения: агент вызывает list_connections и отвечает OK. Проверяет программу, модель, MCP-конфиг и билет запуска.",
-          "prices": "Загружаются с ollama.com/pricing только по «Обновить цены»; до этого — встроенные в эту версию. Оценка: токены агента × цены модели; вне пика — будни вне 12–18 UTC и выходные."
+          "refresh": "Перечитывает модели (настройки Qwen Code, Ollama) и загружает цены с ollama.com/pricing — только этой кнопкой. Оценка: токены агента × цены модели; вне пика — будни вне 12–18 UTC и выходные."
         }
       }
     },

@@ -545,7 +545,7 @@ tr.invalid { color: var(--danger); }
 .agent-log { max-height: 60vh; overflow: auto; margin: 0; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-alt); white-space: pre-wrap; overflow-wrap: anywhere; }
 /* «Фоновый ассистент» в «Настройках» (P4c): поле с кнопкой рядом, под полем — ошибка и пояснения. Подпись строки — по верху
    поля (высота строки поля — 24px), чтобы не съезжала, когда под полем появляется текст. Числа — узкими полями. Ошибки полей —
-   --danger-text, как у других ошибок; путь, модель и адрес — моноширинным шрифтом (общее правило полей задаёт font: inherit). */
+   --danger, как у других ошибок; путь, модель и адрес — моноширинным шрифтом (общее правило полей задаёт font: inherit). */
 .agent-section .form { align-items: start; }
 .agent-section .form > .field-label, .agent-check, .agent-presets { min-height: 24px; }
 .agent-control { display: flex; flex-direction: column; align-items: stretch; min-width: 0; }
@@ -553,9 +553,22 @@ tr.invalid { color: var(--danger); }
 .agent-field > input:not([type="checkbox"]) { flex: 1; min-width: 0; }
 .agent-field > input.agent-num { flex: 0 1 8em; }
 .agent-field > input.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+/* «Модель» — выпадающий список во всю ширину поля (смоук P4c, R19); под ним — поле «Имя модели» («Другая модель…») и ряд
+   «Обновить модели и цены» с днём цен (R25). */
+.agent-field > select { flex: 1; min-width: 0; max-width: 100%; text-overflow: ellipsis; }
+.agent-control > .agent-field:not(:first-child) { margin-top: 4px; }
+.agent-control > .agent-refresh { margin-top: 6px; }
 .agent-check { display: flex; align-items: center; }
 .agent-presets { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
 .agent-error { margin: 0; color: var(--danger); overflow-wrap: anywhere; }
 .agent-lines p, .agent-note { margin: 0; overflow-wrap: anywhere; }
 .agent-control > .agent-error, .agent-control > .agent-note, .agent-control .agent-lines p, .agent-control > .error-banner { margin-top: 4px; }
 .agent-run-when span { white-space: nowrap; }
+/* «Запуски» (смоук P4c, R26): действия — под итогом в его ячейке, а не своей колонкой; стоимость не переносится; таблица шире
+   блока прокручивается внутри него, и полоса прокрутки видна всегда (накладная полоса macOS видна только во время прокрутки, и
+   обрезанная колонка выглядела потерянной). */
+.agent-runs .agent-run-actions { margin-top: 2px; }
+.agent-runs td.agent-run-cost { white-space: nowrap; }
+.agent-runs-scroll::-webkit-scrollbar { height: 8px; }
+.agent-runs-scroll::-webkit-scrollbar-thumb { border-radius: 4px; background: var(--border); }
+.agent-runs-scroll::-webkit-scrollbar-track { background: transparent; }

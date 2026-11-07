@@ -1,12 +1,12 @@
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentStatus, AppError, LlmAccess, McpStatus } from "../../../api/types";
-import { useShownProposals } from "../../../state/shownProposals";
+import { useClosedResults } from "../../../state/closedResults";
 import { emitEvent, listeners, resetEventBus } from "../../../test/events";
 import { connection } from "../../../test/fixtures";
-import { agentRun, optimizationRequest } from "../../../test/llm";
+import { agentRun, optimizationRequest as requestFixture } from "../../../test/llm";
 import { agentStatus, mcpStatus } from "../../../test/mcp";
 import { planTree } from "../../../test/plans";
 import { renderWithClient } from "../../../test/render";
@@ -34,6 +34,8 @@ import { api } from "../../../api/client";
 import { AskLlmButton, type SentNotice } from "./AskLlmButton";
 
 const SQL = "SELECT count(*) FROM shop.orders WHERE status = $1";
+/** Запрос на оптимизацию текста кнопки (`SQL`): строка статуса не считает его запросом к прежнему тексту (R23). */
+const optimizationRequest = (patch: Parameters<typeof requestFixture>[0] = {}) => requestFixture({ sql: SQL, ...patch });
 const props = { connectionId: "c", member: "pg-1", database: "perf", source: { kind: "console" } as const, sql: SQL, params: ["disputed"], plan: null };
 const LINE = "Оптимизируй запрос r3a9f1c из Glafira";
 const NOTICE = "Запрос r3a9f1c передан. Скажите ассистенту «оптимизируй запрос из Glafira» — он заберёт его сам (строка с id уже в буфере обмена).";
@@ -48,6 +50,7 @@ describe("AskLlmButton", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     resetEventBus();
+    useClosedResults.setState({ closed: [] });
     setStatus(mcpStatus());
     vi.mocked(api.listConnections).mockResolvedValue([connection({ id: "c", llmAccess: "diagnostics" })]);
     vi.mocked(api.listOptimizationRequests).mockResolvedValue([]);
@@ -261,6 +264,17 @@ describe("AskLlmButton", () => {
     expect(screen.getByRole("button", { name: LABEL })).toBeEnabled();
   });
 
+  it("R23: ждущий запрос к прежнему тексту консоли — строка ожидания называет начало его текста, ссылка — «Закрыть запрос»", async () => {
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest({ sql: "SELECT o.id, o.total,\n  o.status\nFROM shop.orders o" })]);
+    vi.mocked(api.cancelOptimizationRequest).mockResolvedValue(optimizationRequest({ status: "cancelled" }));
+    const user = userEvent.setup();
+    renderWithClient(<AskLlmButton {...props} />);
+    expect(await screen.findByText("Ждёт ответа LLM: запрос r3a9f1c к прежнему тексту: SELECT o.id, o.total,")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Отменить запрос" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Закрыть запрос" }));
+    expect(api.cancelOptimizationRequest).toHaveBeenCalledWith("r3a9f1c");
+  });
+
   it("ошибки создания и отмены показываются текстом словаря в области статуса", async () => {
     vi.mocked(api.createOptimizationRequest).mockRejectedValue({ code: "NOT_AUTHORIZED", key: "errors.explain.notAuthorized", message: "Not enough privileges", retryable: false });
     const user = userEvent.setup();
@@ -349,6 +363,7 @@ describe("AskLlmButton: фоновый ассистент", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     resetEventBus();
+    useClosedResults.setState({ closed: [] });
     bg();
     vi.mocked(api.listConnections).mockResolvedValue([connection({ id: "c", llmAccess: "diagnostics" })]);
     vi.mocked(api.listOptimizationRequests).mockResolvedValue([]);
@@ -585,35 +600,91 @@ describe("AskLlmButton: фоновый ассистент", () => {
     expect(screen.queryByText("Не удалось прочитать запуски фонового ассистента")).toBeNull();
   });
 
-  it.each<[string, Parameters<typeof agentRun>[0]]>([
-    ["предложения уже показаны панелью", { status: "done", proposalIds: ["p1"], startedAtMs: 1, endedAtMs: 2 }],
-    ["запуск пропущен: ответил чат", { status: "skipped" }],
-    ["запуск упал после ответа", { status: "failed", reason: "exit", exitCode: 1, startedAtMs: 1, endedAtMs: 2 }],
-  ])("отвеченный запрос, строке статуса нечего сказать (%s) — блок строк не занимает ряд", async (_name, patch) => {
-    useShownProposals.setState({ shown: { p1: true } });
-    try {
-      vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest({ status: "answered", proposalIds: ["p1"] })]);
-      vi.mocked(api.listAgentRuns).mockResolvedValue([agentRun(patch)]);
-      const { container, client } = renderWithClient(<AskLlmButton {...props} />);
-      await waitFor(() => expect(screen.getByRole("button", { name: LABEL })).toBeEnabled());
-      // Запуски прочитаны: иначе строки статуса не было бы и без правки.
-      await waitFor(() => expect(client.getQueryData(["agentRuns"])).toBeDefined());
-      const notes = container.querySelector(".llm-ask-notes")!;
-      expect(notes).not.toHaveClass("shown");
-      expect(notes).toHaveTextContent("");
-      expect(screen.queryByRole("group", { name: "Фоновый ассистент: запрос r3a9f1c" })).toBeNull();
-    } finally {
-      // Упавший тест не должен оставить «показанные» предложения соседям. Сброс перерисовывает ещё смонтированную кнопку —
-      // внутри act.
-      act(() => useShownProposals.setState({ shown: {} }));
-    }
+  it.each<[string, Parameters<typeof agentRun>[0], string[]]>([
+    ["запуск пропущен: ответил чат", { status: "skipped" }, []],
+    ["итог закрыт «Закрыть запрос»", { status: "done", proposalIds: ["p1"], startedAtMs: 1, endedAtMs: 2 }, ["r3a9f1c"]],
+  ])("отвеченный запрос, строке статуса нечего сказать (%s) — блок строк не занимает ряд", async (_name, patch, closed) => {
+    useClosedResults.setState({ closed });
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest({ status: "answered", proposalIds: ["p1"] })]);
+    vi.mocked(api.listAgentRuns).mockResolvedValue([agentRun(patch)]);
+    const { container, client } = renderWithClient(<AskLlmButton {...props} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: LABEL })).toBeEnabled());
+    // Запуски прочитаны: иначе строки статуса не было бы и без правки.
+    await waitFor(() => expect(client.getQueryData(["agentRuns"])).toBeDefined());
+    const notes = container.querySelector(".llm-ask-notes")!;
+    expect(notes).not.toHaveClass("shown");
+    expect(notes).toHaveTextContent("");
+    expect(screen.queryByRole("group", { name: "Фоновый ассистент: запрос r3a9f1c" })).toBeNull();
   });
 
-  it("отвеченный запрос: «Ассистент прислал N предложений», пока панель их не показала; кнопка снова активна", async () => {
+  it("R20: итог запуска остаётся после ответа — до «Закрыть запрос» или следующей отправки; кнопка снова активна", async () => {
     vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest({ status: "answered", proposalIds: ["p1"] })]);
-    vi.mocked(api.listAgentRuns).mockResolvedValue([agentRun({ status: "done", proposalIds: ["p1"], startedAtMs: 1, endedAtMs: 2 })]);
+    vi.mocked(api.listAgentRuns).mockResolvedValue([
+      agentRun({ status: "done", proposalIds: ["p1"], startedAtMs: 1_000, endedAtMs: 49_000, summary: "p1: индекс", costEstimate: { usd: 0.0073, pricesDate: "2026-11-07", offPeak: false } }),
+    ]);
+    const user = userEvent.setup();
     renderWithClient(<AskLlmButton {...props} />);
-    expect(within(await group()).getByText("Ассистент прислал 1 предложение")).toBeInTheDocument();
+    const box = await group();
+    expect(within(box).getByRole("status")).toHaveTextContent(/^Ассистент прислал 1 предложение · 48 с · ≈ 0,007 \$$/);
+    expect(within(box).getByRole("button", { name: "Ответ ассистента" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: LABEL })).toBeEnabled();
+    // «Закрыть запрос» у отвеченного запроса: Rust его не трогает, строка закрыта в интерфейсе.
+    await user.click(within(box).getByRole("button", { name: "Закрыть запрос" }));
+    expect(api.cancelOptimizationRequest).not.toHaveBeenCalled();
+    expect(useClosedResults.getState().closed).toEqual(["r3a9f1c"]);
+    await waitFor(() => expect(screen.queryByRole("group")).toBeNull());
+  });
+
+  it("R20: следующая отправка заменяет итог прежнего запуска строкой нового запроса", async () => {
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest({ status: "answered", proposalIds: ["p1"] })]);
+    vi.mocked(api.listAgentRuns).mockResolvedValue([agentRun({ status: "done", proposalIds: ["p1"], startedAtMs: 1_000, endedAtMs: 49_000 })]);
+    vi.mocked(api.createOptimizationRequest).mockResolvedValue(optimizationRequest({ id: "r2" }));
+    vi.mocked(api.startAgentRun).mockResolvedValue(agentRun({ id: "a2b3c4d", requestId: "r2" }));
+    const user = userEvent.setup();
+    renderWithClient(<AskLlmButton {...props} />);
+    expect(within(await group()).getByText("Ассистент прислал 1 предложение · 48 с")).toBeInTheDocument();
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([
+      optimizationRequest({ status: "answered", proposalIds: ["p1"] }),
+      optimizationRequest({ id: "r2", createdAtMs: 1_700_000_001_000 }),
+    ]);
+    vi.mocked(api.listAgentRuns).mockResolvedValue([agentRun({ id: "a2b3c4d", requestId: "r2" }), agentRun({ status: "done", proposalIds: ["p1"], startedAtMs: 1_000, endedAtMs: 49_000 })]);
+    await user.click(screen.getByRole("button", { name: LABEL }));
+    expect(api.cancelOptimizationRequest).not.toHaveBeenCalled();
+    const next = await screen.findByRole("group", { name: "Фоновый ассистент: запрос r2" });
+    expect(within(next).getByText("В очереди фонового ассистента: следующий")).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Фоновый ассистент: запрос r3a9f1c" })).toBeNull();
+  });
+
+  it("R23: в консоль подставили другой текст — строка называет запрос к прежнему тексту; «Повторить» — тот запрос, «Закрыть запрос» — рядом", async () => {
+    const old = "SELECT o.id, o.total,\n  (SELECT count(*) FROM shop.order_items i WHERE i.order_id = o.id) AS items\nFROM shop.orders o\nWHERE date_trunc('day', o.created_at) = date '2026-06-01'";
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest({ sql: old })]);
+    vi.mocked(api.listAgentRuns).mockResolvedValue([agentRun({ status: "cancelled", startedAtMs: 1_000, endedAtMs: 7_000 })]);
+    vi.mocked(api.startAgentRun).mockResolvedValue(agentRun({ id: "a2b3c4d", queuedAtMs: 1_700_000_100_000 }));
+    vi.mocked(api.cancelOptimizationRequest).mockResolvedValue(optimizationRequest({ sql: old, status: "cancelled" }));
+    const user = userEvent.setup();
+    // Тот же текст (с «;» и переводом строки в конце) — обычная строка.
+    const { rerender } = renderWithClient(<AskLlmButton {...props} sql={`${old};\n`} />);
+    const box = await group();
+    expect(within(box).getByRole("status")).toHaveTextContent(/^Запуск остановлен · 6 с$/);
+    // Подстановка «SELECT count(*) …»: строка называет прежний текст.
+    rerender(<AskLlmButton {...props} sql="SELECT count(*) FROM shop.orders WHERE status = $1" />);
+    expect(within(box).getByRole("status")).toHaveTextContent(/^Запрос r3a9f1c к прежнему тексту: SELECT o\.id, o\.total,Запуск остановлен · 6 с$/);
+    expect(within(box).getAllByRole("button").map((b) => b.textContent)).toEqual(["Повторить", "Скопировать строку для чата", "Закрыть запрос"]);
+    await user.click(within(box).getByRole("button", { name: "Повторить" }));
+    expect(api.startAgentRun).toHaveBeenCalledWith("r3a9f1c");
+    await user.click(within(box).getByRole("button", { name: "Закрыть запрос" }));
+    expect(api.cancelOptimizationRequest).toHaveBeenCalledWith("r3a9f1c");
+  });
+
+  it("R23: у отвеченного запроса к прежнему тексту — тоже; у карточки запроса строка прежний текст не называет", async () => {
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest({ sql: "SELECT 1", status: "answered", proposalIds: ["p1"] })]);
+    vi.mocked(api.listAgentRuns).mockResolvedValue([agentRun({ status: "done", proposalIds: ["p1"], startedAtMs: 1_000, endedAtMs: 49_000 })]);
+    const first = renderWithClient(<AskLlmButton {...props} sql="SELECT 2" />);
+    expect(within(await group()).getByRole("status")).toHaveTextContent(/^Запрос r3a9f1c к прежнему тексту: SELECT 1Ассистент прислал 1 предложение · 48 с$/);
+    first.unmount();
+    const card = { kind: "query", queryId: "7" } as const;
+    vi.mocked(api.listOptimizationRequests).mockResolvedValue([optimizationRequest({ sql: "SELECT 1", source: card, status: "answered", proposalIds: ["p1"] })]);
+    renderWithClient(<AskLlmButton {...props} source={card} sql="SELECT 2" />);
+    expect(within(await group()).getByRole("status")).toHaveTextContent(/^Ассистент прислал 1 предложение · 48 с$/);
   });
 });

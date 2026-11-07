@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { listen } from "@tauri-apps/api/event";
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { api } from "../api/client";
 import type { AgentPreset, AgentRun } from "../api/types";
 
@@ -53,6 +53,32 @@ export function queueAhead(all: AgentRun[], run: AgentRun): number {
 export function elapsedText(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+/**
+ * Конец фонового запуска (событие `agent://runs` с итогом: `done`, `failed`, `cancelled`, `interrupted`, `skipped`) —
+ * `onFinished`, пока `enabled`. Вне Tauri подписка отклоняется — это не ошибка. «Журнал» «Настроек» перечитывается по нему
+ * (смоук P4c, R24).
+ */
+export function useRunFinished(onFinished: (run: AgentRun) => void, enabled: boolean): void {
+  const latest = useRef(onFinished);
+  useEffect(() => {
+    latest.current = onFinished;
+  });
+  useEffect(() => {
+    if (!enabled) return;
+    let unmounted = false;
+    let off: (() => void) | undefined;
+    listen<AgentRun>(AGENT_RUNS_EVENT, (e) => {
+      if (!isActive(e.payload)) latest.current(e.payload);
+    })
+      .then((unlisten) => (unmounted ? unlisten() : (off = unlisten)))
+      .catch(() => {});
+    return () => {
+      unmounted = true;
+      off?.();
+    };
+  }, [enabled]);
 }
 
 /**

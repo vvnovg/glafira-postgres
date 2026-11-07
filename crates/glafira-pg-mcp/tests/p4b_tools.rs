@@ -688,6 +688,25 @@ async fn proposal_tools_describe_their_parameters() {
             && !request_id.contains("ignored"),
         "{request_id}"
     );
+    // Смоук 2026-11-07, R21: «Обоснование» и «Ожидаемый эффект» приходили по-английски при русском интерфейсе — язык текстов
+    // для пользователя назван в описаниях полей и инструмента.
+    let rationale = schema["properties"]["rationale"]["description"]
+        .as_str()
+        .unwrap();
+    for phrase in [
+        "in the user's language",
+        "the language the user writes in",
+        "in a background run started by Glafira, the language its prompt names",
+    ] {
+        assert!(rationale.contains(phrase), "{phrase}: {rationale}");
+    }
+    let effect = schema["properties"]["expectedEffect"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(
+        effect.contains("in the same language as rationale"),
+        "{effect}"
+    );
     let propose = tool("propose_query_rewrite")
         .description
         .as_deref()
@@ -698,6 +717,7 @@ async fn proposal_tools_describe_their_parameters() {
         "same rows",
         "list_proposals",
         "database defaults to the connection's database",
+        "are plain text for the user in the user's language",
     ] {
         assert!(propose.contains(phrase), "{phrase}: {propose}");
     }

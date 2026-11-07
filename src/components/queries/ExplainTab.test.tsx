@@ -460,6 +460,34 @@ describe("ExplainTab", () => {
     expect(editor).toHaveValue("SELECT 1 -- mine");
   });
 
+  it("R22: «Вернуть» кладёт заменяемый текст в список с временем; пункт, равный тексту редактора, не показывается", async () => {
+    vi.mocked(api.explain).mockResolvedValue(explained());
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date(2026, 10, 7, 18, 28));
+      const user = userEvent.setup();
+      const { rerender } = renderWithClient(<ExplainTab connectionId="c" member="pg-1" database="perf" sql="SELECT 1 -- mine" active />);
+      const editor = await screen.findByRole("textbox", { name: "SQL" });
+      vi.setSystemTime(new Date(2026, 10, 7, 18, 30));
+      rerender(<ExplainTab connectionId="c" member="pg-1" database="perf" sql={undefined} prefill={{ sql: "SELECT 2 -- proposal", database: "perf", member: "pg-1", nonce: 1 }} active />);
+      const items = () => within(screen.getByRole("region", { name: "Заменённые тексты" })).getAllByRole("listitem").map((li) => li.textContent);
+      expect(items()).toEqual(["18:30 Вернуть: SELECT 1 -- mine"]);
+      vi.setSystemTime(new Date(2026, 10, 7, 18, 31));
+      await user.click(screen.getByRole("button", { name: "Вернуть: SELECT 1 -- mine" }));
+      expect(editor).toHaveValue("SELECT 1 -- mine");
+      // Текст предложения, который «Вернуть» заменила, — в списке; пункт с текстом редактора скрыт (пустое действие).
+      expect(items()).toEqual(["18:31 Вернуть: SELECT 2 -- proposal"]);
+      // Текст правят — его пункт снова виден: вернуть можно и его.
+      await user.type(editor, " x");
+      expect(items()).toEqual(["18:31 Вернуть: SELECT 2 -- proposal", "18:30 Вернуть: SELECT 1 -- mine"]);
+      await user.click(screen.getByRole("button", { name: "Вернуть: SELECT 2 -- proposal" }));
+      expect(editor).toHaveValue("SELECT 2 -- proposal");
+      expect(items()).toEqual(["18:31 Вернуть: SELECT 1 -- mine x", "18:30 Вернуть: SELECT 1 -- mine"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("Z9: две подстановки подряд (nonce 1, 2), вторая — с другой базой: заменённый текст в списке", async () => {
     const view = (p: { sql: string; database?: string; nonce: number }) => <ExplainTab connectionId="c" member={undefined} database={undefined} sql={undefined} prefill={p} active />;
     const { rerender } = renderWithClient(view({ sql: "SELECT count(*) FROM orders WHERE status = $1", database: "perf", nonce: 1 }));

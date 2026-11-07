@@ -1,7 +1,7 @@
-import { act, screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentSettings, AgentStatus, AppInfo, CloudModel, McpStatus } from "../../../api/types";
+import type { AgentSettings, AgentStatus, AppInfo, CloudModel, McpStatus, OllamaPrices as OllamaPricesInfo } from "../../../api/types";
 import { i18n } from "../../../i18n";
 import { useWorkspace } from "../../../state/workspace";
 import { emitEvent, listeners, resetEventBus } from "../../../test/events";
@@ -109,9 +109,8 @@ describe("AgentSection", () => {
     const toggle = await screen.findByRole("checkbox", { name: TOGGLE });
     expect(toggle).toBeDisabled();
     expect(toggle).not.toBeChecked();
-    const model = screen.getByRole("combobox", { name: "Модель" });
-    expect(model).toBeEnabled();
-    await user.type(model, "qwen3.8:27b");
+    expect(screen.getByRole("combobox", { name: "Модель" })).toBeEnabled();
+    await typeModel(user, "qwen3.8:27b");
     await user.click(screen.getByRole("button", { name: "Сохранить" }));
     expect(api.setAgentSettings).toHaveBeenCalledWith({ ...configured, enabled: true, qwen: { path: "/opt/homebrew/bin/qwen", model: "qwen3.8:27b" } });
     expect(await screen.findByText("Сохранено")).toBeInTheDocument();
@@ -123,9 +122,9 @@ describe("AgentSection", () => {
     await user.click(await screen.findByRole("radio", { name: "Claude Code" }));
     await waitFor(() => expect(api.listAgentModels).toHaveBeenLastCalledWith("claude"));
     expect(screen.getByRole("textbox", { name: "Предел расходов на запуск, $" })).toHaveValue("1");
-    // Что значит пустое поле «Модель» — видимым текстом под полем, а не плейсхолдером (контраст AA).
-    expect(screen.getByText("Пусто — модель клиента по умолчанию")).toHaveClass("muted");
-    expect(screen.getByRole("combobox", { name: "Модель" })).not.toHaveAttribute("placeholder");
+    // Что значит пустая модель — пунктом списка, а не плейсхолдером (контраст AA).
+    expect(screen.getByRole("combobox", { name: "Модель" })).toHaveValue("");
+    expect(screen.getByRole("option", { name: "По умолчанию (модель клиента)", selected: true })).toBeInTheDocument();
     // То же у пустого «Предела расходов»: строка .muted под полем, в описании поля.
     const budget = screen.getByRole("textbox", { name: "Предел расходов на запуск, $" });
     expect(screen.queryByText("Пусто — без предела")).toBeNull();
@@ -140,8 +139,11 @@ describe("AgentSection", () => {
     await user.type(budget, "1");
     await user.click(screen.getByRole("checkbox", { name: "Через Ollama" }));
     expect(screen.queryByRole("textbox", { name: "Предел расходов на запуск, $" })).toBeNull();
-    expect(screen.getByRole("combobox", { name: "Модель" })).toHaveAccessibleDescription("Нужна модель Ollama");
-    await user.type(screen.getByRole("combobox", { name: "Модель" }), "qwen3.6-64k:35b-a3b");
+    expect(screen.getByRole("option", { name: "Не выбрана: нужна модель Ollama", selected: true })).toBeInTheDocument();
+    // В поле ручного ввода пустое имя у Claude Code через Ollama — тоже пояснение под полем.
+    const name = await typeModel(user, "");
+    expect(name).toHaveAccessibleDescription("Нужна модель Ollama");
+    await user.type(name, "qwen3.6-64k:35b-a3b");
     expect(screen.queryByText("Нужна модель Ollama")).toBeNull();
     await user.click(screen.getByRole("radio", { name: "Qwen Code" }));
     expect(screen.queryByRole("checkbox", { name: "Через Ollama" })).toBeNull();
@@ -180,20 +182,155 @@ describe("AgentSection", () => {
     expect(screen.queryByText("Программа не найдена: укажите путь вручную")).toBeNull();
   });
 
-  it("модель: список из настроек клиента и свободный ввод; неверное имя — ошибка у поля, «Сохранить» неактивна", async () => {
-    vi.mocked(api.listAgentModels).mockResolvedValue({ ids: ["qwen3.6-64k:35b-a3b", "qwen3.8:27b"], default: "qwen3.6-64k:35b-a3b", source: "qwen" });
+  /** Облачные модели Ollama из таблицы цен (`list_agent_models`, группа «Ollama Cloud»). */
+  const CLOUD: CloudModel[] = [
+    { id: "glm-5.3-flash:cloud", prices: { input: 0.15, cachedInput: 0.03, output: 0.5 }, offPeak: null },
+    { id: "gpt-oss:120b-cloud", prices: { input: 0.15, cachedInput: 0.014, output: 0.6 }, offPeak: null },
+    { id: "nemotron-3-super:cloud", prices: { input: 0.015, cachedInput: 0.015, output: 0.6 }, offPeak: null },
+    { id: "deepseek-v4.1-flash:cloud", prices: { input: 0.3, cachedInput: 0.006, output: 1.2 }, offPeak: { input: 0.15, cachedInput: 0.003, output: 0.6 } },
+  ];
+  /**
+   * Список «Модель» (смоук P4c, R19): пункты вне групп и группы `<optgroup>` по порядку — `[подпись группы или null, [[значение,
+   * текст пункта]…]]`; пробелы Intl — обычными.
+   */
+  const modelList = () => {
+    const select = screen.getByRole("combobox", { name: "Модель" });
+    const item = (o: HTMLOptionElement) => [o.value, o.textContent?.replace(/\s/g, " ") ?? ""];
+    return Array.from(select.children).map((c) =>
+      c instanceof HTMLOptGroupElement ? [c.label, Array.from(c.querySelectorAll("option")).map(item)] : [null, [item(c as HTMLOptionElement)]],
+    );
+  };
+  /** Только имена моделей групп (без «По умолчанию», «Другая модель…» и модели не из списка). */
+  const groupedModels = () => modelList().flatMap(([label, items]) => (label === null ? [] : (items as string[][]).map(([v]) => v)));
+  /** Имя модели руками: «Другая модель…» и поле «Имя модели». */
+  const typeModel = async (user: ReturnType<typeof userEvent.setup>, name: string) => {
+    await user.selectOptions(screen.getByRole("combobox", { name: "Модель" }), "Другая модель…");
+    const input = screen.getByRole("textbox", { name: "Имя модели" });
+    await user.clear(input);
+    if (name !== "") await user.type(input, name);
+    return input;
+  };
+
+  it("модель — выпадающий список (R19): группы «Настройки Qwen Code», «Ollama», «Ollama Cloud» с ценой в тексте пункта, текущая выбрана", async () => {
+    vi.mocked(api.getAgentSettings).mockResolvedValue(agentSettings({ qwen: { path: "/opt/homebrew/bin/qwen", model: "nemotron-3-super:cloud" } }));
+    vi.mocked(api.listAgentModels).mockResolvedValue({
+      ids: ["glm-5.3-flash:cloud", "qwen3.8:27b"],
+      default: "qwen3.8:27b",
+      source: "qwen",
+      ollama: ["gemma3:4b", "qwen3.8:27b", "gpt-oss:120b-cloud", "qwen3.6-64k:35b-a3b"],
+      cloud: CLOUD,
+    });
+    renderWithClient(<AgentSection status={mcpStatus()} />);
+    await waitFor(() => expect(groupedModels()).toContain("nemotron-3-super:cloud"));
+    expect(modelList()).toEqual([
+      [null, [["", "По умолчанию (qwen3.8:27b)"]]],
+      [
+        "Настройки Qwen Code",
+        [
+          ["glm-5.3-flash:cloud", "glm-5.3-flash:cloud"],
+          ["qwen3.8:27b", "qwen3.8:27b"],
+        ],
+      ],
+      [
+        "Ollama",
+        [
+          ["gemma3:4b", "gemma3:4b"],
+          ["qwen3.6-64k:35b-a3b", "qwen3.6-64k:35b-a3b"],
+        ],
+      ],
+      [
+        "Ollama Cloud",
+        [
+          ["gpt-oss:120b-cloud", "gpt-oss:120b-cloud · ≈ 0,15 $ / 0,60 $ за 1 млн токенов, вход / выход"],
+          ["nemotron-3-super:cloud", "nemotron-3-super:cloud · ≈ 0,015 $ / 0,60 $ за 1 млн токенов, вход / выход"],
+          ["deepseek-v4.1-flash:cloud", "deepseek-v4.1-flash:cloud · ≈ 0,30 $ / 1,20 $ за 1 млн токенов, вход / выход; вне пика — 0,15 $ / 0,60 $"],
+        ],
+      ],
+      [null, [["*other", "Другая модель…"]]],
+    ]);
+    const select = screen.getByRole("combobox", { name: "Модель" });
+    expect(select).toHaveValue("nemotron-3-super:cloud");
+    expect(screen.queryByRole("textbox", { name: "Имя модели" })).toBeNull();
+    // Выбор из списка — в черновик: «Сохранить» становится активной.
     const user = userEvent.setup();
-    const { container } = renderWithClient(<AgentSection status={mcpStatus()} />);
-    const model = await screen.findByRole("combobox", { name: "Модель" });
-    expect(await screen.findByText("По умолчанию: qwen3.6-64k:35b-a3b")).toBeInTheDocument();
-    // Что значит пустое поле, скринридер читает при входе в поле.
-    expect(model).toHaveAccessibleDescription("По умолчанию: qwen3.6-64k:35b-a3b");
-    expect(Array.from(container.querySelectorAll("datalist option")).map((o) => o.getAttribute("value"))).toEqual(["qwen3.6-64k:35b-a3b", "qwen3.8:27b"]);
-    await user.type(model, "bad model");
-    expect(model).toHaveAttribute("aria-invalid", "true");
-    expect(screen.getByText("Сначала латинская буква или цифра, дальше латиница, цифры и . _ : / @ + -, до 128 символов")).toBeInTheDocument();
-    expect(model).toHaveAccessibleDescription("Сначала латинская буква или цифра, дальше латиница, цифры и . _ : / @ + -, до 128 символов");
+    await user.selectOptions(select, "qwen3.6-64k:35b-a3b");
+    expect(select).toHaveValue("qwen3.6-64k:35b-a3b");
+    expect(screen.getByRole("button", { name: "Сохранить" })).toBeEnabled();
+    await user.selectOptions(select, "По умолчанию (qwen3.8:27b)");
+    expect(select).toHaveValue("");
+  });
+
+  it("модель не из списка — отдельным пунктом сверху; «Другая модель…» — поле ручного ввода с прежней проверкой имени", async () => {
+    vi.mocked(api.getAgentSettings).mockResolvedValue(agentSettings({ qwen: { path: "/opt/homebrew/bin/qwen", model: "my-model:1b" } }));
+    vi.mocked(api.listAgentModels).mockResolvedValue({ ids: ["qwen3.8:27b"], default: null, source: "qwen", cloud: CLOUD.slice(0, 1) });
+    vi.mocked(api.setAgentSettings).mockImplementation(async (s) => s);
+    const user = userEvent.setup();
+    renderWithClient(<AgentSection status={mcpStatus()} />);
+    await waitFor(() => expect(groupedModels()).toEqual(["qwen3.8:27b", "glm-5.3-flash:cloud"]));
+    const select = screen.getByRole("combobox", { name: "Модель" });
+    expect(modelList()[0]).toEqual([null, [["my-model:1b", "my-model:1b"]]]);
+    expect(modelList()[1]).toEqual([null, [["", "По умолчанию (модель клиента)"]]]);
+    expect(select).toHaveValue("my-model:1b");
+    // «Другая модель…»: поле с текущим именем, фокус остаётся на списке (смена пункта контекста не меняет).
+    await user.selectOptions(select, "Другая модель…");
+    expect(select).toHaveValue("*other");
+    expect(select).toHaveFocus();
+    const input = screen.getByRole("textbox", { name: "Имя модели" });
+    expect(input).toHaveValue("my-model:1b");
+    await user.clear(input);
+    await user.type(input, "bad model");
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    expect(input).toHaveAccessibleDescription("Сначала латинская буква или цифра, дальше латиница, цифры и . _ : / @ + -, до 128 символов");
     expect(screen.getByRole("button", { name: "Сохранить" })).toBeDisabled();
+    await user.clear(input);
+    // Пустое имя — модель клиента по умолчанию: это сказано под полем.
+    expect(input).toHaveAccessibleDescription("Пусто — модель клиента по умолчанию");
+    await user.type(input, "qwen3.9:9b");
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    expect(api.setAgentSettings).toHaveBeenCalledWith(agentSettings({ qwen: { path: "/opt/homebrew/bin/qwen", model: "qwen3.9:9b" } }));
+    expect(await screen.findByText("Сохранено")).toBeInTheDocument();
+    // Пункт из списка закрывает поле ручного ввода.
+    await user.selectOptions(select, "glm-5.3-flash:cloud");
+    expect(screen.queryByRole("textbox", { name: "Имя модели" })).toBeNull();
+    expect(select).toHaveValue("glm-5.3-flash:cloud");
+  });
+
+  it("Claude Code через Ollama — группы «Ollama» и «Ollama Cloud», пустой пункт просит модель; без «Через Ollama» групп нет, сразу", async () => {
+    vi.mocked(api.getAgentSettings).mockResolvedValue(
+      agentSettings({ preset: "claude", claude: { path: "/Users/me/.local/bin/claude", model: "", viaOllama: true, budgetUsd: 1 } }),
+    );
+    vi.mocked(api.listAgentModels).mockResolvedValue({ ids: ["qwen3.6-64k:35b-a3b"], default: null, source: "ollama", ollama: [], cloud: CLOUD.slice(1, 2) });
+    const user = userEvent.setup();
+    renderWithClient(<AgentSection status={mcpStatus()} />);
+    await waitFor(() => expect(groupedModels()).toEqual(["qwen3.6-64k:35b-a3b", "gpt-oss:120b-cloud"]));
+    expect(modelList().map(([label]) => label)).toEqual([null, "Ollama", "Ollama Cloud", null]);
+    expect(modelList()[0]).toEqual([null, [["", "Не выбрана: нужна модель Ollama"]]]);
+    expect(screen.getByRole("combobox", { name: "Модель" })).toHaveValue("");
+    const calls = vi.mocked(api.listAgentModels).mock.calls.length;
+    await user.click(screen.getByRole("checkbox", { name: "Через Ollama" }));
+    expect(groupedModels()).toEqual([]);
+    expect(modelList()).toEqual([[null, [["", "По умолчанию (модель клиента)"]]], [null, [["*other", "Другая модель…"]]]]);
+    expect(api.listAgentModels).toHaveBeenCalledTimes(calls);
+  });
+
+  it("облачные модели по-английски — своя подпись группы и цены", async () => {
+    await act(() => i18n.changeLanguage("en"));
+    try {
+      vi.mocked(api.listAgentModels).mockResolvedValue({ ids: ["qwen3.8:27b"], default: null, source: "qwen", ollama: [], cloud: CLOUD.slice(1, 2) });
+      renderWithClient(<AgentSection status={mcpStatus()} />);
+      await screen.findByRole("combobox", { name: "Model" });
+      const groups = () => Array.from(document.querySelectorAll("optgroup")).map((g) => [g.label, Array.from(g.querySelectorAll("option")).map((o) => o.textContent?.replace(/\s/g, " "))]);
+      await waitFor(() =>
+        expect(groups()).toEqual([
+          ["Qwen Code settings", ["qwen3.8:27b"]],
+          ["Ollama Cloud", ["gpt-oss:120b-cloud · ≈ $0.15 / $0.60 per 1M tokens, input / output"]],
+        ]),
+      );
+      expect(screen.getByRole("option", { name: "Other model…" })).toBeInTheDocument();
+      expect(screen.getByRole("option", { name: "Default (the client's model)" })).toBeInTheDocument();
+    } finally {
+      await act(() => i18n.changeLanguage("ru"));
+    }
   });
 
   it("список моделей перечитывается при входе в поле «Модель» и после «Найти», а не на каждый щелчок; пока читается новый, виден прежний", async () => {
@@ -205,123 +342,96 @@ describe("AgentSection", () => {
       .mockResolvedValue({ ids: ["qwen3.8:27b", "glm-5.3-flash:cloud", "qwen3.6-64k:35b-a3b"], default: null, source: "qwen" });
     vi.mocked(api.detectAgentCli).mockResolvedValue({ path: "/opt/homebrew/bin/qwen", version: "0.26.5", belowMinimum: false, error: null });
     const user = userEvent.setup();
-    const { container } = renderWithClient(<AgentSection status={mcpStatus()} />);
-    const options = () => Array.from(container.querySelectorAll("datalist option")).map((o) => o.getAttribute("value"));
+    renderWithClient(<AgentSection status={mcpStatus()} />);
     const model = await screen.findByRole("combobox", { name: "Модель" });
-    await waitFor(() => expect(options()).toEqual(["qwen3.8:27b"]));
+    await waitFor(() => expect(groupedModels()).toEqual(["qwen3.8:27b"]));
     expect(api.listAgentModels).toHaveBeenCalledTimes(1);
     // Модель добавили в ~/.qwen/settings.json при открытых «Настройках»: вход в поле перечитывает список.
     await user.click(model);
     expect(api.listAgentModels).toHaveBeenCalledTimes(2);
-    expect(options()).toEqual(["qwen3.8:27b"]);
+    expect(groupedModels()).toEqual(["qwen3.8:27b"]);
     act(() => answer({ ids: ["qwen3.8:27b", "glm-5.3-flash:cloud"], default: null, source: "qwen" }));
-    await waitFor(() => expect(options()).toEqual(["qwen3.8:27b", "glm-5.3-flash:cloud"]));
-    // Щелчки по полю, в котором уже фокус (правка имени мышью), списка не перечитывают (итоговое ревью фронтенда).
+    await waitFor(() => expect(groupedModels()).toEqual(["qwen3.8:27b", "glm-5.3-flash:cloud"]));
+    // Щелчки по полю, в котором уже фокус, списка не перечитывают (итоговое ревью фронтенда).
     await user.click(model);
     await user.click(model);
     expect(api.listAgentModels).toHaveBeenCalledTimes(2);
     // «Найти» — тоже.
     await user.click(screen.getByRole("button", { name: "Найти" }));
-    await waitFor(() => expect(options()).toEqual(["qwen3.8:27b", "glm-5.3-flash:cloud", "qwen3.6-64k:35b-a3b"]));
+    await waitFor(() => expect(groupedModels()).toEqual(["qwen3.8:27b", "glm-5.3-flash:cloud", "qwen3.6-64k:35b-a3b"]));
     expect(api.listAgentModels).toHaveBeenCalledTimes(3);
     expect(api.listAgentModels).toHaveBeenLastCalledWith("qwen");
   });
 
-  /** Облачные модели Ollama из таблицы цен (`list_agent_models`, группа «Ollama Cloud»). */
-  const CLOUD: CloudModel[] = [
-    { id: "glm-5.3-flash:cloud", prices: { input: 0.15, cachedInput: 0.03, output: 0.5 }, offPeak: null },
-    { id: "gpt-oss:120b-cloud", prices: { input: 0.15, cachedInput: 0.014, output: 0.6 }, offPeak: null },
-    { id: "nemotron-3-super:cloud", prices: { input: 0.015, cachedInput: 0.015, output: 0.6 }, offPeak: null },
-    { id: "deepseek-v4.1-flash:cloud", prices: { input: 0.3, cachedInput: 0.006, output: 1.2 }, offPeak: { input: 0.15, cachedInput: 0.003, output: 0.6 } },
-  ];
-  /** Пункты списка «Модель»: имя и подпись (пробелы Intl — обычными). */
-  const modelOptions = (container: HTMLElement) =>
-    Array.from(container.querySelectorAll("datalist option")).map((o) => [o.getAttribute("value"), o.getAttribute("label")?.replace(/\s/g, " ") ?? null]);
-
-  it("облачные модели Ollama из таблицы цен — группой «Ollama Cloud» после найденных, с ценой в подписи и без повторов", async () => {
-    vi.mocked(api.listAgentModels).mockResolvedValue({ ids: ["glm-5.3-flash:cloud", "qwen3.8:27b"], default: null, source: "qwen", cloud: CLOUD });
-    const { container } = renderWithClient(<AgentSection status={mcpStatus()} />);
-    await screen.findByRole("combobox", { name: "Модель" });
-    await waitFor(() =>
-      expect(modelOptions(container)).toEqual([
-        ["glm-5.3-flash:cloud", null],
-        ["qwen3.8:27b", null],
-        ["gpt-oss:120b-cloud", "Ollama Cloud · ≈ 0,15 $ / 0,60 $ за 1 млн токенов, вход / выход"],
-        ["nemotron-3-super:cloud", "Ollama Cloud · ≈ 0,015 $ / 0,60 $ за 1 млн токенов, вход / выход"],
-        ["deepseek-v4.1-flash:cloud", "Ollama Cloud · ≈ 0,30 $ / 1,20 $ за 1 млн токенов, вход / выход; вне пика — 0,15 $ / 0,60 $"],
-      ]),
-    );
-  });
-
-  it("облачные модели Ollama — у Claude Code через Ollama; без Ollama группы нет; по-английски — своя подпись", async () => {
-    await act(() => i18n.changeLanguage("en"));
-    try {
-      vi.mocked(api.getAgentSettings).mockResolvedValue(
-        agentSettings({ preset: "claude", claude: { path: "/Users/me/.local/bin/claude", model: "", viaOllama: true, budgetUsd: 1 } }),
-      );
-      vi.mocked(api.listAgentModels).mockResolvedValue({ ids: ["qwen3.6-64k:35b-a3b"], default: null, source: "ollama", ollama: [], cloud: CLOUD.slice(1, 2) });
-      const user = userEvent.setup();
-      const { container } = renderWithClient(<AgentSection status={mcpStatus()} />);
-      await screen.findByRole("combobox", { name: "Model" });
-      await waitFor(() =>
-        expect(modelOptions(container)).toEqual([
-          ["qwen3.6-64k:35b-a3b", null],
-          ["gpt-oss:120b-cloud", "Ollama Cloud · ≈ $0.15 / $0.60 per 1M tokens, input / output"],
-        ]),
-      );
-      // «Через Ollama» сняли — модели Ollama (и локальные, и облачные) Claude Code не годятся, ещё до «Сохранить».
-      await user.click(screen.getByRole("checkbox", { name: "Via Ollama" }));
-      expect(modelOptions(container)).toEqual([]);
-    } finally {
-      await act(() => i18n.changeLanguage("ru"));
-    }
-  });
-
-  it("Claude Code без сохранённого «Через Ollama»: флажок в черновике сразу показывает модели Ollama и облачные, без «Сохранить» и нового чтения", async () => {
-    vi.mocked(api.getAgentSettings).mockResolvedValue(
-      agentSettings({ preset: "claude", claude: { path: "/Users/me/.local/bin/claude", model: "claude-sonnet-5", viaOllama: false, budgetUsd: 1 } }),
-    );
-    vi.mocked(api.listAgentModels).mockResolvedValue({ ids: ["qwen3.6-64k:35b-a3b"], default: null, source: "ollama", ollama: [], cloud: CLOUD.slice(1, 2) });
+  it("«Обновить модели и цены» — сразу после поля «Модель»: загружает цены, затем перечитывает список; дата цен рядом с кнопкой", async () => {
+    let prices: (p: OllamaPricesInfo) => void = () => {};
+    vi.mocked(api.refreshOllamaPrices).mockImplementation(() => new Promise((r) => (prices = r)));
+    vi.mocked(api.listAgentModels).mockResolvedValue({ ids: ["qwen3.8:27b"], default: null, source: "qwen", cloud: CLOUD.slice(0, 1) });
     const user = userEvent.setup();
     const { container } = renderWithClient(<AgentSection status={mcpStatus()} />);
-    await screen.findByRole("combobox", { name: "Модель" });
-    await waitFor(() => expect(api.listAgentModels).toHaveBeenCalledWith("claude"));
-    expect(modelOptions(container)).toEqual([]);
-    const calls = vi.mocked(api.listAgentModels).mock.calls.length;
-    await user.click(screen.getByRole("checkbox", { name: "Через Ollama" }));
-    expect(modelOptions(container)).toEqual([
-      ["qwen3.6-64k:35b-a3b", null],
-      ["gpt-oss:120b-cloud", "Ollama Cloud · ≈ 0,15 $ / 0,60 $ за 1 млн токенов, вход / выход"],
-    ]);
-    expect(api.listAgentModels).toHaveBeenCalledTimes(calls);
+    const select = await screen.findByRole("combobox", { name: "Модель" });
+    const button = screen.getByRole("button", { name: "Обновить модели и цены" });
+    // Кнопка — в строке поля «Модель», до «Срока запуска»; строка о дне цен — рядом с ней; под «Запусками» цен больше нет.
+    const control = select.closest(".agent-control") as HTMLElement;
+    expect(control).toContainElement(button);
+    expect(await within(control).findByText("Стоимость облачных запусков через Ollama — оценка по ценам Ollama Cloud на 07.11.2026, встроенным в Glafira")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Подсказка: Обновить модели и цены" })).toBeInTheDocument();
+    const runsBlock = container.querySelectorAll(".settings-block")[1] as HTMLElement;
+    expect(within(runsBlock).queryByRole("button", { name: /Обновить/ })).toBeNull();
+    expect(runsBlock).not.toHaveTextContent("ollama.com/pricing");
+    await waitFor(() => expect(api.listAgentModels).toHaveBeenCalledTimes(1));
+    await user.click(button);
+    expect(api.refreshOllamaPrices).toHaveBeenCalledTimes(1);
+    // Пока идёт загрузка — кнопка не теряет фокус и второй раз не нажимается; список ждёт новых цен.
+    expect(button).toHaveTextContent("Обновление моделей и цен…");
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    expect(button).toHaveFocus();
+    await user.click(button);
+    expect(api.refreshOllamaPrices).toHaveBeenCalledTimes(1);
+    expect(api.listAgentModels).toHaveBeenCalledTimes(1);
+    vi.mocked(api.listAgentModels).mockResolvedValue({ ids: ["qwen3.8:27b", "qwen3.9:9b"], default: null, source: "qwen", cloud: CLOUD.slice(0, 2) });
+    act(() => prices({ date: "2026-12-01", source: "https://ollama.com/pricing", saved: true, fetchedAtMs: 1_796_117_400_000, models: 25, refreshAllowed: true }));
+    await waitFor(() => expect(groupedModels()).toEqual(["qwen3.8:27b", "qwen3.9:9b", "glm-5.3-flash:cloud", "gpt-oss:120b-cloud"]));
+    expect(api.listAgentModels).toHaveBeenCalledTimes(2);
+    expect(await within(control).findByText("Стоимость облачных запусков через Ollama — оценка по ценам Ollama Cloud на 01.12.2026, загруженным с ollama.com/pricing")).toBeInTheDocument();
+    expect(within(control).getByText("Список моделей обновлён · Цены обновлены: моделей 25")).toBeInTheDocument();
+    expect(button).toHaveTextContent("Обновить модели и цены");
+    expect(button).not.toHaveAttribute("aria-disabled");
   });
 
-  it("Qwen Code: модели локальной Ollama — группой «Ollama» без цены после моделей из настроек и до «Ollama Cloud», без повторов", async () => {
-    vi.mocked(api.listAgentModels).mockResolvedValue({
-      ids: ["glm-5.3-flash:cloud", "qwen3.8:27b"],
-      default: null,
-      source: "qwen",
-      ollama: ["gemma3:4b", "qwen3.8:27b", "gpt-oss:120b-cloud", "qwen3.6-64k:35b-a3b"],
-      cloud: CLOUD.slice(0, 2),
-    });
-    const { container } = renderWithClient(<AgentSection status={mcpStatus()} />);
-    await screen.findByRole("combobox", { name: "Модель" });
-    await waitFor(() =>
-      expect(modelOptions(container)).toEqual([
-        ["glm-5.3-flash:cloud", null],
-        ["qwen3.8:27b", null],
-        ["gemma3:4b", "Ollama"],
-        ["qwen3.6-64k:35b-a3b", "Ollama"],
-        ["gpt-oss:120b-cloud", "Ollama Cloud · ≈ 0,15 $ / 0,60 $ за 1 млн токенов, вход / выход"],
-      ]),
-    );
+  it("«Обновить модели и цены»: политика запрещает загрузку цен — кнопка перечитывает только список; ошибка цен — список всё равно перечитан", async () => {
+    vi.mocked(api.getOllamaPrices).mockResolvedValue({ date: "2026-11-07", source: "https://ollama.com/pricing", saved: false, models: 24, refreshAllowed: false });
+    const user = userEvent.setup();
+    const first = renderWithClient(<AgentSection status={mcpStatus()} />);
+    const button = await screen.findByRole("button", { name: "Обновить модели и цены" });
+    await waitFor(() => expect(button).toHaveAccessibleDescription("Политика организации не разрешает загружать цены: оценки — по этой таблице"));
+    expect(button).toBeEnabled();
+    await waitFor(() => expect(api.listAgentModels).toHaveBeenCalledTimes(1));
+    await user.click(button);
+    expect(await screen.findByText("Список моделей обновлён")).toBeInTheDocument();
+    expect(api.listAgentModels).toHaveBeenCalledTimes(2);
+    expect(api.refreshOllamaPrices).not.toHaveBeenCalled();
+    first.unmount();
+    vi.mocked(api.listAgentModels).mockClear();
+    vi.mocked(api.getOllamaPrices).mockResolvedValue({ date: "2026-11-07", source: "https://ollama.com/pricing", saved: false, models: 24, refreshAllowed: true });
+    vi.mocked(api.refreshOllamaPrices).mockRejectedValue({ code: "INTERNAL", key: "errors.agent.pricesParse", message: "Could not parse the Ollama price page", retryable: false });
+    renderWithClient(<AgentSection status={mcpStatus()} />);
+    await waitFor(() => expect(api.listAgentModels).toHaveBeenCalledTimes(1));
+    await user.click(await screen.findByRole("button", { name: "Обновить модели и цены" }));
+    expect(await screen.findByText("Не удалось разобрать страницу цен Ollama")).toBeInTheDocument();
+    await waitFor(() => expect(api.listAgentModels).toHaveBeenCalledTimes(2));
+    expect(screen.getByText("Стоимость облачных запусков через Ollama — оценка по ценам Ollama Cloud на 07.11.2026, встроенным в Glafira")).toBeInTheDocument();
   });
 
-  it("список моделей не прочитан — свободный ввод с пояснением", async () => {
+  it("список моделей не прочитан — пояснение, имя вводится через «Другая модель…»", async () => {
     vi.mocked(api.listAgentModels).mockRejectedValue({ code: "INTERNAL", message: "boom", retryable: false });
+    const user = userEvent.setup();
     renderWithClient(<AgentSection status={mcpStatus()} />);
     expect(await screen.findByText("Список моделей не прочитан: введите имя вручную")).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Модель" })).toBeEnabled();
+    expect(screen.getByRole("combobox", { name: "Модель" })).toHaveAccessibleDescription("Список моделей не прочитан: введите имя вручную");
+    const input = await typeModel(user, "qwen3.8:27b");
+    expect(input).toHaveValue("qwen3.8:27b");
   });
 
   it("сроки и предел проверяются по пределам Rust; «Сохранить» отправляет настройки целиком", async () => {
@@ -600,11 +710,11 @@ describe("AgentSection", () => {
     await save();
     expect(screen.getByText("Работает: Qwen Code 0.26.5, qwen3.6-64k:35b-a3b, 23 с")).toBeInTheDocument();
     // Модель сменилась и сохранена — итог о прежних настройках убран.
-    await user.type(screen.getByRole("combobox", { name: "Модель" }), "glm-5.3-flash:cloud");
+    await typeModel(user, "glm-5.3-flash:cloud");
     await save();
     expect(screen.queryByText(/^Работает:/)).toBeNull();
     // Вернули прежнюю модель — итог не возвращается: его даёт только новая проверка.
-    await user.clear(screen.getByRole("combobox", { name: "Модель" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Модель" }), "");
     await save();
     expect(screen.queryByText(/^Работает:/)).toBeNull();
     // Программа: новая проверка, затем путь сменился — итог убран; «Не работает» с журналом — тоже.

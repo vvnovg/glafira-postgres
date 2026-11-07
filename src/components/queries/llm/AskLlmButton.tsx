@@ -4,12 +4,13 @@ import { api, toAppError } from "../../../api/client";
 import type { AgentPreset, AppError, McpStatus, OptimizationRequest, PlanTree, RequestSource } from "../../../api/types";
 import { tr } from "../../../i18n/text";
 import { effectiveLlmAccess } from "../../../lib/llmAccess";
+import { differingHead, sameSql } from "../../../lib/sqlHead";
 import { isActive, latestRunFor, queueAhead, useAgentRuns } from "../../../lib/useAgentRuns";
 import { useConnectionProfile } from "../../../lib/useConnectionProfile";
 import { sourceMatches, useOptimizationRequests, waitingRequest } from "../../../lib/useLlmProposals";
 import { useMcpStatus } from "../../../lib/useMcpStatus";
 import { Hint } from "../../common/Hint";
-import { useShownProposals } from "../../../state/shownProposals";
+import { useClosedResults } from "../../../state/closedResults";
 import { AgentRunStatus, agentRunVisible } from "./AgentRunStatus";
 
 /** Почему запрос не отправить. Ключи подсказок — литералами (правило словарей и проверка подсказок `i18n:check`). */
@@ -114,8 +115,14 @@ export interface AskLlmProps {
  * буфер ничего не кладёт; уведомление — «Запрос r… передан фоновому ассистенту»; вместо строки «Ждёт ответа LLM» — строка
  * статуса запуска `AgentRunStatus` в том же блоке строк. Запуски читаются в режиме фона и пока у Glafira есть идущий или
  * ждущий запуск (режим могли выключить во время запуска — он доводится до конца, и его статус виден до конца). После ответа
- * строка статуса остаётся, пока запуск идёт или его предложения не показаны панелью. Не встал в очередь (очередь полна,
- * политика) — текст ошибки в уведомлении, запрос ждёт, в строке статуса — «Запустить фонового ассистента».
+ * строка статуса остаётся с итогом запуска (смоук P4c, R20) до следующей отправки или «Закрыть запрос» — у отвеченного
+ * запроса она закрывает только строку (`useClosedResults`: Rust отвеченный запрос не меняет). Не встал в очередь (очередь
+ * полна, политика) — текст ошибки в уведомлении, запрос ждёт, в строке статуса — «Запустить фонового ассистента».
+ *
+ * Запрос к прежнему тексту (смоук P4c, R23): в консоли (источник `console` — один на подключение) текст редактора мог смениться
+ * подстановкой или правкой; если он не тот, что у запроса (`sameSql`), строка ожидания и строка статуса называют запрос и начало
+ * его текста (`differingHead`, как «Заменённые тексты»), а ссылка закрытия — «Закрыть запрос». «Повторить» повторяет тот
+ * запрос, «Передать LLM-ассистенту» заменяет его новым по тексту редактора. У карточки текст запроса не меняется — правила нет.
  */
 export function AskLlmButton({ connectionId, member, database, source, sql, params, plan, sent: sentProp, onSent, extra }: AskLlmProps) {
   const { t } = useTranslation();
@@ -126,7 +133,8 @@ export function AskLlmButton({ connectionId, member, database, source, sql, para
   const agent = status?.agent;
   const runsWanted = background || (agent !== undefined && (agent.running != null || agent.queued > 0));
   const { all: runs, state: runsState, refresh: refreshRuns } = useAgentRuns(connectionId, { enabled: runsWanted });
-  const shownProposals = useShownProposals((s) => s.shown);
+  const closedResults = useClosedResults((s) => s.closed);
+  const closeResult = useClosedResults((s) => s.close);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<AppError | null>(null);
   const [ownSent, setOwnSent] = useState<SentNotice | null>(null);
@@ -155,9 +163,9 @@ export function AskLlmButton({ connectionId, member, database, source, sql, para
   const can = ready && off === null && sql.trim() !== "" && !busy && !justSent;
 
   // Строка статуса запуска. У ждущего запроса — в режиме фона, а без него — пока его запуск ещё идёт (режим выключили во
-  // время запуска); у отвеченного — если у него был запуск и строке есть что сказать (идущий запуск или непоказанные
-  // предложения, `agentRunVisible`): иначе пустой блок строк занял бы ряд. Пока список запросов не перечитан после
-  // создания, прежний запрос источника не показывается.
+  // время запуска); у отвеченного — если у него был запуск и строке есть что сказать (идущий запуск или итог, который не
+  // закрыли, `agentRunVisible`): иначе пустой блок строк занял бы ряд. Пока список запросов не перечитан после создания,
+  // прежний запрос источника не показывается.
   const current = justSent ? null : (waiting ?? latestRequest(requests, source, database));
   const runsReady = runsWanted && runsState === "ready";
   const run = current !== null && runsReady ? latestRunFor(runs, current.id) : null;
@@ -165,7 +173,9 @@ export function AskLlmButton({ connectionId, member, database, source, sql, para
     current !== null &&
     runsReady &&
     (current.status === "waiting" ? background || (run !== null && isActive(run)) : current.status === "answered" && run !== null) &&
-    agentRunVisible(current, run, shownProposals);
+    agentRunVisible(current, run, closedResults);
+  // Запрос к прежнему тексту консоли (R23): начало его текста; null — запрос о тексте редактора.
+  const staleHead = (r: OptimizationRequest | null) => (r !== null && source.kind === "console" && !sameSql(r.sql, sql) ? differingHead(r.sql, sql) : null);
 
   const ask = async () => {
     setBusy(true);
@@ -265,6 +275,7 @@ export function AskLlmButton({ connectionId, member, database, source, sql, para
   const message = error ? tr(error) : notice;
   // Строка ожидания P4b — когда строки статуса запуска нет.
   const plainWaiting = showRun ? null : waiting;
+  const plainStale = staleHead(plainWaiting);
   const shown = plainWaiting !== null || showRun || unreadable !== "" || message !== "";
   return (
     <>
@@ -276,13 +287,15 @@ export function AskLlmButton({ connectionId, member, database, source, sql, para
       <div className={shown ? "llm-ask-notes shown" : "llm-ask-notes"}>
         <div className="llm-ask-line">
           <span role="status" className="muted">
-            {plainWaiting && <span>{t("llmAssist.ask.waiting", { id: plainWaiting.id })}</span>}
+            {plainWaiting && (
+              <span>{plainStale !== null ? t("llmAssist.ask.waitingStale", { id: plainWaiting.id, head: plainStale }) : t("llmAssist.ask.waiting", { id: plainWaiting.id })}</span>
+            )}
             {plainWaiting && unreadable && " "}
             {unreadable && <span>{unreadable}</span>}
           </span>
           {plainWaiting && (
             <button type="button" className="link" onClick={() => void cancel(plainWaiting.id)}>
-              {t("llmAssist.ask.cancel")}
+              {plainStale !== null ? t("llmAssist.ask.close") : t("llmAssist.ask.cancel")}
             </button>
           )}
           {unreadable && (
@@ -300,7 +313,8 @@ export function AskLlmButton({ connectionId, member, database, source, sql, para
             chatLine={t("llmAssist.ask.chatLine", { id: current.id })}
             busy={busy}
             onRetry={() => void startRun(current.id)}
-            onCancel={() => void cancel(current.id)}
+            onCancel={() => (current.status === "waiting" ? void cancel(current.id) : closeResult(current.id))}
+            staleHead={staleHead(current)}
           />
         )}
         <p role="status" className="muted llm-ask-notice">
