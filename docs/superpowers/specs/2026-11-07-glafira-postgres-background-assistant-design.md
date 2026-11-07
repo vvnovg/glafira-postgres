@@ -192,7 +192,7 @@ queued ──► starting ──► running ──► done      (proposalIds п�
 | Настройки пользователя | `--safe-mode`: хуки, расширения, навыки, файлы контекста и серверы MCP из настроек выключены, провайдер модели и сервер из `--mcp-config` остаются. `--bare` не годится: Qwen Code теряет провайдера и сразу выходит | `--setting-sources project,local`: пользовательские хуки, плагины и разрешения не читаются (рабочая папка пустая — проектных настроек нет). `--bare` не берём: он выключает вход по подписке |
 | Пределы CLI (запасные; главные — у Glafira, §4.4, §5.2) | `--max-wall-time <срок + 30>s --max-tool-calls 40`; превышение — код 55 и в stderr `{"error": {"type": "FatalBudgetExceededError", …, "code": 55}}` | `--max-budget-usd <предел>` только без Ollama; превышение — код 1 и `subtype: "error_max_budget_usd"`. Через Ollama Claude Code считает стоимость по ценам своей модели (около 0,3 $ за запуск на `qwen3.6-64k:35b-a3b`): предел обрывал бы локальные запуски, а стоимость была бы выдуманной — её Glafira не показывает |
 | Модель | `-m <модель>`; пусто — `model.name` из `~/.qwen/settings.json` | `--model <модель>`; через Ollama — ещё `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL` |
-| Через Ollama | Провайдер — из настроек Qwen Code, как в чате | `ANTHROPIC_BASE_URL=<адрес Ollama>`, `ANTHROPIC_AUTH_TOKEN=ollama`, `ANTHROPIC_API_KEY` убирается из окружения, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` |
+| Через Ollama | Провайдер — из настроек Qwen Code, как в чате | `ANTHROPIC_BASE_URL=<адрес Ollama>`, `ANTHROPIC_AUTH_TOKEN=ollama`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`; из окружения убираются `ANTHROPIC_API_KEY`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY` и `ANTHROPIC_CUSTOM_HEADERS`: «через Ollama» — это локально, а с ними Claude Code ушёл бы в Bedrock, Vertex или Foundry мимо `ANTHROPIC_BASE_URL` или отдал бы свои заголовки адресу Ollama |
 | Вывод | `--chat-recording false`, `-o stream-json` | `--no-session-persistence`, `--output-format stream-json --verbose` |
 | Список моделей в «Настройках» | `modelProviders[].id` из `~/.qwen/settings.json` (файл только читается) | Через Ollama — `GET /api/tags`; иначе — свободный ввод (пусто — модель Claude Code по умолчанию) |
 
@@ -203,10 +203,11 @@ queued ──► starting ──► running ──► done      (proposalIds п�
 что-то кроме `mcp__glafira-pg__*`, сразу останавливает запуск: `failed` / `unsafeTools`, лишние имена — в предупреждениях
 запуска (`unsafe <имена через запятую>`).
 
-Уточнено при исполнении (ревью задачи 6, 2026-11-07):
-- до `init` допускаются только события `system` (у Claude Code перед ним идут `hook_started`, `hook_response` и т. п.) и пустые
-  строки; событие `init` без списка `tools`, строка не JSON или другое событие до `init` — остановка сразу, `failed` /
-  `unsafeTools`, предупреждение `unsafe no-init`;
+Уточнено при исполнении (ревью задачи 6 и пакет правок бэкенда, 2026-11-07):
+- до `init` допускаются только пустые строки, события `system` (у Claude Code перед ним идут `hook_started`, `hook_response`) и
+  служебное событие входа Claude Code `auth_status` — список разрешающий. Событие `init` без списка `tools`, строка не JSON и любое
+  другое событие до `init` — ход модели (`assistant`, `user`), `result`, незнакомый `type`, объект без `type`, JSON не объект —
+  остановка сразу, `failed` / `unsafeTools`, предупреждение `unsafe no-init` (`9e7a018`, `bf91c55`);
 - поток stdout кончился без `init` — Glafira ждёт выхода процесса не дольше 5 с: код ≠ 0 → `failed` / `exit` (CLI не запустился:
   вход, провайдер, незнакомый флаг — причина в журнале), код 0 или процесс ещё жив → `unsafeTools` / `unsafe no-init`;
 - живой процесс без `init` дольше min(60 с, срок запуска) → `unsafeTools` / `unsafe no-init` (если раньше вышел срок запуска —
@@ -228,8 +229,15 @@ queued ──► starting ──► running ──► done      (proposalIds п�
   `~/.claude/local`. Windows — поиск по `PATH` процесса с расширениями `.exe` и `.cmd` (как `where.exe`, но без запуска
   процесса), затем `%APPDATA%\npm` и `%USERPROFILE%\.local\bin`. Найденный путь и версия (`<путь> --version` в окружении
   агента, срок 10 с) показываются; путь можно поправить руками — версию пути, введённого руками, форма спрашивает при уходе из
-  поля (`detect_agent_cli(preset, path)`). `--version` не ответила — «Версию не узнать: <причина>» (`Detected.error` — только
-  об этом; не нашлось — «Программа не найдена: укажите путь вручную»).
+  поля (`detect_agent_cli(preset, path)`). Путь, указанный руками, должен быть абсолютным: относительный (`qwen`, `./qwen`,
+  `bin/qwen`) — отказ `errors.agent.pathNotAbsolute`, программа не запускается. `--version` не ответила — «Версию не узнать:
+  <причина>» (`Detected.error` — только об этом; не нашлось — «Программа не найдена: укажите путь вручную»). Причина —
+  «<путь> --version: exit code N, output “<stdout>”, errors “<stderr>”» (`errors` — если stderr не пуст): каждый поток одной
+  строкой, без ANSI и управляющих символов, строки через « / », до 300 символов (дальше «…»), — так виден, например, «node: not
+  found».
+- **Логин-оболочка и `--version`** запускаются в своей сессии (`setsid`: без управляющего терминала, группа процессов = сессия);
+  по сроку SIGKILL получает вся группа (`killpg`), а не только сам процесс, — и фоновые процессы профиля, и дочерний `node` у
+  `qwen --version`. После выхода процесса конец stdout и stderr ждётся не дольше 500 мс.
 - **Окружение процесса** — окружение логин-оболочки, снятое один раз за сеанс приложения (`$SHELL -ilc` и `env -0` между
   метками, срок 5 с), как это делает VS Code: так у Qwen Code находится `node`, а ключи API и прокси из профиля оболочки доходят
   до агента. Не удалось — окружение Glafira, а `PATH` = каталог программы и известные места. Если каталога программы нет в
@@ -313,6 +321,9 @@ language)` рядом с `optimize_query_text` P4b:
   Протокол 2026-07-28 требует подсказку у списка, и rmcp 3.5.1 сам ставит `private`, если её нет; ядро ставит `private` явно.
 - `connectionId` вызова сверяется с подключением запуска без краевых пробелов — как `propose_query_rewrite` сверяет поля с
   запросом (P4b, M6): форма с `requestId` запуска и совпадающим `connectionId` проходит.
+- Подсказки `propose_query_rewrite`, которые обычной сессии советуют прямую форму (снимок запроса не проходит проверку шлюза,
+  узла снимка больше нет), в сессии запуска кончаются иначе: «this request cannot be proposed in a background run: propose
+  nothing and explain why in the summary» — прямая форма ей запрещена (`a9a3548`).
 - Предел — 40 вызовов за запуск во всех его сессиях; дальше — `run_limit` («The background run reached 40 tool calls: stop and
   write the summary»). После выхода процесса запуск без предложений получает `failed` / `limit`, с предложениями — `done`.
   Лимиты сессии P4 (§10.1) действуют как обычно.
@@ -365,7 +376,9 @@ language)` рядом с `optimize_query_text` P4b:
   не до.
 - **«Выгрузить модель»** — сначала `GET /api/ps`: модели нет в памяти (или она облачная) — ничего не шлётся; иначе
   `keep_alive: 0`. Неактивна, пока идёт запуск, и когда Glafira моделью не управляет: «Держать модель в памяти» — 0, Claude Code
-  без Ollama, нелокальный адрес (подраздел пишет почему).
+  без Ollama, нелокальный адрес (подраздел пишет почему). Правило одно для интерфейса и Rust (`ollama::manages`, его же зовёт
+  тёплая модель): команда `unload_agent_model` при идущем запуске отвечает `errors.agent.busy`, а когда Glafira моделью не
+  управляет — `errors.agent.notManaged`, не обращаясь к Ollama (`756a787`).
 
 ### 6.3 Другая модель в памяти
 
@@ -591,7 +604,7 @@ Glafira), `agent-work/` (0700, пустая рабочая папка). В `docs
 
 Только по слову владельца: шаги 6 и 10 с двумя моделями в памяти одновременно (около 41 ГБ на Mac с 48 ГБ) и Claude Code без
 Ollama с окружением владельца — платный вызов: вход по подписке с `--setting-sources project,local`, до `init` в потоке только
-события `system`, строк не JSON нет (§4.1).
+события `system` и `auth_status`, строк не JSON нет (§4.1).
 
 Windows и Linux — интеграционные тесты CI с `fake-agent`; ручной прогон с настоящими CLI — в чек-листе выпуска.
 
@@ -706,9 +719,13 @@ Qwen Code 0.26.5, Claude Code 2.1.319, Ollama 0.40.14, модель `qwen3.6-64k
 3. Решение контроллера (2026-11-07, задача 6): CLI сам вышел до `init` с кодом ≠ 0 — `exit`, с кодом 0 — `unsafeTools`; поток
    JSON без события `result` — итога нет, хвост 4 КБ — только у простого текста (§4.5).
 4. Решение контроллера (2026-11-07, ревью задачи 6): `init` без списка и строка не JSON до `init` — остановка сразу; конец потока
-   без `init` — ожидание выхода до 5 с; `unsafeTools` — `SIGKILL` без паузы; до `init` допускаются только события `system` (§4.1).
+   без `init` — ожидание выхода до 5 с; `unsafeTools` — `SIGKILL` без паузы; до `init` допускаются только события `system` и
+   `auth_status` (служебное событие входа Claude Code; `bf91c55`), §4.1.
 5. Решение контроллера (2026-11-07, ревью задач 7 и 10): «Выгрузить модель» — только когда Glafira управляет моделью (§6.1,
    §6.2): при «Держать модель в памяти» = 0, у Claude Code без Ollama и при нелокальном адресе кнопка неактивна.
+6. Решение контроллера (2026-11-07, ревью задачи 5): «через Ollama» убирает из окружения не только `ANTHROPIC_API_KEY`, но и
+   `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `ANTHROPIC_CUSTOM_HEADERS` (fail-safe:
+   окружение берётся из профиля оболочки), §4.1; сообщить владельцу.
 
 ### Отклонения реализации
 
@@ -745,11 +762,21 @@ Qwen Code 0.26.5, Claude Code 2.1.319, Ollama 0.40.14, модель `qwen3.6-64k
 3. Под запретом политикой `set_agent_settings` отказывает только во включении (`commands/agent.rs`, `apply_agent_settings`), §8.3.
 4. `ShellEnv::for_program` дописывает каталог программы в конец `PATH` оболочки, если его там нет (§4.2).
 5. `ShellEnv` в `Debug` — только имена переменных; тесты сравнивают окружения без печати значений (§4.2).
-6. `run_with_timeout` после выхода процесса ждёт конца stdout не дольше 500 мс (`DRAIN_GRACE`): фоновый процесс профиля,
-   держащий stdout, не отнимает окружение оболочки.
+6. `run_with_timeout` после выхода процесса ждёт конца stdout (а с `7f0102f` — и stderr) не дольше 500 мс (`DRAIN_GRACE`):
+   фоновый процесс профиля, держащий stdout, не отнимает окружение оболочки.
 7. Windows: поиск по `PATH` с расширениями `.exe` и `.cmd` без запуска `where.exe` (`detect.rs`), §4.2.
 8. Claude Code через Ollama требует модель (`AgentSettings::configured`, `errors.agent.modelRequired`), §8.3; `detect_agent_cli`
-   принимает необязательный путь (версия пути, введённого руками).
+   принимает необязательный путь (версия пути, введённого руками; относительный — `pathNotAbsolute`, `3bd9c61`).
+
+Пакет правок бэкенда (`a2bf9ce`…`c45e2d0`, `bf91c55`):
+1. До `init` — разрешающий список событий: `system` и `auth_status` (`process.rs`, `init_of`), §4.1.
+2. «Через Ollama» убирает пять переменных (`presets.rs`), §4.1.
+3. Логин-оболочка и `--version` — `setsid`, по сроку `killpg(SIGKILL)` (`shell_env::run_with_timeout`, общий для обоих); stderr
+   читается всегда (до 16 КБ); ошибка `--version` — stdout и stderr до 300 символов (`detect.rs`, `VERSION_OUTPUT_CHARS`), §4.2.
+4. «Найти» с относительным путём — `errors.agent.pathNotAbsolute` без запуска программы (`commands/agent.rs`, `detect_cli`), §4.2.
+5. `ollama::manages` — общее правило тёплой модели и «Выгрузить модель»; отказ `errors.agent.notManaged` (код
+   `FeatureUnavailable`) без запросов к Ollama; ключ `errors.agent.ollamaNotLocal` удалён — Rust его больше не выдаёт, §6.2.
+6. Подсказки `propose_query_rewrite` в сессии запуска — `NOT_IN_A_RUN` вместо совета прямой формы (`mcp/llm/tools.rs`), §5.2.
 
 Запуски и процессы (задача 6, `ececa26`, `ff59e4b`, `6541b08`):
 1. `FailReason::UnsafeTools`; `AgentProcess::{wait, stop, kill, init_tools}` — все обязательные (реализация по умолчанию незаметно
@@ -800,18 +827,20 @@ Qwen Code 0.26.5, Claude Code 2.1.319, Ollama 0.40.14, модель `qwen3.6-64k
 Документация (задача 11): «Показать журнал» у неудачной «Проверить» видимым текстом — «Показать журнал»
 (`llmAssist.agent.showLog`), «Показать журнал проверки» — только её `aria-label`; глава называет видимый текст.
 
-### Открытые пункты (на `6541b08` и `a9d6df6`)
+### Открытые пункты
 
-1. Rust: до `init` допускать только события `system` — сейчас `init_of` пропускает любой JSON, кроме `init` (повторное ревью
-   задачи 6, № 1); правило — §4.1.
-2. Rust: `unload_agent_model` — та же проверка «Glafira управляет моделью», что у интерфейса (повторное ревью задач 9–10, № 1);
-   правило — §6.2.
-3. Rust: при «Через Ollama» убирать из окружения ещё `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` и
-   `ANTHROPIC_CUSTOM_HEADERS` (ревью задачи 5, № 1; решение контроллера — делать и сообщить владельцу); после правки — §4.1.
-4. Бэклог: Windows — процесс стартует до привязки к Job Object; остановка не прерывает `before_run` и `--version` (до 10 с);
-   блокирующий `spawn` в задаче tokio; логин-оболочка по сроку останавливается без группы процессов и `setsid`; подсказки модели о
-   прямой форме `propose_query_rewrite` в сессии запуска (форма ей запрещена) — свой текст; отдельный текст отказа сессии
-   кончившегося запуска (§5.1).
+Закрыты пакетом правок бэкенда (было открыто на `6541b08` и `a9d6df6`):
+1. ~~До `init` допускать только события `system`~~ — `9e7a018`; `auth_status` Claude Code пропускается — `bf91c55` (§4.1).
+2. ~~`unload_agent_model` — та же проверка «Glafira управляет моделью», что у интерфейса~~ — `756a787` (§6.2).
+3. ~~«Через Ollama» убирать `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `ANTHROPIC_CUSTOM_HEADERS`~~ — `3bd9c61`;
+   `CLAUDE_CODE_USE_FOUNDRY` — `bf91c55` (§4.1).
+4. ~~Логин-оболочка по сроку без группы процессов и `setsid`~~ — `7f0102f` (§4.2); ~~подсказки о прямой форме
+   `propose_query_rewrite` в сессии запуска~~ — `a9a3548` (§5.2).
+
+Бэклог: Windows — процесс стартует до привязки к Job Object; остановка не прерывает `before_run` и `--version` (до 10 с);
+блокирующий `spawn` в задаче tokio; гонка «Выгрузить модель» ↔ продление или предзагрузка (миллисекунды); отдельный текст
+отказа сессии кончившегося запуска (§5.1). Для смоука: у Claude Code с окружением владельца (облачный режим) — нет ли до `init`
+событий, кроме `system` и `auth_status` (иначе каждый запуск — `unsafeTools`).
 
 ---
 

@@ -521,18 +521,19 @@ curl -s http://127.0.0.1:11434/api/generate -d '{"model": "qwen3.8-64k:27b", "ke
 
 **Терминал** (пока идёт запуск пункта 4):
 ```bash
-. ~/smoke-p4c/helpers.sh && agent_group && ps eww -p "$(ps -axo pid=,command= | grep -F "$DATA/agent-runs/" | grep -v grep | awk 'NR==1{print $1}')" | tr ' ' '\n' | grep -E '^ANTHROPIC_(BASE_URL|AUTH_TOKEN|API_KEY|MODEL)='
+. ~/smoke-p4c/helpers.sh && agent_group && ps eww -p "$(ps -axo pid=,command= | grep -F "$DATA/agent-runs/" | grep -v grep | awk 'NR==1{print $1}')" | tr ' ' '\n' | grep -E '^(ANTHROPIC_(BASE_URL|AUTH_TOKEN|API_KEY|MODEL|CUSTOM_HEADERS)|CLAUDE_CODE_USE_[A-Z]+)='
 ```
 - [ ] Агент — `claude -p --mcp-config …/agent-runs/a….mcp.json --strict-mcp-config --setting-sources project,local …`; в его
       окружении `ANTHROPIC_BASE_URL=http://127.0.0.1:11434`, `ANTHROPIC_AUTH_TOKEN=ollama`,
-      `ANTHROPIC_MODEL=qwen3.6-64k:35b-a3b`, а `ANTHROPIC_API_KEY` нет.
+      `ANTHROPIC_MODEL=qwen3.6-64k:35b-a3b`, а `ANTHROPIC_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS` и `CLAUDE_CODE_USE_*` нет (даже
+      если они заданы в профиле оболочки владельца).
 
 **Терминал** (после конца):
 ```bash
 . ~/smoke-p4c/helpers.sh && runs 1 && pre_init "$(last_run)" && agent_group && ls ~/.claude/projects | grep -c agent-work
 ```
 - [ ] Запуск `done`, предложения есть, `cost None`; `init: 9 инструментов; не Glafira: []`, до него — только `system/…` (например,
-      `system/hook_started`) или ничего, строк «НЕ JSON» нет; процессов нет; `0` — Claude Code не сохранил сессию
+      `system/hook_started`) и `auth_status/…` или ничего, строк «НЕ JSON» нет; процессов нет; `0` — Claude Code не сохранил сессию
       (`--no-session-persistence`).
 
 **Должно быть**
@@ -546,7 +547,8 @@ curl -s http://127.0.0.1:11434/api/generate -d '{"model": "qwen3.8-64k:27b", "ke
 ### Шаг 12. Claude Code без Ollama (облако) — только по слову владельца
 
 Платный вызов облачной модели с окружением владельца: проверяем, что Claude Code с `--setting-sources project,local` входит по
-подписке (или ключу) владельца и что до события `init` в его выводе только события `system`, без строк не JSON. Без слова
+подписке (или ключу) владельца и что до события `init` в его выводе только события `system` и `auth_status` (служебное событие
+входа), без строк не JSON: любое другое событие до `init` Glafira считает ходом модели и останавливает запуск. Без слова
 владельца шаг пропускается.
 
 **Сделать**
@@ -560,7 +562,8 @@ curl -s http://127.0.0.1:11434/api/generate -d '{"model": "qwen3.8-64k:27b", "ke
 . ~/smoke-p4c/helpers.sh && runs 1 && pre_init "$(last_run)"
 ```
 - [ ] Запуск `check`, `done`, `cost` — небольшое число (стоимость без Ollama сохраняется).
-- [ ] `init: 9 инструментов; не Glafira: []`; до него — только `system/…`; строк «НЕ JSON» нет.
+- [ ] `init: 9 инструментов; не Glafira: []`; до него — только `system/…` и `auth_status/…`; строк «НЕ JSON» нет. Иначе —
+      записать, какое событие пришло: Glafira остановила бы на нём каждый облачный запуск (`unsafe no-init`).
 
 **Должно быть**
 - [ ] «Проверить» → «Работает: Claude Code 2.1.x, N с». Если «Не работает» — «Показать журнал» и записать текст (вход по
