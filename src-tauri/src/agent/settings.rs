@@ -265,7 +265,7 @@ pub fn model_required() -> AppError {
     app_err!(
         ErrorCode::InvalidInput,
         "errors.agent.modelRequired",
-        "Choose the model: Claude Code through Ollama needs a model name"
+        "Choose the model: Claude Code via Ollama needs a model name"
     )
 }
 
