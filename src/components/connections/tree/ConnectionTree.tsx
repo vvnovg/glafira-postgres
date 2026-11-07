@@ -7,10 +7,12 @@ import type { AppError, ConnectionFolder, ImportPreview, TreeItemRef } from "../
 import { tr } from "../../../i18n/text";
 import { useWorkspace } from "../../../state/workspace";
 import { ErrorBanner } from "../../common/ErrorBanner";
+import { Icon } from "../../common/Icon";
 import { FocusedCatalog } from "./CatalogNodes";
 import { ConnectionNode } from "./ConnectionNode";
 import { FolderMenu, type FolderMenuItem } from "./FolderMenu";
 import { ImportDialog } from "./ImportDialog";
+import { TreeRow } from "./TreeRow";
 import { buildTree, canMoveFolder, filterTree, type TreeNode } from "./folderTree";
 import { type TreeFocus, TreeFocusContext } from "./treeFocus";
 
@@ -513,31 +515,24 @@ export function ConnectionTree() {
           {renaming ? (
             <FolderNameInput initial={folder.name} onSubmit={(name) => renameFolder(folder.id, name)} onCancel={() => setEditing(null)} />
           ) : (
-            <div
-              className={folderRowClass(folder, parentId, folder.id === last, node.children)}
-              {...dragSource({ kind: "folder", id: folder.id })}
-              {...folderRowTarget(folder, parentId)}
-              // Пока открыто меню папки, строку не перетаскивают (выделение текста пунктов не начинает перенос).
-              draggable={!menuOpen}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                setMenu(folder.id);
+            <TreeRow
+              chevron={{ expanded, onToggle: () => toggle(folder.id), label: t("sidebar.folderToggle", { name: folder.name }) }}
+              icon="folder"
+              name={folder.name}
+              title={folder.name}
+              bold
+              rowProps={{
+                className: folderRowClass(folder, parentId, folder.id === last, node.children),
+                ...dragSource({ kind: "folder", id: folder.id }),
+                ...folderRowTarget(folder, parentId),
+                // Пока открыто меню папки, строку не перетаскивают (выделение текста пунктов не начинает перенос).
+                draggable: !menuOpen,
+                onContextMenu: (e) => {
+                  e.preventDefault();
+                  setMenu(folder.id);
+                },
               }}
             >
-              <button
-                type="button"
-                className="tree-folder-toggle"
-                aria-expanded={expanded}
-                aria-label={t("sidebar.folderToggle", { name: folder.name })}
-                onClick={() => toggle(folder.id)}
-              >
-                <span className="tree-caret" aria-hidden="true">
-                  {expanded ? "▾" : "▸"}
-                </span>
-                <span className="tree-name" title={folder.name}>
-                  {folder.name}
-                </span>
-              </button>
               <span className="tree-menu-anchor">
                 <button
                   type="button"
@@ -548,11 +543,11 @@ export function ConnectionTree() {
                   aria-expanded={menuOpen}
                   onClick={() => toggleMenu(folder.id)}
                 >
-                  ⋯
+                  <Icon name="more" />
                 </button>
                 {menuOpen && <FolderMenu label={t("sidebar.menu")} items={folderMenuItems(folder)} onClose={() => setMenu(null)} />}
               </span>
-            </div>
+            </TreeRow>
           )}
           {live && deleting === folder.id && <DeleteFolderConfirm folder={folder} onConfirm={() => deleteFolder(folder.id)} onCancel={() => setDeleting(null)} />}
           {expanded && (childInput || node.children.length > 0) && (
@@ -621,22 +616,29 @@ export function ConnectionTree() {
       <div className={rootHighlight ? "sidebar-header drop-into" : "sidebar-header"} {...rootDrop}>
         <span>{t("sidebar.connections")}</span>
         <span className="sidebar-actions">
-          <button type="button" title={t("sidebar.newConnection")} onClick={() => open({ kind: "connection-form", connectionId: null })}>
-            +
+          <button
+            type="button"
+            className="icon"
+            title={t("sidebar.newConnection")}
+            aria-label={t("sidebar.newConnection")}
+            onClick={() => open({ kind: "connection-form", connectionId: null })}
+          >
+            <Icon name="plus" />
           </button>
-          <button type="button" title={t("sidebar.newFolder")} aria-label={t("sidebar.newFolder")} onClick={() => startCreate(null)}>
-            +📁
+          <button type="button" className="icon" title={t("sidebar.newFolder")} aria-label={t("sidebar.newFolder")} onClick={() => startCreate(null)}>
+            <Icon name="folderPlus" />
           </button>
           <span className="tree-menu-anchor">
             <button
               type="button"
+              className="icon"
               title={t("sidebar.menu")}
               aria-label={t("sidebar.menu")}
               aria-haspopup="menu"
               aria-expanded={menu === "header"}
               onClick={() => toggleMenu("header")}
             >
-              ⋯
+              <Icon name="more" />
             </button>
             {menu === "header" && (
               <FolderMenu label={t("sidebar.menu")} items={headerMenuItems} onClose={() => setMenu(null)} />
@@ -659,8 +661,9 @@ export function ConnectionTree() {
       )}
       {focus && (
         <nav className="tree-focus" aria-label={t("sidebar.focus.label")}>
-          <button type="button" ref={backRef} title={t("sidebar.focus.backHint")} onClick={focusBackOut}>
-            ← {t("sidebar.focus.back")}
+          <button type="button" className="tree-focus-back" ref={backRef} title={t("sidebar.focus.backHint")} onClick={focusBackOut}>
+            <Icon name="chevron" size={14} />
+            {t("sidebar.focus.back")}
           </button>
           <span className="tree-focus-path" title={focusPath.join(" › ")}>
             {focusPath.join(" › ")}
@@ -668,14 +671,17 @@ export function ConnectionTree() {
         </nav>
       )}
       {tree.length > 0 && (focus === null || focus.kind === "folder") && (
-        <input
-          type="search"
-          className="tree-filter"
-          placeholder={t("sidebar.filter")}
-          aria-label={t("sidebar.filter")}
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
+        <div className="search-field tree-filter-wrap">
+          <Icon name="search" />
+          <input
+            type="search"
+            className="tree-filter"
+            placeholder={t("sidebar.filter")}
+            aria-label={t("sidebar.filter")}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+        </div>
       )}
       {filtering && shown.length === 0 && <p className="empty">{t("sidebar.noMatches")}</p>}
       <TreeFocusContext.Provider value={focusOn}>{treeBody()}</TreeFocusContext.Provider>

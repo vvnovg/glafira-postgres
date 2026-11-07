@@ -15,7 +15,7 @@ const setup = () => userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
 describe("Hint", () => {
   it("значок с aria-label из подписи", () => {
     render(<Hint k="hints.test.a" label="acks" />);
-    expect(screen.getByRole("button", { name: "Подсказка: acks" })).toHaveTextContent("?");
+    expect(screen.getByRole("button", { name: "Подсказка: acks" }).querySelector('svg[data-icon="help"]')).not.toBeNull();
   });
 
   it("наведение: показ через 300 мс, уход курсора скрывает", async () => {

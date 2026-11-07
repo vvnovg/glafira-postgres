@@ -22,10 +22,12 @@ describe("WatchPanel", () => {
     expect(WATCH_STEPS("switchover", false)).toEqual(["accepted", "leaderStepped", "newLeaderRunning", "timelineIncreased", "replicasStreaming", "done"]);
     const items = screen.getAllByRole("listitem");
     expect(items).toHaveLength(6);
-    expect(items[0]).toHaveTextContent("✓");
+    // Пройденный шаг — значок «галочка», оставшийся — точка (спец. переноса U1 §5).
+    const done = (li: HTMLElement) => li.querySelector('svg[data-icon="check"]') !== null;
+    expect(done(items[0])).toBe(true);
     expect(items[2]).toHaveTextContent("Новый лидер работает");
-    expect(items[2]).toHaveTextContent("✓");
-    expect(items[3]).not.toHaveTextContent("✓");
+    expect(done(items[2])).toBe(true);
+    expect(done(items[3])).toBe(false);
     // Следующий невыполненный шаг помечен как текущий — для скринридера, который не видит значков.
     expect(items[3]).toHaveAttribute("aria-current", "step");
     expect(items[4]).not.toHaveAttribute("aria-current");
@@ -47,7 +49,7 @@ describe("WatchPanel", () => {
   it("событие done: все шаги пройдены, текущего нет", () => {
     render(<WatchPanel action="pause" events={[ev("accepted"), ev("pauseApplied"), ev("done", "done")]} watchId="w" onClose={() => {}} />);
     for (const item of screen.getAllByRole("listitem")) {
-      expect(item).toHaveTextContent("✓");
+      expect(item.querySelector('svg[data-icon="check"]')).not.toBeNull();
       expect(item).not.toHaveAttribute("aria-current");
     }
   });

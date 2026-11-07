@@ -16,11 +16,12 @@ const MIN_DELTA_E = 8;
 // Серый — «нейтральный», пока его цветность OKLCH (C = √(a² + b²)) не выше этого значения (хроматические цвета палитры — от 0,10).
 const MAX_GREY_CHROMA = 0.04;
 
-const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+// Токены — в двух файлах: общий styles.css (Kafka-версия, этап U1) и app.css PostgreSQL-версии (--link, --wait-*).
+const css = ["../src/styles.css", "../src/app.css"].map((f) => readFileSync(new URL(f, import.meta.url), "utf8")).join("\n");
 const { light, dark } = parseThemeVars(css);
 // Тёмная тема переопределяет не всё: что в ней не названо, наследуется от :root (так это и работает в каскаде).
 const themes = { light, dark: new Map([...light, ...dark]) };
-// Доля --warn в цвете .diag-warn — из styles.css: правка смеси не пройдёт мимо проверки контраста.
+// Доля --warn в цвете .diag-warn — из app.css: правка смеси не пройдёт мимо проверки контраста.
 const DIAG_WARN = /\.diag-warn\s*\{\s*color:\s*color-mix\(in srgb, var\(--warn\) (\d+)%, var\(--fg\)\)/.exec(css);
 const DIAG_WARN_SHARE = DIAG_WARN ? Number(DIAG_WARN[1]) / 100 : NaN;
 
@@ -32,7 +33,7 @@ test("parseThemeVars: переменные из :root и из блока тём�
       --fg: #111111; /* --wait-fake: #000000; */
       --muted: #5f6673;
       --accent: #2563EB;
-      --accent-fill: #2563eb;
+      --link: #0068da;
       --danger-text: var(--danger);
       --wait-cpu: #2A78D6;
       --wait-bufferPin: #e34948;
@@ -53,7 +54,7 @@ test("parseThemeVars: переменные из :root и из блока тём�
     ["--fg", "#111111"],
     ["--muted", "#5f6673"],
     ["--accent", "#2563eb"],
-    ["--accent-fill", "#2563eb"],
+    ["--link", "#0068da"],
     ["--wait-cpu", "#2a78d6"],
     ["--wait-bufferPin", "#e34948"],
   ]);
@@ -63,7 +64,7 @@ test("parseThemeVars: переменные из :root и из блока тём�
 test("parseThemeVars: значение не #rrggbb — ошибка с именем переменной (иначе проверка контраста молча пропустила бы её)", () => {
   assert.throws(() => parseThemeVars(":root { --bg: #fff; --wait-cpu: red; }"), /--bg|--wait-cpu/);
   assert.throws(() => parseThemeVars(":root { --wait-cpu: var(--accent); }"), /--wait-cpu/);
-  assert.throws(() => parseThemeVars(":root { --accent-fill: var(--accent); }"), /--accent-fill/);
+  assert.throws(() => parseThemeVars(":root { --link: var(--accent); }"), /--link/);
   assert.throws(() => parseThemeVars(":root { --muted: #888; }"), /--muted/);
 });
 
@@ -101,17 +102,17 @@ for (const theme of ["light", "dark"]) {
     for (const cls of ALL) assert.ok(color(cls), `нет --wait-${cls}`);
   });
 
-  // Пары текста и фона из правки контраста P4b (смоук 2026-11-07): заливка «Принять» и значка данных, ссылки и полосы
-  // выбора цветом акцента, приглушённый текст на панелях с фоном --bg-alt.
-  test(`${theme}: акцент, его заливка, приглушённый текст и предупреждение — не ниже ${MIN_TEXT_CONTRAST}:1 (WCAG AA)`, () => {
-    assert.ok(DIAG_WARN, "в styles.css нет правила .diag-warn вида color-mix(in srgb, var(--warn) N%, var(--fg))");
+  // Пары текста и фона (смоук P4b, 2026-11-07; перенос U1): ссылки и узлы плана цветом --link на фонах рабочей области,
+  // панелей и боковой панели, приглушённый текст на панелях, предупреждения видов.
+  test(`${theme}: ссылки, приглушённый текст и предупреждение — не ниже ${MIN_TEXT_CONTRAST}:1 (WCAG AA)`, () => {
+    assert.ok(DIAG_WARN, "в app.css нет правила .diag-warn вида color-mix(in srgb, var(--warn) N%, var(--fg))");
     const diagWarn = vars.get("--warn") && vars.get("--fg") ? mixSrgb(vars.get("--warn"), vars.get("--fg"), DIAG_WARN_SHARE) : undefined;
     const pairs = [
-      ["белый на --accent-fill («Принять», значок данных, флажки)", "#ffffff", vars.get("--accent-fill")],
-      ["--accent на --bg (ссылки, «Предложения LLM: N — открыть в консоли»)", vars.get("--accent"), bg],
-      ["--accent на --bg-alt (ссылки боковой панели и находок)", vars.get("--accent"), vars.get("--bg-alt")],
+      ["--link на --bg (ссылки, «Показать узел», «Открыть в консоли EXPLAIN»)", vars.get("--link"), bg],
+      ["--link на --bg-alt (ссылки находок и панелей)", vars.get("--link"), vars.get("--bg-alt")],
+      ["--link на --sidebar (ссылки боковой панели)", vars.get("--link"), vars.get("--sidebar")],
       ["--muted на --bg-alt (приглушённый текст на панелях)", vars.get("--muted"), vars.get("--bg-alt")],
-      // .diag-warn: color-mix(in srgb, var(--warn) 55%, var(--fg)) — предупреждения видов и строки статуса фонового ассистента.
+      // .diag-warn: color-mix(in srgb, var(--warn) N%, var(--fg)) — предупреждения видов и строки статуса фонового ассистента.
       ["предупреждение .diag-warn на --bg (виды диагностики)", diagWarn, bg],
       ["предупреждение .diag-warn на --bg-alt (строка статуса фонового ассистента, пометки видов)", diagWarn, vars.get("--bg-alt")],
     ];
@@ -123,6 +124,14 @@ for (const theme of ["light", "dark"]) {
       bad.map((p) => `${p.name}: ${p.fg} к ${p.back} — ${p.ratio.toFixed(2)}:1`),
       [],
     );
+  });
+
+  // Белый текст на заливке акцентом (главные кнопки, «Принять», выделенные строки): порог семейства Glafira 3,5:1 — как
+  // у системного выделения macOS (спец. U1 Kafka-версии §2; перенос в PostgreSQL — §1).
+  test(`${theme}: белый на --accent — не ниже 3,5:1`, () => {
+    const accent = vars.get("--accent");
+    assert.ok(accent, "нет --accent");
+    assert.ok(contrastRatio("#ffffff", accent) >= 3.5, `белый на ${accent}: ${contrastRatio("#ffffff", accent).toFixed(2)}:1`);
   });
 
   test(`${theme}: каждый --wait-* даёт контраст не ниже ${MIN_CONTRAST}:1 к --bg`, () => {

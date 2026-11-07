@@ -4,6 +4,8 @@ import { useTranslation } from "react-i18next";
 import type { ConnState } from "../../api/types";
 import { useTopology } from "../../lib/useConnectionEvents";
 import { ErrorBanner } from "../common/ErrorBanner";
+import { Icon } from "../common/Icon";
+import { Kbd } from "../common/Kbd";
 
 const isLive = (state: ConnState) => state === "connected" || state === "degraded";
 
@@ -47,13 +49,16 @@ export function ObjectTab<T>({
         {/* Пока чтение идёт, кнопка помечена aria-disabled, а нажатие игнорируется: повторный refetch отменил бы идущее чтение. */}
         <button
           type="button"
+          data-action="refresh"
           aria-disabled={query.isFetching}
           aria-busy={query.isFetching}
           onClick={() => {
             if (!query.isFetching) void query.refetch();
           }}
         >
+          <Icon name="refresh" />
           {t("object.refresh")}
+          <Kbd keys="Mod+R" />
         </button>
       </div>
       {query.isPending && (

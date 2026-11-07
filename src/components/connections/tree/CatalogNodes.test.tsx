@@ -49,7 +49,7 @@ describe("CatalogNodes", () => {
     const user = userEvent.setup();
     renderWithClient(<CatalogNodes connection={conn} view={topologyView()} />);
     await user.click(screen.getByRole("button", { name: /^Узлы/ }));
-    expect(screen.getByRole("button", { name: "★ pg-1" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^pg-1, / })).toBeInTheDocument();
     expect(screen.getByText("Leader")).toBeInTheDocument();
     expect(api.listDatabases).not.toHaveBeenCalled();
 

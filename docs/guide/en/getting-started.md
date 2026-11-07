@@ -15,6 +15,19 @@ nodes are alive, who the leader is, how far replicas lag and how the databases a
 
 To connect through a bastion, see [SSH tunnel](connections.md#ssh); for the tree and the tabs of tables, views, functions and sequences, see [Tree](objects.md#tree) and [Object tabs](objects.md#tabs).
 
+## Keys {#keys}
+
+On macOS the shortcuts are in the application menu (File, View, Window, Help); on Windows and Linux the same shortcuts work with Ctrl instead of ⌘. Buttons that have a shortcut show it next to the label.
+
+- ⌘N — new connection; ⌘W — close the tab; ⇧⌘W — close the window.
+- ⌘R — Refresh on the open screen: a diagnostics tool, an object tab, a query card, the actions journal.
+- ⌘⏎ — Plan in the EXPLAIN console and in a query card (a plan without execution).
+- ⌘F — the filter or search of the open screen (sessions, Queries, the guide), or the connection filter if the screen has none; ⇧⌘F — the connection filter right away.
+- ⌘1…⌘9 — a tab by its number; ⌃Tab and ⌃⇧Tab — the next and the previous tab.
+- ⌘, — Settings (the open section stays); ⇧⌘/ and F1 — the guide chapter about the open screen.
+
+The window size and position are remembered between launches.
+
 ## Passwords {#passwords}
 
 Passwords are kept in the system secret store (Keychain, Credential Manager, Secret Service). If no password

@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { type HTMLAttributes, useEffect, useRef, useState } from "react";
+import { type HTMLAttributes, useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../../api/client";
 import type { AppError, ConnectionProfile, TopologyView } from "../../../api/types";
@@ -9,11 +9,14 @@ import { disconnectedView, ofConnection, refreshAfterConnect, useTopology } from
 import { useWorkspace } from "../../../state/workspace";
 import { EnvBadge } from "../../common/EnvBadge";
 import { Glyph } from "../../common/Glyph";
+import { Icon } from "../../common/Icon";
 import { hostKeyUnknown } from "../profile";
 import { TrustHostKeyDialog } from "../TrustHostKeyDialog";
 import { CatalogNodes } from "./CatalogNodes";
 import { FolderMenu, type FolderMenuItem } from "./FolderMenu";
 import { LlmBadge } from "./LlmBadge";
+import { TreeRow } from "./TreeRow";
+import { inConnection, useActiveTab } from "./treeActive";
 import { useFocusMenuItem } from "./treeFocus";
 
 /**
@@ -44,6 +47,9 @@ export function ConnectionNode({
   const { data: view = disconnectedView } = topologyQ;
   const live = view.state === "connected" || view.state === "degraded";
   const focusItem = useFocusMenuItem({ kind: "connection", connectionId: c.id });
+  const stateId = useId();
+  const kindId = useId();
+  const active = useActiveTab();
 
   // Локальная ошибка — про прошлую попытку или действие. Когда подключение снова здорово («connected»),
   // она устарела и не должна висеть под живым узлом.
@@ -196,35 +202,47 @@ export function ConnectionNode({
   const shownError = error ?? (view.state === "failed" ? view.error : null);
   // У одиночного сервера группы «Узлы» нет, и роль (primary или standby) показывается в заголовке (спека P1 §8).
   const serverRole = c.kind === "server" ? view.topology?.members[0]?.role : undefined;
+  const kindText = c.kind === "patroni" ? "Patroni" : serverRole !== undefined && serverRole !== "unknown" ? roleLabel(serverRole, "server") : null;
   // Диалог доверия — только для ошибки, которой можно доверять, и по собственному действию (не по фоновому событию).
   const trustError = hostKeyUnknown(error) && error !== trustDismissed ? error : null;
 
+  // Подсвечено имя подключения: вкладка «Обзор» — его узел; вкладка внутри подключения, пока ветка не видна (свёрнута или
+  // подключение не открыто) — тоже (спец. переноса U1 §3.3).
+  const current = (active?.kind === "overview" && active.connectionId === c.id) || (inConnection(active, c.id) && (!expanded || !live));
+
+  // Раздельный режим TreeRow: шеврон подключает и раскрывает, имя открывает «Обзор». Значок — точка цвета подключения
+  // с отметкой состояния; состояние описывает кнопку имени (aria-describedby).
   return (
     <li>
-      <div
-        {...rowProps}
-        className={rowProps?.className ? `tree-conn ${rowProps.className}` : "tree-conn"}
-        onContextMenu={(e) => {
-          e.preventDefault();
-          setMenuOpen(true);
-        }}
-        // Пока открыто меню, строку не перетаскивают (выделение текста пунктов не начинает перенос).
-        draggable={rowProps?.draggable && !menuOpen}
-      >
-        <button type="button" className="tree-folder-toggle conn-toggle" aria-expanded={expanded} aria-label={t("sidebar.connectionToggle", { name: c.name })} onClick={toggle}>
-          <span className="tree-caret" aria-hidden="true">
-            {expanded ? "▾" : "▸"}
+      <TreeRow
+        chevron={{ expanded, onToggle: toggle, label: t("sidebar.connectionToggle", { name: c.name }) }}
+        icon={
+          <span className="conn-icon">
+            <span className="dot" style={{ background: c.color }} />
+            <Glyph id={stateId} className={`conn-state conn-state-${view.state}`} symbol="" label={t(`sidebar.state.${view.state}`)} />
           </span>
-        </button>
-        <Glyph className={`conn-state conn-state-${view.state}`} symbol="" label={t(`sidebar.state.${view.state}`)} />
-        <span className="dot" style={{ background: c.color }} />
-        <button type="button" className="link tree-name" title={c.name} onClick={() => open({ kind: "overview", connectionId: c.id })}>
-          {c.name}
-        </button>
+        }
+        name={c.name}
+        title={c.name}
+        // Вид (Patroni) и роль одиночного сервера — справа в строке: в узкой панели они уступают место имени первыми.
+        extra={kindText ? <span id={kindId} className="kind-badge">{kindText}</span> : undefined}
+        current={current}
+        onActivate={() => open({ kind: "overview", connectionId: c.id })}
+        activateLabel={c.name}
+        activateDescribedBy={kindText ? `${stateId} ${kindId}` : stateId}
+        rowProps={{
+          ...rowProps,
+          className: rowProps?.className ? `tree-conn ${rowProps.className}` : "tree-conn",
+          onContextMenu: (e) => {
+            e.preventDefault();
+            setMenuOpen(true);
+          },
+          // Пока открыто меню, строку не перетаскивают (выделение текста пунктов не начинает перенос).
+          draggable: rowProps?.draggable && !menuOpen,
+        }}
+      >
         <EnvBadge environment={c.environment} readOnly={c.readOnly} />
         <LlmBadge connection={c} />
-        {c.kind === "patroni" && <span className="kind-badge">Patroni</span>}
-        {serverRole !== undefined && serverRole !== "unknown" && <span className="kind-badge">{roleLabel(serverRole, "server")}</span>}
         <span className="tree-menu-anchor">
           <button
             type="button"
@@ -234,11 +252,11 @@ export function ConnectionNode({
             aria-label={t("sidebar.connectionMenu", { name: c.name })}
             onClick={() => setMenuOpen(!menuOpen)}
           >
-            ⋯
+            <Icon name="more" />
           </button>
           {menuOpen && <FolderMenu label={t("sidebar.connectionMenu", { name: c.name })} items={menu} onClose={() => setMenuOpen(false)} />}
         </span>
-      </div>
+      </TreeRow>
       {trustError && <TrustHostKeyDialog error={trustError} onTrusted={retryAfterTrust} onCancel={() => setTrustDismissed(trustError)} />}
       {expanded && (
         <>

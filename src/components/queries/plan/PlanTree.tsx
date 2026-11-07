@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import type { PlanNode, PlanTree } from "../../../api/types";
 import { formatCount, formatMs, formatPercent } from "../../../lib/format";
 import { estimateLabel, estimateSeverity, flatten, marks, nodeLabel } from "./planText";
+import { Icon } from "../../common/Icon";
 
 /** Полоса доли собственного времени, ширина — проценты; процент доступен и вспомогательным технологиям (картинка с подписью). */
 function ShareBar({ pct }: { pct: number | null }) {
@@ -121,7 +122,9 @@ export function PlanTreeView({
                   <div className="plan-node">
                     {n.children.length > 0 ? (
                       <button type="button" className="icon plan-caret" aria-label={isCollapsed ? t("diag.plan.expand") : t("diag.plan.collapse")} onClick={() => toggle(n.id)}>
-                        <span aria-hidden="true">{isCollapsed ? "▸" : "▾"}</span>
+                        <span className={isCollapsed ? "tree-chevron" : "tree-chevron open"} aria-hidden="true">
+                          <Icon name="chevron" size={14} />
+                        </span>
                       </button>
                     ) : (
                       <span className="plan-caret" aria-hidden="true" />

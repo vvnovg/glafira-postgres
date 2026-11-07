@@ -5,6 +5,7 @@ import { api } from "../../../api/client";
 import { formatDay } from "../../../lib/format";
 import { ErrorBanner } from "../../common/ErrorBanner";
 import { Hint } from "../../common/Hint";
+import { Icon } from "../../common/Icon";
 
 /** Действующая таблица цен Ollama Cloud в кэше запросов. */
 export const OLLAMA_PRICES_KEY = ["ollamaPrices"] as const;
@@ -41,6 +42,7 @@ export function OllamaPrices() {
           aria-describedby={p.refreshAllowed ? undefined : noteId}
           onClick={() => !refresh.isPending && refresh.mutate()}
         >
+          <Icon name="refresh" />
           {refresh.isPending ? t("settings.mcp.agent.prices.refreshing") : label}
         </button>
         <Hint k="hints.settings.mcp.agent.prices" label={label} />

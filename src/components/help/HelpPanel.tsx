@@ -79,6 +79,7 @@ export function HelpPanel({ spec }: { spec: HelpRequest }) {
       <div className="help-side">
         <input
           type="search"
+          data-action="filter"
           value={query}
           placeholder={t("help.search")}
           aria-label={t("help.search")}

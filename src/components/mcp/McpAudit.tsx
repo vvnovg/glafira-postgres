@@ -8,6 +8,7 @@ import { MCP_AUDIT_KEY } from "../../lib/useMcpStatus";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { isConsoleCall, openBlocked } from "./auditOpen";
 import { finishedRunText } from "./agent/agentText";
+import { Icon } from "../common/Icon";
 
 /** Сколько последних записей журнала показывает раздел (спец. P4 §11). */
 export const AUDIT_LIMIT = 200;
@@ -75,7 +76,9 @@ export function McpAudit({ status, onOpenInConsole }: { status: McpStatus; onOpe
   return (
     <>
       <div className="toolbar">
-        <button type="button" onClick={() => void audit.refetch()}>
+        {/* ⌘R в «Настройках» обновляет журнал, когда открыт его раздел (скрытые разделы не считаются). */}
+        <button type="button" data-action="refresh" onClick={() => void audit.refetch()}>
+          <Icon name="refresh" />
           {t("settings.mcp.audit.refresh")}
         </button>
         <button type="button" disabled={reveal.isPending} onClick={() => reveal.mutate()}>

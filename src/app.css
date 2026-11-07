@@ -1,0 +1,556 @@
+/*
+ * Стили Glafira for PostgreSQL поверх общего styles.css (Kafka-версия, этап U1; см. PORTED.md): токены и правила экранов,
+ * которых нет в Kafka-версии. styles.css здесь не правится — следующие переносы берут его как есть
+ * (спец. docs/superpowers/specs/2026-11-07-glafira-postgres-u1-ui-revision-design.md).
+ */
+:root {
+  /* Ссылки и акцент текстом — linkColor macOS: акцент (#007aff) текстом даёт 4,0:1 на белом, --link держит 4,5:1 на --bg,
+     --bg-alt и --sidebar обеих тем (scripts/theme-contrast.test.mjs). Заливки, кольца и выделение остаются акцентом. */
+  --link: #0068da;
+  /* Подсказка в пустом поле: слабее подписи (--muted), чтобы не выглядеть введённым значением. */
+  --placeholder: #8b919a;
+  /* Классы ожиданий в профиле ожиданий (задача 13). Восемь оттенков — категориальная палитра навыка dataviz в её порядке
+     (cpu, lock, lwlock, io, ipc, client, timeout, bufferPin): соседние классы столбца различимы при протанопии и дейтеранопии
+     (ΔE OKLab ×100: 8,9 и выше в светлой теме, 8,4 и выше в тёмной) и при обычном зрении (17,8 и 19,3), проверено validate_palette.js
+     на фоне темы. Lock — оранжевый, самый заметный тёплый. Три редких класса (extension, activity, other) — нейтральные серые,
+     различимые между собой: девятого оттенка палитра не даёт. Каждый цвет — не ниже 3:1 к фону своей темы (WCAG 1.4.11, нетекстовые
+     элементы): aqua, yellow, magenta и серые светлой темы темнее табличных значений навыка. Контраст и различимость соседей
+     проверяет scripts/theme-contrast.test.mjs (`pnpm test:scripts`). Цвет не единственный носитель: есть легенда, подсказка и таблица
+     для экранного диктора. */
+  --wait-cpu: #2a78d6;
+  --wait-lock: #eb6834;
+  --wait-lwlock: #05a672;
+  --wait-io: #c58502;
+  --wait-ipc: #da6f99;
+  --wait-client: #008300;
+  --wait-timeout: #6250d6;
+  --wait-bufferPin: #e34948;
+  --wait-extension: #8d919a;
+  --wait-activity: #555961;
+  --wait-other: #6f747c;
+  /* Флажки, переключатели, списки и полосы прокрутки рисуются системой в цветах текущей темы. */
+  color-scheme: light dark;
+  accent-color: var(--accent);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --link: #419cff;
+    --placeholder: #747a83;
+    --wait-cpu: #3987e5;
+    --wait-lock: #d95926;
+    --wait-lwlock: #199e70;
+    --wait-io: #c98500;
+    --wait-ipc: #d55181;
+    --wait-client: #008300;
+    --wait-timeout: #9085e9;
+    --wait-bufferPin: #e66767;
+    --wait-extension: #b4bac4;
+    /* Было #626872: на фоне тёмной темы U1 (#1e1f22) — 2,94:1, ниже порога 3:1 для нетекстовых элементов. */
+    --wait-activity: #666c76;
+    --wait-other: #929ba6;
+  }
+}
+
+/* Элементы управления: дополнения к styles.css. */
+/* aria-disabled — кнопка недоступна, но остаётся в порядке Tab и не теряет фокус (disabled его отнимает). */
+button[aria-disabled="true"] { opacity: 0.5; cursor: default; }
+input::placeholder, textarea::placeholder { color: var(--placeholder); opacity: 1; }
+button.link, .release-notes a, .help-content a { color: var(--link); }
+label.inline.wrap { white-space: normal; }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+/* Раскладка: строка вкладок и меню скрытых вкладок справа (вне прокрутки: иначе меню обрезалось бы). Фон и высота — панели
+   вкладок styles.css, линия снизу — у обёртки. Строка вкладок прокручивается без видимой полосы (в WebKit она ложилась
+   поверх вкладок): колесом, меню скрытых вкладок и сама — к активной вкладке. */
+.tabbar-wrap { display: flex; align-items: center; flex-shrink: 0; background: var(--sidebar); border-bottom: 1px solid var(--border); }
+.tabbar-wrap > .tabbar { flex: 1; min-width: 0; border-bottom: none; scrollbar-width: none; }
+.tabbar::-webkit-scrollbar { display: none; }
+.tabbar-more { flex: none; margin-right: 8px; }
+.tabbar-more > button.icon { width: auto; gap: 2px; padding: 0 6px; font-size: 12px; font-variant-numeric: tabular-nums; }
+/* Длинный заголовок вкладки (начало текста запроса) обрезается с «…», полностью — в подсказке вкладки. */
+.tab > button[role="tab"] { max-width: 32ch; overflow: hidden; text-overflow: ellipsis; display: inline-flex; align-items: center; gap: 4px; }
+.tab-dot { display: inline-flex; color: var(--accent); }
+.tab.active .tab-dot { color: var(--accent); }
+/* Шапки инструментов переносятся: элемент не шире строки, длинные подписи (узел, база, queryid) не распирают её. */
+.page { min-width: 0; max-width: 100%; }
+.toolbar > * { max-width: 100%; }
+.toolbar > .mono { min-width: 0; overflow-wrap: anywhere; }
+.toolbar label.inline select { min-width: 0; max-width: 100%; text-overflow: ellipsis; }
+/* Кнопка прямо в панели («Закрыть» в итоге действия) — обычной ширины, а не растянутая колонкой на всю панель. */
+.panel > button { align-self: flex-start; }
+
+/* Дерево подключений (спец. переноса U1 §3). Значок подключения — точка его цвета, состояние — отметка в правом нижнем углу. */
+.conn-icon { position: relative; width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; }
+.conn-icon > .dot { width: 10px; height: 10px; }
+.conn-state { position: absolute; right: 0; bottom: 0; width: 7px; height: 7px; border-radius: 50%; background: var(--border); box-shadow: 0 0 0 1.5px var(--sidebar); }
+.tree-row.current .conn-state { box-shadow: 0 0 0 1.5px var(--accent); }
+.conn-state-connecting, .conn-state-degraded { background: var(--warn); }
+.conn-state-connected { background: var(--ok); }
+.conn-state-failed { background: var(--danger); }
+/* Раздельный режим TreeRow (шеврон и действие строки — две кнопки): подключение, партиционированная таблица. Правило
+   PostgreSQL-версии, в PORTED.md — «перенести в Kafka-версию». */
+.tree-chevron-button { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; padding: 0; border: none; border-radius: 4px; background: none; box-shadow: none; color: inherit; }
+.tree-chevron-button:hover { background: var(--hover); }
+.tree-main { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; height: 100%; padding: 0; border: none; border-radius: var(--radius); background: none; box-shadow: none; font: inherit; color: inherit; text-align: left; cursor: pointer; }
+.tree-chevron-button:focus-visible, .tree-main:focus-visible { box-shadow: inset var(--ring); border-color: transparent; }
+/* Дополнительный текст справа уступает место имени первым, а значение, которое в остаток не помещается целиком, переносится
+   на вторую строку и не видно (высота — одна строка; пустой ::before высотой в строку держит первую строку). Так в узкой
+   панели размеры исчезают, а не обрезаются до «3.2 …». В PORTED.md — «перенести в Kafka-версию». */
+.tree-extra { flex-wrap: wrap; justify-content: flex-end; align-content: flex-start; column-gap: 6px; row-gap: 0; flex: 0 100000 auto; height: var(--row); text-overflow: clip; }
+.tree-extra::before { content: ""; width: 0; height: var(--row); }
+.warn-mark { color: var(--warn); display: inline-flex; vertical-align: -2px; }
+.tree-row.current .warn-mark { color: inherit; }
+/* Список объектов — уровень под группой вида («Таблицы»): отступ и направляющую даёт ветка группы, своих у списка нет. */
+.tree ul.tree-objects, .tree-virtual > ul { padding-left: 0; }
+.tree ul.tree-objects::before, .tree-virtual > ul::before { display: none; }
+.tree-virtual ul { list-style: none; margin: 0; }
+.tree-note { margin: 2px 6px 2px 26px; font-size: 12px; color: var(--muted); }
+.tree .tree-notice, .tree .tree-error { margin: 2px 6px 2px 26px; }
+.tree .error-banner { margin: 2px 6px 2px 26px; }
+.object-filter-wrap { margin: 2px 6px 4px 26px; }
+.object-filter-wrap > input { height: 22px; font-size: 12px; }
+.tree-row .kind-badge, .tree-row .env-badge { flex-shrink: 0; }
+/* Лидер (primary, standby leader) — звезда цветом предупреждения, как на доске прототипа; реплика — окружность. */
+.tree-lead { color: var(--warn); }
+.tree-row.current .tree-lead { color: inherit; }
+.tree li > .tree-more { margin: 2px 6px 2px 26px; }
+.tree-row.current .kind-badge { color: inherit; border-color: rgba(255, 255, 255, 0.55); }
+/* Меню строки подключения — поверх конца строки, при наведении и фокусе (и пока открыто): в панели 248 px бейджи
+   окружения и LLM оставляют имени место. С клавиатуры кнопка доступна по Tab, контекстное меню — правой кнопкой и Shift+F10. */
+.tree-row.tree-conn { position: relative; }
+.tree-row.tree-conn > .tree-menu-anchor { position: absolute; right: 4px; top: 2px; opacity: 0; border-radius: var(--radius); background: var(--sidebar); }
+.tree-row.tree-conn:hover > .tree-menu-anchor { background: color-mix(in srgb, var(--fg) 6%, var(--sidebar)); }
+.tree-row.tree-conn.current > .tree-menu-anchor { background: var(--accent); }
+.tree-row.tree-conn:hover > .tree-menu-anchor, .tree-row.tree-conn:focus-within > .tree-menu-anchor, .tree-row.tree-conn > .tree-menu-anchor:has([aria-expanded="true"]) { opacity: 1; }
+/* Фокус дерева: «Назад» и путь ветки (длинный — с «…», целиком в подсказке). */
+.tree-focus { display: flex; align-items: center; gap: 6px; margin: 0 8px 6px; min-width: 0; }
+.tree-focus > button { flex: none; }
+.tree-focus-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; }
+.tree-focus-back .icon-svg { transform: rotate(180deg); }
+/* Индикатор LLM внизу панели (P4 §11, P4c §8.2) — строка TreeRow со значком-точкой, как McpIndicator Kafka-версии. */
+
+/* Диалог доверия ключу хоста. */
+.host-key { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; margin: 0; }
+.host-key dt { color: var(--muted); }
+.host-key dd { margin: 0; overflow-wrap: anywhere; }
+/* Команда чек-листа готовности: колонка не уже 18em, перенос только по пробелам (слова и идентификаторы
+   не рвутся), слишком длинное слово — прокрутка внутри ячейки. */
+.readiness-fix { min-width: 18em; width: 38%; }
+.readiness-fix pre { white-space: pre-wrap; word-break: normal; overflow-wrap: normal; overflow-x: auto; flex: 1; }
+/* Группа полей (TLS): рамка с заголовком; внутренняя сетка совпадает с внешней по колонкам (180px + 12px зазор = 168px + рамка и поля). */
+.form .field-group { grid-column: 1 / -1; min-width: 0; margin: 0; padding: 8px 12px 8px 11px; border: 1px solid var(--border); border-radius: 8px; }
+.field-group > legend { padding: 0 4px; color: var(--muted); font-size: 12px; }
+.field-group > .form { grid-template-columns: 168px minmax(240px, 520px); }
+/* Команда для исправления в чек-листе: переносится по пробелам, а не посреди слова. */
+.panel td pre { word-break: normal; overflow-wrap: anywhere; }
+.state-mark { display: inline-flex; vertical-align: -2px; }
+/* Ход действия Patroni: пройденный шаг — галочка, ещё не пройденный — точка. */
+.watch-mark { display: inline-flex; justify-content: center; width: 16px; margin-right: 4px; vertical-align: -2px; color: var(--muted); }
+.watch-mark.done { color: color-mix(in srgb, var(--ok) 60%, var(--fg)); }
+/* Направление сортировки у заголовка колонки «Запросов». */
+.sort-mark { display: inline-block; margin-left: 2px; vertical-align: -1px; }
+.state-ok { color: color-mix(in srgb, var(--ok) 60%, var(--fg)); }
+.state-warn { color: color-mix(in srgb, var(--warn) 60%, var(--fg)); }
+.state-error { color: var(--danger); }
+.state-progress, .state-skip { color: var(--muted); }
+
+/* Справка: таблицы GFM. */
+.help-content table { border-collapse: collapse; margin: 8px 0 12px; font-size: 13px; }
+.help-content th, .help-content td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; vertical-align: top; }
+.help-content th { position: static; background: var(--bg-alt); font-weight: 600; }
+
+/* «Настройки» (смоук P4c, R9): слева — разделы списком, как в системных настройках macOS (выбранный — заливка акцентом),
+   справа — выбранный раздел. Узкое окно: колонки не помещаются (220 + 24 + 440 px) — навигация переносится над разделом. */
+.settings-nav { flex: 0 1 220px; min-width: 0; }
+.settings-nav ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+.settings-nav button { display: flex; align-items: center; width: 100%; height: auto; min-height: var(--row); padding: 2px 8px; border: none; border-radius: var(--radius); background: none; box-shadow: none; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.settings-nav button:hover { background: var(--hover); }
+.settings-nav button:focus-visible { box-shadow: inset var(--ring); }
+.settings-nav button[aria-current="page"] { background: var(--accent); color: #fff; }
+.settings-nav-group { display: block; margin: 12px 0 2px; padding: 0 8px; color: var(--muted); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+.settings-nav-group + ul button { padding-left: 16px; }
+/* Значок «LLM» уровня «Данные» — белым на #2563eb (5,2:1 в обеих темах), как «сообщения» Kafka-версии. */
+.llm-badge--data { background: #2563eb; border-color: #2563eb; color: #fff; }
+
+.tree-note { margin: 2px 0; font-size: 12px; color: var(--muted); }
+label.inline.wrap { white-space: normal; }
+.kind-badge { font-size: 11px; line-height: 16px; padding: 0 4px; border: 1px solid var(--border); border-radius: 4px; color: var(--muted); white-space: nowrap; }
+/* Обзор: таблица участников шире окна прокручивается сама, а шапка и журнал остаются на месте. */
+.table-scroll { overflow-x: auto; }
+.members-table th, .members-table td { white-space: nowrap; }
+.members-table td.wrap { white-space: normal; min-width: 180px; }
+.warning-red { color: var(--danger); font-weight: 600; }
+/* Факты узла, которые не удалось обновить: цифры последнего чтения приглушены (рядом значок ⚠ с причиной). */
+.members-table td.stale { color: var(--muted); }
+/* Причина недоступности узла: видимый текст в ячейке, а не только подсказка; длинное сообщение переносится. */
+.members-table .member-error { max-width: 28ch; font-size: 11px; font-weight: normal; white-space: normal; overflow-wrap: anywhere; }
+
+/* Вкладки объектов каталога (таблица, представление, функция, последовательность). */
+.subtabs { flex-wrap: wrap; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.plain-list { list-style: none; margin: 0; padding: 0; }
+.badges { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+/* Невалидный индекс и непроверенное ограничение: цвет плюс слово INVALID / NOT VALID — смысл не держится на одном цвете. */
+tr.invalid { color: var(--danger); }
+.kind-badge.invalid { color: var(--danger); border-color: var(--danger); }
+.table-scroll td { vertical-align: top; }
+.table-scroll td code { white-space: pre-wrap; overflow-wrap: anywhere; }
+.ddl { display: flex; flex-direction: column; gap: 6px; }
+.ddl pre { max-height: 60vh; overflow: auto; padding: 8px; background: var(--bg-alt); border: 1px solid var(--border); border-radius: 4px; word-break: normal; overflow-wrap: anywhere; }
+
+/* Вкладка инструмента диагностики: шапка, находки и тело. */
+.diag-head { gap: 12px; }
+.diag-head select { max-width: 100%; }
+.diag-title { display: inline-flex; align-items: center; gap: 4px; margin-right: auto; }
+.diag-title h2 { margin: 0; }
+.diag-note { margin: 0; padding: 4px 8px; border-left: 3px solid var(--accent); background: var(--bg-alt); }
+.diag-closed { display: flex; align-items: center; gap: 12px; }
+.diag-closed p { margin: 0; }
+.diag-body { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+/* Отчёт прошлого узла на время загрузки нового. */
+.diag-pending { opacity: 0.6; }
+.diag-unavailable p { margin: 0 0 2px; }
+.findings { border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; }
+/* Заголовок блока — кнопка сворачивания (смоук P4c, R13): выглядит заголовком, стрелка слева. */
+.findings-head { margin: 0; font-size: 13px; }
+.findings-toggle { display: inline-flex; align-items: baseline; gap: 6px; padding: 0; border: none; background: none; font-weight: inherit; text-align: left; }
+.findings-caret { display: inline-flex; color: var(--muted); align-self: center; }
+.findings-caret.open .icon-svg { transform: rotate(90deg); }
+.findings-more { margin-top: 6px; }
+.findings > p { margin: 4px 0 0; }
+.findings-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+/* Строгость: цвет полосы слева плюс текстовая метка — смысл не держится на одном цвете. */
+/* Свои находки PostgreSQL-версии: правила .finding и .sev-* из styles.css (находки Kafka-версии) сброшены. */
+.finding { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px 6px 10px; border: none; border-left: 4px solid var(--border); border-radius: 0 6px 6px 0; background: var(--bg-alt); }
+.finding p { margin: 0; }
+.finding-query { margin: 0; font-size: 0.9em; overflow-wrap: anywhere; }
+.finding-main { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; }
+.finding-sev { font-size: 11px; font-weight: 600; }
+.finding-title { min-width: 0; overflow-wrap: anywhere; }
+.finding details { color: var(--muted); }
+.finding summary { cursor: pointer; }
+.finding details p { margin: 4px 0 0; color: var(--fg); overflow-wrap: anywhere; }
+.finding-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.sev-critical { border-left-color: var(--danger); color: inherit; }
+/* Метки подмешивают цвет текста: чистые --danger и --warn на сером фоне карточки дают контраст ниже 4,5:1; --accent — так же, для единообразия. */
+.sev-critical .finding-sev { color: color-mix(in srgb, var(--danger) 85%, var(--fg)); }
+.sev-warning { border-left-color: var(--warn); color: inherit; }
+.sev-warning .finding-sev { color: color-mix(in srgb, var(--warn) 55%, var(--fg)); }
+.sev-info { border-left-color: var(--accent); color: inherit; }
+.sev-info .finding-sev { color: color-mix(in srgb, var(--link) 70%, var(--fg)); }
+
+/* Пульс: строка на узел, колонка на показатель; клетка — кнопка перехода, окрашенная худшей находкой узла. */
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.pulse-table th[scope="col"] { vertical-align: bottom; }
+.pulse-table th[scope="row"], .pulse-table td { white-space: nowrap; }
+.pulse-table td.pulse-cell { padding: 0; }
+.pulse-cell button { display: flex; align-items: baseline; gap: 4px; width: 100%; padding: 4px 8px; border: none; border-radius: 0; background: none; text-align: left; font-variant-numeric: tabular-nums; }
+.pulse-cell button:hover, .pulse-cell button:focus-visible { background: color-mix(in srgb, var(--fg) 8%, transparent); }
+/* Строгость: фон и полоса слева плюс метка (!! / ! / i) и слово для читалки — смысл не держится на одном цвете. */
+.pulse-cell.sev-critical { background: color-mix(in srgb, var(--danger) 16%, transparent); box-shadow: inset 3px 0 0 var(--danger); }
+.pulse-cell.sev-warning { background: color-mix(in srgb, var(--warn) 18%, transparent); box-shadow: inset 3px 0 0 var(--warn); }
+.pulse-cell.sev-info { background: color-mix(in srgb, var(--accent) 12%, transparent); box-shadow: inset 3px 0 0 var(--accent); }
+.sev-mark { font-size: 11px; font-weight: 700; }
+.sev-critical .sev-mark { color: color-mix(in srgb, var(--danger) 85%, var(--fg)); }
+.sev-warning .sev-mark { color: color-mix(in srgb, var(--warn) 55%, var(--fg)); }
+.sev-info .sev-mark { color: color-mix(in srgb, var(--link) 70%, var(--fg)); }
+
+/* Сессии: список с фиксированной высотой строки (виртуализация), заголовок прилипает к верху прокручиваемой области. */
+.sess-view { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.sess-view > .toolbar input[type="text"] { flex: 1 1 220px; min-width: 160px; max-width: 420px; }
+.sess-setting { margin: 0; }
+.sess-scroll { overflow: auto; max-height: 420px; border: 1px solid var(--border); border-radius: 4px; }
+.sess-table { width: 100%; }
+.sess-head-group { position: sticky; top: 0; z-index: 1; background: var(--bg-alt); }
+.sess-row { display: grid; grid-template-columns: var(--sess-cols); align-items: center; height: 26px; padding: 0 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.sess-row > * { overflow: hidden; text-overflow: ellipsis; padding-right: 8px; }
+.sess-head { color: var(--muted); font-weight: 500; }
+.sess-row:not(.sess-head) { cursor: pointer; }
+.sess-row:not(.sess-head):hover { background: var(--bg-alt); }
+.sess-row.selected { background: var(--accent); color: #fff; }
+.sess-row.selected .muted, .sess-row.selected .link { color: inherit; }
+.sess-row:focus-visible { outline: none; box-shadow: inset var(--ring); }
+.sess-panel .toolbar h3 { margin: 0 auto 0 0; font-size: 14px; }
+.sess-query { max-height: 40vh; overflow: auto; padding: 8px; background: var(--bg-alt); border: 1px solid var(--border); border-radius: 4px; word-break: normal; overflow-wrap: anywhere; }
+
+/* Блокировки: карточки DDL в очереди и дерево от корней-блокирующих. */
+.locks-view { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.locks-view h3 { margin: 0 0 6px; font-size: 13px; }
+.locks-view .panel h3 { margin: 0; }
+.lock-cards { display: flex; flex-direction: column; gap: 6px; }
+.lock-card { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px 6px 10px; border-left: 4px solid var(--warn); border-radius: 0 4px 4px 0; background: var(--bg-alt); }
+.lock-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 10px; }
+.lock-query { white-space: pre-wrap; overflow-wrap: anywhere; }
+.lock-tree, .lock-tree ul { list-style: none; margin: 0; padding: 0; }
+.lock-tree ul { margin-left: 8px; padding-left: 16px; border-left: 1px solid var(--border); }
+.lock-node { padding: 3px 0; }
+.lock-detail { display: flex; flex-direction: column; gap: 2px; padding-left: 20px; }
+.lock-toggle { display: inline-block; flex: none; width: 16px; padding: 0; text-align: center; }
+.lock-victims { font-weight: 600; color: color-mix(in srgb, var(--danger) 85%, var(--fg)); }
+.lock-wait { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* Горизонт, реплики, слоты, failover и health: таблицы и сводки под находками. */
+.diag-view { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.diag-view section { display: flex; flex-direction: column; gap: 6px; }
+.diag-view h3 { margin: 0; font-size: 13px; }
+.diag-view p { margin: 0; }
+.diag-table td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* Отметки слота не ломаются посреди слова: узкая колонка растягивает таблицу, и появляется прокрутка. */
+.diag-table .kind-badge { white-space: nowrap; }
+/* Вторая строка внутри значения карточки (`.stats div` красит любой div, поэтому это span). */
+.diag-sub { display: block; }
+/* Инструмент «Запросы» (смоук P4c, R13): шапка таблицы с поиском прилипает к верху вкладки, пока таблица на экране. */
+.queries-top { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.queries-top-head { position: sticky; top: 0; z-index: 2; background: var(--bg); padding: 6px 0; border-bottom: 1px solid var(--border); }
+/* Инструмент «Запросы»: текст запроса в ячейке — одной строкой, без разрыва таблицы. */
+.diag-query-cell { max-width: 480px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diag-query-cell button { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+/* Содержимое ячейки запроса: значок «Глафира» и пометка «обрезан» не сжимаются, «…» — только у текста запроса. */
+.query-cell { display: flex; align-items: baseline; gap: 4px; min-width: 0; max-width: 100%; }
+.query-cell > .kind-badge, .query-cell > .muted { flex: none; }
+.query-cell > button, .query-cell > .query-cell-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Снимки pgss (P3b): панель под фильтрами «Запросов», итог сравнения, подпись режима «между снимками». */
+.snapshots-panel { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
+.snapshots-panel h3 { margin: 0; font-size: 1em; }
+.snapshot-compare { display: flex; flex-direction: column; gap: 6px; }
+.snapshot-compare h4 { margin: 6px 0 2px; }
+.snapshot-own, .snapshot-unreadable td:nth-child(2), .snapshot-unreadable td:nth-child(3) { opacity: 0.6; }
+.snapshots-between { margin: 4px 0; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.diag-command { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.diag-facts { display: flex; flex-direction: column; gap: 2px; }
+/* Дерево плана (P3): горячие узлы жирным, выбранный — фоном, ошибка оценки — цветом и словом «×N» (цвет не единственный признак). */
+.plan-tree tr.plan-hot { background: color-mix(in srgb, var(--warn) 14%, transparent); }
+.plan-tree tr.plan-hot td:first-child { font-weight: 600; }
+.plan-tree tr.plan-hot .kind-badge:first-child { background: color-mix(in srgb, var(--warn) 30%, transparent); font-weight: 600; }
+/* Узлы рекомендации («Показать узел»): полоса слева и метка «рекомендация»; выбранный из них — ещё и фоном. */
+.plan-tree tr.plan-related td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.plan-tree .plan-related-mark { background: color-mix(in srgb, var(--accent) 20%, transparent); }
+/* Выбранный узел — акцентом с белым текстом, как выделенные строки списков (спец. U1 §4). */
+.plan-tree tr.plan-selected td { background: var(--accent); color: #fff; }
+.plan-tree tr.plan-selected .link, .plan-tree tr.plan-selected .muted, .plan-tree tr.plan-selected .plan-misestimate { color: inherit; }
+.plan-tree tr.plan-selected .kind-badge { color: inherit; border-color: rgba(255, 255, 255, 0.55); }
+.plan-node { display: flex; align-items: baseline; gap: 4px; }
+.plan-node .link { text-align: left; }
+.plan-tree .plan-caret { display: inline-block; flex: none; width: 16px; padding: 0; text-align: center; }
+.plan-misestimate { color: color-mix(in srgb, var(--warn) 55%, var(--fg)); font-weight: 600; }
+/* ×100 и больше (и бесконечная ошибка): красный, как у `.lock-victims`; само «×N» говорит о степени и без цвета. */
+.plan-misestimate-severe { color: color-mix(in srgb, var(--danger) 85%, var(--fg)); }
+.plan-share { display: inline-block; width: 60px; height: 6px; margin-left: 6px; background: var(--border); vertical-align: middle; }
+.plan-share > span { display: block; height: 100%; background: var(--accent); }
+.plan-summary { display: flex; flex-direction: column; gap: 6px; }
+.plan-summary p { margin: 0; }
+.plan-copy { display: inline-flex; align-items: center; gap: 6px; }
+.plan-summary-part + .plan-summary-part::before { content: " · "; color: var(--muted); }
+.plan-setting { margin-right: 8px; }
+.plan-details pre { max-height: 240px; overflow: auto; }
+/* Рекомендации по плану (P3b): карточки как у находок (полоса важности и метка), команда — моноширинным блоком. */
+.recommendations { display: flex; flex-direction: column; gap: 6px; }
+.recommendations h3 { margin: 0; font-size: 13px; }
+.recommendations > p { margin: 0; }
+.recommend-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.recommend h4 { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.recommend p { margin: 0; overflow-wrap: anywhere; }
+.recommend .diag-command pre { flex: 1 1 320px; min-width: 0; }
+.recommend-partitions summary { color: var(--muted); }
+.recommend-partitions p { margin-top: 4px; }
+.hypo-check { width: min(900px, 100%); }
+.hypo-check h4 { margin: 0; font-size: 13px; }
+/* «Индекс использован»: цвет с подмешанным текстом (контраст) и жирное слово — смысл не держится на одном цвете. */
+.hypo-used { color: color-mix(in srgb, var(--ok) 55%, var(--fg)); font-weight: 600; }
+/* Карточка запроса и запуск плана (P3a). */
+.query-text { margin: 0; max-height: 200px; overflow: auto; white-space: pre-wrap; }
+/* Шапка карточки запроса: в узком окне «база · queryid» сжимается с «…» (полностью — в подсказке), строка переносится,
+   а «Обновить» не сжимается и не уезжает за край. */
+.query-head .query-head-id { flex: 1 1 12ch; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.query-head > button { flex: none; }
+.query-overview, .plan-runner, .query-plan { display: flex; flex-direction: column; gap: 12px; }
+/* Обзор карточки: текст запроса и ряд кнопок под ним — с тем же промежутком, что форма консоли (ряд не прилипает к тексту). */
+.query-overview-head { display: flex; flex-direction: column; gap: 12px; }
+/* Подпись флажка GENERIC_PLAN — обычным цветом: от него зависит, что делает «План». */
+.params-form label.generic { color: var(--fg); font-weight: 600; }
+.params-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
+.sparkline { color: var(--accent); margin-right: 12px; }
+.sql-error mark { background: color-mix(in srgb, var(--danger) 25%, transparent); color: inherit; outline: 1px solid var(--danger); }
+.search-path { display: inline-flex; align-items: center; gap: 4px; }
+.search-path summary { color: var(--muted); cursor: pointer; }
+/* Консоль EXPLAIN (P3a): панели «Запрос» и «Вставить план» смонтированы обе; скрытая не должна перебивать hidden своим display. */
+.explain-panel:not([hidden]) { display: flex; flex-direction: column; gap: 12px; }
+.explain-sql { width: 100%; min-height: 120px; resize: vertical; box-sizing: border-box; }
+/* Предупреждение в тексте вида: чистый --warn на светлом фоне ниже 4,5:1, поэтому подмешивается цвет текста (как у меток находок). */
+.diag-warn { color: color-mix(in srgb, var(--warn) 55%, var(--fg)); font-weight: 600; }
+/* Вердикт и коды health: фон клетки плюс слово или код внутри — смысл не держится на одном цвете. */
+.diag-table td.ok { background: color-mix(in srgb, var(--ok) 18%, transparent); box-shadow: inset 3px 0 0 var(--ok); }
+.diag-table td.bad { background: color-mix(in srgb, var(--danger) 16%, transparent); box-shadow: inset 3px 0 0 var(--danger); }
+.diag-table td.none { background: color-mix(in srgb, var(--muted) 14%, transparent); font-style: italic; }
+/* Матрица health: серый — адрес чужой роли (503 ожидаем), жёлтый — узел вне пула балансировщика. */
+.diag-table td.na { background: color-mix(in srgb, var(--muted) 18%, transparent); box-shadow: inset 3px 0 0 var(--muted); }
+.diag-table td.degraded { background: color-mix(in srgb, var(--warn) 16%, transparent); box-shadow: inset 3px 0 0 var(--warn); }
+.health-table td { white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* Баннер запланированного switchover в шапке обзора: абзац в строке с переносом, без полей абзаца. */
+.toolbar-note { margin: 0; }
+
+/* Профиль ожиданий: график со столбцами по классам, легенда, топы и разрезы. Цвета классов — переменные --wait-<класс>. */
+.waits-view { gap: 12px; }
+.waits-status { display: flex; flex-direction: column; gap: 4px; }
+.waits-status p { margin: 0; }
+.waits-live { font-variant-numeric: tabular-nums; }
+.waits-chart { position: relative; min-width: 0; }
+.waits-plot { width: 100%; min-width: 0; }
+.waits-plot svg { display: block; max-width: 100%; overflow: visible; }
+.waits-axis { stroke: var(--border); stroke-width: 1; }
+.waits-grid { stroke: var(--border); stroke-width: 1; opacity: 0.6; }
+.waits-ytick, .waits-xtick { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.waits-hatch { stroke: var(--muted); stroke-width: 1.5; opacity: 0.55; }
+.waits-hit { fill: transparent; }
+.waits-col:hover .waits-hit { fill: color-mix(in srgb, var(--fg) 8%, transparent); }
+.waits-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 6px 0 0; padding: 0; list-style: none; }
+.waits-legend li { display: inline-flex; align-items: center; gap: 6px; }
+.waits-swatch { flex: none; width: 10px; height: 10px; border-radius: 2px; }
+.waits-swatch[data-class="cpu"] { background: var(--wait-cpu); }
+.waits-swatch[data-class="lock"] { background: var(--wait-lock); }
+.waits-swatch[data-class="lwlock"] { background: var(--wait-lwlock); }
+.waits-swatch[data-class="io"] { background: var(--wait-io); }
+.waits-swatch[data-class="ipc"] { background: var(--wait-ipc); }
+.waits-swatch[data-class="client"] { background: var(--wait-client); }
+.waits-swatch[data-class="timeout"] { background: var(--wait-timeout); }
+.waits-swatch[data-class="bufferPin"] { background: var(--wait-bufferPin); }
+.waits-swatch[data-class="extension"] { background: var(--wait-extension); }
+.waits-swatch[data-class="activity"] { background: var(--wait-activity); }
+.waits-swatch[data-class="other"] { background: var(--wait-other); }
+.waits-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.waits-groups section { min-width: 0; }
+/* Текст запроса в топе — не длиннее двух строк; целиком он в подсказке. */
+.waits-query { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; max-width: 70ch; overflow: hidden; white-space: normal; overflow-wrap: anywhere; }
+
+/* Выбор в диалоге действия Patroni (кандидат, время): варианты столбцом, причина отказа — рядом с недоступным вариантом. */
+.choice { border: 0; margin: 0; padding: 0; min-width: 0; }
+.choice legend { padding: 0; margin-bottom: 2px; color: var(--muted); }
+.choice label { display: flex; flex-wrap: wrap; gap: 0 6px; align-items: baseline; margin: 3px 0; }
+
+/* «Настройки» (смоук P4c, R9): слева — разделы, справа — выбранный раздел с заголовком и блоками в рамке. Узкое окно:
+   колонки не помещаются (220 + 24 + 440 px) — навигация переносится над разделом (flex-wrap), без горизонтальной прокрутки. */
+.settings-layout { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px 24px; }
+.settings-content { flex: 1 1 440px; min-width: 0; }
+.settings-section { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.settings-section[hidden] { display: none; }
+.settings-section > h3 { margin: 0; font-size: 14px; }
+.settings-section > p, .agent-section > p { margin: 0; }
+.settings-block { min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; display: flex; flex-direction: column; gap: 8px; }
+.settings-block > * { margin-top: 0; margin-bottom: 0; }
+.settings-block h4 { margin: 0; font-size: 13px; }
+.settings-block > button { align-self: flex-start; }
+.agent-section { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+
+/* MCP (спец. P4 §11): индикатор сессий внизу боковой панели и фрагменты конфигураций клиентов в «Настройках». */
+.mcp-clients { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; }
+.mcp-snippet pre { margin: 4px 0 8px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-alt); white-space: pre-wrap; word-break: break-all; font-size: 12px; }
+.llm-notes { display: flex; flex-direction: column; gap: 2px; flex-basis: 100%; }
+.llm-levels { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; }
+.llm-levels [role="radiogroup"] { display: inline-flex; gap: 12px; }
+
+
+/* Панель «Предложения LLM» (P4b): ограниченный блок на --bg-alt после плана и «Истории» консоли (видно, где панель
+   начинается); слева список — карточки в две строки, справа выбранное предложение — карточка на --bg. Колонка списка — до
+   320 px: короткое время умещается в строку статуса, а первая строка SQL — не короче ~40 символов (смоук P4b, R3); в узком
+   окне колонка сжимается до 180 px и строки переносятся. */
+.llm-proposals { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 8px; padding: 8px 12px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-alt); }
+.llm-proposals-toggle { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; padding: 2px 0; border: none; background: none; font-weight: 600; }
+.llm-proposals-region:empty { display: none; }
+.llm-proposals-empty { margin: 0; }
+.llm-proposals-body { display: grid; grid-template-columns: minmax(180px, 320px) minmax(0, 1fr); gap: 12px; align-items: start; }
+.llm-proposals-list { display: flex; flex-direction: column; gap: 4px; }
+/* Пункт списка — не ссылка: строка «статус · клиент · время» и начало текста; выбранный — фоном карточки и полосой акцента
+   слева (и aria-current), а не одной жирностью. */
+.llm-item { display: flex; flex-direction: column; align-items: stretch; gap: 3px; width: 100%; padding: 5px 8px 5px 6px; border: 1px solid transparent; border-left: 3px solid transparent; border-radius: 4px; background: none; text-align: left; }
+/* Наведение — полшага к фону карточки и рамка, без полосы: выбранный пункт остаётся единственным на чистом --bg. */
+.llm-item:hover { background: color-mix(in srgb, var(--bg) 50%, var(--bg-alt)); border-color: var(--border); }
+.llm-item[aria-current="true"] { background: var(--bg); border-color: var(--border); border-left-color: var(--accent); }
+.llm-item-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; font-size: 12px; }
+.llm-item-client { font-weight: 600; overflow-wrap: anywhere; }
+.llm-item-time { color: var(--muted); white-space: nowrap; }
+.llm-item-sql { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Чип статуса: тонированный фон, рамка цвета статуса и слово — смысл не держится на одном цвете. Цвет текста подмешивает
+   --fg (как метки находок): не ниже 5,1:1 на --bg и --bg-alt в обеих темах; рамка — не ниже 3:1 (WCAG 1.4.11). */
+.llm-status { display: inline-block; padding: 0 6px; border: 1px solid; border-radius: 8px; font-size: 11px; font-weight: 600; line-height: 16px; white-space: nowrap; }
+.llm-status-new { color: color-mix(in srgb, var(--link) 60%, var(--fg)); background: color-mix(in srgb, var(--accent) 14%, transparent); border-color: var(--accent); }
+.llm-status-accepted { color: color-mix(in srgb, var(--ok) 55%, var(--fg)); background: color-mix(in srgb, var(--ok) 16%, transparent); border-color: var(--ok); }
+.llm-status-rejected { color: color-mix(in srgb, var(--danger) 75%, var(--fg)); background: color-mix(in srgb, var(--danger) 14%, transparent); border-color: var(--danger); }
+/* Карточка предложения: шапка (статус, кто прислал, «Принять» / «Отклонить», второй ряд действий) отделена линией;
+   разделы — заголовок с линией сверху. */
+.llm-proposal { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
+.llm-proposal-head { display: flex; flex-direction: column; gap: 6px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.llm-proposal-title { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; }
+.llm-proposal-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; overflow-wrap: anywhere; }
+.llm-proposal-answer { display: flex; flex-wrap: wrap; gap: 8px; }
+.llm-proposal-reason { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.llm-proposal-section { display: flex; flex-direction: column; gap: 4px; padding-top: 8px; border-top: 1px solid var(--border); }
+.llm-proposal h4 { margin: 0; font-size: 13px; font-weight: 600; }
+.llm-proposal-section p { margin: 0; }
+.llm-text { margin: 0; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+.llm-reject { display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
+.llm-reject label { display: flex; flex-direction: column; gap: 4px; }
+/* Сравнение текстов: при table-layout: fixed ширины задаёт colgroup — узкие номера строк, остальное — тексту; длинная строка
+   переносится внутри своей колонки. */
+.line-diff { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.line-diff col.diff-num { width: calc(4ch + 12px); }
+.line-diff th { text-align: left; font-weight: 600; padding: 2px 6px; }
+.line-diff td { padding: 0 6px; vertical-align: top; white-space: pre-wrap; overflow-wrap: anywhere; }
+.line-diff td.num { text-align: right; white-space: nowrap; color: var(--muted); user-select: none; }
+.line-diff .diff-del { background: color-mix(in srgb, var(--danger) 14%, transparent); }
+.line-diff .diff-add { background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.line-diff .diff-empty { background: var(--bg-alt); }
+.line-diff .diff-mark { margin-right: 4px; color: var(--muted); }
+/* Итог «Сравнить планы» — свой блок с рамкой; колонки исходного и предложенного плана не шире своей половины: длинное имя
+   узла переносится, а не уходит за край окна. */
+.llm-compare { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; }
+.llm-compare p { margin: 0; }
+.llm-compare-cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.llm-compare-side { min-width: 0; overflow-wrap: anywhere; }
+.llm-compare-side + .llm-compare-side { padding-left: 12px; border-left: 1px solid var(--border); }
+.llm-compare-side h5 { margin: 0 0 4px; font-size: 13px; }
+.llm-compare-side p { margin: 4px 0 2px; }
+/* «Заменённые тексты» консоли: время замены (цифрами одной ширины) и «Вернуть: …» в строку; длинная подпись переносится. */
+.llm-replaced h4 { margin: 0 0 4px; font-size: 13px; }
+.llm-replaced li { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.llm-replaced-time { flex: none; font-variant-numeric: tabular-nums; }
+.llm-replaced li .link { min-width: 0; overflow-wrap: anywhere; text-align: left; }
+/* «Передать LLM-ассистенту»: строки ожидания (с «Отменить запрос») и уведомления — под кнопками своим рядом, каждая своей
+   строкой; пустой блок ряд не занимает. В консоли и на «Плане» карточки кнопки запроса стоят в ряду формы запуска. */
+.llm-ask-notes { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.llm-ask-notes.shown { flex-basis: 100%; }
+.llm-ask-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
+.llm-ask-notice { margin: 0; overflow-wrap: anywhere; }
+/* Фоновый ассистент (P4c): строка статуса запуска — в блоке строк под «Передать LLM-ассистенту», каждое сообщение своей
+   строкой; полоса акцента и фон --bg-alt, как у пометок видов (.diag-note). Текст — цвета темы на --bg-alt: --fg, --muted,
+   --link ссылок и .diag-warn предупреждений (контраст AA проверяет scripts/theme-contrast.test.mjs). Время работы — цифрами
+   одной ширины: строка не дрожит каждую секунду. */
+.agent-run { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; padding: 4px 8px 4px 10px; border-left: 3px solid var(--accent); background: var(--bg-alt); }
+.agent-run-lines { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.agent-run-lines p, .agent-run-progress { margin: 0; overflow-wrap: anywhere; }
+.agent-run-progress { font-variant-numeric: tabular-nums; }
+.agent-run-actions { display: flex; flex-wrap: wrap; gap: 2px 12px; }
+.agent-run-answer { align-self: stretch; min-width: 0; }
+.agent-run-summary { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; margin: 2px 0; }
+.agent-run-summary .llm-text { align-self: stretch; }
+.agent-run-summary .llm-text.clamped { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 5; line-clamp: 5; overflow: hidden; }
+.agent-log-dialog { width: min(900px, 100%); }
+.agent-log { max-height: 60vh; overflow: auto; margin: 0; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-alt); white-space: pre-wrap; overflow-wrap: anywhere; }
+/* «Фоновый ассистент» в «Настройках» (P4c): поле с кнопкой рядом, под полем — ошибка и пояснения. Подпись строки — по верху
+   поля (высота строки поля — 24px), чтобы не съезжала, когда под полем появляется текст. Числа — узкими полями. Ошибки полей —
+   --danger-text, как у других ошибок; путь, модель и адрес — моноширинным шрифтом (общее правило полей задаёт font: inherit). */
+.agent-section .form { align-items: start; }
+.agent-section .form > .field-label, .agent-check, .agent-presets { min-height: 24px; }
+.agent-control { display: flex; flex-direction: column; align-items: stretch; min-width: 0; }
+.agent-field { display: flex; gap: 6px; align-items: center; min-width: 0; }
+.agent-field > input:not([type="checkbox"]) { flex: 1; min-width: 0; }
+.agent-field > input.agent-num { flex: 0 1 8em; }
+.agent-field > input.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.agent-check { display: flex; align-items: center; }
+.agent-presets { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+.agent-error { margin: 0; color: var(--danger); overflow-wrap: anywhere; }
+.agent-lines p, .agent-note { margin: 0; overflow-wrap: anywhere; }
+.agent-control > .agent-error, .agent-control > .agent-note, .agent-control .agent-lines p, .agent-control > .error-banner { margin-top: 4px; }
+.agent-run-when span { white-space: nowrap; }

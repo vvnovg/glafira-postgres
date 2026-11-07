@@ -172,6 +172,23 @@ describe("ObjectList", () => {
     expect(useWorkspace.getState().activeId).toBe("table:c:orders:shop.events");
   });
 
+  it("строка вкладки, открытой последней, подсвечена (aria-current); значок — по виду объекта", async () => {
+    vi.mocked(api.listObjects).mockResolvedValue({ total: 2, nextOffset: null, items: [item(1, { name: "orders" }), item(2, { name: "events", relkind: "p", partitions: 2 })] });
+    const user = userEvent.setup();
+    renderList(2);
+    const orders = await screen.findByRole("button", { name: "Открыть orders" });
+    expect(orders).not.toHaveAttribute("aria-current");
+    expect(orders.querySelector('svg[data-icon="table"]')).not.toBeNull();
+    await user.click(orders);
+    expect(orders).toHaveAttribute("aria-current", "page");
+    expect(orders.closest(".tree-row")).toHaveClass("current");
+    // Партиционированная таблица — раздельный режим: подсвечена её строка, шеврон — отдельная кнопка.
+    await user.click(screen.getByRole("button", { name: "Открыть events" }));
+    expect(orders).not.toHaveAttribute("aria-current");
+    expect(screen.getByRole("button", { name: "Открыть events" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("button", { name: /Партиции events|events/, expanded: false })).not.toHaveAttribute("aria-current");
+  });
+
   it("у партиционированной таблицы стрелка раскрывает партиции и не открывает вкладку", async () => {
     vi.mocked(api.listObjects).mockResolvedValue({ total: 1, nextOffset: null, items: [item(2, { name: "events", relkind: "p", partitions: 2 })] });
     vi.mocked(api.listPartitions).mockResolvedValue({

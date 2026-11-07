@@ -9,5 +9,7 @@ export default defineConfig({
     setupFiles: ["./src/test/setup.ts"],
     // Тесты scripts/ — на node:test, их запускает `pnpm test:scripts`.
     include: ["src/**/*.{test,spec}.?(c|m)[jt]s?(x)"],
+    // Стили в тестах пустые; текстом (`?raw`) — настоящие: тест стилей читает токены и кегли.
+    css: { include: [/\.css\?raw$/] },
   },
 });

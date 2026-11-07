@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { act, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { useWorkspace } from "../../../state/workspace";
@@ -60,4 +60,20 @@ describe("DiagnosticsNodes", () => {
     expect(DIAG_TOOLS_FOR("patroni").slice(-2)).toEqual(["failover", "health"]);
     expect(DIAG_TOOLS_FOR("server")).not.toContain("failover");
   });
+
+  it("строка активной вкладки подсвечена (aria-current), карточка запроса — «Запросы»; свёрнутая группа подсвечена сама", async () => {
+    const user = userEvent.setup();
+    useWorkspace.setState({ tabs: [{ id: "query:c:pg-1:perf:7", kind: "query", connectionId: "c", member: "pg-1", database: "perf", queryId: "7" }], activeId: "query:c:pg-1:perf:7" });
+    renderWithClient(<ul><DiagnosticsNodes connectionId="c" kind="server" /></ul>);
+    const group = screen.getByRole("button", { name: "Диагностика" });
+    expect(group.closest(".tree-row")).toHaveClass("current");
+    await user.click(group);
+    expect(group.closest(".tree-row")).not.toHaveClass("current");
+    expect(screen.getByRole("button", { name: "Запросы" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("button", { name: "Сессии" })).not.toHaveAttribute("aria-current");
+    // Вкладка закрыта — подсветки нет.
+    act(() => useWorkspace.setState({ activeId: null }));
+    expect(screen.getByRole("button", { name: "Запросы" })).not.toHaveAttribute("aria-current");
+  });
 });
+

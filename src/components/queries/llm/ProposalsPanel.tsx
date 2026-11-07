@@ -16,6 +16,7 @@ import { ErrorBanner } from "../../common/ErrorBanner";
 import { Glyph } from "../../common/Glyph";
 import { agentLabel } from "../../mcp/agent/agentText";
 import { ProposalCompare } from "./ProposalCompare";
+import { Icon } from "../../common/Icon";
 
 /** Подписи статусов — литералами (правило словарей). */
 const STATUS_KEYS = {
@@ -155,8 +156,8 @@ export function ProposalsPanel({
   return (
     <section className="llm-proposals" aria-label={t("llmAssist.panel.title")}>
       <button type="button" className="llm-proposals-toggle" aria-expanded={isOpen} aria-controls={bodyId} onClick={() => setOpen(!isOpen)}>
-        <span className="tree-caret" aria-hidden="true">
-          {isOpen ? "▾" : "▸"}
+        <span className={isOpen ? "tree-chevron open" : "tree-chevron"} aria-hidden="true">
+          <Icon name="chevron" size={14} />
         </span>
         {t("llmAssist.panel.heading", { count: list.length })}
       </button>

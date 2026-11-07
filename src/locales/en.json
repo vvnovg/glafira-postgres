@@ -17,7 +17,14 @@
       "connectionAria": "Connection name"
     },
     "yes": "Yes",
-    "no": "No"
+    "no": "No",
+    "state": {
+      "ok": "OK",
+      "warn": "Warning",
+      "error": "Error",
+      "progress": "In progress",
+      "skip": "Skipped"
+    }
   },
   "errors": {
     "generic": "{{message}}",
@@ -812,7 +819,21 @@
     "help": "Help",
     "guide": "Glafira Guide",
     "about": "About Glafira",
-    "diagnostics": "Collect Diagnostics…"
+    "diagnostics": "Collect Diagnostics…",
+    "file": "File",
+    "newConnection": "New Connection",
+    "closeTab": "Close Tab",
+    "closeWindow": "Close Window",
+    "edit": "Edit",
+    "view": "View",
+    "refresh": "Refresh",
+    "run": "Run",
+    "find": "Find",
+    "filterConnections": "Filter Connections",
+    "window": "Window",
+    "nextTab": "Next Tab",
+    "prevTab": "Previous Tab",
+    "settings": "Settings…"
   },
   "support": {
     "title": "Support the project",

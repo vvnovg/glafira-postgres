@@ -1,214 +1,238 @@
+/* Токены (спец. U1 §2): светлая тема. Акцент и семантика — палитра macOS; кегль не ниже 11 px (§3). */
 :root {
   --bg: #ffffff;
-  --bg-alt: #f4f5f7;
-  --fg: #1d2129;
-  /* Приглушённый текст: не ниже 4,5:1 и на --bg-alt (5,3:1), и на подкраске строк сравнения текстов (4,7:1). */
-  --muted: #5f6673;
-  /* Подсказка в пустом поле: слабее подписи (--muted), чтобы не выглядеть введённым значением. */
-  --placeholder: #8b919a;
-  --border: #e3e5e8;
-  /* Акцент как цвет текста и линий (ссылки, полосы выбора): не ниже 4,5:1 к --bg и --bg-alt своей темы. */
-  --accent: #2563eb;
-  /* Заливка акцента под белым текстом («Принять», значок данных) и системные флажки: белый на ней — 5,2:1 в обеих темах.
-     Отдельная переменная, потому что светлый акцент тёмной темы под белым текстом даёт 2,8:1. */
-  --accent-fill: #2563eb;
-  --danger: #dc2626;
-  /* Красный для текста: сам --danger остаётся фоном значков (белый текст на нём), а как цвет текста он темноват на тёмной теме. */
-  --danger-text: var(--danger);
-  --warn: #f59e0b;
-  /* Подкраска «готов» и кода 200 в видах диагностики: только фон клетки, слово или код остаётся текстом. */
-  --ok: #16a34a;
-  /* Классы ожиданий в профиле ожиданий (задача 13). Восемь оттенков — категориальная палитра навыка dataviz в её порядке
-     (cpu, lock, lwlock, io, ipc, client, timeout, bufferPin): соседние классы столбца различимы при протанопии и дейтеранопии
-     (ΔE OKLab ×100: 8,9 и выше в светлой теме, 8,4 и выше в тёмной) и при обычном зрении (17,8 и 19,3), проверено validate_palette.js
-     на фоне темы. Lock — оранжевый, самый заметный тёплый. Три редких класса (extension, activity, other) — нейтральные серые,
-     различимые между собой: девятого оттенка палитра не даёт. Каждый цвет — не ниже 3:1 к фону своей темы (WCAG 1.4.11, нетекстовые
-     элементы): aqua, yellow, magenta и серые светлой темы темнее табличных значений навыка. Контраст и различимость соседей
-     проверяет scripts/theme-contrast.test.mjs (`pnpm test:scripts`). Цвет не единственный носитель: есть легенда, подсказка и таблица
-     для экранного диктора. */
-  --wait-cpu: #2a78d6;
-  --wait-lock: #eb6834;
-  --wait-lwlock: #05a672;
-  --wait-io: #c58502;
-  --wait-ipc: #da6f99;
-  --wait-client: #008300;
-  --wait-timeout: #6250d6;
-  --wait-bufferPin: #e34948;
-  --wait-extension: #8d919a;
-  --wait-activity: #555961;
-  --wait-other: #6f747c;
-  /* Флажки, переключатели, списки и полосы прокрутки рисуются системой в цветах текущей темы. */
-  color-scheme: light dark;
-  accent-color: var(--accent-fill);
+  --bg-alt: #f2f2f4;
+  --sidebar: #f5f5f7;
+  --control: #ffffff;
+  --field: #ffffff;
+  --fg: #1d1d1f;
+  --muted: #6e6e73;
+  --border: #e1e1e5;
+  --accent: #007aff;
+  /* Значки LLM в дереве: контраст текста не ниже 4,5:1 (#2563eb — 5,2:1 на белом, 4,7:1 на --bg-alt). */
+  --llm-badge: #2563eb;
+  /* Красный текста — 5,0:1 на белом; системный #ff3b30 даёт лишь 3,5:1. Заливка бейджа PROD — он же в обеих темах
+     (белый текст 5,0:1); в тёмной теме красный текста светлее. */
+  --danger: #d70015;
+  --badge-danger: #d70015;
+  --warn: #ff9500;
+  --ok: #34c759;
+  --shadow: 0 0.5px 1px rgba(0, 0, 0, 0.12);
+  --ring: 0 0 0 3px color-mix(in srgb, var(--accent) 40%, transparent);
+  --radius: 6px;
+  --row: 24px;
+  --guide: color-mix(in srgb, var(--fg) 9%, transparent);
+  --guide-open: color-mix(in srgb, var(--fg) 22%, transparent);
+  --hover: color-mix(in srgb, var(--fg) 6%, transparent);
+  --zebra: color-mix(in srgb, var(--fg) 3%, transparent);
+  --tabbar-h: 36px;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   font-size: 13px;
+  line-height: 1.4;
   color: var(--fg);
   background: var(--bg);
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #1b1d21;
-    --bg-alt: #23262b;
-    --fg: #e6e8eb;
-    --muted: #9aa0a6;
-    --placeholder: #747a83;
-    --border: #33373d;
-    /* Светлее, чем в светлой теме: текстом на --bg 6,1:1, на --bg-alt 5,5:1 (#2563eb дал бы 3,3:1). */
-    --accent: #5b9cf8;
-    --accent-fill: #2563eb;
-    /* #f87171: 6.1:1 на фоне темы и 5.3:1 на плашке предупреждений (#dc2626 давал 3.5:1 и 3.1:1). */
-    --danger-text: #f87171;
-    --wait-cpu: #3987e5;
-    --wait-lock: #d95926;
-    --wait-lwlock: #199e70;
-    --wait-io: #c98500;
-    --wait-ipc: #d55181;
-    --wait-client: #008300;
-    --wait-timeout: #9085e9;
-    --wait-bufferPin: #e66767;
-    --wait-extension: #b4bac4;
-    --wait-activity: #626872;
-    --wait-other: #929ba6;
+    --bg: #1e1f22;
+    --bg-alt: #2a2b2f;
+    --sidebar: #232428;
+    --control: #303135;
+    --field: #1a1b1e;
+    --fg: #e8e8ea;
+    --muted: #9c9ca3;
+    --border: #3a3b40;
+    --accent: #0a84ff;
+    --llm-badge: #60a5fa;
+    --danger: #ff453a;
+    --badge-danger: #d70015;
+    --warn: #ff9f0a;
+    --ok: #30d158;
+    --shadow: none;
   }
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); }
-button { font: inherit; color: inherit; background: var(--bg-alt); border: 1px solid var(--border); border-radius: 4px; padding: 3px 8px; cursor: pointer; }
-/* aria-disabled — кнопка, которая недоступна, но остаётся в порядке Tab и не теряет фокус (disabled его отнимает). */
-button:disabled, button[aria-disabled="true"] { opacity: 0.5; cursor: default; }
-button.icon { background: none; border: none; padding: 0 4px; }
-button.link { background: none; border: none; color: var(--accent); padding: 2px 0; }
-button.primary { background: var(--accent-fill); color: #fff; border-color: var(--accent-fill); }
-button.danger { color: var(--danger-text); }
-input:not([type="checkbox"]):not([type="radio"]), select, textarea { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px; }
-input::placeholder, textarea::placeholder { color: var(--placeholder); font-style: italic; opacity: 1; }
+
+/* Элементы управления (§4): высота 24 px, скругление 6 px, кольцо фокуса у всего, что получает фокус с клавиатуры. */
+button { font: inherit; color: inherit; background: var(--control); border: 1px solid var(--border); border-radius: var(--radius); padding: 0 10px; height: var(--row); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; box-shadow: var(--shadow); }
+button:disabled { opacity: 0.5; cursor: default; }
+button.icon { background: none; border: none; box-shadow: none; padding: 0; width: var(--row); justify-content: center; color: var(--muted); }
+button.icon:hover:not(:disabled) { color: var(--fg); background: var(--hover); }
+button.link { display: inline; background: none; border: none; box-shadow: none; color: var(--accent); padding: 2px 0; height: auto; white-space: normal; text-align: left; }
+button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+button.danger { color: var(--danger); }
+input, select, textarea { font: inherit; color: inherit; background: var(--field); border: 1px solid var(--border); border-radius: var(--radius); padding: 0 6px; height: var(--row); box-shadow: var(--shadow); }
+textarea { height: auto; padding: 4px 6px; }
+input[type="checkbox"], input[type="radio"] { height: auto; box-shadow: none; }
+input[type="search"] { -webkit-appearance: none; appearance: none; border-radius: 7px; }
+input[type="search"]::-webkit-search-decoration { -webkit-appearance: none; }
+/* Подсказка в пустом поле — курсивом, чтобы её нельзя было принять за введённое значение. */
+input::placeholder, textarea::placeholder { font-style: italic; }
+:focus-visible { outline: none; box-shadow: var(--ring); }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { border-color: var(--accent); box-shadow: var(--ring); }
+.search-field { position: relative; display: flex; }
+.search-field > .icon-svg { position: absolute; left: 8px; top: 50%; margin-top: -7px; width: 14px; height: 14px; color: var(--muted); pointer-events: none; }
+.search-field > input { width: 100%; padding-left: 26px; background: var(--control); border-color: transparent; }
+.search-field > input:focus-visible { border-color: var(--accent); }
+.icon-svg { flex-shrink: 0; vertical-align: -3px; }
+/* Подсказка клавиши у кнопки (⏎, ⌘R): 11 px, рамка; в кнопке акцента — белая. */
+.kbd { font: inherit; font-size: 11px; line-height: 15px; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; margin-left: 2px; }
+button.primary .kbd { color: rgba(255, 255, 255, 0.9); border-color: rgba(255, 255, 255, 0.55); }
 code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 pre { white-space: pre-wrap; word-break: break-all; margin: 0; }
+h3 { font-size: 14px; font-weight: 600; }
+h4 { font-size: 13px; font-weight: 600; }
+
+/* Таблицы: шапка 12 px липкая, строки через одну, выделение акцентом. */
 table { border-collapse: collapse; width: 100%; }
 th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); }
-th { color: var(--muted); font-weight: 500; }
+th { color: var(--muted); font-weight: 600; font-size: 12px; position: sticky; top: 0; background: var(--bg); z-index: 1; }
+tbody tr:nth-child(even) { background: var(--zebra); }
 tr.clickable { cursor: pointer; }
-tr.clickable:hover, .row.clickable:hover { background: var(--bg-alt); }
+tr.clickable:hover, .row.clickable:hover { background: var(--hover); }
 .muted { color: var(--muted); }
 .warn { color: var(--warn); font-weight: 600; }
 .empty { color: var(--muted); padding: 16px; }
+.tabular { font-variant-numeric: tabular-nums; }
+
+/* Раскладка (§7): боковая панель с изменяемой шириной, рабочая область с панелью вкладок. */
 .layout { display: flex; height: 100vh; }
-/* Ширина панели — inline-стилем (перетаскиваемая граница, запоминается); узкое окно может её сжать, но не до нуля. */
-.sidebar { width: 260px; flex-shrink: 1; min-width: 140px; border-right: 1px solid var(--border); background: var(--bg-alt); overflow: auto; }
-/* Граница панели: узкая полоса поверх правого края; при наведении и фокусе — линия акцента. */
-.sidebar-resizer { flex: none; width: 6px; margin-left: -4px; margin-right: -2px; position: relative; z-index: 2; cursor: col-resize; touch-action: none; }
-.sidebar-resizer:hover, .sidebar-resizer:focus-visible { background: linear-gradient(to right, transparent 2px, var(--accent) 2px, var(--accent) 4px, transparent 4px); outline: none; }
-.sidebar-header { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; font-weight: 600; }
+.sidebar { width: 248px; flex-shrink: 0; border-right: 1px solid var(--border); background: var(--sidebar); display: flex; flex-direction: column; min-height: 0; position: relative; }
+/* macOS: место светофора; область перетаскивания окна. */
+.sidebar-top { height: 52px; flex-shrink: 0; }
+.sidebar-scroll { flex: 1; min-height: 0; overflow: auto; }
+.sidebar-splitter { position: absolute; top: 0; bottom: 0; right: -3px; width: 6px; cursor: col-resize; z-index: 2; }
+.sidebar-splitter:hover, .sidebar-splitter.active { background: color-mix(in srgb, var(--accent) 45%, transparent); }
+.sidebar-splitter:focus-visible { box-shadow: none; background: color-mix(in srgb, var(--accent) 45%, transparent); }
+.sidebar-header { display: flex; justify-content: space-between; align-items: center; padding: 4px 8px 4px 16px; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.sidebar-actions { display: flex; gap: 2px; }
+.sidebar-footer { padding: 6px 8px; border-top: 1px solid var(--border); display: flex; flex-direction: column; }
+.sidebar-footer .tree-row { width: 100%; }
+
+/* Дерево (§6): строка 24 px, отступ уровня 14 px, направляющие по центру колонки шеврона родителя. */
 .tree, .tree ul { list-style: none; margin: 0; padding: 0; }
-.tree > li { padding: 4px 12px; }
-/* Вложенные уровни — компактный отступ (11 px) с тонкой вертикальной направляющей под стрелкой родителя. */
-.tree ul { margin-left: 3px; padding-left: 7px; border-left: 1px solid var(--border); }
-.tree-conn { display: flex; align-items: center; gap: 6px; }
-.tree-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dot { width: 8px; height: 8px; border-radius: 50%; }
-.tree-filter { display: block; width: calc(100% - 24px); margin: 0 12px 4px; }
-.tree-folder { display: flex; align-items: center; gap: 6px; }
-.tree-folder-toggle { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; background: none; border: none; padding: 0; font-weight: 600; text-align: left; }
-.tree-caret { width: 8px; flex-shrink: 0; color: var(--muted); font-size: 10px; }
-.tree-folder + ul > li { padding-top: 4px; }
-.sidebar-actions { display: flex; gap: 4px; }
+.tree { padding: 0 8px 8px; }
+.tree ul { padding-left: 14px; position: relative; }
+.tree ul::before { content: ""; position: absolute; left: 12px; top: 0; bottom: 4px; width: 1px; background: var(--guide); }
+.tree ul.tree-open::before { background: var(--guide-open); }
+.tree-row { display: flex; align-items: center; gap: 6px; height: var(--row); padding: 0 6px 0 4px; border-radius: var(--radius); min-width: 0; white-space: nowrap; width: 100%; background: none; border: none; box-shadow: none; text-align: left; color: inherit; font: inherit; cursor: default; }
+.tree-row.bold { font-weight: 500; }
+button.tree-row { cursor: pointer; }
+.tree-row:hover { background: var(--hover); }
+.tree-row.current { background: var(--accent); color: #fff; }
+.tree-row.current .tree-icon, .tree-row.current .tree-extra, .tree-row.current .tree-chevron { color: rgba(255, 255, 255, 0.85); }
+.tree-row:focus-visible, .tree-toggle:focus-visible { box-shadow: inset var(--ring); border-color: transparent; }
+.tree-toggle { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; height: 100%; background: none; border: none; box-shadow: none; padding: 0; text-align: left; font: inherit; color: inherit; border-radius: var(--radius); }
+.tree-chevron { width: 16px; height: 16px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); }
+.tree-chevron.open .icon-svg { transform: rotate(90deg); }
+.tree-icon { width: 16px; height: 16px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); }
+.tree-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tree-extra { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; flex: 0 10 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; display: inline-flex; align-items: center; gap: 4px; }
+.tree-row .icon { width: 20px; height: 20px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.tree-filter-wrap { margin: 0 8px 6px; }
+/* Совместимость: прежние классы строк папки и подключения указывают на те же правила. */
+.tree-conn, .tree-folder { display: flex; align-items: center; gap: 6px; }
 .tree-menu-anchor { position: relative; display: inline-flex; }
-.tree-menu { position: absolute; right: 0; top: 100%; z-index: 20; display: flex; flex-direction: column; min-width: 180px; padding: 4px 0; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); box-shadow: 0 4px 12px rgb(0 0 0 / 15%); font-weight: normal; }
-.tree-menu [role="menuitem"] { background: none; border: none; border-radius: 0; padding: 4px 12px; text-align: left; white-space: nowrap; }
-.tree-menu [role="menuitem"]:hover, .tree-menu [role="menuitem"]:focus { background: var(--bg-alt); }
+.tree-menu { position: absolute; right: 0; top: 100%; z-index: 20; display: flex; flex-direction: column; min-width: 180px; padding: 4px 0; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); box-shadow: 0 6px 20px rgb(0 0 0 / 18%); font-weight: normal; white-space: nowrap; }
+.tree-menu [role="menuitem"] { background: none; border: none; border-radius: 0; padding: 4px 12px; text-align: left; white-space: nowrap; box-shadow: none; height: auto; display: block; width: 100%; color: var(--fg); }
+.tree-menu [role="menuitem"]:hover, .tree-menu [role="menuitem"]:focus { background: var(--accent); color: #fff; box-shadow: none; }
+.tree-name-input { padding: 2px 0 2px 20px; }
 .tree-name-input input { width: 100%; }
-.tree-error { margin: 2px 0 0; color: var(--danger-text); font-size: 12px; }
+.tree-error { margin: 2px 0 0; color: var(--danger); font-size: 12px; }
 .tree-confirm { margin-top: 4px; }
 .tree-notice { margin: 0 12px 4px; font-size: 12px; color: var(--muted); }
-/* Фокус дерева: «Назад» и путь ветки (длинный — с «…», целиком в подсказке). */
-.tree-focus { display: flex; align-items: center; gap: 6px; margin: 0 12px 6px; min-width: 0; }
-.tree-focus > button { flex: none; padding: 1px 6px; }
-.tree-focus-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; }
 .modal-backdrop { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgb(0 0 0 / 35%); }
-.modal { display: flex; flex-direction: column; gap: 10px; width: min(640px, 100%); max-height: calc(100vh - 32px); overflow: auto; padding: 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); box-shadow: 0 8px 24px rgb(0 0 0 / 25%); }
+.modal { display: flex; flex-direction: column; gap: 10px; width: min(640px, 100%); max-height: calc(100vh - 32px); overflow: auto; padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); box-shadow: 0 12px 32px rgb(0 0 0 / 28%); }
 .modal h3 { margin: 0; overflow-wrap: anywhere; }
 .modal .form { grid-template-columns: auto minmax(200px, 1fr); }
-.host-key { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; margin: 0; }
-.host-key dt { color: var(--muted); }
-.host-key dd { margin: 0; overflow-wrap: anywhere; }
 .import-preview p { margin: 0 0 6px; }
 .import-group ul, .import-warnings { margin: 4px 0; padding-left: 20px; }
 .import-warnings li::marker { color: var(--warn); }
-.tree-folder[draggable="true"], .tree-conn[draggable="true"] { cursor: grab; }
-.drop-into { outline: 2px solid var(--accent); outline-offset: -1px; border-radius: 4px; }
+.tree-row[draggable="true"] { cursor: grab; }
+/* Значки в строке подключения — подписи с подсказкой, а не ручка перетаскивания. */
+.tree-row .env-badge, .tree-row .llm-badge { cursor: default; }
+.drop-into { outline: 2px solid var(--accent); outline-offset: -1px; border-radius: var(--radius); }
 .drop-before { box-shadow: inset 0 2px 0 var(--accent); }
 .drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
 .tree-root-drop { min-height: 24px; }
-.env-badge { color: #fff; font-size: 10px; padding: 0 4px; border-radius: 3px; }
-.workspace { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-.env-stripe { height: 3px; flex-shrink: 0; }
-/* Строка вкладок и кнопка меню скрытых вкладок справа (вне прокрутки: иначе меню обрезалось бы). */
-.tabbar-wrap { display: flex; align-items: stretch; flex-shrink: 0; border-bottom: 1px solid var(--border); background: var(--bg-alt); }
-/* Строка вкладок прокручивается без видимой полосы (в WebKit она ложилась поверх вкладок): колесом, меню «» N» и сама —
-   к активной вкладке. Отступ слева отделяет первую вкладку от границы панели. */
-.tabbar { display: flex; flex: 1; min-width: 0; overflow-x: auto; padding-left: 8px; scrollbar-width: none; }
-.tabbar > .tab:first-child { border-left: 1px solid var(--border); }
-.tabbar-more { flex: none; align-items: center; border-left: 1px solid var(--border); }
-.tabbar-more > button { padding: 0 8px; color: var(--muted); white-space: nowrap; }
-.tabbar::-webkit-scrollbar { display: none; }
-.tab { display: flex; flex: none; align-items: center; gap: 4px; padding: 6px 10px; border-right: 1px solid var(--border); cursor: pointer; white-space: nowrap; color: var(--muted); }
-/* Длинный заголовок вкладки (начало текста запроса) обрезается с «…», полностью — в подсказке вкладки. */
-.tab > button[role="tab"] { border: none; background: none; padding: 0; font: inherit; color: inherit; cursor: pointer; max-width: 32ch; overflow: hidden; text-overflow: ellipsis; }
-.tab:hover { color: var(--fg); }
-/* Активная вкладка — фоном содержимого (сливается с ним) и полосой акцента сверху, не только жирностью. */
-.tab.active { background: var(--bg); color: var(--fg); font-weight: 600; box-shadow: inset 0 2px 0 var(--accent); }
+
+/* Бейджи (§3): 11 px, высота 16 px; на оранжевом и зелёном — тёмный текст. */
+.env-badge { color: #fff; font-size: 11px; font-weight: 600; line-height: 16px; padding: 0 5px; border-radius: 4px; letter-spacing: 0.02em; }
+.env-badge[data-env="stage"], .env-badge[data-env="test"] { color: #1d1d1f; }
+
+/* Рабочая область и вкладки (§7): панель вкладок — сегменты на фоне панели; полоса окружения под ней. */
+.workspace { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.tabbar { display: flex; align-items: center; gap: 4px; padding: 0 12px; height: var(--tabbar-h); background: var(--sidebar); border-bottom: 1px solid var(--border); overflow-x: auto; flex-shrink: 0; }
+.layout.mac .tabbar { --tabbar-h: 52px; }
+.tab { display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 4px 0 10px; border-radius: 7px; color: var(--muted); white-space: nowrap; cursor: pointer; flex-shrink: 0; }
+.tab > button[role="tab"] { border: none; background: none; box-shadow: none; padding: 0; height: auto; font: inherit; color: inherit; cursor: pointer; }
+.tab.active { background: var(--control); color: var(--fg); box-shadow: var(--shadow); }
+.tab .icon { width: 20px; height: 20px; opacity: 0; }
+.tab.active .icon, .tab:hover .icon, .tab .icon:focus-visible { opacity: 1; }
+.env-stripe { height: 2px; flex-shrink: 0; }
 .tab-content { flex: 1; overflow: auto; min-height: 0; }
 .tab-content[hidden] { display: none; }
-.page { padding: 12px 16px; display: flex; flex-direction: column; gap: 12px; min-height: 100%; min-width: 0; max-width: 100%; }
-/* Шапки инструментов переносятся: элемент не шире строки, длинные подписи (узел, база, queryid) не распирают её. */
-.toolbar > * { max-width: 100%; }
-.toolbar > .mono { min-width: 0; overflow-wrap: anywhere; }
-.toolbar label.inline select { min-width: 0; max-width: 100%; text-overflow: ellipsis; }
+.page { padding: 14px 20px; display: flex; flex-direction: column; gap: 12px; min-height: 100%; }
 .toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.toolbar h2 { margin: 0 auto 0 0; font-size: 16px; }
+.toolbar h2 { margin: 0 auto 0 0; font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
 .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; margin: 0; }
-.stats div { background: var(--bg-alt); border-radius: 6px; padding: 8px; }
-.stats dt { color: var(--muted); font-size: 11px; }
-.stats dd { margin: 2px 0 0; font-size: 16px; }
+.stats div { background: var(--bg-alt); border-radius: 8px; padding: 8px 10px; }
+.stats dt { color: var(--muted); font-size: 12px; }
+.stats dd { margin: 2px 0 0; font-size: 17px; font-variant-numeric: tabular-nums; }
 .form { display: grid; grid-template-columns: 180px minmax(240px, 520px); gap: 8px 12px; align-items: center; }
-.form label { color: var(--muted); }
+.form label { color: var(--muted); font-size: 12px; }
 .form .full { grid-column: 1 / -1; }
-.error-banner { border: 1px solid var(--danger); border-radius: 6px; padding: 8px; background: color-mix(in srgb, var(--danger) 8%, transparent); }
+.error-banner { border: 1px solid var(--danger); border-radius: 8px; padding: 8px 10px; background: color-mix(in srgb, var(--danger) 8%, transparent); }
 .error-title { display: flex; gap: 8px; align-items: center; }
 .steps { list-style: none; padding: 0; margin: 0; }
 .steps li { padding: 2px 0; }
-.subtabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); }
-.subtabs button { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: none; }
-.subtabs button.active { border-bottom-color: var(--accent); font-weight: 600; }
-.vlist { flex: 1; overflow: auto; position: relative; border: 1px solid var(--border); border-radius: 4px; min-height: 200px; }
+/* Подвкладки — сегментированный контрол. */
+.subtabs { display: inline-flex; align-self: flex-start; gap: 0; padding: 2px; background: var(--control); border-radius: 7px; box-shadow: var(--shadow); border: 1px solid var(--border); }
+.subtabs button { border: none; border-radius: 5px; background: none; box-shadow: none; height: 22px; padding: 0 12px; color: var(--fg); }
+.subtabs button.active { background: var(--bg); font-weight: 500; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18); }
+@media (prefers-color-scheme: dark) {
+  .subtabs button.active { background: #4a4b50; }
+}
+/* Виртуальные списки: шапка 12 px, строки через одну (`.odd` ставит компонент по индексу), выделение акцентом. */
+.vlist { flex: 1; overflow: auto; position: relative; border: 1px solid var(--border); border-radius: 8px; min-height: 200px; }
 .row { display: grid; align-items: center; position: absolute; left: 0; right: 0; padding: 0 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
 .row > span { overflow: hidden; text-overflow: ellipsis; padding-right: 8px; }
-.row.header { position: sticky; top: 0; z-index: 1; background: var(--bg-alt); color: var(--muted); }
-tr.selected { background: color-mix(in srgb, var(--accent) 15%, transparent); }
-.row.selected { background: color-mix(in srgb, var(--accent) 15%, transparent); }
+.row.odd { background: var(--zebra); }
+.row.header { position: sticky; top: 0; z-index: 1; background: var(--bg-alt); color: var(--muted); font-size: 12px; font-weight: 600; }
+tr.selected, .row.selected, .row.selected:hover { background: var(--accent); color: #fff; }
+tr.selected .muted, .row.selected .muted, tr.selected .link, .row.selected .link { color: inherit; }
+/* Правка в редакторе конфигов: строка и поле подсвечены цветом акцента. */
+tr.edited { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+tr.edited input.edited { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.topic-row { grid-template-columns: 28px minmax(200px, 1fr) 90px 60px 120px 130px 90px 56px; }
+.group-row { grid-template-columns: minmax(220px, 1fr) 150px 90px 110px 110px minmax(120px, 1fr) 56px; }
+.msg-row { grid-template-columns: 50px 90px 190px minmax(80px, 1fr) minmax(160px, 3fr) 50px 70px; }
+.browse { display: flex; flex-direction: column; gap: 10px; height: 100%; }
+.browse-body { display: flex; gap: 12px; flex: 1; min-height: 300px; }
+.browse-body .vlist { flex: 3; }
+.details-pane { flex: 2; border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; overflow: auto; }
+.browse-form { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+.browse-form fieldset { border: 1px solid color-mix(in srgb, var(--fg) 10%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--fg) 3%, transparent); display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; padding: 6px 12px 10px; margin: 0; }
+.browse-form legend { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; padding: 0 4px; }
+.browse-form .field { display: flex; flex-direction: column; gap: 2px; }
+.browse-form .field > span { font-size: 12px; color: var(--muted); }
 
-.confirm { border: 1px solid var(--warn); border-radius: 6px; padding: 8px; display: flex; flex-direction: column; gap: 6px; background: color-mix(in srgb, var(--warn) 8%, transparent); }
+.confirm { border: 1px solid var(--warn); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; background: color-mix(in srgb, var(--warn) 8%, transparent); }
 .confirm label { display: flex; flex-direction: column; gap: 2px; }
-.panel { border: 1px solid var(--border); border-radius: 6px; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
-/* Кнопка прямо в панели («Закрыть» в итоге действия) — обычной ширины, а не растянутая колонкой на всю панель. */
-.panel > button { align-self: flex-start; }
+.panel { border: 1px solid var(--border); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+.producer textarea { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.payload-field { display: flex; flex-direction: column; gap: 4px; }
+.headers-editor { border: 1px solid var(--border); border-radius: 8px; display: flex; flex-direction: column; gap: 4px; }
+.headers-captions span { width: 160px; }
+.assignment ul { list-style: none; padding: 0; margin: 0 0 8px; }
+.details-pane h4 button.link { margin-left: 8px; }
 
 .path-field { display: flex; gap: 6px; align-items: center; }
 .path-field > input:not([type="checkbox"]) { flex: 1; min-width: 0; }
-/* Команда чек-листа готовности: колонка не уже 18em, перенос только по пробелам (слова и идентификаторы
-   не рвутся), слишком длинное слово — прокрутка внутри ячейки. */
-.readiness-fix { min-width: 18em; width: 38%; }
-.readiness-fix pre { white-space: pre-wrap; word-break: normal; overflow-wrap: normal; overflow-x: auto; flex: 1; }
 label.inline { display: inline-flex; gap: 4px; align-items: center; white-space: nowrap; color: var(--muted); }
-.headers-editor { border: 1px solid var(--border); border-radius: 4px; padding: 6px; display: flex; flex-direction: column; gap: 4px; }
-/* Группа полей (TLS): рамка с заголовком; внутренняя сетка совпадает с внешней по колонкам (180px + 12px зазор = 168px + рамка и поля). */
-.form .field-group { grid-column: 1 / -1; min-width: 0; margin: 0; padding: 8px 12px 8px 11px; border: 1px solid var(--border); border-radius: 4px; }
-.field-group > legend { padding: 0 4px; color: var(--muted); font-size: 12px; }
-.field-group > .form { grid-template-columns: 168px minmax(240px, 520px); }
-/* Команда для исправления в чек-листе: переносится по пробелам, а не посреди слова. */
-.panel td pre { word-break: normal; overflow-wrap: anywhere; }
 
-.sidebar-footer { padding: 8px 12px; border-top: 1px solid var(--border); display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 .notice { display: flex; gap: 8px; align-items: center; padding: 6px 12px; border-bottom: 1px solid var(--warn); background: color-mix(in srgb, var(--warn) 10%, transparent); }
 .about-summary { margin: 0; max-width: 720px; line-height: 1.5; }
 .release-notes { max-width: 720px; line-height: 1.5; }
@@ -218,10 +242,11 @@ label.inline { display: inline-flex; gap: 4px; align-items: center; white-space:
 .release-notes p { margin: 4px 0; }
 .release-notes code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; background: var(--bg-alt); border-radius: 3px; padding: 0 3px; }
 .release-notes a { color: var(--accent); }
-.hint-icon { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; padding: 0; margin-left: 2px; border: 1px solid var(--muted); border-radius: 50%; background: none; color: var(--muted); font-size: 10px; line-height: 1; cursor: help; vertical-align: middle; user-select: none; }
+/* Подсказка «?» (§4): значок 16 px без рамки. */
+.hint-icon { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; padding: 0; margin-left: 2px; border: none; border-radius: 50%; background: none; color: var(--muted); cursor: help; vertical-align: middle; user-select: none; }
 .field-label { display: inline-flex; align-items: center; gap: 2px; }
-.hint-icon:hover, .hint-icon:focus-visible { color: var(--accent); border-color: var(--accent); outline: none; }
-.hint-tooltip { z-index: 1000; max-width: 320px; padding: 6px 8px; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15); font-size: 12px; line-height: 1.4; }
+.hint-icon:hover, .hint-icon:focus-visible { color: var(--accent); outline: none; box-shadow: var(--ring); }
+.hint-tooltip { z-index: 1000; max-width: 320px; padding: 6px 8px; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18); font-size: 12px; line-height: 1.4; }
 .hint-tooltip code { font-size: 11px; }
 .help-panel { display: flex; height: 100%; min-height: 0; }
 .help-side { width: 240px; flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; padding: 12px; border-right: 1px solid var(--border); overflow: auto; }
@@ -238,423 +263,44 @@ label.inline { display: inline-flex; gap: 4px; align-items: center; white-space:
 .help-content h1 { font-size: 20px; margin: 4px 0 12px; }
 .help-content h2 { font-size: 16px; margin: 24px 0 8px; scroll-margin-top: 8px; }
 .help-content code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; background: var(--bg-alt); border-radius: 3px; padding: 0 3px; }
-.help-content pre { background: var(--bg-alt); border: 1px solid var(--border); border-radius: 4px; padding: 8px; overflow: auto; }
+.help-content pre { background: var(--bg-alt); border: 1px solid var(--border); border-radius: 6px; padding: 8px; overflow: auto; }
 .help-content pre code { padding: 0; background: none; }
 .help-content a { color: var(--accent); }
-.help-content table { border-collapse: collapse; margin: 8px 0 12px; font-size: 13px; }
-.help-content th, .help-content td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; vertical-align: top; }
-.help-content th { background: var(--bg-alt); font-weight: 600; }
+.llm-badge { font-size: 11px; font-weight: 600; line-height: 16px; padding: 0 4px; border: 1px solid var(--llm-badge); border-radius: 4px; color: var(--llm-badge); }
+/* Белый текст на #2563eb — 5,2:1 в обеих темах. */
+.llm-badge--messages { background: #2563eb; border-color: #2563eb; color: #fff; }
+.form .llm-levels label, .form .llm-mask label { color: var(--fg); margin-right: 12px; }
+.llm-levels, .llm-mask { display: flex; flex-wrap: wrap; gap: 4px 0; align-items: center; }
+.llm-mask { flex-direction: column; align-items: stretch; }
+.llm-mask code { white-space: normal; }
+.mcp-config pre { margin: 4px 0 8px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-alt); white-space: pre-wrap; word-break: break-all; font-size: 12px; }
+.mcp-indicator .icon-svg { color: var(--muted); }
+.mcp-indicator.active .icon-svg { color: var(--accent); }
 
-/* Дерево подключений: состояние подключения и ленивые списки каталога. */
-.conn-state { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; background: var(--border); }
-.conn-state-connecting { background: var(--warn); }
-.conn-state-connected { background: #16a34a; }
-.conn-state-degraded { background: var(--warn); }
-.conn-state-failed { background: var(--danger); }
-.tree-folder-toggle.conn-toggle { flex: none; }
-.tree-conn ~ .tree-error { margin-left: 12px; }
-.tree-note { margin: 2px 0; font-size: 12px; color: var(--muted); }
-/* Строка узла — в одну линию: имя обрезается с «…» (полное — в подсказке), слова не рвутся. Размер, «N партиций» и
-   глиф «—» собраны в .tree-extra справа: она уступает место имени первой (большой коэффициент сжатия), а значение,
-   которое в остаток не помещается целиком, переносится на вторую строку .tree-extra и не видно (высота — одна строка;
-   пустой ::before высотой в строку держит первую строку). Так в узкой панели размеры исчезают, а не обрезаются до «3.2 …». */
-.tree-wrap .tree-folder-toggle { flex: 1 1 auto; }
-.tree-wrap .tree-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tree-extra { display: flex; flex-wrap: wrap; justify-content: flex-end; column-gap: 6px; flex: 0 100000 auto; min-width: 0; height: 1.5em; line-height: 1.5em; overflow: hidden; white-space: nowrap; }
-.tree-extra::before { content: ""; width: 0; height: 1.5em; }
-/* Список объектов — тот же уровень, что и его группа («Таблицы»): своей направляющей и отступа у него нет. */
-.tree ul.tree-objects, .tree-virtual > ul { margin: 0; padding: 0; border-left: none; }
-.tree-virtual ul { list-style: none; }
-button.link.tree-name { text-align: left; color: inherit; }
-label.inline.wrap { white-space: normal; }
-.kind-badge { font-size: 10px; padding: 0 4px; border: 1px solid var(--border); border-radius: 3px; color: var(--muted); }
-/* Обзор: таблица участников шире окна прокручивается сама, а шапка и журнал остаются на месте. */
-.table-scroll { overflow-x: auto; }
-.members-table th, .members-table td { white-space: nowrap; }
-.members-table td.wrap { white-space: normal; min-width: 180px; }
-.warning-red { color: var(--danger-text); font-weight: 600; }
-/* Факты узла, которые не удалось обновить: цифры последнего чтения приглушены (рядом значок ⚠ с причиной). */
-.members-table td.stale { color: var(--muted); }
-/* Причина недоступности узла: видимый текст в ячейке, а не только подсказка; длинное сообщение переносится. */
-.members-table .member-error { max-width: 28ch; font-size: 11px; font-weight: normal; white-space: normal; overflow-wrap: anywhere; }
-
-/* Вкладки объектов каталога (таблица, представление, функция, последовательность). */
-.subtabs { flex-wrap: wrap; }
-.kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0; }
-.kv dt { color: var(--muted); }
-.kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
-.plain-list { list-style: none; margin: 0; padding: 0; }
-.badges { display: inline-flex; flex-wrap: wrap; gap: 4px; }
-/* Невалидный индекс и непроверенное ограничение: цвет плюс слово INVALID / NOT VALID — смысл не держится на одном цвете. */
-tr.invalid { color: var(--danger-text); }
-.kind-badge.invalid { color: var(--danger-text); border-color: var(--danger); }
-.table-scroll td { vertical-align: top; }
-.table-scroll td code { white-space: pre-wrap; overflow-wrap: anywhere; }
-.ddl { display: flex; flex-direction: column; gap: 6px; }
-.ddl pre { max-height: 60vh; overflow: auto; padding: 8px; background: var(--bg-alt); border: 1px solid var(--border); border-radius: 4px; word-break: normal; overflow-wrap: anywhere; }
-/* В списке объектов стрелка раскрытия партиций — отдельная кнопка рядом с именем, а не вся строка. */
-.tree-wrap .tree-folder-toggle.caret-only { flex: none; }
-/* Имя объекта в списке — кнопка, открывающая вкладку: при наведении и фокусе подчёркнуто. */
-button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decoration: underline; }
-
-/* Вкладка инструмента диагностики: шапка, находки и тело. */
-.diag-head { gap: 12px; }
-.diag-head select { max-width: 100%; }
-.diag-title { display: inline-flex; align-items: center; gap: 4px; margin-right: auto; }
-.diag-title h2 { margin: 0; }
-.diag-note { margin: 0; padding: 4px 8px; border-left: 3px solid var(--accent); background: var(--bg-alt); }
-.diag-closed { display: flex; align-items: center; gap: 12px; }
-.diag-closed p { margin: 0; }
-.diag-body { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-/* Отчёт прошлого узла на время загрузки нового. */
-.diag-pending { opacity: 0.6; }
-.diag-unavailable p { margin: 0 0 2px; }
-.findings { border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; }
-/* Заголовок блока — кнопка сворачивания (смоук P4c, R13): выглядит заголовком, стрелка слева. */
-.findings-head { margin: 0; font-size: 13px; }
-.findings-toggle { display: inline-flex; align-items: baseline; gap: 6px; padding: 0; border: none; background: none; font-weight: inherit; text-align: left; }
-.findings-caret { width: 1em; color: var(--muted); }
-.findings-more { margin-top: 6px; }
-.findings > p { margin: 4px 0 0; }
-.findings-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-/* Строгость: цвет полосы слева плюс текстовая метка — смысл не держится на одном цвете. */
-.finding { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px 6px 10px; border-left: 4px solid var(--border); border-radius: 0 4px 4px 0; background: var(--bg-alt); }
-.finding-query { margin: 0; font-size: 0.9em; overflow-wrap: anywhere; }
-.finding-main { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; }
-.finding-sev { font-size: 11px; font-weight: 600; }
-.finding-title { min-width: 0; overflow-wrap: anywhere; }
-.finding details { color: var(--muted); }
-.finding summary { cursor: pointer; }
-.finding details p { margin: 4px 0 0; color: var(--fg); overflow-wrap: anywhere; }
-.finding-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
-.sev-critical { border-left-color: var(--danger); }
-/* Метки подмешивают цвет текста: чистые --danger-text и --warn на сером фоне карточки дают контраст ниже 4,5:1; --accent — так же, для единообразия. */
-.sev-critical .finding-sev { color: color-mix(in srgb, var(--danger-text) 85%, var(--fg)); }
-.sev-warning { border-left-color: var(--warn); }
-.sev-warning .finding-sev { color: color-mix(in srgb, var(--warn) 55%, var(--fg)); }
-.sev-info { border-left-color: var(--accent); }
-.sev-info .finding-sev { color: color-mix(in srgb, var(--accent) 70%, var(--fg)); }
-
-/* Пульс: строка на узел, колонка на показатель; клетка — кнопка перехода, окрашенная худшей находкой узла. */
-.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
-.pulse-table th[scope="col"] { vertical-align: bottom; }
-.pulse-table th[scope="row"], .pulse-table td { white-space: nowrap; }
-.pulse-table td.pulse-cell { padding: 0; }
-.pulse-cell button { display: flex; align-items: baseline; gap: 4px; width: 100%; padding: 4px 8px; border: none; border-radius: 0; background: none; text-align: left; font-variant-numeric: tabular-nums; }
-.pulse-cell button:hover, .pulse-cell button:focus-visible { background: color-mix(in srgb, var(--fg) 8%, transparent); }
-/* Строгость: фон и полоса слева плюс метка (!! / ! / i) и слово для читалки — смысл не держится на одном цвете. */
-.pulse-cell.sev-critical { background: color-mix(in srgb, var(--danger) 16%, transparent); box-shadow: inset 3px 0 0 var(--danger); }
-.pulse-cell.sev-warning { background: color-mix(in srgb, var(--warn) 18%, transparent); box-shadow: inset 3px 0 0 var(--warn); }
-.pulse-cell.sev-info { background: color-mix(in srgb, var(--accent) 12%, transparent); box-shadow: inset 3px 0 0 var(--accent); }
-.sev-mark { font-size: 10px; font-weight: 700; }
-.sev-critical .sev-mark { color: color-mix(in srgb, var(--danger-text) 85%, var(--fg)); }
-.sev-warning .sev-mark { color: color-mix(in srgb, var(--warn) 55%, var(--fg)); }
-.sev-info .sev-mark { color: color-mix(in srgb, var(--accent) 70%, var(--fg)); }
-
-/* Сессии: список с фиксированной высотой строки (виртуализация), заголовок прилипает к верху прокручиваемой области. */
-.sess-view { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-.sess-view > .toolbar input[type="text"] { flex: 1 1 220px; min-width: 160px; max-width: 420px; }
-.sess-setting { margin: 0; }
-.sess-scroll { overflow: auto; max-height: 420px; border: 1px solid var(--border); border-radius: 4px; }
-.sess-table { width: 100%; }
-.sess-head-group { position: sticky; top: 0; z-index: 1; background: var(--bg-alt); }
-.sess-row { display: grid; grid-template-columns: var(--sess-cols); align-items: center; height: 26px; padding: 0 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
-.sess-row > * { overflow: hidden; text-overflow: ellipsis; padding-right: 8px; }
-.sess-head { color: var(--muted); font-weight: 500; }
-.sess-row:not(.sess-head) { cursor: pointer; }
-.sess-row:not(.sess-head):hover { background: var(--bg-alt); }
-.sess-row.selected { background: color-mix(in srgb, var(--accent) 15%, transparent); }
-.sess-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.sess-panel .toolbar h3 { margin: 0 auto 0 0; font-size: 14px; }
-.sess-query { max-height: 40vh; overflow: auto; padding: 8px; background: var(--bg-alt); border: 1px solid var(--border); border-radius: 4px; word-break: normal; overflow-wrap: anywhere; }
-
-/* Блокировки: карточки DDL в очереди и дерево от корней-блокирующих. */
-.locks-view { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-.locks-view h3 { margin: 0 0 6px; font-size: 13px; }
-.locks-view .panel h3 { margin: 0; }
-.lock-cards { display: flex; flex-direction: column; gap: 6px; }
-.lock-card { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px 6px 10px; border-left: 4px solid var(--warn); border-radius: 0 4px 4px 0; background: var(--bg-alt); }
-.lock-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 10px; }
-.lock-query { white-space: pre-wrap; overflow-wrap: anywhere; }
-.lock-tree, .lock-tree ul { list-style: none; margin: 0; padding: 0; }
-.lock-tree ul { margin-left: 8px; padding-left: 16px; border-left: 1px solid var(--border); }
-.lock-node { padding: 3px 0; }
-.lock-detail { display: flex; flex-direction: column; gap: 2px; padding-left: 20px; }
-.lock-toggle { display: inline-block; flex: none; width: 16px; padding: 0; text-align: center; }
-.lock-victims { font-weight: 600; color: color-mix(in srgb, var(--danger-text) 85%, var(--fg)); }
-.lock-wait { font-weight: 600; font-variant-numeric: tabular-nums; }
-
-/* Горизонт, реплики, слоты, failover и health: таблицы и сводки под находками. */
-.diag-view { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-.diag-view section { display: flex; flex-direction: column; gap: 6px; }
-.diag-view h3 { margin: 0; font-size: 13px; }
-.diag-view p { margin: 0; }
-.diag-table td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
-/* Отметки слота не ломаются посреди слова: узкая колонка растягивает таблицу, и появляется прокрутка. */
-.diag-table .kind-badge { white-space: nowrap; }
-/* Вторая строка внутри значения карточки (`.stats div` красит любой div, поэтому это span). */
-.diag-sub { display: block; }
-/* Инструмент «Запросы» (смоук P4c, R13): шапка таблицы с поиском прилипает к верху вкладки, пока таблица на экране. */
-.queries-top { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.queries-top-head { position: sticky; top: 0; z-index: 2; background: var(--bg); padding: 6px 0; border-bottom: 1px solid var(--border); }
-/* Инструмент «Запросы»: текст запроса в ячейке — одной строкой, без разрыва таблицы. */
-.diag-query-cell { max-width: 480px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.diag-query-cell button { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
-/* Содержимое ячейки запроса: значок «Глафира» и пометка «обрезан» не сжимаются, «…» — только у текста запроса. */
-.query-cell { display: flex; align-items: baseline; gap: 4px; min-width: 0; max-width: 100%; }
-.query-cell > .kind-badge, .query-cell > .muted { flex: none; }
-.query-cell > button, .query-cell > .query-cell-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* Снимки pgss (P3b): панель под фильтрами «Запросов», итог сравнения, подпись режима «между снимками». */
-.snapshots-panel { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
-.snapshots-panel h3 { margin: 0; font-size: 1em; }
-.snapshot-compare { display: flex; flex-direction: column; gap: 6px; }
-.snapshot-compare h4 { margin: 6px 0 2px; }
-.snapshot-own, .snapshot-unreadable td:nth-child(2), .snapshot-unreadable td:nth-child(3) { opacity: 0.6; }
-.snapshots-between { margin: 4px 0; }
-.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
-.diag-command { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
-.diag-facts { display: flex; flex-direction: column; gap: 2px; }
-/* Дерево плана (P3): горячие узлы жирным, выбранный — фоном, ошибка оценки — цветом и словом «×N» (цвет не единственный признак). */
-.plan-tree tr.plan-hot { background: color-mix(in srgb, var(--warn) 14%, transparent); }
-.plan-tree tr.plan-hot td:first-child { font-weight: 600; }
-.plan-tree tr.plan-hot .kind-badge:first-child { background: color-mix(in srgb, var(--warn) 30%, transparent); font-weight: 600; }
-/* Узлы рекомендации («Показать узел»): полоса слева и метка «рекомендация»; выбранный из них — ещё и фоном. */
-.plan-tree tr.plan-related td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
-.plan-tree .plan-related-mark { background: color-mix(in srgb, var(--accent) 20%, transparent); }
-.plan-tree tr.plan-selected { background: color-mix(in srgb, var(--accent) 15%, transparent); }
-.plan-node { display: flex; align-items: baseline; gap: 4px; }
-.plan-node .link { text-align: left; }
-.plan-tree .plan-caret { display: inline-block; flex: none; width: 16px; padding: 0; text-align: center; }
-.plan-misestimate { color: color-mix(in srgb, var(--warn) 55%, var(--fg)); font-weight: 600; }
-/* ×100 и больше (и бесконечная ошибка): красный, как у `.lock-victims`; само «×N» говорит о степени и без цвета. */
-.plan-misestimate-severe { color: color-mix(in srgb, var(--danger-text) 85%, var(--fg)); }
-.plan-share { display: inline-block; width: 60px; height: 6px; margin-left: 6px; background: var(--border); vertical-align: middle; }
-.plan-share > span { display: block; height: 100%; background: var(--accent); }
-.plan-summary { display: flex; flex-direction: column; gap: 6px; }
-.plan-summary p { margin: 0; }
-.plan-copy { display: inline-flex; align-items: center; gap: 6px; }
-.plan-summary-part + .plan-summary-part::before { content: " · "; color: var(--muted); }
-.plan-setting { margin-right: 8px; }
-.plan-details pre { max-height: 240px; overflow: auto; }
-/* Рекомендации по плану (P3b): карточки как у находок (полоса важности и метка), команда — моноширинным блоком. */
-.recommendations { display: flex; flex-direction: column; gap: 6px; }
-.recommendations h3 { margin: 0; font-size: 13px; }
-.recommendations > p { margin: 0; }
-.recommend-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.recommend h4 { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
-.recommend p { margin: 0; overflow-wrap: anywhere; }
-.recommend .diag-command pre { flex: 1 1 320px; min-width: 0; }
-.recommend-partitions summary { color: var(--muted); }
-.recommend-partitions p { margin-top: 4px; }
-.hypo-check { width: min(900px, 100%); }
-.hypo-check h4 { margin: 0; font-size: 13px; }
-/* «Индекс использован»: цвет с подмешанным текстом (контраст) и жирное слово — смысл не держится на одном цвете. */
-.hypo-used { color: color-mix(in srgb, var(--ok) 55%, var(--fg)); font-weight: 600; }
-/* Карточка запроса и запуск плана (P3a). */
-.query-text { margin: 0; max-height: 200px; overflow: auto; white-space: pre-wrap; }
-/* Шапка карточки запроса: в узком окне «база · queryid» сжимается с «…» (полностью — в подсказке), строка переносится,
-   а «Обновить» не сжимается и не уезжает за край. */
-.query-head .query-head-id { flex: 1 1 12ch; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.query-head > button { flex: none; }
-.query-overview, .plan-runner, .query-plan { display: flex; flex-direction: column; gap: 12px; }
-/* Обзор карточки: текст запроса и ряд кнопок под ним — с тем же промежутком, что форма консоли (ряд не прилипает к тексту). */
-.query-overview-head { display: flex; flex-direction: column; gap: 12px; }
-/* Подпись флажка GENERIC_PLAN — обычным цветом: от него зависит, что делает «План». */
-.params-form label.generic { color: var(--fg); font-weight: 600; }
-.params-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
-.sparkline { color: var(--accent); margin-right: 12px; }
-.sql-error mark { background: color-mix(in srgb, var(--danger-text) 25%, transparent); color: inherit; outline: 1px solid var(--danger-text); }
-.search-path { display: inline-flex; align-items: center; gap: 4px; }
-.search-path summary { color: var(--muted); cursor: pointer; }
-/* Консоль EXPLAIN (P3a): панели «Запрос» и «Вставить план» смонтированы обе; скрытая не должна перебивать hidden своим display. */
-.explain-panel:not([hidden]) { display: flex; flex-direction: column; gap: 12px; }
-.explain-sql { width: 100%; min-height: 120px; resize: vertical; box-sizing: border-box; }
-/* Предупреждение в тексте вида: чистый --warn на светлом фоне ниже 4,5:1, поэтому подмешивается цвет текста (как у меток находок). */
-.diag-warn { color: color-mix(in srgb, var(--warn) 55%, var(--fg)); font-weight: 600; }
-/* Вердикт и коды health: фон клетки плюс слово или код внутри — смысл не держится на одном цвете. */
-.diag-table td.ok { background: color-mix(in srgb, var(--ok) 18%, transparent); box-shadow: inset 3px 0 0 var(--ok); }
-.diag-table td.bad { background: color-mix(in srgb, var(--danger) 16%, transparent); box-shadow: inset 3px 0 0 var(--danger); }
-.diag-table td.none { background: color-mix(in srgb, var(--muted) 14%, transparent); font-style: italic; }
-/* Матрица health: серый — адрес чужой роли (503 ожидаем), жёлтый — узел вне пула балансировщика. */
-.diag-table td.na { background: color-mix(in srgb, var(--muted) 18%, transparent); box-shadow: inset 3px 0 0 var(--muted); }
-.diag-table td.degraded { background: color-mix(in srgb, var(--warn) 16%, transparent); box-shadow: inset 3px 0 0 var(--warn); }
-.health-table td { white-space: nowrap; font-variant-numeric: tabular-nums; }
-/* Баннер запланированного switchover в шапке обзора: абзац в строке с переносом, без полей абзаца. */
-.toolbar-note { margin: 0; }
-
-/* Профиль ожиданий: график со столбцами по классам, легенда, топы и разрезы. Цвета классов — переменные --wait-<класс>. */
-.waits-view { gap: 12px; }
-.waits-status { display: flex; flex-direction: column; gap: 4px; }
-.waits-status p { margin: 0; }
-.waits-live { font-variant-numeric: tabular-nums; }
-.waits-chart { position: relative; min-width: 0; }
-.waits-plot { width: 100%; min-width: 0; }
-.waits-plot svg { display: block; max-width: 100%; overflow: visible; }
-.waits-axis { stroke: var(--border); stroke-width: 1; }
-.waits-grid { stroke: var(--border); stroke-width: 1; opacity: 0.6; }
-.waits-ytick, .waits-xtick { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
-.waits-hatch { stroke: var(--muted); stroke-width: 1.5; opacity: 0.55; }
-.waits-hit { fill: transparent; }
-.waits-col:hover .waits-hit { fill: color-mix(in srgb, var(--fg) 8%, transparent); }
-.waits-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 6px 0 0; padding: 0; list-style: none; }
-.waits-legend li { display: inline-flex; align-items: center; gap: 6px; }
-.waits-swatch { flex: none; width: 10px; height: 10px; border-radius: 2px; }
-.waits-swatch[data-class="cpu"] { background: var(--wait-cpu); }
-.waits-swatch[data-class="lock"] { background: var(--wait-lock); }
-.waits-swatch[data-class="lwlock"] { background: var(--wait-lwlock); }
-.waits-swatch[data-class="io"] { background: var(--wait-io); }
-.waits-swatch[data-class="ipc"] { background: var(--wait-ipc); }
-.waits-swatch[data-class="client"] { background: var(--wait-client); }
-.waits-swatch[data-class="timeout"] { background: var(--wait-timeout); }
-.waits-swatch[data-class="bufferPin"] { background: var(--wait-bufferPin); }
-.waits-swatch[data-class="extension"] { background: var(--wait-extension); }
-.waits-swatch[data-class="activity"] { background: var(--wait-activity); }
-.waits-swatch[data-class="other"] { background: var(--wait-other); }
-.waits-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
-.waits-groups section { min-width: 0; }
-/* Текст запроса в топе — не длиннее двух строк; целиком он в подсказке. */
-.waits-query { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; max-width: 70ch; overflow: hidden; white-space: normal; overflow-wrap: anywhere; }
-
-/* Выбор в диалоге действия Patroni (кандидат, время): варианты столбцом, причина отказа — рядом с недоступным вариантом. */
-.choice { border: 0; margin: 0; padding: 0; min-width: 0; }
-.choice legend { padding: 0; margin-bottom: 2px; color: var(--muted); }
-.choice label { display: flex; flex-wrap: wrap; gap: 0 6px; align-items: baseline; margin: 3px 0; }
-
-/* «Настройки» (смоук P4c, R9): слева — разделы, справа — выбранный раздел с заголовком и блоками в рамке. Узкое окно:
-   колонки не помещаются (220 + 24 + 440 px) — навигация переносится над разделом (flex-wrap), без горизонтальной прокрутки. */
-.settings-layout { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px 24px; }
-.settings-nav { flex: 0 1 220px; min-width: 0; }
-.settings-nav ul { list-style: none; margin: 0; padding: 0; }
-.settings-nav button { display: block; width: 100%; padding: 4px 8px; border: none; border-left: 3px solid transparent; border-radius: 0 4px 4px 0; background: none; text-align: left; overflow-wrap: anywhere; }
-.settings-nav button:hover { background: var(--bg-alt); }
-.settings-nav button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.settings-nav button[aria-current="page"] { border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, transparent); font-weight: 600; }
-.settings-nav-group { display: block; margin: 12px 0 2px; padding: 0 8px 0 11px; color: var(--muted); font-size: 12px; }
-.settings-nav-group + ul button { padding-left: 19px; }
-.settings-content { flex: 1 1 440px; min-width: 0; }
-.settings-section { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-.settings-section[hidden] { display: none; }
-.settings-section > h3 { margin: 0; font-size: 14px; }
-.settings-section > p, .agent-section > p { margin: 0; }
-.settings-block { min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; display: flex; flex-direction: column; gap: 8px; }
-.settings-block > * { margin-top: 0; margin-bottom: 0; }
-.settings-block h4 { margin: 0; font-size: 13px; }
-.settings-block > button { align-self: flex-start; }
-.agent-section { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-
-/* MCP (спец. P4 §11): индикатор сессий внизу боковой панели и фрагменты конфигураций клиентов в «Настройках». */
-.llm-indicator.active::before { content: "● "; color: var(--accent); }
-.mcp-clients { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; }
-.mcp-snippet pre { margin: 4px 0 8px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-alt); white-space: pre-wrap; word-break: break-all; font-size: 12px; }
-/* Значок «LLM» в дереве и группа «Доступ для LLM» в форме подключения (спец. P4 §11). */
-.llm-badge { font-size: 10px; padding: 0 3px; border: 1px solid var(--accent); border-radius: 3px; color: var(--accent); }
-.llm-badge--data { background: var(--accent-fill); border-color: var(--accent-fill); color: #fff; }
-.llm-notes { display: flex; flex-direction: column; gap: 2px; flex-basis: 100%; }
-.tree-conn .llm-badge { cursor: default; }
-.llm-levels { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; }
-.llm-levels [role="radiogroup"] { display: inline-flex; gap: 12px; }
-
-
-/* Панель «Предложения LLM» (P4b): ограниченный блок на --bg-alt после плана и «Истории» консоли (видно, где панель
-   начинается); слева список — карточки в две строки, справа выбранное предложение — карточка на --bg. Колонка списка — до
-   320 px: короткое время умещается в строку статуса, а первая строка SQL — не короче ~40 символов (смоук P4b, R3); в узком
-   окне колонка сжимается до 180 px и строки переносятся. */
-.llm-proposals { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 8px; padding: 8px 12px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-alt); }
-.llm-proposals-toggle { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; padding: 2px 0; border: none; background: none; font-weight: 600; }
-.llm-proposals-region:empty { display: none; }
-.llm-proposals-empty { margin: 0; }
-.llm-proposals-body { display: grid; grid-template-columns: minmax(180px, 320px) minmax(0, 1fr); gap: 12px; align-items: start; }
-.llm-proposals-list { display: flex; flex-direction: column; gap: 4px; }
-/* Пункт списка — не ссылка: строка «статус · клиент · время» и начало текста; выбранный — фоном карточки и полосой акцента
-   слева (и aria-current), а не одной жирностью. */
-.llm-item { display: flex; flex-direction: column; align-items: stretch; gap: 3px; width: 100%; padding: 5px 8px 5px 6px; border: 1px solid transparent; border-left: 3px solid transparent; border-radius: 4px; background: none; text-align: left; }
-/* Наведение — полшага к фону карточки и рамка, без полосы: выбранный пункт остаётся единственным на чистом --bg. */
-.llm-item:hover { background: color-mix(in srgb, var(--bg) 50%, var(--bg-alt)); border-color: var(--border); }
-.llm-item[aria-current="true"] { background: var(--bg); border-color: var(--border); border-left-color: var(--accent); }
-.llm-item-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; font-size: 12px; }
-.llm-item-client { font-weight: 600; overflow-wrap: anywhere; }
-.llm-item-time { color: var(--muted); white-space: nowrap; }
-.llm-item-sql { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* Чип статуса: тонированный фон, рамка цвета статуса и слово — смысл не держится на одном цвете. Цвет текста подмешивает
-   --fg (как метки находок): не ниже 5,1:1 на --bg и --bg-alt в обеих темах; рамка — не ниже 3:1 (WCAG 1.4.11). */
-.llm-status { display: inline-block; padding: 0 6px; border: 1px solid; border-radius: 8px; font-size: 11px; font-weight: 600; line-height: 16px; white-space: nowrap; }
-.llm-status-new { color: color-mix(in srgb, var(--accent) 60%, var(--fg)); background: color-mix(in srgb, var(--accent) 14%, transparent); border-color: var(--accent); }
-.llm-status-accepted { color: color-mix(in srgb, var(--ok) 55%, var(--fg)); background: color-mix(in srgb, var(--ok) 16%, transparent); border-color: var(--ok); }
-.llm-status-rejected { color: color-mix(in srgb, var(--danger-text) 75%, var(--fg)); background: color-mix(in srgb, var(--danger) 14%, transparent); border-color: var(--danger); }
-/* Карточка предложения: шапка (статус, кто прислал, «Принять» / «Отклонить», второй ряд действий) отделена линией;
-   разделы — заголовок с линией сверху. */
-.llm-proposal { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
-.llm-proposal-head { display: flex; flex-direction: column; gap: 6px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
-.llm-proposal-title { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; }
-.llm-proposal-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; overflow-wrap: anywhere; }
-.llm-proposal-answer { display: flex; flex-wrap: wrap; gap: 8px; }
-.llm-proposal-reason { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-.llm-proposal-section { display: flex; flex-direction: column; gap: 4px; padding-top: 8px; border-top: 1px solid var(--border); }
-.llm-proposal h4 { margin: 0; font-size: 13px; font-weight: 600; }
-.llm-proposal-section p { margin: 0; }
-.llm-text { margin: 0; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
-.llm-reject { display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
-.llm-reject label { display: flex; flex-direction: column; gap: 4px; }
-/* Сравнение текстов: при table-layout: fixed ширины задаёт colgroup — узкие номера строк, остальное — тексту; длинная строка
-   переносится внутри своей колонки. */
-.line-diff { width: 100%; border-collapse: collapse; table-layout: fixed; }
-.line-diff col.diff-num { width: calc(4ch + 12px); }
-.line-diff th { text-align: left; font-weight: 600; padding: 2px 6px; }
-.line-diff td { padding: 0 6px; vertical-align: top; white-space: pre-wrap; overflow-wrap: anywhere; }
-.line-diff td.num { text-align: right; white-space: nowrap; color: var(--muted); user-select: none; }
-.line-diff .diff-del { background: color-mix(in srgb, var(--danger) 14%, transparent); }
-.line-diff .diff-add { background: color-mix(in srgb, var(--ok) 14%, transparent); }
-.line-diff .diff-empty { background: var(--bg-alt); }
-.line-diff .diff-mark { margin-right: 4px; color: var(--muted); }
-/* Итог «Сравнить планы» — свой блок с рамкой; колонки исходного и предложенного плана не шире своей половины: длинное имя
-   узла переносится, а не уходит за край окна. */
-.llm-compare { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; }
-.llm-compare p { margin: 0; }
-.llm-compare-cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
-.llm-compare-side { min-width: 0; overflow-wrap: anywhere; }
-.llm-compare-side + .llm-compare-side { padding-left: 12px; border-left: 1px solid var(--border); }
-.llm-compare-side h5 { margin: 0 0 4px; font-size: 13px; }
-.llm-compare-side p { margin: 4px 0 2px; }
-/* «Заменённые тексты» консоли: время замены (цифрами одной ширины) и «Вернуть: …» в строку; длинная подпись переносится. */
-.llm-replaced h4 { margin: 0 0 4px; font-size: 13px; }
-.llm-replaced li { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
-.llm-replaced-time { flex: none; font-variant-numeric: tabular-nums; }
-.llm-replaced li .link { min-width: 0; overflow-wrap: anywhere; text-align: left; }
-/* «Передать LLM-ассистенту»: строки ожидания (с «Отменить запрос») и уведомления — под кнопками своим рядом, каждая своей
-   строкой; пустой блок ряд не занимает. В консоли и на «Плане» карточки кнопки запроса стоят в ряду формы запуска. */
-.llm-ask-notes { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.llm-ask-notes.shown { flex-basis: 100%; }
-.llm-ask-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
-.llm-ask-notice { margin: 0; overflow-wrap: anywhere; }
-.tab-dot { color: var(--accent); font-size: 10px; line-height: 1; margin-left: 4px; }
-/* Фоновый ассистент (P4c): строка статуса запуска — в блоке строк под «Передать LLM-ассистенту», каждое сообщение своей
-   строкой; полоса акцента и фон --bg-alt, как у пометок видов (.diag-note). Текст — цвета темы на --bg-alt: --fg, --muted,
-   --accent ссылок и .diag-warn предупреждений (контраст AA проверяет scripts/theme-contrast.test.mjs). Время работы — цифрами
-   одной ширины: строка не дрожит каждую секунду. */
-.agent-run { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; padding: 4px 8px 4px 10px; border-left: 3px solid var(--accent); background: var(--bg-alt); }
-.agent-run-lines { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.agent-run-lines p, .agent-run-progress { margin: 0; overflow-wrap: anywhere; }
-.agent-run-progress { font-variant-numeric: tabular-nums; }
-.agent-run-actions { display: flex; flex-wrap: wrap; gap: 2px 12px; }
-.agent-run-answer { align-self: stretch; min-width: 0; }
-.agent-run-summary { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; margin: 2px 0; }
-.agent-run-summary .llm-text { align-self: stretch; }
-.agent-run-summary .llm-text.clamped { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 5; line-clamp: 5; overflow: hidden; }
-.agent-log-dialog { width: min(900px, 100%); }
-.agent-log { max-height: 60vh; overflow: auto; margin: 0; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-alt); white-space: pre-wrap; overflow-wrap: anywhere; }
-/* «Фоновый ассистент» в «Настройках» (P4c): поле с кнопкой рядом, под полем — ошибка и пояснения. Подпись строки — по верху
-   поля (высота строки поля — 24px), чтобы не съезжала, когда под полем появляется текст. Числа — узкими полями. Ошибки полей —
-   --danger-text, как у других ошибок; путь, модель и адрес — моноширинным шрифтом (общее правило полей задаёт font: inherit). */
-.agent-section .form { align-items: start; }
-.agent-section .form > .field-label, .agent-check, .agent-presets { min-height: 24px; }
-.agent-control { display: flex; flex-direction: column; align-items: stretch; min-width: 0; }
-.agent-field { display: flex; gap: 6px; align-items: center; min-width: 0; }
-.agent-field > input:not([type="checkbox"]) { flex: 1; min-width: 0; }
-.agent-field > input.agent-num { flex: 0 1 8em; }
-.agent-field > input.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
-.agent-check { display: flex; align-items: center; }
-.agent-presets { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
-.agent-error { margin: 0; color: var(--danger-text); overflow-wrap: anywhere; }
-.agent-lines p, .agent-note { margin: 0; overflow-wrap: anywhere; }
-.agent-control > .agent-error, .agent-control > .agent-note, .agent-control .agent-lines p, .agent-control > .error-banner { margin-top: 4px; }
-.agent-run-when span { white-space: nowrap; }
+/* Проверка кластера и замечания (G2) */
+.sev { font-size: 12px; line-height: 1; white-space: nowrap; display: inline-flex; align-items: center; }
+.sev .icon-svg { width: 12px; height: 12px; }
+.sev-critical { color: var(--danger); }
+.sev-warning { color: var(--warn); }
+.sev-info { color: var(--accent); }
+.sev-count { margin-left: 2px; color: var(--fg); font-size: 12px; }
+.tree-row.current .sev-count { color: inherit; }
+.check-bar { display: flex; flex-direction: column; gap: 4px; }
+.check-bar p { margin: 0; }
+.check-bar-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.check-bar-count { margin-left: 8px; }
+.finding-group { border: 1px solid var(--border); border-radius: 8px; padding: 4px 10px; margin-bottom: 6px; }
+.finding-group > summary { cursor: pointer; padding: 4px 0; }
+.finding-list { list-style: none; margin: 0; padding: 0; }
+.finding { padding: 6px 0; border-top: 1px solid var(--border); }
+.finding:first-child { border-top: none; }
+.finding p { margin: 2px 0; }
+.finding-head { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.finding-actions { display: flex; gap: 12px; }
+.finding.is-hidden, .finding.is-closed { opacity: 0.65; }
+.note-body { white-space: pre-wrap; overflow-wrap: anywhere; }
+.proposal-change { overflow-wrap: anywhere; }
+.proposal-reject { display: inline-flex; gap: 8px; align-items: center; }
+.health-badge { margin-left: 4px; }
+.health-block { border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
+.health-block h3 { margin: 0 0 4px; font-size: 14px; }

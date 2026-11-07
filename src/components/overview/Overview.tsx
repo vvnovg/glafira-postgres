@@ -15,6 +15,7 @@ import { Glyph } from "../common/Glyph";
 import { hostKeyUnknown } from "../connections/profile";
 import { warningText } from "../connections/TestPanel";
 import { TrustHostKeyDialog } from "../connections/TrustHostKeyDialog";
+import { Icon } from "../common/Icon";
 
 /** Как часто обновляются быстрые факты узлов (спец. P1 §9): топология опрашивается раз в 10 с. */
 const FACTS_REFRESH_MS = 10_000;
@@ -120,7 +121,7 @@ function FactsCells({ connectionId, m, live, active }: { connectionId: string; m
           {asking && q.isError && (
             <>
               {" "}
-              <Glyph className="warn" symbol="⚠" label={t("overview.factsFailed", { error: tr(toAppError(q.error)) })} />
+              <Glyph className="warn-mark" symbol={<Icon name="warning" size={14} />} label={t("overview.factsFailed", { error: tr(toAppError(q.error)) })} />
             </>
           )}
         </td>
@@ -143,7 +144,7 @@ function FactsCells({ connectionId, m, live, active }: { connectionId: string; m
         {stale && (
           <>
             {" "}
-            <Glyph className="warn" symbol="⚠" label={t("overview.factsStale", { error: tr(toAppError(q.error)) })} />
+            <Glyph className="warn-mark" symbol={<Icon name="warning" size={14} />} label={t("overview.factsStale", { error: tr(toAppError(q.error)) })} />
           </>
         )}
       </td>
@@ -195,7 +196,7 @@ function MembersTable({
           {!m.reachable && (
             <>
               {" "}
-              <Glyph className="warn" symbol="⚠" label={t("sidebar.unreachable")} />
+              <Glyph className="warn-mark" symbol={<Icon name="warning" size={14} />} label={t("sidebar.unreachable")} />
               {/* Причина — видимым текстом, а не только в подсказке: её видно без наведения мыши. */}
               {m.error && <div className="member-error muted">{tr(m.error)}</div>}
             </>

@@ -3,6 +3,7 @@ import type { ConnectionKind, ConnectionProfile, HostOverride, HostPort, Patroni
 import { Hint } from "../common/Hint";
 import { ClientCertRows, FieldGroup, PathRow, RowLabel, SecretRow } from "./fields";
 import { emptyPatroni, isValidPort, type SecretField } from "./profile";
+import { Icon } from "../common/Icon";
 
 const TARGETS: TargetServerType[] = ["primary", "standby", "preferStandby", "any"];
 
@@ -70,9 +71,15 @@ export function NodesSection(props: {
                 value={h.port}
                 onChange={(e) => setHosts(p.hosts.map((x, j) => (j === i ? { ...x, port: Number(e.target.value) } : x)))}
               />
-              <button type="button" className="icon" disabled={i === 0} aria-label={t("connections.form.moveUp", { n: i + 1 })} onClick={() => move(i, -1)}>↑</button>
-              <button type="button" className="icon" disabled={i === p.hosts.length - 1} aria-label={t("connections.form.moveDown", { n: i + 1 })} onClick={() => move(i, 1)}>↓</button>
-              <button type="button" className="icon" disabled={p.hosts.length === 1} aria-label={t("connections.form.removeHost", { n: i + 1 })} onClick={() => setHosts(p.hosts.filter((_, j) => j !== i))}>✕</button>
+              <button type="button" className="icon" disabled={i === 0} aria-label={t("connections.form.moveUp", { n: i + 1 })} onClick={() => move(i, -1)}>
+                <Icon name="arrowUp" size={14} />
+              </button>
+              <button type="button" className="icon" disabled={i === p.hosts.length - 1} aria-label={t("connections.form.moveDown", { n: i + 1 })} onClick={() => move(i, 1)}>
+                <Icon name="arrowDown" size={14} />
+              </button>
+              <button type="button" className="icon" disabled={p.hosts.length === 1} aria-label={t("connections.form.removeHost", { n: i + 1 })} onClick={() => setHosts(p.hosts.filter((_, j) => j !== i))}>
+                <Icon name="close" size={14} />
+              </button>
             </span>
           ))}
           <button type="button" className="link" disabled={p.hosts.length >= 16} onClick={() => setHosts([...p.hosts, { host: "", port: 5432 }])}>
@@ -109,7 +116,9 @@ export function NodesSection(props: {
         {pt.urls.map((u, i) => (
           <span key={i} className="path-field">
             <input aria-label={t("connections.form.urlN", { n: i + 1 })} placeholder="https://pg-1:8008" value={u} onChange={(e) => setPatroni({ urls: pt.urls.map((x, j) => (j === i ? e.target.value : x)) })} />
-            <button type="button" className="icon" disabled={pt.urls.length === 1} aria-label={t("connections.form.removeUrl", { n: i + 1 })} onClick={() => setPatroni({ urls: pt.urls.filter((_, j) => j !== i) })}>✕</button>
+            <button type="button" className="icon" disabled={pt.urls.length === 1} aria-label={t("connections.form.removeUrl", { n: i + 1 })} onClick={() => setPatroni({ urls: pt.urls.filter((_, j) => j !== i) })}>
+                <Icon name="close" size={14} />
+              </button>
           </span>
         ))}
         <button type="button" className="link" disabled={pt.urls.length >= 8} onClick={() => setPatroni({ urls: [...pt.urls, ""] })}>
@@ -166,7 +175,9 @@ export function NodesSection(props: {
                 onChange={(e) => setOverride(i, { port: e.target.value ? Number(e.target.value) : null })}
               />
               <input aria-label={t("connections.form.overrideApi", { n: i + 1 })} placeholder="https://10.0.0.1:8008" value={o.apiUrl ?? ""} onChange={(e) => setOverride(i, { apiUrl: e.target.value || null })} />
-              <button type="button" className="icon" aria-label={t("connections.form.removeOverride", { n: i + 1 })} onClick={() => setPatroni({ hostOverrides: pt.hostOverrides.filter((_, j) => j !== i) })}>✕</button>
+              <button type="button" className="icon" aria-label={t("connections.form.removeOverride", { n: i + 1 })} onClick={() => setPatroni({ hostOverrides: pt.hostOverrides.filter((_, j) => j !== i) })}>
+                <Icon name="close" size={14} />
+              </button>
             </span>
           ))}
           <button type="button" className="link" onClick={() => setPatroni({ hostOverrides: [...pt.hostOverrides, { member: "", host: null, port: null, apiUrl: null }] })}>

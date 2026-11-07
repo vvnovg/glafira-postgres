@@ -198,7 +198,7 @@ describe("PatroniActionDialog", () => {
       renderWithClient(dialog(switchover));
       await user.click(await screen.findByRole("button", { name: "Выполнить" }));
       const panel = await screen.findByRole("region", { name: "Ход действия" });
-      expect(within(panel).getAllByRole("listitem")[0]).toHaveTextContent("✓");
+      expect(within(panel).getAllByRole("listitem")[0].querySelector('svg[data-icon="check"]')).not.toBeNull();
       // Диалог остаётся открытым, а подтверждения в нём уже нет: повторить то же действие нельзя.
       expect(screen.queryByRole("button", { name: "Выполнить" })).toBeNull();
     });

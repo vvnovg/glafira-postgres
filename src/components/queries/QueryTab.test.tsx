@@ -227,7 +227,7 @@ describe("QueryTab", () => {
     await screen.findByText("SELECT * FROM shop.customers WHERE id = $1");
     const text = screen.getByRole("group", { name: "Текст запроса" });
     const row = text.nextElementSibling as HTMLElement;
-    expect(within(row).getAllByRole("button").map((b) => b.textContent)).toEqual(["Получить план", "Открыть в консоли", "Копировать запрос", "Скопировать для LLM", "?", "Передать LLM-ассистенту", "?"]);
+    expect(within(row).getAllByRole("button").map((b) => b.textContent)).toEqual(["Получить план", "Открыть в консоли", "Копировать запрос", "Скопировать для LLM", "", "Передать LLM-ассистенту", ""]);
     // Ряд отделён от текста запроса отступом, как тулбары консоли (смоук P4b, R5): текст и ряд — в блоке с промежутком.
     expect(row).toHaveClass("toolbar");
     expect(row.parentElement).toHaveClass("query-overview-head");
@@ -423,7 +423,7 @@ describe("QueryTab", () => {
     const row = screen.getByRole("group", { name: "Текст запроса" }).nextElementSibling as HTMLElement;
     expect(row).toContainElement(link);
     expect(within(row).getAllByRole("button").map((b) => b.textContent)).toEqual([
-      "Получить план", "Открыть в консоли", "Копировать запрос", "Скопировать для LLM", "?", "Передать LLM-ассистенту", "?", "Предложения LLM: 1 — открыть в консоли",
+      "Получить план", "Открыть в консоли", "Копировать запрос", "Скопировать для LLM", "", "Передать LLM-ассистенту", "", "Предложения LLM: 1 — открыть в консоли",
     ]);
     expect(screen.getByRole("button", { name: "Обновить" }).closest(".toolbar")).not.toContainElement(link);
     view.unmount();
