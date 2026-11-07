@@ -7,7 +7,8 @@
 //! служебное событие входа `auth_status`; `init` без списка или любое другое событие — `NoList`, строка не JSON —
 //! `NotStreamJson`: на обоих очередь (`AgentQueue::check_tools`) останавливает запуск сразу (`unsafeTools`,
 //! `unsafe no-init`). Поток кончился без `init` — `Ended`: очередь ждёт выхода процесса не дольше 5 с — вышел сам с кодом
-//! ≠ 0 → `exit`, код 0 или ещё жив → `unsafeTools`. Ответа нет дольше `INIT_TIMEOUT` (и срока запуска) — тоже `unsafeTools`.
+//! ≠ 0 → `exit`, код 0 или ещё жив → `unsafeTools`. Ответа нет дольше min(`INIT_TIMEOUT`, срок запуска): срок вышел —
+//! `timeout`, иначе `unsafeTools`.
 //!
 //! Остановка — SIGTERM группе, через `STOP_GRACE` SIGKILL (Unix) или `TerminateJobObject` (Windows): так останавливаются и
 //! дочерние процессы (шим, `node`). При `unsafeTools` — `AgentProcess::kill`: SIGKILL группе сразу, без SIGTERM и паузы

@@ -340,7 +340,8 @@ ollama ps
 ```bash
 . ~/smoke-p4c/helpers.sh && cancel_watch
 ```
-- [ ] «группа процессов пуста через X с», X ≤ 5.
+- [ ] «группа процессов пуста через X с», X ≤ 6 (агент, который не ответил на `SIGTERM`, получает `SIGKILL` через 5 с; опрос —
+      раз в 0,25 с).
 ```bash
 . ~/smoke-p4c/helpers.sh && runs 1 && agent_group
 ```
@@ -380,6 +381,16 @@ curl -s http://127.0.0.1:11434/api/generate -d '{"model": "qwen3.6-64k:35b-a3b",
 - [ ] «Ошибка фонового ассистента: превышен срок 2 мин» · «Показать журнал» · «Повторить» · «Скопировать строку для чата» ·
       «Отменить запрос».
 - [ ] «Повторить» запускает тот же запрос заново с тем же сроком 2 мин.
+
+**Терминал** (после пункта 4) — если владелец не разрешил две модели в памяти, выгрузить `qwen3.8-64k:27b`:
+```bash
+curl -s http://127.0.0.1:11434/api/generate -d '{"model": "qwen3.8-64k:27b", "keep_alive": 0}' >/dev/null && ollama ps
+```
+- [ ] `qwen3.8-64k:27b` в `ollama ps` нет. Зачем: после каждого запуска, и после срока тоже, Glafira продлевает модель запуска
+      на 10 минут, а шаг 7 на старте запуска (ещё до процесса агента, даже при неверном пути) предзагружает
+      `qwen3.6-64k:35b-a3b` — без выгрузки в памяти оказались бы обе модели. Если владелец разрешил две модели, `qwen3.8` можно
+      оставить: тогда в шаге 7 ожидаемо предупреждение «Ollama может выгрузить qwen3.8-64k:27b, чтобы загрузить
+      qwen3.6-64k:35b-a3b».
 
 ### Шаг 7. Неверный путь
 
@@ -521,7 +532,7 @@ curl -s http://127.0.0.1:11434/api/generate -d '{"model": "qwen3.8-64k:27b", "ke
 
 **Терминал** (пока идёт запуск пункта 4):
 ```bash
-. ~/smoke-p4c/helpers.sh && agent_group && ps eww -p "$(ps -axo pid=,command= | grep -F "$DATA/agent-runs/" | grep -v grep | awk 'NR==1{print $1}')" | tr ' ' '\n' | grep -E '^(ANTHROPIC_(BASE_URL|AUTH_TOKEN|API_KEY|MODEL|CUSTOM_HEADERS)|CLAUDE_CODE_USE_[A-Z]+)='
+. ~/smoke-p4c/helpers.sh && agent_group && ps eww -p "$(ps -axo pid=,command= | grep -F "$DATA/agent-runs/" | grep -v grep | awk 'NR==1{print $1}')" | tr ' ' '\n' | grep -E '^(ANTHROPIC_(BASE_URL|AUTH_TOKEN|API_KEY|MODEL|CUSTOM_HEADERS)|CLAUDE_CODE_USE_[A-Z]+)=' | sed -E 's/^(ANTHROPIC_API_KEY|ANTHROPIC_CUSTOM_HEADERS|CLAUDE_CODE_USE_[A-Z]+)=.*/\1=<скрыто>/'
 ```
 - [ ] Агент — `claude -p --mcp-config …/agent-runs/a….mcp.json --strict-mcp-config --setting-sources project,local …`; в его
       окружении `ANTHROPIC_BASE_URL=http://127.0.0.1:11434`, `ANTHROPIC_AUTH_TOKEN=ollama`,
@@ -655,8 +666,8 @@ sudo rm "/Library/Managed Preferences/io.github.vvnovg.glafira.postgres.plist"
 - [ ] В главе «LLM-ассистенты (MCP)» — разделы «Фоновый ассистент», «Запуски фонового ассистента», «Локальная модель для
       фонового ассистента», «Что видит фоновый агент», между «Сценариями (prompts)» и «Примерами вопросов»; таблиц нет,
       названия кнопок — жирным, как в интерфейсе.
-- [ ] В «Если не работает» — «программа не найдена», «агент не подключился к Glafira», «превышен срок», «агенту доступны не
-      только инструменты Glafira», `bad_ticket`.
+- [ ] В «Если не работает» — «программа не найдена», «код выхода», «агент не подключился к Glafira», «превышен срок»,
+      «агенту доступны не только инструменты Glafira», `bad_ticket`.
 - [ ] В главе «Локальные модели», раздел «Сервер модели», — абзац о тёплой модели после `OLLAMA_KEEP_ALIVE`; ссылка ведёт в
       «Локальную модель для фонового ассистента».
 
