@@ -331,6 +331,7 @@ impl PgServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::{RUN_TOOL_NAMES, TOOL_NAMES};
 
     #[test]
     fn arguments_are_checked() {
@@ -546,6 +547,12 @@ mod tests {
         );
         let c = check_run_text();
         assert!(c.contains("list_connections") && c.contains("OK"), "{c}");
+        // Фоновый агент видит только инструменты запуска: другие имена в его промптах — вызовы мимо.
+        for text in [&t, &c] {
+            for name in TOOL_NAMES.iter().filter(|n| !RUN_TOOL_NAMES.contains(n)) {
+                assert!(!text.contains(*name), "{name}: {text}");
+            }
+        }
         let cyrillic = |s: &str| s.chars().any(|ch| ('\u{0400}'..='\u{04FF}').contains(&ch));
         assert!(!cyrillic(&t) && !cyrillic(&c));
     }

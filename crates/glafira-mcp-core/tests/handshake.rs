@@ -225,6 +225,42 @@ async fn unknown_expired_or_malformed_ticket_is_bad_ticket() {
     }
 }
 
+/// После верного токена — только `run=<билет>`: другой ключ, лишнее после билета и пустой хвост — `bad_ticket`, сессии
+/// нет (сервер отвечает ошибкой). Проверка билета приложения при этом пропустила бы `ticket()`.
+#[tokio::test]
+async fn anything_but_a_lone_ticket_after_the_token_is_bad_ticket() {
+    let t = ticket();
+    for tail in [
+        format!("foo={t}"),
+        format!("{RUN_PREFIX}{t} x"),
+        format!("{RUN_PREFIX}{t} "),
+        format!(" {RUN_PREFIX}{t}"),
+        t.clone(),
+        String::new(),
+    ] {
+        let (mut a, mut b) = tokio::io::duplex(1024);
+        let srv = tokio::spawn(async move {
+            let check = run_check(Arc::new(AtomicBool::new(true)));
+            handshake::server(&mut b, "t0k3n", &check).await
+        });
+        a.write_all(format!("{PREFIX}t0k3n {tail}\n").as_bytes())
+            .await
+            .unwrap();
+        let mut answer = String::new();
+        a.read_to_string(&mut answer).await.unwrap();
+        assert_eq!(
+            answer,
+            format!("ERR bad_ticket {BAD_TICKET_MESSAGE}\n"),
+            "{tail:?}"
+        );
+        let r = srv.await.unwrap();
+        assert!(
+            matches!(&r, Err(HandshakeError::Rejected { code, .. }) if code == "bad_ticket"),
+            "{tail:?}: {r:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn wrong_token_is_bad_token_and_the_ticket_is_not_checked() {
     let asked = Arc::new(AtomicUsize::new(0));

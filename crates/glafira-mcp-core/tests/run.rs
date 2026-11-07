@@ -2,7 +2,7 @@
 //! - билет в рукопожатии через настоящий сокет (pipe на Windows);
 //! - `SessionView.run` и `SessionCtx::run`;
 //! - `tools/list` и `prompts/list` через `Gate`;
-//! - отказ `check_call` — модели и в журнал;
+//! - отказ `check_call` — модели и в журнал; порядок `access` → `check_call` → лимит частоты;
 //! - `run` в журнале и в списке сессий;
 //! - подсказка кеша списка;
 //! - «Отключить клиента» не трогает сессию запуска.
@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use glafira_mcp_core::endpoint::{self, Endpoint};
 use glafira_mcp_core::handshake::{self, BAD_TICKET_MESSAGE, HandshakeError, TICKET_LEN};
+use glafira_mcp_core::limits::CALLS_PER_MINUTE;
 use glafira_mcp_core::{
     AuditLog, CallMeta, CallOk, Gate, GatewayOptions, McpServerHandle, SessionAccess, SessionCtx,
     SessionFactory, SessionView, ToolError,
@@ -48,8 +49,10 @@ fn ticket() -> String {
 
 /// Билет `ticket()` даёт запуск `RUN`, пока он жив. Сессии запуска видны только `work` и только подключение `c1`;
 /// prompts им не видны. Остальные сессии видят всё.
+/// `pending` — клиент ещё не подтверждён (`access` отвечает `Pending`).
 struct RunGate {
     live: AtomicBool,
+    pending: AtomicBool,
     seen: Mutex<Vec<SessionView>>,
     checks: Mutex<Vec<(String, Option<String>)>>,
 }
@@ -58,6 +61,7 @@ impl RunGate {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             live: AtomicBool::new(true),
+            pending: AtomicBool::new(false),
             seen: Mutex::default(),
             checks: Mutex::default(),
         })
@@ -67,7 +71,11 @@ impl RunGate {
 impl Gate for RunGate {
     fn access(&self, s: &SessionView) -> SessionAccess {
         self.seen.lock().unwrap().push(s.clone());
-        SessionAccess::Approved
+        if self.pending.load(Ordering::SeqCst) {
+            SessionAccess::Pending
+        } else {
+            SessionAccess::Approved
+        }
     }
 
     fn connection_name(&self, id: &str) -> Option<String> {
@@ -460,6 +468,48 @@ async fn scope_refusals_reach_the_model_and_the_audit() {
         e.handle.sessions()[0].calls,
         1,
         "отказ области — вне счёта вызовов сессии"
+    );
+}
+
+/// Уточнение 8 задач 2–4: отказ `check_call` не тратит лимит частоты — больше `CALLS_PER_MINUTE` отказов подряд, а
+/// следующий разрешённый вызов проходит.
+#[tokio::test]
+async fn scope_refusals_do_not_spend_the_rate_limit() {
+    let e = env().await;
+    let run = client(&e.ep, "qwen-code", Some(&ticket())).await;
+    let refusals = CALLS_PER_MINUTE + 10;
+    for i in 0..refusals {
+        assert_eq!(
+            err(&call(&run, "work", json!({"connectionId": "c2"})).await),
+            OUTSIDE,
+            "отказ {i}"
+        );
+    }
+    ok(call(&run, "work", json!({"connectionId": "c1"})).await);
+    assert_eq!(e.gate.checks.lock().unwrap().len() as u32, refusals + 1);
+    assert_eq!(e.handle.sessions()[0].calls, 1);
+}
+
+/// Уточнение 8 задач 2–4: `check_call` зовётся только после `access` = `Approved` — неподтверждённый клиент получает
+/// `client_not_approved`, а не отказ области.
+#[tokio::test]
+async fn check_call_waits_for_the_approval() {
+    let e = env().await;
+    e.gate.pending.store(true, Ordering::SeqCst);
+    let run = client(&e.ep, "qwen-code", Some(&ticket())).await;
+    for args in [json!({"connectionId": "c2"}), json!({"connectionId": "c1"})] {
+        let msg = err(&call(&run, "work", args).await);
+        assert!(msg.starts_with("client_not_approved: "), "{msg}");
+    }
+    assert!(
+        e.gate.checks.lock().unwrap().is_empty(),
+        "до подтверждения область не проверяется"
+    );
+    e.gate.pending.store(false, Ordering::SeqCst);
+    ok(call(&run, "work", json!({"connectionId": "c1"})).await);
+    assert_eq!(
+        *e.gate.checks.lock().unwrap(),
+        [("work".to_string(), Some("c1".to_string()))]
     );
 }
 

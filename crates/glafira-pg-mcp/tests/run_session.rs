@@ -23,8 +23,10 @@ use glafira_pg_mcp::server::{
     INSTRUCTIONS, INSTRUCTIONS_RUN, PgFactory, RUN_TOOL_NAMES, TOOL_NAMES,
 };
 use p4b::{Client, call, err, ok};
-use rmcp::ServiceExt;
-use rmcp::model::{ClientCapabilities, ClientConfig, GetPromptRequestParams, Implementation, Tool};
+use rmcp::model::{
+    ClientCapabilities, ClientConfig, ErrorCode, GetPromptRequestParams, Implementation, Tool,
+};
+use rmcp::{ErrorData, ServiceError, ServiceExt};
 use serde_json::json;
 
 const RUN: &str = "a1b2c3d";
@@ -162,9 +164,10 @@ async fn background_run_has_its_instructions_and_no_prompts() {
         .await
         .unwrap_err();
     assert!(
-        e.to_string()
-            .contains("Prompts are not available in this session"),
-        "{e}"
+        matches!(&e, ServiceError::McpError(ErrorData { code, message, .. })
+            if *code == ErrorCode::INVALID_PARAMS
+                && message.contains("Prompts are not available in this session")),
+        "{e:?}"
     );
     let chat = session(Arc::new(RunFake::default()), None).await;
     assert_eq!(
@@ -261,6 +264,8 @@ fn run_instructions_name_only_the_run_tools() {
     for t in TOOL_NAMES.iter().filter(|t| !RUN_TOOL_NAMES.contains(t)) {
         assert!(!INSTRUCTIONS_RUN.contains(*t), "{t}");
     }
+    // Предел вызовов запуска (40) модели не называется: его держит Glafira (уточнение 15 задач 2–4).
+    assert!(!INSTRUCTIONS_RUN.contains("40"), "{INSTRUCTIONS_RUN}");
     assert!(
         !INSTRUCTIONS_RUN
             .chars()
