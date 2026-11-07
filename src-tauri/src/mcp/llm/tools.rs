@@ -450,18 +450,32 @@ fn origin(st: &AppState, p: &ProposeParams) -> Result<Origin, ToolError> {
     })
 }
 
+/// Хвост подсказок «предложи в прямой форме» для сессии фонового запуска: прямая форма ей запрещена (`not_allowed`,
+/// P4c §5.2), вызов был бы потрачен впустую — модель ничего не предлагает и объясняет это в итоге.
+const NOT_IN_A_RUN: &str = "this request cannot be proposed in a background run: propose nothing and explain why in the summary";
+
 /// Вид исходного запроса (§8.2: предложение — того же вида). SQL модели и текст pgss уже прошли ту же проверку; снимок
 /// пользователя мог её не пройти (консоль принимает и другое, а текст pgss карточки бывает нормализован так, что не
 /// разбирается и после приведений `PlanText`) — тогда модель предлагает в прямой форме, со своим текстом исходного
-/// запроса.
-fn original_kind(plan: &PlanText, request_id: Option<&str>) -> Result<StatementKind, ToolError> {
+/// запроса; сессия фонового запуска (`run`) — не предлагает ничего (`NOT_IN_A_RUN`).
+fn original_kind(
+    plan: &PlanText,
+    request_id: Option<&str>,
+    run: bool,
+) -> Result<StatementKind, ToolError> {
     check_model_sql(&plan.text, Purpose::Explain)
         .map(|c| c.kind)
         .map_err(|e| plan.restore(e))
         .map_err(|e| match request_id {
             Some(id) => invalid_argument(format!(
-                "The original query of optimization request {id} is not accepted by the gateway ({}: {}): propose with connectionId and sql (the original query with values) instead of requestId",
-                e.code, e.message
+                "The original query of optimization request {id} is not accepted by the gateway ({}: {}): {}",
+                e.code,
+                e.message,
+                if run {
+                    NOT_IN_A_RUN
+                } else {
+                    "propose with connectionId and sql (the original query with values) instead of requestId"
+                }
             )),
             None => e,
         })
@@ -518,14 +532,25 @@ fn probe_params(n: usize, values: &[Option<String>], version_num: i32) -> Option
 }
 
 /// Узел снимка запроса пропал (смена топологии): запасного «лидера» нет — предложение к запросу привязано к узлу, на
-/// котором снимали план; модели советуют прямую форму (`connectionId` и `sql`).
-fn direct_form_hint(e: ToolError, request_id: Option<&str>, member: Option<&str>) -> ToolError {
+/// котором снимали план; модели советуют прямую форму (`connectionId` и `sql`), сессии фонового запуска (`run`) —
+/// ничего не предлагать (`NOT_IN_A_RUN`).
+fn direct_form_hint(
+    e: ToolError,
+    request_id: Option<&str>,
+    member: Option<&str>,
+    run: bool,
+) -> ToolError {
     match (request_id, member) {
         (Some(id), Some(m)) => err(
             &e.code,
             format!(
-                "{} (the node {m} of optimization request {id} is not available now: propose in the direct form with connectionId and sql instead of requestId)",
-                e.message
+                "{} (the node {m} of optimization request {id} is not available now: {})",
+                e.message,
+                if run {
+                    NOT_IN_A_RUN
+                } else {
+                    "propose in the direct form with connectionId and sql instead of requestId"
+                }
             ),
         ),
         _ => e,
@@ -548,6 +573,7 @@ async fn propose(
     if run_request(st, run.as_deref(), asked)?.is_some() && asked.is_none() {
         return Err(not_in_run());
     }
+    let in_run = run.is_some();
     let o = origin(st, &p)?;
     // До сервера — те же проверки, что у explain_query и hypothetical_index (типизированные литералы — приведения,
     // `PlanText`); позиции — в тексте модели (§16.17).
@@ -557,7 +583,7 @@ async fn propose(
     let indexes = proposal_indexes(p.indexes.as_deref().unwrap_or_default())?;
     if let Original::Text(plan) = &o.original {
         same_kind(
-            original_kind(plan, o.request_id.as_deref())?,
+            original_kind(plan, o.request_id.as_deref(), in_run)?,
             rewritten.kind,
         )?;
     }
@@ -569,7 +595,7 @@ async fn propose(
     }
     ensure_open(st, &o.connection_id).await?;
     let member = member_or_leader(st, &o.connection_id, o.member.as_deref())
-        .map_err(|e| direct_form_hint(e, o.request_id.as_deref(), o.member.as_deref()))?;
+        .map_err(|e| direct_form_hint(e, o.request_id.as_deref(), o.member.as_deref(), in_run))?;
     let original = match o.original {
         Original::Text(plan) => plan.text,
         Original::QueryId(q) => {
@@ -581,7 +607,7 @@ async fn propose(
                 Asked::QueryId(q),
             )
             .await?;
-            same_kind(original_kind(&source.plan, None)?, rewritten.kind)?;
+            same_kind(original_kind(&source.plan, None, in_run)?, rewritten.kind)?;
             source.plan.text
         }
     };
@@ -932,13 +958,16 @@ mod tests {
         assert!(rec.0.lock().unwrap().is_empty(), "событий нет");
     }
 
-    /// Узел снимка пропал: нет запасного «лидера», модели советуют прямую форму; без запроса текст не меняется.
+    /// Узел снимка пропал: нет запасного «лидера», модели советуют прямую форму; без запроса текст не меняется. Сессии
+    /// фонового запуска прямая форма запрещена (`not_allowed`) — ей советуют ничего не предлагать и сказать почему в
+    /// итоге.
     #[test]
     fn a_missing_snapshot_member_points_to_the_direct_form() {
         let e = direct_form_hint(
             invalid_argument("Unknown member pg-1"),
             Some("r3a9f1c"),
             Some("pg-1"),
+            false,
         );
         assert_eq!(e.code, "invalid_argument");
         assert!(
@@ -947,8 +976,22 @@ mod tests {
             "{}",
             e.message
         );
-        let e = direct_form_hint(invalid_argument("Unknown member pg-1"), None, None);
+        let e = direct_form_hint(invalid_argument("Unknown member pg-1"), None, None, false);
         assert_eq!(e.message, "Unknown member pg-1");
+        let e = direct_form_hint(
+            invalid_argument("Unknown member pg-1"),
+            Some("r3a9f1c"),
+            Some("pg-1"),
+            true,
+        );
+        assert_eq!(e.code, "invalid_argument");
+        assert_eq!(
+            e.message,
+            format!(
+                "Unknown member pg-1 (the node pg-1 of optimization request r3a9f1c is not available now: {NOT_IN_A_RUN})"
+            )
+        );
+        assert!(!e.message.contains("connectionId"), "{}", e.message);
     }
 
     fn size_of(v: &Value) -> usize {
@@ -1433,6 +1476,30 @@ mod tests {
         assert_eq!(e.code, "invalid_argument");
         assert!(
             e.message.contains(&r.id) && e.message.contains("connectionId and sql"),
+            "{}",
+            e.message
+        );
+        // Сессия фонового запуска: прямая форма ей запрещена — ничего не предлагать, сказать почему в итоге.
+        st.tickets.issue(RunScope {
+            run_id: "a1".into(),
+            connection_id: Some("c1".into()),
+            request_id: Some(r.id.clone()),
+        });
+        let e = handle(
+            &st,
+            LlmOp::Propose {
+                params: propose_params(&r.id, "SELECT 1"),
+                client: None,
+                run: Some("a1".into()),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.code, "invalid_argument");
+        assert!(
+            e.message.contains(&r.id)
+                && e.message.ends_with(NOT_IN_A_RUN)
+                && !e.message.contains("connectionId"),
             "{}",
             e.message
         );
