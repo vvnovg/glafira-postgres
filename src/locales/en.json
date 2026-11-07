@@ -306,7 +306,7 @@
       "logMissing": "The log of background run {{id}} is not available",
       "busy": "Wait for the background run to finish",
       "noModel": "No model to unload: choose the model of the background assistant",
-      "ollamaNotLocal": "Glafira manages only a local Ollama (localhost, 127.0.0.1 or ::1)",
+      "notManaged": "Glafira does not manage the model: “Keep the model in memory” is 0, Claude Code runs without Ollama, or the Ollama address is not local",
       "ollamaUnavailable": "Ollama did not answer: {{error}}"
     }
   },

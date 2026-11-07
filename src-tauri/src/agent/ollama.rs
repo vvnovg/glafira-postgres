@@ -212,11 +212,19 @@ fn logged<T>(what: &str, r: reqwest::Result<T>) -> Option<T> {
         .ok()
 }
 
-/// Модель, которой Glafira управляет (§6.1): «Держать модель в памяти» не 0, модель задана, пресет ходит в Ollama (не
-/// Claude Code без Ollama), Ollama локальная, модель скачана (`/api/tags`) и не облачная (тег `cloud` или `remote_host`
-/// в `/api/show`).
+/// Glafira управляет моделью Ollama по этим настройкам (§6.1): «Держать модель в памяти» не 0, пресет ходит в Ollama (не
+/// Claude Code без Ollama), Ollama локальная. Одно правило для тёплой модели (`managed`) и «Выгрузить модель»
+/// (`unload_model`); то же условие у интерфейса — `unloadOff` в `agentForm.ts`.
+pub fn manages(s: &AgentSettings) -> bool {
+    s.keep_warm_min != 0
+        && !(s.preset == Preset::Claude && !s.claude.via_ollama)
+        && is_loopback(&s.ollama_url)
+}
+
+/// Модель, которой Glafira управляет (§6.1): `manages`, модель задана, скачана (`/api/tags`) и не облачная (тег `cloud`
+/// или `remote_host` в `/api/show`).
 async fn managed(s: &AgentSettings, model: Option<&str>) -> Option<(OllamaClient, String)> {
-    if s.keep_warm_min == 0 || (s.preset == Preset::Claude && !s.claude.via_ollama) {
+    if !manages(s) {
         return None;
     }
     let model = model.map(str::trim).filter(|m| !m.is_empty())?;
@@ -347,11 +355,15 @@ pub async fn list_models(s: &AgentSettings) -> AgentModels {
     }
 }
 
-/// «Выгрузить модель» (§6.2): модель фонового ассистента — `keep_alive: 0`. Неактивна, пока идёт запуск. Модели нет в
-/// памяти (`/api/ps`) или она облачная — выгружать нечего. `home` — домашний каталог (модель Qwen Code по умолчанию).
+/// «Выгрузить модель» (§6.2): модель фонового ассистента — `keep_alive: 0`. Неактивна, пока идёт запуск, и когда Glafira
+/// моделью не управляет (`manages`: тогда в Ollama не ходит вовсе). Модели нет в памяти (`/api/ps`) или она облачная —
+/// выгружать нечего. `home` — домашний каталог (модель Qwen Code по умолчанию).
 pub async fn unload_model(st: &AppState, s: &AgentSettings, home: Option<&Path>) -> AppResult<()> {
     if st.agent.is_busy() {
         return Err(busy());
+    }
+    if !manages(s) {
+        return Err(not_managed());
     }
     let model = {
         // Модель Qwen Code по умолчанию — чтение его настроек (блокирующий вызов).
@@ -362,7 +374,7 @@ pub async fn unload_model(st: &AppState, s: &AgentSettings, home: Option<&Path>)
             .flatten()
             .ok_or_else(no_model)?
     };
-    let client = OllamaClient::new(&s.ollama_url).ok_or_else(not_local)?;
+    let client = OllamaClient::new(&s.ollama_url).ok_or_else(not_managed)?;
     let loaded = client.ps().await.map_err(|e| unavailable(&e))?;
     if is_cloud(&model, &Value::Null) || !loaded.iter().any(|l| same_model(&l.name, &model)) {
         return Ok(());
@@ -388,11 +400,11 @@ fn no_model() -> AppError {
     )
 }
 
-fn not_local() -> AppError {
+fn not_managed() -> AppError {
     app_err!(
         ErrorCode::FeatureUnavailable,
-        "errors.agent.ollamaNotLocal",
-        "Glafira manages only a local Ollama (localhost, 127.0.0.1 or ::1)"
+        "errors.agent.notManaged",
+        "Glafira does not manage the model: “Keep the model in memory” is 0, Claude Code runs without Ollama, or the Ollama address is not local"
     )
 }
 
@@ -728,6 +740,69 @@ mod tests {
         );
     }
 
+    /// Других моделей в памяти несколько: в `evict` — через запятую, в порядке `/api/ps` (строку разбирает
+    /// `agentText.ts`); имена, которые не прошли бы `valid_model`, не попадают.
+    #[tokio::test(start_paused = true)]
+    async fn several_other_models_are_named_with_commas() {
+        const THIRD: &str = "llama3.2:3b";
+        let fake = fake(|req, _| match req {
+            "GET /api/tags" => ok(json!({ "models": [{ "name": MODEL }] })),
+            "POST /api/show" => ok(json!({})),
+            "GET /api/ps" => ok(json!({
+                "models": [{ "name": OTHER }, { "name": "bad name" }, { "name": THIRD }]
+            })),
+            _ => ok(json!({ "done": true })),
+        })
+        .await;
+        let (_d, settings) = settings_with(&fake.url, |_| {});
+        let w = OllamaWarmth::new(settings);
+        let warnings = within_real_limit("before_run", w.before_run(Some(MODEL))).await;
+        assert_eq!(warnings, [format!("evict {OTHER},{THIRD} {MODEL}")]);
+    }
+
+    /// Ошибка Ollama (код 500, закрытый порт) на старте запуска — только в журнал приложения (§6.1): запуск идёт без
+    /// предупреждений и без предзагрузки.
+    #[tokio::test(start_paused = true)]
+    async fn ollama_errors_before_a_run_give_no_warnings() {
+        for broken in ["GET /api/tags", "POST /api/show", "GET /api/ps"] {
+            let fake = fake(move |req, _| match req {
+                r if r == broken => Reply::Json(500, json!({ "error": "boom" })),
+                "GET /api/tags" => ok(json!({ "models": [{ "name": MODEL }] })),
+                "POST /api/show" => ok(json!({})),
+                "GET /api/ps" => ok(json!({ "models": [{ "name": OTHER }] })),
+                _ => ok(json!({ "done": true })),
+            })
+            .await;
+            let (_d, settings) = settings_with(&fake.url, |_| {});
+            let w = OllamaWarmth::new(settings);
+            let warnings = within_real_limit(broken, w.before_run(Some(MODEL))).await;
+            assert!(warnings.is_empty(), "{broken}: {warnings:?}");
+            settle().await;
+            assert!(
+                fake.seen.called(broken),
+                "{broken}: {:?}",
+                fake.seen.calls()
+            );
+            assert!(
+                fake.seen.generated().is_empty(),
+                "{broken}: {:?}",
+                fake.seen.calls()
+            );
+            w.after_run(Some(MODEL)).await;
+        }
+        // Ollama не запущена: порт 9 закрыт (ни тестовый сервер, ни настоящая Ollama). Часы держит страж фальшивой
+        // Ollama, чтобы сроки reqwest не «истекли» сами.
+        let _frozen = fake(|_, _| ok(json!({}))).await;
+        let (_d, down) = settings_with("http://127.0.0.1:9", |_| {});
+        let w = OllamaWarmth::new(down);
+        assert!(
+            within_real_limit("refused", w.before_run(Some(MODEL)))
+                .await
+                .is_empty()
+        );
+        within_real_limit("refused", w.after_run(Some(MODEL))).await;
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_loaded_model_is_not_preloaded_and_gives_no_warning() {
         let fake = fake(|req, _| match req {
@@ -1000,10 +1075,20 @@ mod tests {
             ..s.clone()
         };
         assert_eq!(list_models(&remote).await.source, ModelsSource::None);
-        assert_eq!(
-            unload_model(&st, &remote, None).await.unwrap_err().key,
-            "errors.agent.ollamaNotLocal"
-        );
+        // Glafira моделью не управляет (0 минут, Claude Code без Ollama, удалённый адрес) — отказ без запросов к Ollama,
+        // как и у тёплой модели (`manages`).
+        fake.seen.clear();
+        let keep_off = AgentSettings {
+            keep_warm_min: 0,
+            ..s.clone()
+        };
+        for off in [&keep_off, &direct, &remote] {
+            assert_eq!(
+                unload_model(&st, off, None).await.unwrap_err().key,
+                "errors.agent.notManaged"
+            );
+        }
+        assert!(fake.seen.calls().is_empty(), "{:?}", fake.seen.calls());
         let no_model = AgentSettings {
             claude: ClaudeSettings {
                 model: String::new(),

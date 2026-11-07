@@ -2368,6 +2368,50 @@ mod tests {
         );
     }
 
+    /// «Выгрузить модель» неактивна, пока идёт запуск (§6.2): бэкенд — последняя защита, отказ `busy` до обращения к
+    /// Ollama (ревью задачи 7, замечание 1). Ollama здесь — порт, который никто не обслуживает: соединений быть не должно.
+    #[tokio::test(start_paused = true)]
+    async fn unloading_the_model_waits_for_the_run() {
+        let ollama = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        ollama.set_nonblocking(true).unwrap();
+        let s = AgentSettings {
+            ollama_url: format!("http://127.0.0.1:{}", ollama.local_addr().unwrap().port()),
+            ..harness().st.settings.agent()
+        };
+        assert!(
+            crate::agent::ollama::manages(&s),
+            "иначе отказ был бы не busy"
+        );
+        // Запуск ждёт событие `init` (`starting`) и запуск работает (`running` — с первого вызова).
+        for (steps, status) in [
+            (vec![Step::NoInit, Step::Hang], RunStatus::Starting),
+            (
+                vec![
+                    Step::Connect,
+                    Step::Call("get_optimization_request"),
+                    Step::Hang,
+                ],
+                RunStatus::Running,
+            ),
+        ] {
+            let h = harness();
+            h.fake.script(steps);
+            let run = h.q().start(&request(&h)).unwrap();
+            until(&h, &run.id, |r| r.status == status).await;
+            let e = crate::agent::ollama::unload_model(&h.st, &s, None)
+                .await
+                .unwrap_err();
+            assert_eq!(e.key, "errors.agent.busy", "{status:?}");
+            h.q().stop(&run.id).unwrap();
+            until(&h, &run.id, done).await;
+        }
+        assert_eq!(
+            ollama.accept().map_err(|e| e.kind()).unwrap_err(),
+            io::ErrorKind::WouldBlock,
+            "в Ollama не ходили"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn stop_cancels_the_run_and_keeps_the_request_waiting() {
         let h = harness();
