@@ -3,27 +3,15 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../../../api/client";
 import type { AgentRun } from "../../../api/types";
-import { formatDay, formatDuration, formatTimestamp, formatUsd } from "../../../lib/format";
+import { formatDuration, formatTimestamp } from "../../../lib/format";
 import { AGENT_RUNS_KEY, isActive, type RunsState } from "../../../lib/useAgentRuns";
 import { ErrorBanner } from "../../common/ErrorBanner";
 import { AgentSummary } from "./AgentSummary";
+import { RunCost } from "./RunCost";
 import { agentLabel, runResultText, runSeconds } from "./agentText";
 
 /** Сколько последних запусков показывает подраздел (спец. P4c §8.3). */
 export const RUNS_SHOWN = 20;
-
-/**
- * Стоимость запуска: точная, как её сообщил CLI (Claude Code без Ollama), — как есть; оценка облачного запуска через Ollama
- * по ценам Ollama Cloud (смоук P4c, sf-T6) — «≈ 0,01 $» с подсказкой о дне цен таблицы (и «вне пика»).
- */
-function RunCost({ run }: { run: AgentRun }) {
-  const { t } = useTranslation();
-  if (run.costUsd != null) return <>{formatUsd(run.costUsd)}</>;
-  const e = run.costEstimate;
-  if (!e) return null;
-  const hint = e.offPeak ? "settings.mcp.agent.runs.costEstimateHintOffPeak" : "settings.mcp.agent.runs.costEstimateHint";
-  return <span title={t(hint, { date: formatDay(e.pricesDate) })}>{t("settings.mcp.agent.runs.costEstimate", { cost: formatUsd(e.usd, "estimate") })}</span>;
-}
 
 /**
  * «Запуски» подраздела «Фоновый ассистент» (спец. P4c §8.3): последние 20 запусков всех подключений, новые первыми —

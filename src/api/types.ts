@@ -2031,6 +2031,9 @@ export interface McpAuditEntry {
   reason?: string;
   exitCode?: number;
   proposals?: number;
+  /** Стоимость запуска, $: точная у Claude Code без Ollama; оценка по ценам Ollama Cloud — с `costEstimated: true`. */
+  costUsd?: number;
+  costEstimated?: boolean;
 }
 
 /** Фрагменты конфигураций MCP-клиентов (`get_mcp_client_configs`): путь — к установленному приложению (AppImage — `$APPIMAGE`). */

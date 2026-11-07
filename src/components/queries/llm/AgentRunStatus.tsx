@@ -7,6 +7,7 @@ import { useShownProposals } from "../../../state/shownProposals";
 import { AgentLogDialog } from "../../mcp/agent/AgentLogDialog";
 import { AgentSummary } from "../../mcp/agent/AgentSummary";
 import { failReasonText, warningText } from "../../mcp/agent/agentText";
+import { hasCost, RunCost } from "../../mcp/agent/RunCost";
 
 export interface AgentRunStatusProps {
   /** Запрос источника: ждущий или (после ответа) последний. */
@@ -91,7 +92,7 @@ function progressText(run: AgentRun, now: number, t: TFunction): string {
 /**
  * Строка статуса фонового ассистента под «Передать LLM-ассистенту» (спец. P4c §8.1) — в консоли и в карточке. Каждое
  * сообщение — своей строкой (смоук P4b, Z1): фаза, предупреждения Ollama, «Ассистент прислал N предложений» и итог
- * копирования — в живой области; ход работы (время, вызовы, инструмент) — отдельной строкой вне её, чтобы скринридер не
+ * копирования — в живой области; у кончившегося запуска к его итогу через « · » дописана стоимость (`RunCost`); ход работы (время, вызовы, инструмент) — отдельной строкой вне её, чтобы скринридер не
  * читал его каждую секунду. Действия — ссылками отдельным рядом, вне живой области: «Ответ ассистента» (итог простым
  * текстом без разметки, свёрнут до пяти строк, во всю ширину строки — `AgentSummary`, смоук P4c, R16), «Показать журнал»,
  * «Повторить» / «Запустить фонового ассистента», «Скопировать строку для чата»
@@ -129,6 +130,15 @@ export function AgentRunStatus({ request, run, ahead, chatLine, busy, onRetry, o
   const arrived = run !== null && unseenProposals(request, run, shown) ? t("llmAssist.agent.arrived", { count: run.proposalIds.length }) : "";
   const finished = run !== null && !active && run.status !== "skipped";
   const summary = waiting && run !== null && finished && run.summary ? run.summary : null;
+  // Стоимость кончившегося запуска — рядом с его итогом (фазой или «Ассистент прислал N»): «≈ 0,01 $» с подсказкой о дне
+  // цен у оценки, точная стоимость Claude Code без Ollama — как есть (дополнение владельца к sf-T7).
+  const cost =
+    run !== null && finished && hasCost(run) ? (
+      <>
+        {" · "}
+        <RunCost run={run} />
+      </>
+    ) : null;
 
   const retry = () => {
     refocus.current = true;
@@ -148,7 +158,12 @@ export function AgentRunStatus({ request, run, ahead, chatLine, busy, onRetry, o
   return (
     <div className="agent-run" role="group" aria-label={t("llmAssist.agent.title", { id: request.id })} tabIndex={-1} ref={rootRef}>
       <div role="status" className="agent-run-lines">
-        {phase && <p>{phase}</p>}
+        {phase && (
+          <p>
+            {phase}
+            {cost}
+          </p>
+        )}
         {run !== null &&
           active &&
           run.warnings.map((w, i) => (
@@ -156,7 +171,12 @@ export function AgentRunStatus({ request, run, ahead, chatLine, busy, onRetry, o
               {warningText(w, t)}
             </p>
           ))}
-        {arrived && <p>{arrived}</p>}
+        {arrived && (
+          <p>
+            {arrived}
+            {!phase && cost}
+          </p>
+        )}
         {copied !== null && <p className="muted">{copied ? t("llmAssist.agent.copied", { line: chatLine }) : t("llmAssist.agent.copyFailed", { line: chatLine })}</p>}
       </div>
       {run !== null && (run.status === "starting" || run.status === "running") && <p className="muted agent-run-progress">{progressText(run, now, t)}</p>}

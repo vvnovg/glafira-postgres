@@ -228,6 +228,39 @@ describe("AgentRunStatus", () => {
     expect(screen.queryByRole("group")).toBeNull();
   });
 
+  it("стоимость запуска — рядом с итогом: оценка облачного запуска через Ollama «≈ …» с подсказкой о дне цен, точная — без «≈»", () => {
+    const estimate = { usd: 0.0148, pricesDate: "2026-11-07", offPeak: false };
+    const proposals = view({
+      request: optimizationRequest({ status: "answered", proposalIds: ["p1", "p2"] }),
+      run: agentRun({ status: "done", proposalIds: ["p1", "p2"], endedAtMs: NOW, costEstimate: estimate }),
+    });
+    expect(screen.getByRole("status")).toHaveTextContent(/^Ассистент прислал 2 предложения · ≈ 0,01 \$$/);
+    expect(within(screen.getByRole("status")).getByTitle("Оценка по ценам Ollama Cloud на 07.11.2026 (ollama.com/pricing)")).toHaveTextContent(/^≈ 0,01 \$$/);
+    proposals.unmount();
+    const none = view({ run: agentRun({ status: "done", startedAtMs: 0, endedAtMs: NOW, costEstimate: { usd: 0.0061, pricesDate: "2026-11-07", offPeak: true } }) });
+    expect(screen.getByRole("status")).toHaveTextContent(/^Ассистент закончил без предложений · ≈ 0,006 \$$/);
+    expect(within(screen.getByRole("status")).getByTitle("Оценка по ценам Ollama Cloud вне пика на 07.11.2026 (ollama.com/pricing)")).toBeInTheDocument();
+    none.unmount();
+    // Claude Code без Ollama: стоимость сообщил сам CLI — без «≈» и подсказки; у ошибки — тоже рядом с итогом.
+    const exact = view({ run: agentRun({ preset: "claude", status: "failed", reason: "limit", startedAtMs: 0, endedAtMs: NOW, costUsd: 0.42 }) });
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent(/ · 0,42 \$$/);
+    expect(status).not.toHaveTextContent("≈");
+    expect(status.querySelector("[title]")).toBeNull();
+    exact.unmount();
+    // Без стоимости — итог как был; пока запуск идёт, стоимости нет.
+    view({ run: agentRun({ status: "done", startedAtMs: 0, endedAtMs: NOW }) });
+    expect(screen.getByRole("status")).toHaveTextContent(/^Ассистент закончил без предложений$/);
+  });
+
+  it("у идущего запуска стоимости в строке нет", () => {
+    view({
+      request: optimizationRequest({ status: "answered", proposalIds: ["p1"] }),
+      run: agentRun({ status: "running", startedAtMs: Date.now(), proposalIds: ["p1"], costEstimate: { usd: 0.01, pricesDate: "2026-11-07", offPeak: false } }),
+    });
+    expect(screen.getByRole("status")).not.toHaveTextContent("$");
+  });
+
   it("у отвеченного запроса без предложений этого запуска (ответил чат) строки нет", () => {
     view({ request: optimizationRequest({ status: "answered", proposalIds: ["p9"] }), run: agentRun({ status: "skipped", endedAtMs: NOW }) });
     expect(screen.queryByRole("group")).toBeNull();
