@@ -631,7 +631,10 @@ async fn propose(
 /// Сохранение проверенного предложения: такое же (§8.2: тот же исходный запрос, SQL и индексы) — возвращается
 /// существующее, без событий; новое прикрепляется к запросу (статус `answered`) и даёт события запроса и предложения.
 /// Запрос могли отменить, пока шла проверка на сервере, — тогда предложение не сохраняется (`request_closed`).
-async fn store_proposal(st: &AppState, new: NewProposal) -> Result<ProposedOut, ToolError> {
+pub(crate) async fn store_proposal(
+    st: &AppState,
+    new: NewProposal,
+) -> Result<ProposedOut, ToolError> {
     if let Some(rid) = &new.request_id
         && st
             .llm
@@ -660,6 +663,10 @@ async fn store_proposal(st: &AppState, new: NewProposal) -> Result<ProposedOut, 
             }
         }
         st.llm.emit(ProposalsEvent::proposal(&proposal));
+        // Предложение фонового запуска (P4c §8.1): строка статуса запуска видит его ещё во время работы.
+        if let Some(run) = proposal.run_id.as_deref() {
+            st.agent.proposal_saved(run);
+        }
     }
     Ok(ProposedOut {
         proposal_id: proposal.id,

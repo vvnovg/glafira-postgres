@@ -54,12 +54,28 @@ pub struct ExitInfo {
 /// Запущенный агент. `wait` и `init_tools` можно звать повторно и прерывать: итог запоминается.
 pub trait AgentProcess: Send {
     fn wait(&mut self) -> BoxFuture<'_, ExitInfo>;
-    /// Остановка всей группы процессов; итог потом — `wait`.
+    /// Остановка всей группы процессов: SIGTERM, через паузу — SIGKILL; итог потом — `wait`.
     fn stop(&mut self) -> BoxFuture<'_, ()>;
-    /// Инструменты модели из первого события `{"type": "system", "subtype": "init", "tools": […]}` потока stdout: оно
-    /// приходит до первого хода (§4.1 «Проверка инструментов»). `None` — поток кончился без него, у события нет списка
-    /// или вывод не `stream-json`. Срок ожидания задаёт вызывающий (`INIT_TIMEOUT`).
-    fn init_tools(&mut self) -> BoxFuture<'_, Option<Vec<String>>>;
+    /// Остановка всей группы сразу, без паузы (SIGKILL группе, на Windows — `TerminateJobObject`): проверка инструментов
+    /// не прошла, первый ход модели продолжаться не должен (§4.1 «сразу останавливает»). Итог потом — `wait`.
+    fn kill(&mut self) -> BoxFuture<'_, ()>;
+    /// Что поток stdout сказал об инструментах модели до первого хода (§4.1 «Проверка инструментов»): первое событие
+    /// `{"type": "system", "subtype": "init", "tools": […]}`, событие без списка, строка не JSON до него или конец потока.
+    /// Срок ожидания задаёт вызывающий (`INIT_TIMEOUT`).
+    fn init_tools(&mut self) -> BoxFuture<'_, InitTools>;
+}
+
+/// Итог поиска события `init` в потоке stdout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InitTools {
+    /// Событие `init` со списком инструментов.
+    Listed(Vec<String>),
+    /// Событие `init` без списка `tools`: проверить нечего, а модель уже делает первый ход.
+    NoList,
+    /// До события `init` пришла строка не JSON, или вывод не `stream-json` вовсе: поток не тот, проверить нечем.
+    NotStreamJson,
+    /// Поток stdout кончился без события `init`: обычно процесс вышел сам (ранняя ошибка CLI).
+    Ended,
 }
 
 /// Запуск процесса агента. В приложении — `TokioSpawner`, в тестах очереди — фальшивый агент.
@@ -79,29 +95,29 @@ pub trait AgentSpawner: Send + Sync {
     ) -> io::Result<Box<dyn AgentProcess>>;
 }
 
-/// Список инструментов из события `init` (`AgentProcess::init_tools`): ожидание по каналу от читателя stdout, итог
-/// запоминается. Общий для процессов приложения и фальшивых агентов тестов.
+/// Итог поиска события `init` (`AgentProcess::init_tools`): ожидание по каналу от читателя stdout, итог запоминается.
+/// Общий для процессов приложения и фальшивых агентов тестов.
 pub(crate) struct InitWatch {
-    rx: Option<oneshot::Receiver<Vec<String>>>,
-    got: Option<Vec<String>>,
+    rx: Option<oneshot::Receiver<InitTools>>,
+    got: InitTools,
 }
 
 impl InitWatch {
-    /// Канал: отправитель — у читателя потока; брошенный без отправки отправитель — «поток кончился без `init`».
-    pub(crate) fn channel() -> (oneshot::Sender<Vec<String>>, Self) {
+    /// Канал: отправитель — у читателя потока; брошенный без отправки отправитель — `InitTools::Ended`.
+    pub(crate) fn channel() -> (oneshot::Sender<InitTools>, Self) {
         let (tx, rx) = oneshot::channel();
         (
             tx,
             Self {
                 rx: Some(rx),
-                got: None,
+                got: InitTools::Ended,
             },
         )
     }
 
-    pub(crate) async fn get(&mut self) -> Option<Vec<String>> {
+    pub(crate) async fn get(&mut self) -> InitTools {
         if let Some(rx) = self.rx.as_mut() {
-            let got = rx.await.ok();
+            let got = rx.await.unwrap_or(InitTools::Ended);
             self.rx = None;
             self.got = got;
         }
@@ -119,15 +135,8 @@ pub fn foreign_tools(tools: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Первое событие `init` потока JSON по строке.
-#[derive(Debug, Clone, PartialEq)]
-enum Init {
-    Tools(Vec<String>),
-    /// Событие без списка `tools`: проверить нечего.
-    NoList,
-}
-
-/// Поиск события `init` в порциях stdout: строки собираются через границы порций; слишком длинная строка пропускается.
+/// Поиск события `init` в порциях stdout: строки собираются через границы порций; пустая строка и слишком длинная
+/// строка пропускаются.
 #[derive(Default)]
 struct InitScan {
     line: Vec<u8>,
@@ -135,8 +144,8 @@ struct InitScan {
 }
 
 impl InitScan {
-    /// Порция вывода; `Some` — найдено первое событие `init` (дальше звать незачем).
-    fn feed(&mut self, mut data: &[u8]) -> Option<Init> {
+    /// Порция вывода; `Some` — найдено первое событие `init` или строка не JSON до него (дальше звать незачем).
+    fn feed(&mut self, mut data: &[u8]) -> Option<InitTools> {
         while !data.is_empty() {
             let (part, rest, ends) = match data.iter().position(|b| *b == b'\n') {
                 Some(i) => (&data[..i], &data[i + 1..], true),
@@ -164,21 +173,23 @@ impl InitScan {
     }
 }
 
-/// Строка потока — событие `{"type": "system", "subtype": "init"}`? Имя инструмента — строка; объект с `name` — его
-/// имя; прочее — JSON текстом (такое имя проверку не пройдёт).
-fn init_of(line: &[u8]) -> Option<Init> {
+/// Строка потока до события `init`: само событие (имя инструмента — строка; объект с `name` — его имя; прочее — JSON
+/// текстом, такое имя проверку не пройдёт), строка не JSON (`NotStreamJson`) или другое событие (`None`).
+fn init_of(line: &[u8]) -> Option<InitTools> {
     let t = line.trim_ascii();
-    if !t.starts_with(b"{") {
+    if t.is_empty() {
         return None;
     }
-    let v: Value = serde_json::from_slice(t).ok()?;
+    let Ok(v) = serde_json::from_slice::<Value>(t) else {
+        return Some(InitTools::NotStreamJson);
+    };
     let is_init = v.get("type").and_then(Value::as_str) == Some("system")
         && v.get("subtype").and_then(Value::as_str) == Some("init");
     if !is_init {
         return None;
     }
     Some(match v.get("tools").and_then(Value::as_array) {
-        Some(items) => Init::Tools(
+        Some(items) => InitTools::Listed(
             items
                 .iter()
                 .map(|t| match t {
@@ -190,7 +201,7 @@ fn init_of(line: &[u8]) -> Option<Init> {
                 })
                 .collect(),
         ),
-        None => Init::NoList,
+        None => InitTools::NoList,
     })
 }
 
@@ -301,7 +312,7 @@ fn read_stream<R>(
     stream: Stream,
     log: Arc<Mutex<RunLog>>,
     keep_tail: bool,
-    mut init: Option<oneshot::Sender<Vec<String>>>,
+    mut init: Option<oneshot::Sender<InitTools>>,
 ) -> JoinHandle<Vec<u8>>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -317,11 +328,11 @@ where
             };
             let chunk = &buf[..n];
             log.lock_safe().write(stream, chunk);
-            if let Some(found) = init.as_ref().and_then(|_| scan.feed(chunk)) {
-                // Найдено первое событие `init`; без списка — отправитель бросается: «списка нет».
-                if let (Init::Tools(tools), Some(tx)) = (found, init.take()) {
-                    let _ = tx.send(tools);
-                }
+            if let Some(found) = init.as_ref().and_then(|_| scan.feed(chunk))
+                && let Some(tx) = init.take()
+            {
+                // Первое событие `init` или строка не JSON до него: дальше поток не разбирается.
+                let _ = tx.send(found);
             }
             if keep_tail {
                 tail.extend(chunk);
@@ -463,8 +474,13 @@ impl AgentSpawner for TokioSpawner {
         }
         let log = Arc::new(Mutex::new(run_log));
         let (init_tx, init) = InitWatch::channel();
-        // Событие `init` есть только в потоке JSON; у простого текста списка инструментов нет.
-        let init_tx = (spec.output == OutputFormat::StreamJson).then_some(init_tx);
+        // Событие `init` есть только в потоке JSON; простой текст проверить нечем.
+        let init_tx = if spec.output == OutputFormat::StreamJson {
+            Some(init_tx)
+        } else {
+            let _ = init_tx.send(InitTools::NotStreamJson);
+            None
+        };
         let out = child
             .stdout
             .take()
@@ -592,7 +608,18 @@ impl AgentProcess for TokioProcess {
         })
     }
 
-    fn init_tools(&mut self) -> BoxFuture<'_, Option<Vec<String>>> {
+    fn kill(&mut self) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            if self.exit.is_some() {
+                return;
+            }
+            // SIGKILL группе (Windows — `TerminateJobObject`); лидер — ещё и напрямую, если группы или Job Object нет.
+            self.kill_leftovers();
+            let _ = self.child.start_kill();
+        })
+    }
+
+    fn init_tools(&mut self) -> BoxFuture<'_, InitTools> {
         Box::pin(self.init.get())
     }
 }
@@ -992,22 +1019,20 @@ mod tests {
     #[test]
     fn the_init_event_lists_the_tools_of_the_model() {
         let mut scan = InitScan::default();
-        // Порции рвут строки посередине; до `init` — не JSON и другие системные события.
+        // Порции рвут строки посередине; до `init` — пустые строки и другие системные события.
         let stream = format!(
-            "warming up\n{}\n{INIT}\n{}\n",
+            "\n  \r\n{}\n{INIT}\n{}\n",
             r#"{"type":"system","subtype":"hook_started"}"#,
             r#"{"type":"system","subtype":"init","tools":["run_shell_command"]}"#
         );
-        let mut found = None;
-        for chunk in stream.as_bytes().chunks(7) {
-            if let Some(f) = scan.feed(chunk) {
-                assert!(found.is_none(), "только первое событие init");
-                found = Some(f);
-            }
-        }
+        // Как `read_stream`: после первого ответа поток не разбирается.
+        let found = stream
+            .as_bytes()
+            .chunks(7)
+            .find_map(|chunk| scan.feed(chunk));
         assert_eq!(
             found,
-            Some(Init::Tools(vec![
+            Some(InitTools::Listed(vec![
                 "mcp__glafira-pg__list_connections".into(),
                 "mcp__glafira-pg__get_optimization_request".into()
             ]))
@@ -1019,7 +1044,7 @@ mod tests {
                 br#"{"type":"system","subtype":"init","tools":[{"name":"mcp__glafira-pg__explain_query"},7]}
 "#
             ),
-            Some(Init::Tools(vec![
+            Some(InitTools::Listed(vec![
                 "mcp__glafira-pg__explain_query".into(),
                 "7".into()
             ]))
@@ -1027,8 +1052,19 @@ mod tests {
         let mut scan = InitScan::default();
         assert_eq!(
             scan.feed(b"{\"type\":\"system\",\"subtype\":\"init\"}\n"),
-            Some(Init::NoList),
+            Some(InitTools::NoList),
             "init без списка инструментов"
+        );
+        // Строка не JSON до `init` — вывод не `stream-json`; после `init` поток уже не разбирается.
+        let mut scan = InitScan::default();
+        assert_eq!(
+            scan.feed(b"{\"type\":\"system\",\"subtype\":\"hook_started\"}\nwarming up\n"),
+            Some(InitTools::NotStreamJson)
+        );
+        let mut scan = InitScan::default();
+        assert_eq!(
+            scan.feed(b"\x1b[32m{\"type\":\"system\"}\n"),
+            Some(InitTools::NotStreamJson)
         );
         // Слишком длинная строка пропускается целиком, следующая разбирается.
         let mut scan = InitScan::default();
@@ -1207,25 +1243,34 @@ mod tests {
     #[tokio::test]
     async fn the_tools_come_from_the_init_event_before_the_first_turn() {
         let dir = tempfile::tempdir().unwrap();
-        let mut spec = sh(
-            dir.path(),
-            "printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"hook_started\"}' \"$INIT\"; sleep 300",
-            &[(
-                "INIT",
-                r#"{"type":"system","subtype":"init","tools":["mcp__glafira-pg__list_connections","run_shell_command"]}"#
-                    .to_string(),
-            )],
+        // Скрипт печатает строки `$LINES` и работает дальше: ответ о списке приходит, пока процесс жив.
+        let live = |name: &str, lines: &[&str]| {
+            let mut spec = sh(
+                dir.path(),
+                "printf '%s\\n' \"$LINE1\" \"$LINE2\"; sleep 300",
+                &[
+                    ("LINE1", lines[0].to_string()),
+                    ("LINE2", lines.get(1).copied().unwrap_or("").to_string()),
+                ],
+            );
+            spec.output = OutputFormat::StreamJson;
+            spawner()
+                .spawn(&spec, String::new(), dir.path().join(name))
+                .unwrap()
+        };
+        let mut p = live(
+            "a.log",
+            &[
+                r#"{"type":"system","subtype":"hook_started"}"#,
+                r#"{"type":"system","subtype":"init","tools":["mcp__glafira-pg__list_connections","run_shell_command"]}"#,
+            ],
         );
-        spec.output = OutputFormat::StreamJson;
-        let mut p = spawner()
-            .spawn(&spec, String::new(), dir.path().join("a.log"))
-            .unwrap();
         let tools = tokio::time::timeout(Duration::from_secs(5), p.init_tools())
             .await
             .expect("init пришёл, процесс работает дальше");
         assert_eq!(
             tools,
-            Some(vec![
+            InitTools::Listed(vec![
                 "mcp__glafira-pg__list_connections".to_string(),
                 "run_shell_command".to_string()
             ])
@@ -1235,21 +1280,45 @@ mod tests {
             tools,
             "повторный вызов — тот же список"
         );
-        p.stop().await;
+        p.kill().await;
         let exit = p.wait().await;
         assert!(
             exit.stdout_tail.contains("\"subtype\":\"init\""),
             "строки init остаются в выводе"
         );
-        // Поток кончился без события init — списка нет.
+        // Событие `init` без списка и строка не JSON до него — ответ сразу, процесс ещё работает.
+        for (name, lines, want) in [
+            (
+                "b.log",
+                [r#"{"type":"system","subtype":"init","model":"m"}"#, ""],
+                InitTools::NoList,
+            ),
+            (
+                "c.log",
+                [
+                    "Loading settings…",
+                    r#"{"type":"system","subtype":"init","tools":[]}"#,
+                ],
+                InitTools::NotStreamJson,
+            ),
+        ] {
+            let mut p = live(name, &lines);
+            let got = tokio::time::timeout(Duration::from_secs(5), p.init_tools())
+                .await
+                .expect("ответ — до конца процесса");
+            assert_eq!(got, want, "{name}");
+            p.kill().await;
+            assert_eq!(p.wait().await.code, None);
+        }
+        // Поток кончился без события init.
         let mut spec = sh(dir.path(), "echo '{\"type\":\"result\"}'", &[]);
         spec.output = OutputFormat::StreamJson;
         let mut p = spawner()
-            .spawn(&spec, String::new(), dir.path().join("b.log"))
+            .spawn(&spec, String::new(), dir.path().join("d.log"))
             .unwrap();
-        assert_eq!(p.init_tools().await, None);
+        assert_eq!(p.init_tools().await, InitTools::Ended);
         assert_eq!(p.wait().await.code, Some(0));
-        // Простой текст — без события init.
+        // Простой текст — проверить нечем, ответ сразу.
         let mut p = spawner()
             .spawn(
                 &sh(
@@ -1258,11 +1327,41 @@ mod tests {
                     &[("INIT", INIT.into())],
                 ),
                 String::new(),
-                dir.path().join("c.log"),
+                dir.path().join("e.log"),
             )
             .unwrap();
-        assert_eq!(p.init_tools().await, None);
-        p.stop().await;
+        assert_eq!(p.init_tools().await, InitTools::NotStreamJson);
+        p.kill().await;
+    }
+
+    /// Проверка инструментов не прошла: группа останавливается сразу, без паузы SIGTERM → SIGKILL (§4.1).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kill_stops_the_whole_group_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("child.pid");
+        // TERM игнорируют и оболочка, и её потомок: обычная остановка ждала бы паузу (здесь — 5 с).
+        let spec = sh(
+            dir.path(),
+            "trap '' TERM; sleep 300 & echo $! > \"$PIDFILE\"; wait",
+            &[("PIDFILE", pidfile.display().to_string())],
+        );
+        let mut p = TokioSpawner::with_env(Arc::new(ShellEnv::current_process()))
+            .spawn(&spec, String::new(), dir.path().join("a.log"))
+            .unwrap();
+        let child = pid_from(&pidfile).await;
+        let started = std::time::Instant::now();
+        p.kill().await;
+        let exit = tokio::time::timeout(Duration::from_secs(3), p.wait())
+            .await
+            .expect("wait после kill не ждёт паузу");
+        assert_eq!(exit.code, None);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(until_dead(child).await, "потомок группы остановлен");
     }
 
     #[cfg(unix)]

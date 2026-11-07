@@ -19,7 +19,7 @@ use tokio::sync::{oneshot, watch};
 
 use super::models::effective_model;
 use super::presets::{self, RunInputs};
-use super::process::{self, AgentProcess, AgentSpawner, ExitInfo, TokioSpawner};
+use super::process::{self, AgentProcess, AgentSpawner, ExitInfo, InitTools, TokioSpawner};
 use super::prompt;
 pub use super::runs::RunFilter;
 use super::runs::{self, AgentRun, FailReason, NewRun, RunKind, RunStatus, RunStore};
@@ -47,6 +47,8 @@ pub const RUNS_EVENT: &str = "agent://runs";
 const PROGRESS_EVERY: Duration = Duration::from_secs(1);
 /// Предупреждение запуска: агент не сообщил список своих инструментов (§4.1 «Проверка инструментов»).
 const UNSAFE_NO_INIT: &str = "unsafe no-init";
+/// Поток stdout кончился без события `init`: столько ждать конца процесса, прежде чем остановить его как непроверенный.
+const STREAM_END_GRACE: Duration = Duration::from_secs(5);
 
 fn agent_off() -> AppError {
     app_err!(
@@ -494,7 +496,10 @@ impl AgentQueue {
                 .chain(s.queued.iter().cloned())
                 .collect()
         };
-        ids.iter().filter_map(|id| self.get(id)).find(pred)
+        // Текущий запуск, чей итог уже записан (`current` ещё не снят), — не активный: «Повторить» поставит новый.
+        ids.iter()
+            .filter_map(|id| self.get(id))
+            .find(|r| r.status.is_active() && pred(r))
     }
 
     /// Следующий запуск из очереди, если ничего не идёт.
@@ -596,11 +601,21 @@ impl AgentQueue {
                 return;
             }
         };
+        // Пресет, модель и программа записи — по настройкам на момент старта: по ним собран процесс, их же называют
+        // `agentRunStarted`, строка статуса и тёплая модель (настройки могли смениться, пока запуск ждал очереди).
         let path = spec.program.display().to_string();
+        let (settings, home) = (s.clone(), self.home.clone());
+        let model = off_thread(move || Ok(effective_model(&settings, home.as_deref())))
+            .await
+            .ok()
+            .flatten();
+        let (preset, started_model) = (s.preset, model.clone());
         if let Some(r) = self
             .update(&id, move |r| {
                 r.status = RunStatus::Starting;
                 r.started_at_ms = Some(now_ms());
+                r.preset = preset;
+                r.model = started_model;
                 r.path = Some(path);
             })
             .await
@@ -611,7 +626,7 @@ impl AgentQueue {
         }
         self.d.mcp.emit_state();
         // Предзагрузка модели (в фоне, §6.2) и версия программы — пока агент ещё не запущен.
-        let warnings = self.d.runtime.warmth.before_run(run.model.as_deref()).await;
+        let warnings = self.d.runtime.warmth.before_run(model.as_deref()).await;
         let (spawner, program) = (self.d.runtime.spawner.clone(), spec.program.clone());
         let version = tokio::task::spawn_blocking(move || spawner.version(&program))
             .await
@@ -687,7 +702,8 @@ impl AgentQueue {
             }
             InitCheck::Unsafe(warning) => {
                 tracing::warn!(run = %id, "{warning}: the agent is stopped before its first turn");
-                proc.stop().await;
+                // Сразу, без паузы SIGTERM → SIGKILL: первый ход модели продолжаться не должен (§4.1).
+                proc.kill().await;
                 (proc.wait().await, None, Some(warning))
             }
             InitCheck::Exited(exit) => {
@@ -706,7 +722,7 @@ impl AgentQueue {
         };
         self.cleanup(&id);
         if stopped != Some(Stopped::Shutdown) {
-            let (warmth, model) = (self.d.runtime.warmth.clone(), run.model.clone());
+            let warmth = self.d.runtime.warmth.clone();
             tokio::spawn(async move { warmth.after_run(model.as_deref()).await });
         }
         let proposals = self.run_proposals(&run);
@@ -748,32 +764,35 @@ impl AgentQueue {
         .await;
     }
 
-    /// Событие `init` — не дольше `INIT_TIMEOUT` (и не дольше срока запуска); остановка запуска прерывает ожидание (решение
-    /// контроллера к задаче 6):
+    /// Событие `init` — не дольше `INIT_TIMEOUT` (и не дольше срока запуска); остановка запуска прерывает ожидание (решения
+    /// контроллера и ревью задачи 6):
     /// - имя без префикса `mcp__glafira-pg__` — `unsafe <имена через запятую>`;
-    /// - поток stdout кончился без события, и процесс сам вышел в том же окне: код ≠ 0 — ранняя ошибка CLI (`exit`), код 0 —
-    ///   запуск прошёл без проверки инструментов (`unsafe no-init`);
-    /// - живой процесс без события дольше окна — `unsafe no-init`.
+    /// - событие без списка `tools` или строка не JSON до него — `unsafe no-init` сразу: модель уже работает, а проверить
+    ///   нечем;
+    /// - поток stdout кончился без события — короткое ожидание конца процесса (`STREAM_END_GRACE`): вышел с кодом ≠ 0 —
+    ///   ранняя ошибка CLI (`exit`), с кодом 0 — запуск прошёл без проверки (`unsafe no-init`), жив — `unsafe no-init`;
+    /// - живой процесс без события дольше `INIT_TIMEOUT` — `unsafe no-init`.
     async fn check_tools(
         proc: &mut dyn AgentProcess,
         stop_rx: &mut oneshot::Receiver<Stopped>,
         deadline: tokio::time::Instant,
     ) -> InitCheck {
-        let init_deadline = (tokio::time::Instant::now() + process::INIT_TIMEOUT).min(deadline);
-        // Окно вышло: по сроку запуска (короче минуты — тесты) или без события `init`.
+        let no_init = || InitCheck::Unsafe(UNSAFE_NO_INIT.to_string());
+        // Окно вышло: по сроку запуска (короче окна — тесты) или без события `init`.
         let window_over = || {
             if tokio::time::Instant::now() >= deadline {
                 InitCheck::Stopped(Stopped::Timeout)
             } else {
-                InitCheck::Unsafe(UNSAFE_NO_INIT.to_string())
+                no_init()
             }
         };
+        let init_deadline = (tokio::time::Instant::now() + process::INIT_TIMEOUT).min(deadline);
         let tools = tokio::select! {
             tools = tokio::time::timeout_at(init_deadline, proc.init_tools()) => tools,
             why = stop_signal(stop_rx) => return InitCheck::Stopped(why),
         };
         match tools {
-            Ok(Some(tools)) => {
+            Ok(InitTools::Listed(tools)) => {
                 let foreign = process::foreign_tools(&tools);
                 if foreign.is_empty() {
                     InitCheck::Safe
@@ -781,16 +800,18 @@ impl AgentQueue {
                     InitCheck::Unsafe(format!("unsafe {}", foreign.join(",")))
                 }
             }
+            Ok(InitTools::NoList | InitTools::NotStreamJson) => no_init(),
             Err(_) => window_over(),
-            Ok(None) => {
-                // Поток кончился без `init`: обычно процесс вышел сам. Ждём его конца в том же окне.
+            Ok(InitTools::Ended) => {
+                // Поток кончился без `init`: обычно процесс вышел сам. Ждём его конца коротко.
+                let exit_deadline = (tokio::time::Instant::now() + STREAM_END_GRACE).min(deadline);
                 let exit = tokio::select! {
-                    exit = tokio::time::timeout_at(init_deadline, proc.wait()) => exit,
+                    exit = tokio::time::timeout_at(exit_deadline, proc.wait()) => exit,
                     why = stop_signal(stop_rx) => return InitCheck::Stopped(why),
                 };
                 match exit {
                     Ok(exit) if exit.code != Some(0) => InitCheck::Exited(exit),
-                    Ok(_) => InitCheck::Unsafe(UNSAFE_NO_INIT.to_string()),
+                    Ok(_) => no_init(),
                     Err(_) => window_over(),
                 }
             }
@@ -1025,20 +1046,30 @@ impl AgentQueue {
             .collect()
     }
 
+    /// Ход работы идущего запуска поверх записи: статус, вызовы и уже присланные предложения (строка статуса пишет
+    /// «Ассистент прислал N» ещё во время работы).
     fn overlay(&self, mut r: AgentRun) -> AgentRun {
         if !r.status.is_active() {
             return r;
         }
-        let s = self.state.lock_safe();
-        if let Some(c) = s.current.as_ref().filter(|c| c.run_id == r.id) {
-            if let Some(status) = c.live.status {
+        if let Some(l) = self.live(&r.id) {
+            if let Some(status) = l.status {
                 r.status = status;
             }
-            r.calls = c.live.calls;
-            r.last_tool = c.live.last_tool.clone();
-            r.last_call_at_ms = c.live.last_call_at_ms;
+            r.calls = l.calls;
+            r.last_tool = l.last_tool;
+            r.last_call_at_ms = l.last_call_at_ms;
+            r.proposal_ids = self.run_proposals(&r);
         }
         r
+    }
+
+    /// Предложение с `runId` сохранено (`mcp::llm::tools`): событие `agent://runs` сразу, без правила «не чаще раза в
+    /// секунду» — предложений у запроса не больше пяти, а строка статуса должна показать их без задержки.
+    pub fn proposal_saved(&self, run_id: &str) {
+        if self.live(run_id).is_some() {
+            self.emit_live(run_id);
+        }
     }
 
     pub fn status(&self) -> AgentStatus {
@@ -1297,9 +1328,13 @@ mod tests {
     /// Шаг сценария фальшивого агента.
     #[derive(Debug, Clone)]
     enum Step {
-        /// Событие `system`/`init` потока: инструменты модели. Сценарий без `Init` и `NoInit` начинается с `init`
-        /// девяти инструментов Glafira.
+        /// Событие `system`/`init` потока: инструменты модели. Сценарий без шагов `init` (`Init`, `InitNoList`,
+        /// `NotJson`, `NoInit`, `EndStream`) начинается с `init` девяти инструментов Glafira.
         Init(Vec<String>),
+        /// Событие `init` без списка `tools`.
+        InitNoList,
+        /// Строка не JSON до события `init`: вывод не `stream-json`.
+        NotJson,
         /// Агент не сообщает список инструментов: событие `init` не приходит.
         NoInit,
         /// Поток stdout закрыт (событие `init` уже не придёт), процесс работает дальше.
@@ -1309,7 +1344,8 @@ mod tests {
         Call(&'static str),
         /// Столько вызовов подряд.
         Calls(u32),
-        /// `propose_query_rewrite`: предложение с `runId` этого запуска, запрос — `answered`.
+        /// `propose_query_rewrite`: предложение с `runId` этого запуска сохраняется так же, как его сохраняет шлюз
+        /// (`tools::store_proposal`), запрос — `answered`.
         Propose,
         Out(&'static str),
         Sleep(u64),
@@ -1350,12 +1386,15 @@ mod tests {
     struct FakeSpawner {
         scripts: Mutex<VecDeque<Result<Vec<Step>, io::ErrorKind>>>,
         queue: OnceLock<Weak<AgentQueue>>,
-        llm: OnceLock<Arc<LlmStores>>,
+        /// Приложение — для сохранения предложения путём шлюза (цикл `Arc` в тестах безвреден).
+        st: OnceLock<AppState>,
         tickets: OnceLock<Arc<Tickets>>,
         spawned: Mutex<Vec<Spawned>>,
         alive: Arc<AtomicU32>,
         max_alive: Arc<AtomicU32>,
         stops: Arc<AtomicU32>,
+        /// Остановок без паузы (`kill`): проверка инструментов не прошла.
+        kills: Arc<AtomicU32>,
     }
 
     impl FakeSpawner {
@@ -1369,7 +1408,7 @@ mod tests {
 
         fn attach(&self, st: &AppState) {
             let _ = self.queue.set(Arc::downgrade(&st.agent));
-            let _ = self.llm.set(st.llm.clone());
+            let _ = self.st.set(st.clone());
             let _ = self.tickets.set(st.tickets.clone());
         }
 
@@ -1429,29 +1468,36 @@ mod tests {
                     Step::Exit(0),
                 ],
             };
-            if !steps
-                .iter()
-                .any(|s| matches!(s, Step::Init(_) | Step::NoInit))
-            {
+            if !steps.iter().any(|s| {
+                matches!(
+                    s,
+                    Step::Init(_)
+                        | Step::InitNoList
+                        | Step::NotJson
+                        | Step::NoInit
+                        | Step::EndStream
+                )
+            }) {
                 steps.insert(0, init(&[]));
             }
             let n = self.alive.fetch_add(1, Ordering::SeqCst) + 1;
             self.max_alive.fetch_max(n, Ordering::SeqCst);
             let guard = AliveGuard(self.alive.clone());
-            let (q, llm) = (
+            let (q, st) = (
                 self.queue.get().unwrap().clone(),
-                self.llm.get().unwrap().clone(),
+                self.st.get().unwrap().clone(),
             );
             let (init_tx, init) = InitWatch::channel();
             let task = tokio::spawn(async move {
                 let _guard = guard;
-                play(steps, run_id, q, llm, init_tx).await
+                play(steps, run_id, q, st, init_tx).await
             });
             Ok(Box::new(FakeProcess {
                 task,
                 result: None,
                 init,
                 stops: self.stops.clone(),
+                kills: self.kills.clone(),
             }))
         }
     }
@@ -1460,8 +1506,8 @@ mod tests {
         steps: Vec<Step>,
         run_id: String,
         q: Weak<AgentQueue>,
-        llm: Arc<LlmStores>,
-        init_tx: oneshot::Sender<Vec<String>>,
+        st: AppState,
+        init_tx: oneshot::Sender<InitTools>,
     ) -> ExitInfo {
         // Без события `init` отправитель живёт, пока идёт сценарий: «поток кончился» — конец сценария.
         let mut init_tx = Some(init_tx);
@@ -1471,7 +1517,17 @@ mod tests {
             match step {
                 Step::Init(tools) => {
                     if let Some(tx) = init_tx.take() {
-                        let _ = tx.send(tools);
+                        let _ = tx.send(InitTools::Listed(tools));
+                    }
+                }
+                Step::InitNoList => {
+                    if let Some(tx) = init_tx.take() {
+                        let _ = tx.send(InitTools::NoList);
+                    }
+                }
+                Step::NotJson => {
+                    if let Some(tx) = init_tx.take() {
+                        let _ = tx.send(InitTools::NotStreamJson);
                     }
                 }
                 Step::NoInit => {}
@@ -1498,16 +1554,16 @@ mod tests {
                     }
                 }
                 Step::Propose => {
-                    let q = q.upgrade().unwrap();
-                    let req = q.get(&run_id).and_then(|r| r.request_id).unwrap();
-                    let (p, _) = llm
-                        .proposals
-                        .add_or_existing(NewProposal {
+                    let req = st.agent.get(&run_id).and_then(|r| r.request_id).unwrap();
+                    crate::mcp::llm::tools::store_proposal(
+                        &st,
+                        NewProposal {
                             run_id: Some(run_id.clone()),
                             ..proposals::tests::new(Some(&req), "SELECT 2", &[])
-                        })
-                        .unwrap();
-                    llm.requests.attach_proposal(&req, &p.id).unwrap();
+                        },
+                    )
+                    .await
+                    .unwrap();
                 }
                 Step::Out(s) => out.push_str(s),
                 Step::Sleep(s) => tokio::time::sleep(Duration::from_secs(s)).await,
@@ -1531,6 +1587,7 @@ mod tests {
         result: Option<ExitInfo>,
         init: InitWatch,
         stops: Arc<AtomicU32>,
+        kills: Arc<AtomicU32>,
     }
 
     impl AgentProcess for FakeProcess {
@@ -1553,7 +1610,14 @@ mod tests {
             })
         }
 
-        fn init_tools(&mut self) -> BoxFuture<'_, Option<Vec<String>>> {
+        fn kill(&mut self) -> BoxFuture<'_, ()> {
+            Box::pin(async move {
+                self.kills.fetch_add(1, Ordering::SeqCst);
+                self.task.abort();
+            })
+        }
+
+        fn init_tools(&mut self) -> BoxFuture<'_, InitTools> {
             Box::pin(self.init.get())
         }
     }
@@ -1578,12 +1642,19 @@ mod tests {
         }
     }
 
+    /// Ответ «интерфейса» на событие запуска.
+    type Hook = Box<dyn Fn(&AgentRun) + Send + Sync>;
+
+    /// Получатель событий: запоминает их и, если задан, зовёт `Hook` (как интерфейс, который отвечает на событие).
     #[derive(Default)]
-    struct Events(Mutex<Vec<AgentRun>>);
+    struct Events(Mutex<Vec<AgentRun>>, OnceLock<Hook>);
 
     impl RunsSink for Events {
         fn run_changed(&self, run: &AgentRun) {
             self.0.lock().unwrap().push(run.clone());
+            if let Some(hook) = self.1.get() {
+                hook(run);
+            }
         }
     }
 
@@ -1932,7 +2003,14 @@ mod tests {
             (0, None),
             "вызовов нет"
         );
-        assert_eq!(h.fake.stops.load(Ordering::SeqCst), 1, "процесс остановлен");
+        assert_eq!(
+            (
+                h.fake.kills.load(Ordering::SeqCst),
+                h.fake.stops.load(Ordering::SeqCst)
+            ),
+            (1, 0),
+            "группа остановлена сразу, без паузы SIGTERM"
+        );
         assert_eq!(h.fake.alive.load(Ordering::SeqCst), 0);
         let s = &h.fake.spawned()[0];
         assert_eq!(h.st.tickets.resolve(&s.ticket), None, "билет отозван");
@@ -1995,7 +2073,7 @@ mod tests {
             (RunStatus::Failed, Some(FailReason::UnsafeTools))
         );
         assert_eq!(run.warnings, ["unsafe no-init"]);
-        assert_eq!(h.fake.stops.load(Ordering::SeqCst), 1);
+        assert_eq!(h.fake.kills.load(Ordering::SeqCst), 1);
         // Процесс сам вышел с кодом 0, не сообщив инструментов: запуск прошёл без проверки — то же сразу.
         h.fake.script(vec![
             Step::NoInit,
@@ -2027,6 +2105,11 @@ mod tests {
         assert_eq!((run.status, run.reason), (RunStatus::Cancelled, None));
         assert!(run.warnings.is_empty());
         assert_eq!(h.fake.stops.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            h.fake.kills.load(Ordering::SeqCst),
+            0,
+            "остановка пользователя — с паузой"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -2044,7 +2127,14 @@ mod tests {
         );
         assert!(run.warnings.is_empty(), "{:?}", run.warnings);
         assert_eq!(run.summary, None);
-        assert_eq!(h.fake.stops.load(Ordering::SeqCst), 0, "процесс вышел сам");
+        assert_eq!(
+            (
+                h.fake.stops.load(Ordering::SeqCst),
+                h.fake.kills.load(Ordering::SeqCst)
+            ),
+            (0, 0),
+            "процесс вышел сам"
+        );
         let s = &h.fake.spawned()[0];
         assert_eq!(h.st.tickets.resolve(&s.ticket), None);
         assert!(!s.config.exists());
@@ -2055,17 +2145,22 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_live_agent_that_closed_its_output_without_init_is_stopped_after_a_minute() {
+    async fn a_live_agent_that_closed_its_output_without_init_is_stopped_after_five_seconds() {
+        // Поток stdout кончился без `init`, а процесс жив: ходы он может делать и без вывода — ждём его конца коротко.
         let h = harness();
-        h.fake
-            .script(vec![Step::NoInit, Step::EndStream, Step::Hang]);
+        h.fake.script(vec![
+            Step::NoInit,
+            Step::Sleep(3),
+            Step::EndStream,
+            Step::Hang,
+        ]);
         let started = tokio::time::Instant::now();
         let run = h.q().start(&request(&h)).unwrap();
         let run = until(&h, &run.id, done).await;
         let waited = started.elapsed();
         assert!(
-            waited >= process::INIT_TIMEOUT
-                && waited < process::INIT_TIMEOUT + Duration::from_secs(2),
+            waited >= Duration::from_secs(3) + STREAM_END_GRACE
+                && waited < Duration::from_secs(3) + STREAM_END_GRACE + Duration::from_secs(1),
             "{waited:?}"
         );
         assert_eq!(
@@ -2076,8 +2171,172 @@ mod tests {
                 &["unsafe no-init".to_string()][..]
             )
         );
-        assert_eq!(h.fake.stops.load(Ordering::SeqCst), 1, "группа остановлена");
+        assert_eq!(
+            h.fake.kills.load(Ordering::SeqCst),
+            1,
+            "группа остановлена сразу"
+        );
         assert_eq!(h.fake.alive.load(Ordering::SeqCst), 0);
+    }
+
+    /// Событие `init` без списка `tools` и строка не JSON до него (вывод не `stream-json`): модель уже работает, а
+    /// проверить нечем — остановка сразу, а не через минуту (ревью задачи 6, замечание 1).
+    #[tokio::test(start_paused = true)]
+    async fn an_init_without_tools_or_output_that_is_not_stream_json_stops_the_run_at_once() {
+        for first in [Step::InitNoList, Step::NotJson] {
+            let h = harness();
+            h.fake.script(vec![
+                first.clone(),
+                Step::Sleep(1),
+                Step::Connect,
+                Step::Call("get_optimization_request"),
+                Step::Hang,
+            ]);
+            let started = tokio::time::Instant::now();
+            let run = h.q().start(&request(&h)).unwrap();
+            let run = until(&h, &run.id, done).await;
+            assert!(started.elapsed() < Duration::from_secs(1), "{first:?}");
+            assert_eq!(
+                (run.status, run.reason, run.warnings.as_slice()),
+                (
+                    RunStatus::Failed,
+                    Some(FailReason::UnsafeTools),
+                    &["unsafe no-init".to_string()][..]
+                ),
+                "{first:?}"
+            );
+            assert_eq!(run.calls, 0, "{first:?}: первого хода не было");
+            assert_eq!(h.fake.kills.load(Ordering::SeqCst), 1, "{first:?}");
+        }
+    }
+
+    /// «Повторить» по событию итога: запуск ещё текущий (очередь его не сняла), но закончен — ставится новый, а не
+    /// возвращается законченный (ревью задачи 6, замечание 2).
+    #[tokio::test(start_paused = true)]
+    async fn retry_right_on_the_final_event_starts_a_new_run() {
+        let h = harness();
+        let req = request(&h);
+        h.fake.script(vec![
+            Step::Connect,
+            Step::Call("get_optimization_request"),
+            Step::Exit(2),
+        ]);
+        let retried: Arc<Mutex<Option<AppResult<AgentRun>>>> = Arc::default();
+        let (q, slot, rid) = (Arc::downgrade(h.q()), retried.clone(), req.clone());
+        let _ = h.events.1.set(Box::new(move |run: &AgentRun| {
+            if run.status.is_active() || run.request_id.as_deref() != Some(rid.as_str()) {
+                return;
+            }
+            let mut slot = slot.lock().unwrap();
+            if slot.is_none() {
+                *slot = Some(q.upgrade().unwrap().start(&rid));
+            }
+        }));
+        let first = h.q().start(&req).unwrap();
+        let first = until(&h, &first.id, done).await;
+        assert_eq!(first.reason, Some(FailReason::Exit));
+        let again = retried.lock().unwrap().take().unwrap().unwrap();
+        assert_ne!(again.id, first.id, "новый запуск, а не законченный");
+        assert_eq!(again.status, RunStatus::Queued);
+        assert_eq!(until(&h, &again.id, done).await.status, RunStatus::Done);
+        assert_eq!(h.fake.spawned().len(), 2);
+    }
+
+    /// Пока запуск ждал очереди, пользователь сменил пресет и модель: запись, `agentRunStarted` и тёплая модель называют
+    /// то, что запущено (ревью задачи 6, замечание 3).
+    #[tokio::test(start_paused = true)]
+    async fn the_run_takes_the_preset_and_the_model_of_the_moment_it_starts() {
+        const CLAUDE_MODEL: &str = "claude-sonnet-4-5";
+        let warmth = Arc::new(FakeWarmth::default());
+        let h = harness_with(warmth.clone(), |_| {});
+        h.fake.script(talk(10));
+        let (ra, rb) = (request(&h), request(&h));
+        let a = h.q().start(&ra).unwrap();
+        let b = h.q().start(&rb).unwrap();
+        assert_eq!((b.preset, b.model.as_deref()), (Preset::Qwen, Some(MODEL)));
+        until(&h, &a.id, |r| r.status == RunStatus::Running).await;
+        let mut c = h.st.settings.agent();
+        c.preset = Preset::Claude;
+        c.claude = ClaudeSettings {
+            path: "/opt/agents/claude".into(),
+            model: CLAUDE_MODEL.into(),
+            via_ollama: false,
+            budget_usd: None,
+        };
+        h.st.settings.set_agent(c).unwrap();
+        let b = until(&h, &b.id, done).await;
+        assert_eq!(
+            (b.preset, b.model.as_deref(), b.path.as_deref()),
+            (
+                Preset::Claude,
+                Some(CLAUDE_MODEL),
+                Some("/opt/agents/claude")
+            )
+        );
+        assert_eq!(
+            h.fake.spawned()[1].spec.program,
+            PathBuf::from("/opt/agents/claude")
+        );
+        let started =
+            h.st.mcp
+                .audit_tail(50)
+                .into_iter()
+                .find(|e| e["event"] == "agentRunStarted" && e["runId"] == b.id.as_str())
+                .unwrap();
+        assert_eq!(
+            (started["preset"].as_str(), started["model"].as_str()),
+            (Some("claude"), Some(CLAUDE_MODEL))
+        );
+        assert_eq!(
+            *warmth.before.lock().unwrap(),
+            [Some(MODEL.to_string()), Some(CLAUDE_MODEL.to_string())]
+        );
+    }
+
+    /// Предложение идущего запуска видно сразу: в записи (`proposalIds` поверх файла) и событием `agent://runs` в момент
+    /// сохранения — строка статуса пишет «Ассистент прислал N» ещё во время работы (ревью задачи 9, замечание 2).
+    #[tokio::test(start_paused = true)]
+    async fn proposals_of_the_running_run_are_seen_at_once() {
+        let h = harness();
+        h.fake.script(vec![
+            Step::Connect,
+            Step::Call("propose_query_rewrite"),
+            Step::Propose,
+            Step::Sleep(30),
+            Step::Out(RESULT),
+            Step::Exit(0),
+        ]);
+        let run = h.q().start(&request(&h)).unwrap();
+        let live = until(&h, &run.id, |r| !r.proposal_ids.is_empty()).await;
+        assert_eq!(
+            (live.status, live.proposal_ids.len()),
+            (RunStatus::Running, 1)
+        );
+        assert_eq!(
+            h.q().list(&RunFilter::default())[0].proposal_ids,
+            live.proposal_ids
+        );
+        let p = h.st.llm.proposals.get(&live.proposal_ids[0]).unwrap();
+        assert_eq!(p.run_id.as_deref(), Some(run.id.as_str()));
+        let event = h
+            .events
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|e| e.id == run.id && !e.proposal_ids.is_empty())
+            .cloned()
+            .expect("событие с предложением");
+        assert_eq!(
+            (event.status, event.calls, event.proposal_ids),
+            (RunStatus::Running, 1, live.proposal_ids.clone()),
+            "событие ушло при сохранении, а не в конце запуска"
+        );
+        let finished = until(&h, &run.id, done).await;
+        assert_eq!(
+            (finished.status, finished.proposal_ids),
+            (RunStatus::Done, live.proposal_ids)
+        );
     }
 
     #[tokio::test(start_paused = true)]
