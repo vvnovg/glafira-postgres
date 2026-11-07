@@ -139,7 +139,7 @@ const NO_WAIT_SAMPLES_HINT: &str = "The wait sampler collected no samples in thi
 const PARTLY_SAMPLED_ADVICE: &str = ", but it did not cover the whole window or is not running now: call observe_activity for a live sample";
 /// `get_table_details` на уровне `diagnostics` (смоук P4b, M2): статистика значений не читается — модель не должна
 /// придумывать иную причину их отсутствия.
-pub const VALUE_STATS_HINT: &str = "Value statistics (mostCommonVals, mostCommonFreqs, histogramBounds) are returned only when the connection's LLM access is \"diagnostics and data\" (llmAccess \"data\")";
+pub const VALUE_STATS_HINT: &str = "Value statistics (mostCommonVals, mostCommonFreqs, histogramBounds) are returned only when the connection's LLM access is “Diagnostics and data” (llmAccess \"data\"; the user sets it in the connection settings, the “LLM access” group)";
 
 /// Операция чтения.
 pub async fn read_op(st: &AppState, op: PgRead) -> Result<PgAnswer, ToolError> {
@@ -1457,20 +1457,22 @@ async fn explain(st: &AppState, p: ExplainParams) -> Result<PgAnswer, ToolError>
     .await?;
     let probed = async {
         let params = plan_params(
-            &normalize(&source.text),
+            &normalize(&source.plan.text),
             p.params.as_deref(),
             p.generic_plan.unwrap_or(false),
             tx.version_num(),
         )?;
-        // Текст — как его прислала модель: `GuardTx` нормализует сам, позиции ошибок — в исходном тексте.
-        tx.prepare_one_hinted(&source.text, source.syntax_hint.as_deref())
+        // Текст для плана (`PlanText`, с ведущими пробелами текста модели): `GuardTx` нормализует сам; позиции ошибок —
+        // в тексте приведений, ниже `restore` возвращает их в исходный текст.
+        tx.prepare_one_hinted(&source.plan.text, source.syntax_hint.as_deref())
             .await?;
-        let raw = tx.probe(&source.text, &params).await?;
+        let raw = tx.probe(&source.plan.text, &params).await?;
         Ok::<_, ToolError>((params, raw))
     }
     .await;
     tx.finish().await;
-    let (params, raw) = probed?;
+    // Позиции ошибок — в тексте, который прислала модель (или в тексте pgss), а не в тексте приведений.
+    let (params, raw) = probed.map_err(|e| source.plan.restore(e))?;
     explain_answer(member, raw, &params, source.from_pgss && masks(access))
 }
 
@@ -1554,20 +1556,20 @@ async fn hypo(st: &AppState, p: HypoIndexParams) -> Result<PgAnswer, ToolError> 
     .await?;
     let checked = async {
         let params = plan_params(
-            &normalize(&source.text),
+            &normalize(&source.plan.text),
             p.params.as_deref(),
             false,
             tx.version_num(),
         )?;
-        tx.prepare_one_hinted(&source.text, source.syntax_hint.as_deref())
+        tx.prepare_one_hinted(&source.plan.text, source.syntax_hint.as_deref())
             .await?;
-        tx.probe(&source.text, &params).await?;
+        tx.probe(&source.plan.text, &params).await?;
         tx.rollback().await?;
         // Исходный текст: `check_many` нормализует его сам (`validate_many`), а позиции ошибок EXPLAIN считает по нему.
         let req = HypoManyRequest {
             member,
             database: database.clone(),
-            sql: source.text.clone(),
+            sql: source.plan.text.clone(),
             params,
             search_path: None,
             index_ddls,
@@ -1579,7 +1581,10 @@ async fn hypo(st: &AppState, p: HypoIndexParams) -> Result<PgAnswer, ToolError> 
     }
     .await;
     tx.finish().await;
-    hypo_answer(checked?, source.from_pgss && masks(access))
+    hypo_answer(
+        checked.map_err(|e| source.plan.restore(e))?,
+        source.from_pgss && masks(access),
+    )
 }
 
 /// Ответ `hypothetical_index`; `mask` — как у `explain_answer`: выражения плана «после» по тексту pgss маскируются, и
@@ -2887,7 +2892,8 @@ mod tests {
         assert_eq!(diagnostics.hint.as_deref(), Some(VALUE_STATS_HINT));
         assert!(
             VALUE_STATS_HINT.contains("mostCommonVals, mostCommonFreqs, histogramBounds")
-                && VALUE_STATS_HINT.contains("\"diagnostics and data\""),
+                && VALUE_STATS_HINT.contains("“Diagnostics and data”")
+                && VALUE_STATS_HINT.contains("“LLM access”"),
             "{VALUE_STATS_HINT}"
         );
         let data = table_out(

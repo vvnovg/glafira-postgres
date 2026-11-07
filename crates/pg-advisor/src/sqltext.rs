@@ -363,25 +363,53 @@ const TYPED_LITERAL_TYPES: [&[&str]; 34] = [
 /// в кавычках, комментарии и тела долларовых кавычек не трогаются; тип, перед которым точка (`s.date`), и тип,
 /// отделённый от `$N` комментарием, — тоже. Уже приведённый `$1::date` остаётся как есть.
 pub fn cast_typed_literal_params(sql: &str) -> String {
-    let b = sql.as_bytes();
-    let tokens = sql_tokens(b);
-    let mut out = String::with_capacity(sql.len() + 16);
+    apply_typed_literal_casts(sql, &typed_literal_casts(sql))
+}
+
+/// Текст с приведениями `casts` (`typed_literal_casts` этого же текста).
+pub fn apply_typed_literal_casts(sql: &str, casts: &[TypedLiteralCast]) -> String {
+    let mut out = String::with_capacity(sql.len() + casts.len() * 2);
     let mut copied = 0;
-    for (k, tok) in tokens.iter().enumerate() {
-        let Token::Param(param_start, param_end) = *tok else {
-            continue;
-        };
-        let Some((type_start, type_end)) = typed_literal_type(sql, &tokens[..k]) else {
-            continue;
-        };
-        out.push_str(&sql[copied..type_start]);
-        out.push_str(&sql[param_start..param_end]);
+    for c in casts {
+        out.push_str(&sql[copied..c.type_start]);
+        out.push_str(&sql[c.param_start..c.param_end]);
         out.push_str("::");
-        out.push_str(&sql[type_start..type_end]);
-        copied = param_end;
+        out.push_str(&sql[c.type_start..c.type_end]);
+        copied = c.param_end;
     }
     out.push_str(&sql[copied..]);
     out
+}
+
+/// Приведение `<тип> $N` → `$N::<тип>` в тексте: байтовые границы типа (как в тексте, слова и пробелы между ними) и
+/// параметра `$N`; между ними — только пробельные символы.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TypedLiteralCast {
+    pub type_start: usize,
+    pub type_end: usize,
+    pub param_start: usize,
+    pub param_end: usize,
+}
+
+/// Приведения, которые сделает `cast_typed_literal_params`, по порядку текста.
+pub fn typed_literal_casts(sql: &str) -> Vec<TypedLiteralCast> {
+    let tokens = sql_tokens(sql.as_bytes());
+    tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(k, tok)| {
+            let Token::Param(param_start, param_end) = *tok else {
+                return None;
+            };
+            let (type_start, type_end) = typed_literal_type(sql, &tokens[..k])?;
+            Some(TypedLiteralCast {
+                type_start,
+                type_end,
+                param_start,
+                param_end,
+            })
+        })
+        .collect()
 }
 
 /// Лексема для `cast_typed_literal_params`: слово без кавычек, параметр `$N` или что-то другое (строка, идентификатор в
@@ -775,7 +803,6 @@ mod tests {
         assert_eq!(mask(r"SELECT E'abc\"), pair("SELECT $1", 1));
     }
 
-    /// Повторное маскирование ничего не меняет: `$N`, `/*…*/` и `--…` — уже маска.
     /// Смоук P4b, G5: `date $1` из pgss становится `$1::date`, каждая форма типа из списка.
     #[test]
     fn typed_literal_params_become_casts() {
@@ -868,6 +895,32 @@ mod tests {
         );
     }
 
+    /// Ревью правки B, #2: границы каждого приведения — тип (как в тексте) и параметр; по ним шлюз пересчитывает позиции
+    /// ошибок сервера в текст, который прислала модель.
+    #[test]
+    fn typed_literal_casts_give_the_type_and_param_spans() {
+        let sql = "SELECT 'ж', date $1, timestamp\n with time zone  $2 FROM t WHERE x = $3 AND y = int $4";
+        let spans: Vec<(&str, &str)> = typed_literal_casts(sql)
+            .iter()
+            .map(|c| {
+                (
+                    &sql[c.type_start..c.type_end],
+                    &sql[c.param_start..c.param_end],
+                )
+            })
+            .collect();
+        assert_eq!(
+            spans,
+            [
+                ("date", "$1"),
+                ("timestamp\n with time zone", "$2"),
+                ("int", "$4")
+            ]
+        );
+        assert!(typed_literal_casts("SELECT $1::date, date '2026-01-01'").is_empty());
+    }
+
+    /// Повторное маскирование ничего не меняет: `$N`, `/*…*/` и `--…` — уже маска.
     #[test]
     fn masking_is_idempotent() {
         for text in [

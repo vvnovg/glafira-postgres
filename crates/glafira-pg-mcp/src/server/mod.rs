@@ -27,12 +27,31 @@ use crate::model::{
 use crate::params::OBSERVE_GRACE_S;
 use crate::truncate::{self, FIT_LIMIT, TRUNCATED_HINT};
 
+/// Фраза о текстах исправлений находок (`fixes_once`) — одна для описаний `run_diagnostic`, `get_top_queries`,
+/// `get_health_summary` и для `INSTRUCTIONS` (ревью правки B, #5). Макрос, а не `const`: `concat!` в атрибутах
+/// `#[tool]` и в `INSTRUCTIONS` принимает только литералы.
+macro_rules! fixes_once_text {
+    () => {
+        "the fix text of each finding id is given once in fixes (a finding keeps its own fix only when it differs)"
+    };
+}
+
+/// Карта «инструменты → экраны и кнопки Glafira» (смоук P4b, M4) — в сценариях (`prompts::GLAFIRA_SCREENS`) и в
+/// `INSTRUCTIONS` (ревью правки B, #3: свободный разговор без сценария тоже получает подписи). Подписи в “…” — точные
+/// английские строки `src/locales/en.json`; тест `quoted_labels_are_the_english_ui_labels` сверяет их со словарём.
+macro_rules! screens_map {
+    () => {
+        "Screens behind the tools: get_health_summary → “Pulse”; sessions and get_activity → “Sessions” (with the buttons “Cancel query…” and “Terminate session…”) and “Idle in transaction”; waits and observe_activity → “Wait profile”; locks → “Locks”; horizon → “xmin horizon”; replication → “Replicas”; slots → “Replication slots”; failover → “Failover readiness”; health → “Health matrix”; get_top_queries, observe_top_queries and get_query_details → “Queries” and the query card that opens from its row; explain_query and hypothetical_index → “EXPLAIN console”; the user's own actions are listed in “Actions journal”. To have a query optimized, the user clicks “Send to LLM assistant” in the EXPLAIN console or the query card; proposals appear in the “LLM proposals” panel of the EXPLAIN console with “Compare plans”."
+    };
+}
+
 pub mod prompts;
 mod proposal_tools;
 pub mod select_tool;
 mod tools;
 
-pub const INSTRUCTIONS: &str = "\
+pub const INSTRUCTIONS: &str = concat!(
+    "\
 Glafira is a gateway to PostgreSQL and Patroni diagnostics for the connections that the user opened \
 for LLM assistants in Glafira. Call list_connections first: it gives connection ids and the access \
 level of each connection.
@@ -42,14 +61,17 @@ transactions (run_select reads data with one SELECT), plans are built without ex
 and propose_query_rewrite only stores a proposal in Glafira for the user to review. Cancelling or \
 terminating sessions, dropping replication slots, switchover, restarts and configuration changes \
 are done by the user in Glafira or elsewhere: describe what to do and where, naming Glafira's \
-screens and buttons, never tool names.
+screens and buttons, never tool names. ",
+    screens_map!(),
+    "
 
 To investigate an incident, start with get_health_summary, then call run_diagnostic for the tools \
 behind its findings (list_diagnostics lists them). For load and slow queries use get_activity or \
 observe_activity, get_top_queries or observe_top_queries, get_query_details, explain_query and \
-hypothetical_index. Findings come with an English title and a fix; reports and get_health_summary \
-give the fix text of each finding id once, in fixes. Take the facts from them, then explain them, \
-set priorities and find connections between them.
+hypothetical_index. Findings come with an English title and a fix; in reports and \
+get_health_summary ",
+    fixes_once_text!(),
+    ". Take the facts from them, then explain them, set priorities and find connections between them.
 
 At the diagnostics level, literals in query texts and plans are replaced with $1, $2 and so on, and \
 comment bodies with /*…*/: do not try to restore or guess the masked values.
@@ -73,7 +95,8 @@ can change them at any time. The rewritten query must return the same rows: Glaf
 check that.
 
 run_select reads data and works only for connections with llmAccess \"data\"; nothing is masked \
-there. Prefer get_table_details (pg_stats) and explain_query, and always add WHERE and LIMIT.";
+there. Prefer get_table_details (pg_stats) and explain_query, and always add WHERE and LIMIT."
+);
 
 /// Инструменты в порядке спеки: P4a (§5.2), затем P4b; сторожок `tests/p4b_tools.rs` сверяет их с маршрутизатором.
 pub const TOOL_NAMES: [&str; 18] = [

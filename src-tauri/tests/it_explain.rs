@@ -361,11 +361,9 @@ async fn plan_and_analyze_read_tier_on_perf() {
     assert_eq!(e.details.as_deref(), Some("position 3"), "{e:?}");
 }
 
-/// Административная функция (спец. §15 п. 10): READ ONLY её не остановит, поэтому вызов в VERBOSE-плане пробы —
-/// ярус записи с предупреждением `adminFunction`. План без ANALYZE функцию не выполняет.
 /// Спец. P4 §15 (решение владельца по смоуку P4b): константа, которую планировщик вычисляет заранее, попадает в
-/// VERBOSE-план целиком; план больше 8 МБ не разбирается — отказ `errors.explain.planTooLarge`, и пробный план, и
-/// выполнение.
+/// VERBOSE-план целиком; план больше 8 МБ не разбирается — отказ `errors.explain.planTooLarge` в обоих режимах; у
+/// ANALYZE отказ приходит уже на пробном плане (план тот же), до выполнения.
 #[tokio::test]
 async fn plan_larger_than_eight_megabytes_is_refused() {
     let Some(perf) = common::perf_addr() else {
@@ -411,6 +409,8 @@ async fn plan_larger_than_eight_megabytes_is_refused() {
     assert_eq!(r.mode, Mode::Plan);
 }
 
+/// Административная функция (спец. §15 п. 10): READ ONLY её не остановит, поэтому вызов в VERBOSE-плане пробы —
+/// ярус записи с предупреждением `adminFunction`. План без ANALYZE функцию не выполняет.
 #[tokio::test]
 async fn admin_function_call_moves_the_statement_to_the_write_tier() {
     let Some(perf) = common::perf_addr() else {

@@ -12,7 +12,7 @@ use crate::commands::catalog::{catalog_limit, on_catalog_node_within};
 use crate::diag::caps::V16;
 use crate::diag::query_detail;
 use crate::error::AppResult;
-use crate::explain::params::count_params;
+use crate::explain::params::{count_params, plannable};
 use crate::explain::{ExplainRequest, ExplainResult, Mode, Params, run};
 use crate::state::AppState;
 
@@ -205,10 +205,11 @@ pub async fn bundle(
         None => match probe_text(text.as_deref(), text_truncated) {
             Some(sql) => match probe_params(count_params(sql), version) {
                 Some(params) => {
+                    // Текст карточки — из pg_stat_statements: `date $1` планируется как `$1::date` (`plannable`).
                     let req = ExplainRequest {
                         member: member.to_string(),
                         database: database.to_string(),
-                        sql: sql.to_string(),
+                        sql: plannable(sql),
                         mode: Mode::Plan,
                         params,
                         timeout_s: crate::explain::DEFAULT_TIMEOUT_S,

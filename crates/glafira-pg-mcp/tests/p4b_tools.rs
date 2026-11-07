@@ -345,17 +345,23 @@ async fn descriptions_and_instructions_carry_the_smoke_texts() {
     ] {
         assert!(table.contains(phrase), "{phrase}: {table}");
     }
+    // Ревью правки B, #5: одна фраза о `fixes` — в трёх описаниях и в `instructions`.
     for name in ["run_diagnostic", "get_top_queries", "get_health_summary"] {
         let d = description(name);
         assert!(
-            d.contains("the fix text of each finding id") && d.contains("once in fixes"),
+            d.contains(
+                "the fix text of each finding id is given once in fixes (a finding keeps its own fix only when it differs)"
+            ),
             "{name}: {d}"
         );
     }
     for phrase in [
         "call it again right before answering about decisions",
-        "give the fix text of each finding id once, in fixes",
+        "the fix text of each finding id is given once in fixes (a finding keeps its own fix only when it differs)",
         "naming Glafira's screens and buttons, never tool names",
+        // Ревью правки B, #3: карта экранов — и в `instructions` (свободный разговор без сценария).
+        "Screens behind the tools: get_health_summary → “Pulse”",
+        "“Compare plans”",
     ] {
         assert!(INSTRUCTIONS.contains(phrase), "{phrase}");
     }

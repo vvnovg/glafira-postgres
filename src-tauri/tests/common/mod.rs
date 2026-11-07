@@ -127,6 +127,21 @@ pub fn lab_addr() -> Option<String> {
 }
 
 /// Стенд тяжёлых запросов P3 (`GPG_IT_PERF=localhost:5471`, PG 17 с hypopg, pg_stat_kcache, pg_wait_sampling).
+/// Выполняет `sql` суперпользователем в базе `perf` стенда (строка попадает в pg_stat_statements) и отдаёт его
+/// `queryid` из плана (`Query Identifier`, PG 14+).
+pub async fn pgss_query_id(perf: &str, sql: &str) -> i64 {
+    let su = superuser(perf, "perf").await;
+    su.batch_execute(sql).await.unwrap();
+    let plan: serde_json::Value = su
+        .query_one(&format!("EXPLAIN (VERBOSE, FORMAT JSON) {sql}"), &[])
+        .await
+        .unwrap()
+        .get(0);
+    plan[0]["Query Identifier"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("{plan}"))
+}
+
 pub fn perf_addr() -> Option<String> {
     env("GPG_IT_PERF")
 }

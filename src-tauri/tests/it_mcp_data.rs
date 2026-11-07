@@ -654,7 +654,7 @@ async fn data_level_shows_literals_and_pg_stats_values() {
     assert!(
         v["hint"]
             .as_str()
-            .is_some_and(|h| h.contains("\"diagnostics and data\"")),
+            .is_some_and(|h| h.contains("“Diagnostics and data”")),
         "{v}"
     );
     set_access(&st, "it", LlmAccess::Data);

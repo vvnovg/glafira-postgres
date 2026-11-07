@@ -11,7 +11,7 @@ use super::proposals::{Comparison, IndexUse, LlmProposal};
 use crate::actions::Confirmation;
 use crate::error::{AppResult, ErrorCode};
 use crate::explain::hypopg::{self, HypoManyRequest};
-use crate::explain::params::count_params;
+use crate::explain::params::{count_params, plannable};
 use crate::explain::{DEFAULT_TIMEOUT_S, ExplainRequest, Mode, PROBE_TIMEOUT_S, Params};
 use crate::state::AppState;
 use crate::topology::model::now_ms;
@@ -31,7 +31,8 @@ pub fn params_for(n: usize, values: &[Option<String>]) -> Params {
     }
 }
 
-/// План без выполнения (`Mode::Plan`: пробный план консоли P3 в `READ ONLY`).
+/// План без выполнения (`Mode::Plan`: пробный план консоли P3 в `READ ONLY`); типизированные литералы `date $1` —
+/// приведения (`plannable`: предложения хранят тексты уже с ними, здесь — страховка).
 async fn plan_of(
     st: &AppState,
     connection_id: &str,
@@ -43,7 +44,7 @@ async fn plan_of(
     let req = ExplainRequest {
         member: member.into(),
         database: database.into(),
-        sql: sql.into(),
+        sql: plannable(sql),
         mode: Mode::Plan,
         params,
         timeout_s: DEFAULT_TIMEOUT_S,
@@ -97,7 +98,7 @@ async fn plan_after(
         &HypoManyRequest {
             member: member.to_string(),
             database: p.database.clone(),
-            sql: p.rewritten_sql.clone(),
+            sql: plannable(&p.rewritten_sql),
             params: params.clone(),
             search_path: None,
             index_ddls: p.indexes.clone(),

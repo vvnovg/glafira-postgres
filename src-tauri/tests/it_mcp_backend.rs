@@ -441,19 +441,6 @@ async fn plan_of_a_pgss_query_is_masked() {
 }
 
 /// queryid запроса `sql` в pgss: запрос выполняется суперпользователем, id — из `EXPLAIN (VERBOSE)` того же запроса.
-async fn pgss_query_id(perf: &str, sql: &str) -> i64 {
-    let su = common::superuser(perf, "perf").await;
-    su.batch_execute(sql).await.unwrap();
-    let plan: Value = su
-        .query_one(&format!("EXPLAIN (VERBOSE, FORMAT JSON) {sql}"), &[])
-        .await
-        .unwrap()
-        .get(0);
-    plan[0]["Query Identifier"]
-        .as_i64()
-        .unwrap_or_else(|| panic!("{plan}"))
-}
-
 /// Смоук P4b, G5: pgss хранит запрос с типизированными литералами (`timestamptz '…'`, `interval '…'`) как
 /// `timestamptz $1 - interval $2`, и раньше `explain_query` и `hypothetical_index` по queryId отвечали `invalid_sql`.
 /// Теперь шлюз приводит частые типы сам (`$1::timestamptz - $2::interval`), и план строится.
@@ -463,7 +450,7 @@ async fn pgss_text_with_typed_literals_is_planned() {
         return;
     };
     let (_dir, st, _m) = open_for_llm(&perf).await;
-    let qid = pgss_query_id(
+    let qid = common::pgss_query_id(
         &perf,
         "SELECT count(*) FROM shop.orders o \
          WHERE o.created_at >= timestamptz '2026-01-01 00:00:00+00' - interval '1 day'",
@@ -493,6 +480,56 @@ async fn pgss_text_with_typed_literals_is_planned() {
     assert!(matches!(a.body, PgOutput::Hypo(_)));
 }
 
+/// Ревью правки B, #2: `<тип> $N` в SQL модели (например, текст pgss, скопированный из get_query_details или из
+/// запроса карточки) тоже планируется как `$N::тип` — у `explain_query` и `hypothetical_index`; ошибка сервера в тексте
+/// после приведений — с позицией в тексте модели (§16.17), а не в тексте приведений (он длиннее на символ у каждого
+/// приведения).
+#[tokio::test]
+async fn model_sql_with_typed_literals_is_planned_and_positions_refer_to_its_text() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (_dir, st, _m) = open_for_llm(&perf).await;
+    let sql =
+        "SELECT count(*) FROM shop.orders o WHERE o.created_at >= timestamptz $1 - interval $2";
+    let params = json!(["2026-01-01 00:00:00+00", "1 day"]);
+    let a = ok(read_op(
+        &st,
+        explain(json!({"connectionId": "it", "database": "perf", "sql": sql, "params": params})),
+    )
+    .await);
+    let PgOutput::Explain(out) = &a.body else {
+        panic!("не план")
+    };
+    assert!(out.tables.iter().any(|t| t == "shop.orders"), "{out:?}");
+    let a = ok(read_op(
+        &st,
+        hypo(json!({
+            "connectionId": "it", "database": "perf", "sql": sql, "params": params,
+            "indexes": ["CREATE INDEX ON shop.orders (created_at)"]
+        })),
+    )
+    .await);
+    assert!(matches!(a.body, PgOutput::Hypo(_)));
+    let bad = format!("  {sql} AND o.no_such_column = 1");
+    let e = read_op(
+        &st,
+        explain(json!({"connectionId": "it", "database": "perf", "sql": bad, "params": params})),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, "invalid_sql", "{}", e.message);
+    assert!(
+        e.message.contains("no_such_column")
+            && e.message.ends_with(&format!(
+                "(position {})",
+                bad.find("o.no_such_column").unwrap() + 1
+            )),
+        "{}",
+        e.message
+    );
+}
+
 /// E5: тип, которого шлюз не приводит (`point '(1,2)'` → `point $1`), — сервер текст не разбирает (SQLSTATE 42601):
 /// `invalid_sql` с текстом и позицией сервера и подсказкой передать `sql` с приведениями `$N::type` или значениями — у
 /// `explain_query` и у `hypothetical_index`; у SQL модели с той же ошибкой подсказки нет.
@@ -502,7 +539,7 @@ async fn syntax_error_of_a_pgss_text_carries_the_hint() {
         return;
     };
     let (_dir, st, _m) = open_for_llm(&perf).await;
-    let qid = pgss_query_id(
+    let qid = common::pgss_query_id(
         &perf,
         "SELECT count(*) FROM shop.orders o WHERE o.id > (point '(1,2)' <-> point '(3,4)')",
     )

@@ -309,6 +309,146 @@ async fn console_request_to_compared_and_answered_proposal() {
     assert_eq!(index_count(&perf).await, indexes_before);
 }
 
+/// Запрос с типизированными литералами: pg_stat_statements хранит его как `timestamptz $1 - interval $2`.
+const TYPED: &str = "SELECT count(*) FROM shop.orders o \
+     WHERE o.created_at >= timestamptz '2026-01-01 00:00:00+00' - interval '1 day'";
+
+/// Ревью правки B, #2 и #4: запрос на оптимизацию из карточки запроса — текст pgss с `timestamptz $1 - interval $2`, как
+/// его отправляет “Send to LLM assistant” карточки. Снимок получает план, предложение по `requestId` (модель пишет в
+/// том же стиле, `<тип> $N`) проходит пробу, «Сравнить планы» строит оба плана; хранятся тексты с приведениями `$N::тип`,
+/// а `originalQueryId` связывает предложение с карточкой. Поле `sql` с приведениями — тот же запрос (M6). Предложение в
+/// прямой форме по `queryId` хранит тот же текст с приведениями и тот же `originalQueryId`.
+#[tokio::test]
+async fn typed_literals_of_a_card_query_are_proposed_and_compared() {
+    let Some(perf) = common::perf_addr() else {
+        return;
+    };
+    let (dir, st) = common::open_server_in(&perf, "perf").await;
+    set_access(&st, "it", LlmAccess::Diagnostics);
+    let gw = Gateway::start(&st, dir.path()).await;
+    let m = mcp_harness::member(&st);
+    let qid = common::pgss_query_id(&perf, TYPED).await;
+    let text: String = common::superuser(&perf, "perf")
+        .await
+        .query_one(
+            "SELECT s.query FROM pg_stat_statements s JOIN pg_database d ON d.oid = s.dbid \
+             WHERE s.queryid = $1 AND d.datname = 'perf' LIMIT 1",
+            &[&qid],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(text.contains("timestamptz $1 - interval $2"), "{text}");
+    let cast = text.replace(
+        "timestamptz $1 - interval $2",
+        "$1::timestamptz - $2::interval",
+    );
+    let req = create_request(
+        &st,
+        "it",
+        CreateRequestArgs {
+            member: m.clone(),
+            database: "perf".into(),
+            source: RequestSource::Query {
+                query_id: qid.to_string(),
+            },
+            sql: text.clone(),
+            params: vec![],
+            plan: None,
+        },
+    )
+    .await
+    .unwrap();
+    let v = gw
+        .ok("get_optimization_request", json!({"requestId": req.id}))
+        .await;
+    assert_eq!(v["sql"], text.as_str(), "снимок — текст карточки как есть");
+    assert!(
+        v["bundle"]["planText"]
+            .as_str()
+            .is_some_and(|p| p.contains("orders")),
+        "пробный план снимка — по тексту с приведениями: {}",
+        v["bundle"]
+    );
+
+    let rewritten = "SELECT count(o.id) FROM shop.orders o \
+                     WHERE o.created_at >= timestamptz $1 - interval $2";
+    let propose = |extra: Value| {
+        let mut args = json!({
+            "requestId": req.id,
+            "rewrittenSql": rewritten,
+            "indexes": ["CREATE INDEX ON shop.orders (created_at)"],
+            "rationale": "Index the date filter"
+        });
+        for (k, x) in extra.as_object().unwrap() {
+            args[k] = x.clone();
+        }
+        args
+    };
+    let v = gw.ok("propose_query_rewrite", propose(json!({}))).await;
+    let pid = v["proposalId"].as_str().unwrap().to_string();
+    let again = gw
+        .ok(
+            "propose_query_rewrite",
+            propose(json!({"sql": cast, "queryId": qid.to_string()})),
+        )
+        .await;
+    assert_eq!(
+        again["proposalId"],
+        pid.as_str(),
+        "тот же запрос и предложение"
+    );
+    let p = st.llm.proposals.get(&pid).unwrap();
+    assert_eq!(p.original_sql, cast);
+    assert_eq!(
+        p.rewritten_sql,
+        "SELECT count(o.id) FROM shop.orders o \
+         WHERE o.created_at >= $1::timestamptz - $2::interval"
+    );
+    assert_eq!(p.original_query_id, Some(qid.to_string()));
+    let c = compare_proposal(&st, &pid)
+        .await
+        .unwrap()
+        .comparison
+        .expect("сравнение сохранено");
+    assert!(c.cost_before > 0.0 && c.cost_after > 0.0, "{c:?}");
+    assert_eq!(c.indexes_used.len(), 1, "{c:?}");
+
+    // #4: прямая форма по queryId — текст pgss с приведениями, связь с карточкой — по originalQueryId.
+    let v = gw
+        .ok(
+            "propose_query_rewrite",
+            json!({
+                "connectionId": "it",
+                "database": "perf",
+                "queryId": qid.to_string(),
+                "rewrittenSql": "SELECT count(*) FROM shop.orders WHERE created_at >= $1::timestamptz - $2::interval",
+                "rationale": "The same query without the alias"
+            }),
+        )
+        .await;
+    let direct = st
+        .llm
+        .proposals
+        .get(v["proposalId"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(
+        (
+            direct.original_sql.as_str(),
+            direct.original_query_id.as_deref(),
+            direct.request_id.as_deref(),
+            direct.database.as_str()
+        ),
+        (cast.as_str(), Some(qid.to_string().as_str()), None, "perf")
+    );
+    let c = compare_proposal(&st, &direct.id)
+        .await
+        .unwrap()
+        .comparison
+        .expect("сравнение сохранено");
+    assert!(c.cost_before > 0.0, "{c:?}");
+}
+
 /// В базе `postgres` стенда pg-perf hypopg нет: сравнение идёт без индексов и помечено (§8.4).
 #[tokio::test]
 async fn comparison_without_hypopg_is_marked() {

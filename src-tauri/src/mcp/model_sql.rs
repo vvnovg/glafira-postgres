@@ -7,7 +7,7 @@
 use glafira_mcp_core::error::ToolError;
 use glafira_pg_mcp::params::{SQL_AND_QUERY_ID_BOTH, SQL_AND_QUERY_ID_NEITHER};
 use pg_advisor::sqlcheck::{self, Checked, Purpose};
-use pg_advisor::sqltext::cast_typed_literal_params;
+use pg_advisor::sqltext::{apply_typed_literal_casts, typed_literal_casts};
 
 use super::access::{err, invalid_argument, tool_error};
 use super::guard;
@@ -59,14 +59,21 @@ fn check_sql(original: &str, purpose: Purpose) -> Result<(), ToolError> {
     check_model_sql(original, purpose).map(|_| ())
 }
 
-/// Текст pgss по `queryId` — те же проверки, что у SQL модели; слишком длинный называется хранимым текстом запроса:
-/// модель прислала только `queryId`, не SQL. Синтаксическая ошибка разбора — с подсказкой `pgss_syntax_hint` (E5).
-pub(crate) fn check_pgss_text(query_id: i64, text: &str) -> Result<(), ToolError> {
+/// Длина текста pgss по `queryId`: слишком длинный называется хранимым текстом запроса — модель прислала только
+/// `queryId`, не SQL.
+fn check_pgss_len(query_id: i64, text: &str) -> Result<(), ToolError> {
     if normalize(text).len() > MAX_SQL_BYTES {
         return Err(invalid_argument(format!(
             "The text of query {query_id} stored in pg_stat_statements is longer than {MAX_SQL_BYTES} bytes: the gateway does not plan it"
         )));
     }
+    Ok(())
+}
+
+/// Текст pgss по `queryId` — те же проверки, что у SQL модели (длина — `check_pgss_len`). Синтаксическая ошибка
+/// разбора — с подсказкой `pgss_syntax_hint` (E5).
+pub(crate) fn check_pgss_text(query_id: i64, text: &str) -> Result<(), ToolError> {
+    check_pgss_len(query_id, text)?;
     check_sql(text, Purpose::Explain).map_err(|e| {
         // Ошибка грамматики `pg_query` — текст парсера PostgreSQL («syntax error at or near …», «… at end of input»),
         // как у SQLSTATE 42601 сервера; прочие отказы `sqlcheck` (вид выражения, функции) так не начинаются.
@@ -117,29 +124,127 @@ pub(crate) fn check_index_ddls(ddls: &[String]) -> Result<Vec<String>, ToolError
 /// Откуда SQL: прислала модель или текст pgss по `queryId` — план по нему не «SQL модели» и маскируется (§6.1);
 /// синтаксическая ошибка сервера в тексте pgss получает подсказку (`syntax_hint`, E5).
 pub(crate) struct SqlSource {
-    pub(crate) text: String,
+    pub(crate) plan: PlanText,
     pub(crate) from_pgss: bool,
     pub(crate) syntax_hint: Option<String>,
 }
 
-/// Что прислала модель: ровно одно из `sql` и `queryId`; `sql` проверен `sqlcheck`, `queryId` — число. До соединения.
-pub(crate) enum Asked<'a> {
-    Sql(&'a str),
+/// Текст для плана (смоук P4b, G5; ревью правки B, #2) — SQL модели, текст pgss по `queryId`, снимок запроса на
+/// оптимизацию и предложенный SQL: типизированные литералы частых типов (`date $1`) становятся приведениями `$1::date`
+/// (`pg_advisor::sqltext::typed_literal_casts`). `<тип> $N` — не SQL (сервер его не разбирает), так что меняются только
+/// тексты, которые иначе не построили бы план. Позиции в ошибках разбора и плана — по тексту приведений; `restore`
+/// пересчитывает их в исходный текст (§16.17). Текст длиннее `MAX_SQL_BYTES` на лексемы не разбирается (ревью правки
+/// B, #1): его отвергнет проверка длины.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PlanText {
+    pub(crate) text: String,
+    /// Приведения по порядку, в символах исходного текста: начало куска `<тип> $N` (с 0), его длина и длина приведения.
+    casts: Vec<(usize, usize, usize)>,
+}
+
+impl PlanText {
+    pub(crate) fn new(sql: &str) -> Self {
+        let found = if normalize(sql).len() > MAX_SQL_BYTES {
+            Vec::new()
+        } else {
+            typed_literal_casts(sql)
+        };
+        if found.is_empty() {
+            return Self {
+                text: sql.to_string(),
+                casts: Vec::new(),
+            };
+        }
+        let chars = |a: usize, b: usize| sql[a..b].chars().count();
+        let (mut byte, mut char) = (0, 0);
+        let casts = found
+            .iter()
+            .map(|c| {
+                char += chars(byte, c.type_start);
+                byte = c.type_start;
+                let cast = chars(c.param_start, c.param_end) + 2 + chars(c.type_start, c.type_end);
+                (char, chars(c.type_start, c.param_end), cast)
+            })
+            .collect();
+        Self {
+            text: apply_typed_literal_casts(sql, &found),
+            casts,
+        }
+    }
+
+    /// Позиция в тексте приведений (символы с 1) → позиция в исходном тексте; внутри приведения — начало его типа.
+    fn original_position(&self, p: usize) -> usize {
+        let q = p.saturating_sub(1);
+        // Насколько текст приведений длиннее исходного до текущего куска.
+        let mut shift = 0isize;
+        for &(start, piece, cast) in &self.casts {
+            let at = start.saturating_add_signed(shift);
+            if q < at {
+                break;
+            }
+            if q < at + cast {
+                return start + 1;
+            }
+            shift += cast as isize - piece as isize;
+        }
+        q.saturating_add_signed(-shift) + 1
+    }
+
+    /// Ошибка с позициями «(position N)» (так их пишут `guard::with_position` и `sql_error`) в тексте приведений — с
+    /// позициями в исходном тексте. Без приведений — как есть.
+    pub(crate) fn restore(&self, mut e: ToolError) -> ToolError {
+        const KEY: &str = "(position ";
+        if self.casts.is_empty() || !e.message.contains(KEY) {
+            return e;
+        }
+        let mut out = String::with_capacity(e.message.len());
+        let mut rest = e.message.as_str();
+        while let Some(i) = rest.find(KEY) {
+            let (head, tail) = rest.split_at(i + KEY.len());
+            out.push_str(head);
+            let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+            match tail[..digits].parse::<usize>() {
+                Ok(p) if tail[digits..].starts_with(')') => {
+                    out.push_str(&self.original_position(p).to_string())
+                }
+                _ => out.push_str(&tail[..digits]),
+            }
+            rest = &tail[digits..];
+        }
+        out.push_str(rest);
+        e.message = out;
+        e
+    }
+}
+
+/// Текст pgss по `queryId` для плана: длина — до разбора на лексемы (ревью правки B, #1: текст pgss бывает в мегабайты,
+/// например длинный список `IN`), затем приведения (`PlanText`) и проверки `check_pgss_text` по тексту приведений
+/// (позиции — в тексте pgss).
+fn pgss_plan_text(query_id: i64, raw: &str) -> Result<PlanText, ToolError> {
+    check_pgss_len(query_id, raw)?;
+    let plan = PlanText::new(raw);
+    check_pgss_text(query_id, &plan.text).map_err(|e| plan.restore(e))?;
+    Ok(plan)
+}
+
+/// Что прислала модель: ровно одно из `sql` и `queryId`; `sql` — текст для плана (`PlanText`), проверен `sqlcheck`,
+/// `queryId` — число. До соединения.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Asked {
+    Sql(PlanText),
     QueryId(i64),
 }
 
 /// Правило и сообщения — как у `validate` крейта (пустая строка — «не задана»): через шлюз сюда приходит уже
 /// нормализованная пара, а при прямом вызове `read_op` (тесты, будущие вызовы приложения) проверка остаётся страховкой.
-pub(crate) fn asked<'a>(
-    sql: Option<&'a str>,
-    query_id: Option<&str>,
-) -> Result<Asked<'a>, ToolError> {
+pub(crate) fn asked(sql: Option<&str>, query_id: Option<&str>) -> Result<Asked, ToolError> {
     let sql = sql.filter(|s| !s.trim().is_empty());
     let query_id = query_id.filter(|q| !q.trim().is_empty());
     match (sql, query_id) {
         (Some(s), None) => {
-            check_sql(s, Purpose::Explain)?;
-            Ok(Asked::Sql(s))
+            let plan = PlanText::new(s);
+            check_sql(&plan.text, Purpose::Explain).map_err(|e| plan.restore(e))?;
+            Ok(Asked::Sql(plan))
         }
         (None, Some(q)) => Ok(Asked::QueryId(
             query_detail::parse_query_id(q).map_err(tool_error)?,
@@ -202,31 +307,27 @@ async fn pgss_text(
     }
 }
 
-/// Текст для плана: SQL модели как есть или текст pgss (он тоже проходит `sqlcheck`: в pgss бывают и служебные
-/// команды). В тексте pgss типизированные литералы частых типов (`date $1`) сначала становятся приведениями (`$1::date`,
-/// `cast_typed_literal_params`, смоук P4b, G5): иначе текст не разбирается.
+/// Текст для плана: SQL модели (уже `PlanText`) или текст pgss (он тоже проходит `sqlcheck`: в pgss бывают и служебные
+/// команды) — в обоих типизированные литералы частых типов (`date $1`) становятся приведениями (`$1::date`, `PlanText`):
+/// иначе сервер текст не разбирает.
 pub(crate) async fn sql_source(
     st: &AppState,
     id: &str,
     member: &str,
     database: &str,
-    asked: Asked<'_>,
+    asked: Asked,
 ) -> Result<SqlSource, ToolError> {
     match asked {
-        Asked::Sql(s) => Ok(SqlSource {
-            text: s.to_string(),
+        Asked::Sql(plan) => Ok(SqlSource {
+            plan,
             from_pgss: false,
             syntax_hint: None,
         }),
-        Asked::QueryId(q) => {
-            let text = cast_typed_literal_params(&pgss_text(st, id, member, database, q).await?);
-            check_pgss_text(q, &text)?;
-            Ok(SqlSource {
-                text,
-                from_pgss: true,
-                syntax_hint: Some(pgss_syntax_hint(q)),
-            })
-        }
+        Asked::QueryId(q) => Ok(SqlSource {
+            plan: pgss_plan_text(q, &pgss_text(st, id, member, database, q).await?)?,
+            from_pgss: true,
+            syntax_hint: Some(pgss_syntax_hint(q)),
+        }),
     }
 }
 
@@ -402,10 +503,10 @@ mod tests {
 
     #[test]
     fn sql_or_query_id_is_checked_before_the_server() {
-        assert!(matches!(
+        assert_eq!(
             asked(Some("SELECT 1"), None),
-            Ok(Asked::Sql("SELECT 1"))
-        ));
+            Ok(Asked::Sql(PlanText::new("SELECT 1")))
+        );
         assert!(matches!(asked(None, Some(" 42 ")), Ok(Asked::QueryId(42))));
         for (sql, qid, code) in [
             (Some("SELECT 1"), Some("42"), "invalid_argument"),
@@ -423,10 +524,10 @@ mod tests {
             assert_eq!(e.code, code, "{sql:?} {qid:?}");
         }
         // Те же правило и сообщения, что у `validate` крейта (E2): пустая строка — «не задана».
-        assert!(matches!(
+        assert_eq!(
             asked(Some("SELECT 1"), Some("")),
-            Ok(Asked::Sql("SELECT 1"))
-        ));
+            Ok(Asked::Sql(PlanText::new("SELECT 1")))
+        );
         assert!(matches!(asked(Some(" "), Some("7")), Ok(Asked::QueryId(7))));
         for (sql, qid, want) in [
             (Some("SELECT 1"), Some("42"), SQL_AND_QUERY_ID_BOTH),
@@ -436,6 +537,102 @@ mod tests {
             let e = asked(sql, qid).err().unwrap();
             assert_eq!(e.message, want, "{sql:?} {qid:?}");
         }
+    }
+
+    /// Ревью правки B, #2: `<тип> $N` — не SQL, и в SQL модели он, как в тексте pgss, становится приведением `$N::тип`;
+    /// текст без таких литералов не меняется. Позиции в тексте приведений (символы с 1) пересчитываются в текст модели:
+    /// до приведения — те же, внутри — начало типа, после — со сдвигом (приведение длиннее куска на 2 символа минус
+    /// пробелы между типом и параметром).
+    #[test]
+    fn typed_literals_of_any_sql_become_casts_and_positions_come_back() {
+        let original =
+            "SELECT * FROM t WHERE e < timestamptz  $2 AND d = date $1 AND x = int\n $3 AND nope";
+        let p = PlanText::new(original);
+        assert_eq!(
+            p.text,
+            "SELECT * FROM t WHERE e < $2::timestamptz AND d = $1::date AND x = $3::int AND nope"
+        );
+        let at = |text: &str, part: &str| text.find(part).unwrap() + 1;
+        for (cast, want) in [
+            (1, 1),
+            (at(&p.text, "$2::"), at(original, "timestamptz")),
+            (at(&p.text, " AND d"), at(original, " AND d")),
+            (at(&p.text, "$1::"), at(original, "date $1")),
+            (at(&p.text, "date AND"), at(original, "date $1")),
+            (at(&p.text, " AND x"), at(original, " AND x")),
+            (at(&p.text, "$3::"), at(original, "int\n")),
+            (at(&p.text, "nope"), at(original, "nope")),
+        ] {
+            assert_eq!(p.original_position(cast), want, "{cast}");
+        }
+        let e = p.restore(err(
+            "invalid_sql",
+            format!(
+                "column \"nope\" does not exist (position {}) (positions) (position 1)",
+                at(&p.text, "nope")
+            ),
+        ));
+        assert_eq!(
+            e.message,
+            format!(
+                "column \"nope\" does not exist (position {}) (positions) (position 1)",
+                at(original, "nope")
+            )
+        );
+        let plain = PlanText::new("SELECT $1::date FROM t");
+        assert_eq!(plain.text, "SELECT $1::date FROM t");
+        let e = err("invalid_sql", "x (position 9)");
+        assert_eq!(plain.restore(e.clone()), e);
+    }
+
+    /// SQL модели с `date $1` уходит серверу приведённым (`pg_query` разбирает и `date $1`, сервер — нет); отказ
+    /// `sqlcheck` по тексту приведений — с позицией в тексте модели.
+    #[test]
+    fn model_sql_with_typed_literals_is_checked_as_casts() {
+        let Ok(Asked::Sql(p)) = asked(Some(" SELECT * FROM t WHERE d > date $1"), None) else {
+            panic!("date $1 не принят");
+        };
+        assert_eq!(p.text, " SELECT * FROM t WHERE d > $1::date");
+        let sql = " SELECT * FROM t WHERE d > date $1 AND pg_sleep(1) IS NULL";
+        let e = asked(Some(sql), None).unwrap_err();
+        assert_eq!(
+            (e.code.as_str(), e.message),
+            (
+                "forbidden_function",
+                format!(
+                    "Function pg_sleep is not allowed (position {})",
+                    sql.find("pg_sleep").unwrap() + 1
+                )
+            )
+        );
+    }
+
+    /// Ревью правки B, #1: длина текста — до разбора на лексемы: длинный текст pgss отвергается сразу, длинный SQL модели
+    /// не приводится (его отвергнет проверка длины); короткий текст pgss приводится и проверяется `check_pgss_text`.
+    #[test]
+    fn long_texts_are_not_tokenized_and_pgss_positions_come_back() {
+        let long = format!("SELECT date $1, {}1", "1,".repeat(MAX_SQL_BYTES / 2));
+        assert_eq!(PlanText::new(&long).text, long, "длинный текст — как есть");
+        let e = pgss_plan_text(7, &long).unwrap_err();
+        assert_eq!(e.code, "invalid_argument");
+        assert!(
+            e.message
+                .contains("stored in pg_stat_statements is longer than"),
+            "{}",
+            e.message
+        );
+        let p = pgss_plan_text(7, "SELECT * FROM t WHERE d > date $1").unwrap();
+        assert_eq!(p.text, "SELECT * FROM t WHERE d > $1::date");
+        // `pg_query` разбирает `date $1` (грамматика libpg_query для нормализованных текстов) — отвергает сервер; здесь
+        // ошибка грамматики после приведения: подсказка E5 остаётся.
+        let e = pgss_plan_text(7, "SELECT * FROM t WHERE d > date $1 AND AND x").unwrap_err();
+        assert_eq!(e.code, "invalid_sql");
+        assert!(
+            e.message
+                .starts_with("syntax error at or near \"AND\". pg_stat_statements stores query 7"),
+            "{}",
+            e.message
+        );
     }
 
     /// Позиция отказа `sqlcheck` — в тексте, как его прислала модель: ведущие пробелы и переводы строк, которые снимает

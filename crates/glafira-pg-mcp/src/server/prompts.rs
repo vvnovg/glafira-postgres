@@ -18,9 +18,13 @@ const ANSWER_LANGUAGE: &str = "Answer in the language the user writes in.";
 /// места.
 pub const ANSWER_BUDGET: &str = "Keep the answer short: start with a summary of up to about 10 lines (what is happening or the main problem, the likely cause, the next action) and give details only when the user asks for them.";
 /// Инструменты → экраны и кнопки Glafira (смоук P4b, M4): модель перечисляла пользователю имена инструментов как
-/// «действия в Glafira». Подписи в “…” — точные английские строки `src/locales/en.json` (дерево диагностики, карточка
-/// запроса, консоль EXPLAIN, панель предложений); тест `quoted_labels_are_the_english_ui_labels` сверяет их со словарём.
-pub const GLAFIRA_SCREENS: &str = "When you tell the user what to do in Glafira, name its screens and buttons, never tool names. Screens behind the tools: get_health_summary → “Pulse”; sessions and get_activity → “Sessions” (with the buttons “Cancel query…” and “Terminate session…”) and “Idle in transaction”; waits and observe_activity → “Wait profile”; locks → “Locks”; horizon → “xmin horizon”; replication → “Replicas”; slots → “Replication slots”; failover → “Failover readiness”; health → “Health matrix”; get_top_queries, observe_top_queries and get_query_details → “Queries” and the query card that opens from its row; explain_query and hypothetical_index → “EXPLAIN console”; the user's own actions are listed in “Actions journal”. To have a query optimized, the user clicks “Send to LLM assistant” in the EXPLAIN console or the query card; proposals appear in the “LLM proposals” panel of the EXPLAIN console with “Compare plans”.";
+/// «действия в Glafira». Карта (`screens_map!`, та же — в `INSTRUCTIONS`): подписи в “…” — точные английские строки
+/// `src/locales/en.json` (дерево диагностики, карточка запроса, консоль EXPLAIN, панель предложений); тест
+/// `quoted_labels_are_the_english_ui_labels` сверяет их со словарём.
+pub const GLAFIRA_SCREENS: &str = concat!(
+    "When you tell the user what to do in Glafira, name its screens and buttons, never tool names. ",
+    screens_map!()
+);
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -366,7 +370,7 @@ mod tests {
         for text in all_texts()
             .iter()
             .map(String::as_str)
-            .chain([GLAFIRA_SCREENS])
+            .chain([GLAFIRA_SCREENS, crate::server::INSTRUCTIONS])
         {
             for label in quoted(text) {
                 assert!(labels.contains(label), "“{label}” нет в en.json");

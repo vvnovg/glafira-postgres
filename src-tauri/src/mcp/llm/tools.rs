@@ -25,7 +25,7 @@ use crate::explain::params::{count_params, normalize};
 use crate::mcp::access::{check_connection, ensure_open, err, invalid_argument, tool_error};
 use crate::mcp::guard;
 use crate::mcp::model_sql::{
-    Asked, asked, check_index_ddls, check_model_sql, resolve_database, sql_source,
+    Asked, PlanText, asked, check_index_ddls, check_model_sql, resolve_database, sql_source,
 };
 use crate::mcp::read::{EXPLAIN_TIMEOUT_S, member_or_leader};
 use crate::state::AppState;
@@ -313,10 +313,10 @@ fn get_request(st: &AppState, p: GetRequestParams) -> Result<PgOutput, ToolError
     Ok(PgOutput::Request(request_for_model(&r, &name)?))
 }
 
-/// Текст исходного запроса: известен до сервера (снимок пользователя, `sql` модели) или текст pgss по `queryId` —
-/// читается на узле.
+/// Текст исходного запроса: известен до сервера (снимок пользователя, `sql` модели; `PlanText` — с приведениями
+/// типизированных литералов) или текст pgss по `queryId` — читается на узле.
 enum Original {
-    Text(String),
+    Text(PlanText),
     QueryId(i64),
 }
 
@@ -335,7 +335,8 @@ struct Origin {
 }
 
 /// Поля прямой формы рядом с `requestId` (смоук P4b, M6): совпадающие с запросом принимаются и ничего не меняют —
-/// подключение и база (база — после снятия краевых пробелов), SQL после `normalize` (краевые пробелы и хвостовые `;`),
+/// подключение и база (база — после снятия краевых пробелов), SQL после `normalize` (краевые пробелы и хвостовые `;`)
+/// и приведений типизированных литералов (`date $1` и `$1::date` — один запрос),
 /// `queryId` запроса карточки (как число). Первое несовпадение — `invalid_argument` с полем и подсказкой
 /// `WITH_REQUEST_ONLY`. `member` в параметрах нет: лишнее поле модели разбор пропускает.
 fn request_conflict(
@@ -359,7 +360,7 @@ fn request_conflict(
             r.database
         ))
     } else if let Some(sql) = p.sql.as_deref()
-        && normalize(sql) != normalize(&r.sql)
+        && normalize(&PlanText::new(sql).text) != normalize(&PlanText::new(&r.sql).text)
     {
         Some("sql differs from the query of".to_string())
     } else if let Some(q) = p.query_id.as_deref()
@@ -391,7 +392,7 @@ fn origin(st: &AppState, p: &ProposeParams) -> Result<Origin, ToolError> {
             connection_id: r.connection_id,
             database: r.database,
             member: Some(r.member),
-            original: Original::Text(r.sql),
+            original: Original::Text(PlanText::new(&r.sql)),
             query_id,
             values: r.params,
         });
@@ -402,7 +403,7 @@ fn origin(st: &AppState, p: &ProposeParams) -> Result<Origin, ToolError> {
     let (profile, _) = check_connection(st, &connection_id)?;
     let database = resolve_database(&profile, p.database.as_deref());
     let (original, query_id) = match asked(p.sql.as_deref(), p.query_id.as_deref())? {
-        Asked::Sql(s) => (Original::Text(s.to_string()), None),
+        Asked::Sql(plan) => (Original::Text(plan), None),
         Asked::QueryId(q) => (Original::QueryId(q), Some(q.to_string())),
     };
     Ok(Origin {
@@ -418,10 +419,12 @@ fn origin(st: &AppState, p: &ProposeParams) -> Result<Origin, ToolError> {
 
 /// Вид исходного запроса (§8.2: предложение — того же вида). SQL модели и текст pgss уже прошли ту же проверку; снимок
 /// пользователя мог её не пройти (консоль принимает и другое, а текст pgss карточки бывает нормализован так, что не
-/// разбирается) — тогда модель предлагает в прямой форме, со своим текстом исходного запроса.
-fn original_kind(text: &str, request_id: Option<&str>) -> Result<StatementKind, ToolError> {
-    check_model_sql(text, Purpose::Explain)
+/// разбирается и после приведений `PlanText`) — тогда модель предлагает в прямой форме, со своим текстом исходного
+/// запроса.
+fn original_kind(plan: &PlanText, request_id: Option<&str>) -> Result<StatementKind, ToolError> {
+    check_model_sql(&plan.text, Purpose::Explain)
         .map(|c| c.kind)
+        .map_err(|e| plan.restore(e))
         .map_err(|e| match request_id {
             Some(id) => invalid_argument(format!(
                 "The original query of optimization request {id} is not accepted by the gateway ({}: {}): propose with connectionId and sql (the original query with values) instead of requestId",
@@ -505,12 +508,15 @@ async fn propose(
     client: Option<String>,
 ) -> Result<PgOutput, ToolError> {
     let o = origin(st, &p)?;
-    // До сервера — те же проверки, что у explain_query и hypothetical_index; позиции — в тексте модели (§16.17).
-    let rewritten = check_model_sql(&p.rewritten_sql, Purpose::Explain)?;
+    // До сервера — те же проверки, что у explain_query и hypothetical_index (типизированные литералы — приведения,
+    // `PlanText`); позиции — в тексте модели (§16.17).
+    let rewritten_sql = PlanText::new(&p.rewritten_sql);
+    let rewritten = check_model_sql(&rewritten_sql.text, Purpose::Explain)
+        .map_err(|e| rewritten_sql.restore(e))?;
     let indexes = proposal_indexes(p.indexes.as_deref().unwrap_or_default())?;
-    if let Original::Text(text) = &o.original {
+    if let Original::Text(plan) = &o.original {
         same_kind(
-            original_kind(text, o.request_id.as_deref())?,
+            original_kind(plan, o.request_id.as_deref())?,
             rewritten.kind,
         )?;
     }
@@ -524,7 +530,7 @@ async fn propose(
     let member = member_or_leader(st, &o.connection_id, o.member.as_deref())
         .map_err(|e| direct_form_hint(e, o.request_id.as_deref(), o.member.as_deref()))?;
     let original = match o.original {
-        Original::Text(text) => text,
+        Original::Text(plan) => plan.text,
         Original::QueryId(q) => {
             let source = sql_source(
                 st,
@@ -534,12 +540,12 @@ async fn propose(
                 Asked::QueryId(q),
             )
             .await?;
-            same_kind(original_kind(&source.text, None)?, rewritten.kind)?;
-            source.text
+            same_kind(original_kind(&source.plan, None)?, rewritten.kind)?;
+            source.plan.text
         }
     };
     // Слои §7.3: READ ONLY, сроки EXPLAIN, `prepare` под точкой сохранения, проба плана с поиском запрещённого. Текст —
-    // как прислала модель: `GuardTx` нормализует сам, позиции ошибок сервера — в исходном тексте.
+    // для плана (`PlanText`): `GuardTx` нормализует сам, позиции ошибок сервера `restore` возвращает в текст модели.
     let tx = guard::begin(
         st,
         &o.connection_id,
@@ -549,16 +555,16 @@ async fn propose(
     )
     .await?;
     let checked = async {
-        tx.prepare_one(&p.rewritten_sql).await?;
-        let n = count_params(&normalize(&p.rewritten_sql));
+        tx.prepare_one(&rewritten_sql.text).await?;
+        let n = count_params(&normalize(&rewritten_sql.text));
         if let Some(params) = probe_params(n, &o.values, tx.version_num()) {
-            tx.probe(&p.rewritten_sql, &params).await?;
+            tx.probe(&rewritten_sql.text, &params).await?;
         }
         Ok::<_, ToolError>(())
     }
     .await;
     tx.finish().await;
-    checked?;
+    checked.map_err(|e| rewritten_sql.restore(e))?;
     let new = NewProposal {
         source: ProposalSource::Mcp,
         client,
@@ -568,7 +574,7 @@ async fn propose(
         member: Some(member),
         original_sql: normalize(&original),
         original_query_id: o.query_id,
-        rewritten_sql: normalize(&p.rewritten_sql),
+        rewritten_sql: normalize(&rewritten_sql.text),
         indexes,
         rationale,
         expected_effect: p
@@ -1068,6 +1074,10 @@ mod tests {
             query_id: "-42".into(),
         };
         let card = st.llm.requests.create(q).unwrap();
+        // Ревью правки B, #2: снимок карточки с типизированным литералом; `sql` модели с приведением — тот же запрос.
+        let mut t = new_request("c1");
+        t.sql = "SELECT * FROM orders WHERE created > date $1".into();
+        let typed = st.llm.requests.create(t).unwrap();
         let propose = |p: ProposeParams| {
             handle(
                 &st,
@@ -1091,6 +1101,9 @@ mod tests {
             }),
             with(&card.id, &|p| p.query_id = Some(" -42 ".into())),
             with(&r.id, &|p| p.query_id = Some(r.id.clone())),
+            with(&typed.id, &|p| {
+                p.sql = Some("SELECT * FROM orders WHERE created > $1::date;".into())
+            }),
         ] {
             let e = propose(p).await.unwrap_err();
             assert_eq!(
