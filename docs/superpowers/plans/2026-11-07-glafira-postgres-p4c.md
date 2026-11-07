@@ -1416,6 +1416,75 @@ Expected: в коммите только спека (журнал плана `.s
 (шаг «синхронизация спеки» их не переписывает).
 
 
+### Сверка с `feat/p4b` 4068590 — поправки к задачам 2–4, 8–11 (обязательны)
+
+Ветка `feat/p4c` начата 2026-11-07 от вершины `feat/p4b` 4068590 (правки смоука P4b A, A2, B, C, D и финального ревью), а
+не от `main` после слияния P4b (Global Constraints, «Ветка»): так решил владелец через сессию P4b. Коммиты спеки, плана и
+задачи 1 перенесены сюда (`f5c5fdb` → `a91fb30`, `b5940d9` → `b55ea8e`). Задачи 2–11 написаны по `feat/p4b` 4cc4480;
+ниже — что с тех пор поменялось и как это учитывает исполнитель. При расхождении текста задачи и этих поправок правы
+поправки. Отчёты P4b — `.superpowers/sdd/p4b/smoke-fix-{A,B,C,D}-report.md`, `smoke-final-fix-report.md` (в main checkout).
+
+**Ответ инструмента (все задачи с тестами MCP).** `glafira_mcp_core::call` отдаёт успешный ответ функцией `success`: JSON
+сжимается (`compact::compact` — без `null`, дробные округлены) и идёт модели одним текстовым блоком, без
+`structuredContent`; предел 100 КБ — по сжатому тексту. `success` и `compact` задачи P4c не меняют.
+- Тест-хелперы читают JSON из текста: `ok(r)` = `assert_eq!(r.structured_content, None)` и
+  `serde_json::from_str(&text(&r))` — как `ok` в `crates/glafira-mcp-core/tests/server.rs` и `mcp_harness` приложения на
+  `feat/p4b`. Так — в задаче 2 (хелпер `ok` тестов ядра, `r.structured_content.unwrap()` в тексте задачи) и в задаче 8
+  (`Agent::call` фальшивого агента: `serde_json::from_str(&text_of(&r))` вместо `r.structured_content`).
+- Поля со значением `null` в ответе модели отсутствуют: тесты проверяют `v["x"].is_null()` или отсутствие ключа, а не
+  `Some(&Value::Null)`. Файлы приложения (`llm-proposals.json`, `agent-runs.json`) и JSON для фронтенда это не касается:
+  `"runId": null` у предложения (уточнение 13 задач 2–4) остаётся.
+
+**Задача 3 (`prompts.rs`, `server/mod.rs`).**
+1. `optimize_query_text` на `feat/p4b` — с новым шагом 5 («…list_proposals shows the decision and the comparison. The
+   user's decisions and comparisons change at any time: …») и концом `{ANSWER_BUDGET} {ANSWER_LANGUAGE}`. Шаги 1–4 те же, что
+   в задаче. `optimize_steps` выносит шаги 1–4; текст `optimize_query` остаётся байт в байт как на 4068590 — тест сравнивает
+   `optimize_query_text(Some("r3a9f1c"))` и `optimize_query_text(None)` с текстом до правки (строка-образец в тесте).
+   Пример `optimize_query_text` в шаге 5 задачи (старый шаг 5 «Later, list_proposals …» и конец `{ANSWER_LANGUAGE}`) не
+   переносится.
+2. Тексты фонового запуска (`optimize_query_run_text`, `check_run_text`) в `all_texts()` не входят: это не сценарии
+   `prompts/list`, у них нет `ANSWER_BUDGET` и конца `ANSWER_LANGUAGE`. Но подписи в “…” у них и у `INSTRUCTIONS_RUN` —
+   точные строки `en.json`: тест `quoted_labels_are_the_english_ui_labels` проверяет и их.
+3. `optimize_query_run_text` после шагов 1–4 добавляет абзац (смоук P4b M5/M6 и итог задачи 1 — модели путали id запроса с
+   `queryId` и слали лишние поля): «explain_query and hypothetical_index take the query text in sql and its parameter
+   values in params, never the requestId. propose_query_rewrite with the requestId needs only rewrittenSql, indexes,
+   rationale and expectedEffect.» Тест `background_run_prompts` проверяет фразы «never the requestId» и «needs only
+   rewrittenSql»; текст `optimize_query` этот абзац не получает.
+4. `INSTRUCTIONS_RUN` получает предложение, как `INSTRUCTIONS` на `feat/p4b`: «Tool answers are compact JSON. Fields that are
+   null are omitted, and fractional numbers are rounded.» — фраза «Fields that are null are omitted» в тесте
+   `run_instructions_name_only_the_run_tools`. Карту экранов (`screens_map!`) и `fixes_once_text!` в `INSTRUCTIONS_RUN` не
+   добавлять: в карте есть имена инструментов вне `RUN_TOOL_NAMES`, и тест их запрещает.
+5. Описания инструментов на `feat/p4b` выросли (`fixes_once_text!`, `concat!` в `#[tool]`) — задача 3 их не трогает.
+
+**Задача 4 (`mcp/llm/tools.rs`, `mcp/read.rs`).** `propose` с `requestId` на `feat/p4b` принимает совпадающие
+`connectionId` / `database` / `sql` и называет расхождения (M6, тест `propose_with_a_request_accepts_matching_fields_and_
+names_conflicts`); `explain` и снимки — приведения `тип $N` → `$N::тип`; `read.rs` вырос (компактные ответы). Область
+запуска проверяется до этих проверок и с ними не спорит: «прямая форма» — это `requestId` не задан; `requestId` запуска с
+совпадающим `connectionId` — форма запроса, проходит. Тест: сессия запуска, `propose_query_rewrite` с `requestId` своего
+запуска и `connectionId` своего подключения — не `not_allowed`.
+
+**Задача 9 (фронтенд, кнопка и статус).** P4b переделал `AskLlmButton`, `ProposalsPanel`, `QueryOverview`, `QueryTab`,
+`ExplainTab` (коммиты `fcb4e1c`, `af2d67f`, `e79a6a5`): раздельные сообщения и подсказки кнопок LLM, фокус после ответа на
+предложение, ссылка «Предложения LLM: N — открыть в консоли» в ряду под текстом карточки, карточка предложения с цветными
+статусами и кнопками в шапке, цвета `--accent` / `--accent-fill` (контраст AA, `scripts/theme-contrast.mjs`). «Файл
+целиком» задачи 9 для `AskLlmButton.tsx` не копируется: режим фона добавляется в файл `feat/p4b`, его поведение и тесты в
+режиме P4b сохраняются (уточнение 14 задач 9–10). Решение 4 «значком «Предложения LLM»» в карточке — это ссылка P4b
+«Предложения LLM: N — открыть в консоли». Новые цвета строки статуса — токенами темы; если цвет текста новый, он
+добавляется в проверку `theme-contrast` и проходит AA.
+
+**Задача 10 (подраздел «Настроек», F1).** `SettingsPanel` на `feat/p4b` считает раздел MCP текущим и по `pointerdown` на
+фазе захвата, не только по фокусу (в WKWebView щелчок мышью фокус не переносит). Якорь `background` (уточнение 10 задач
+9–10) определяется так же: по `data-help-anchor` ближайшего предка цели `pointerdown` или элемента в фокусе; тест — щелчок
+по тексту подраздела без фокуса даёт F1 с якорем `#background`.
+
+**Задача 11 (документы).** В главах руководства (`docs/guide/*/*.md`) таблиц GFM нет — только списки: справка рендерит
+CommonMark, тест `src/guide/noTables.test.ts` роняет таблицу. Таблицы задачи 11 в `docs/admin.md` допустимы (в справку он не
+входит); в главах `llm-mcp` и `local-llm` — списки. Глава `local-llm` на `feat/p4b` переписана списками; якоря `#server`,
+`#limits` и абзац об `OLLAMA_KEEP_ALIVE` на месте. Якоря `llm-mcp` — `#prompts` (141) и `#examples` (158): новые разделы —
+между ними, как в задаче. Смоук P4b (`docs/smoke/p4b.md`) переписан — ссылки смоука P4c на его шаги сверяются по номерам
+шагов 4068590.
+
+
 ### Task 2: Ядро шлюза — билет запуска в рукопожатии, область сессии через `Gate`, поле `run`
 
 Рукопожатие получает необязательный билет: `GLAFIRA-MCP/1 <token> run=<билет>`. Сервер ядра сначала проверяет токен,
