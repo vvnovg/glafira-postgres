@@ -37,7 +37,7 @@ export function TabContent({ tab, active = true }: { tab: Tab; active?: boolean 
     case "help":
       return <LazyHelp tab={tab} />;
     case "settings":
-      return <SettingsPanel />;
+      return <SettingsPanel active={active} />;
     case "connection-form":
       return <ConnectionFormTab connectionId={tab.connectionId} folderId={tab.folderId ?? null} copyOf={tab.copyOf} tabId={tab.id} />;
     case "overview":

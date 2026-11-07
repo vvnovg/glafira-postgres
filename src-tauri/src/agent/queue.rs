@@ -988,10 +988,11 @@ impl AgentQueue {
             })
             .await;
         if let Some(r) = ended {
-            self.emit(&r);
+            // Сначала журнал, потом событие: «Журнал» «Настроек» перечитывается по событию конца запуска (смоук P4c, R24).
             if r.started_at_ms.is_some() {
                 self.audit_finished(&r);
             }
+            self.emit(&r);
         }
         runs::prune_logs(&self.runs_dir, &self.runs.recent_ids(runs::MAX_LOGS));
     }
@@ -2642,6 +2643,30 @@ mod tests {
         assert_eq!(again.status, RunStatus::Queued);
         assert_eq!(until(&h, &again.id, done).await.status, RunStatus::Done);
         assert_eq!(h.fake.spawned().len(), 2);
+    }
+
+    /// Смоук P4c, R24: событие конца запуска приходит, когда `agentRunFinished` уже в журнале MCP, — «Журнал» «Настроек»
+    /// перечитывается по этому событию и должен видеть запись.
+    #[tokio::test(start_paused = true)]
+    async fn the_end_of_a_run_is_in_the_audit_before_its_event() {
+        let h = harness();
+        let mcp = h.st.mcp.clone();
+        let seen: Arc<Mutex<Vec<(String, bool)>>> = Arc::default();
+        let slot = seen.clone();
+        let _ = h.events.1.set(Box::new(move |run: &AgentRun| {
+            if run.status.is_active() {
+                return;
+            }
+            let logged = mcp
+                .audit_tail(20)
+                .iter()
+                .any(|e| e["event"] == "agentRunFinished" && e["runId"] == run.id.as_str());
+            slot.lock().unwrap().push((run.id.clone(), logged));
+        }));
+        h.fake.script(talk(1));
+        let run = h.q().start(&request(&h)).unwrap();
+        until(&h, &run.id, done).await;
+        assert_eq!(*seen.lock().unwrap(), vec![(run.id.clone(), true)]);
     }
 
     /// Пока запуск ждал очереди, пользователь сменил пресет и модель: запись, `agentRunStarted` и тёплая модель называют

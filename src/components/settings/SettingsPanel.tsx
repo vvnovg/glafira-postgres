@@ -104,9 +104,10 @@ function Section({ id, shown, children }: { id: SettingsSection; shown: boolean;
  * клиентов, фоновый ассистент, сессии и клиенты, журнал), справа — только выбранный. Выбор хранится в спеке вкладки
  * (`section`, без него — «Язык»): индикатор LLM открывает «Сервер и подключение клиентов» (`mcp`), а во время фонового
  * запуска — «Фоновый ассистент» (`agent`). Пункта «Фоновый ассистент» нет, если бэкенд о нём не сообщает (статус MCP без
- * `agent`); тогда `agent` открывает раздел сервера. F1 — по выбранному разделу (`SECTION_HELP`).
+ * `agent`); тогда `agent` открывает раздел сервера. F1 — по выбранному разделу (`SECTION_HELP`). `active` — вкладка видна:
+ * «Журнал» перечитывается при каждом показе — выбором пункта и возвратом на вкладку (смоук P4c, R24).
  */
-export function SettingsPanel() {
+export function SettingsPanel({ active = true }: { active?: boolean }) {
   const { t } = useTranslation();
   const spec = useWorkspace((st) => st.tabs.find((x) => x.id === SETTINGS_TAB));
   const open = useWorkspace((st) => st.open);
@@ -169,7 +170,7 @@ export function SettingsPanel() {
             <McpSessionsSection />
           </Section>
           <Section id="audit" shown={selected === "audit"}>
-            <McpAuditSection />
+            <McpAuditSection shown={active && selected === "audit"} />
           </Section>
         </div>
       </div>

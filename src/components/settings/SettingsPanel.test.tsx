@@ -300,4 +300,23 @@ describe("SettingsPanel", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("disk full");
     expect(box).not.toBeChecked();
   });
+
+  it("R24: «Журнал» перечитывается при каждом показе раздела — выбором пункта и возвратом на вкладку «Настроек»", async () => {
+    vi.mocked(api.getLanguageSettings).mockResolvedValue(base);
+    useWorkspace.setState({ tabs: [{ kind: "settings", id: "settings" }], activeId: "settings" });
+    const user = userEvent.setup();
+    const { rerender } = renderWithClient(<SettingsPanel active />);
+    await within(nav()).findByRole("button", { name: "Журнал" });
+    // Скрытый раздел журнал не читает.
+    expect(api.getMcpAudit).not.toHaveBeenCalled();
+    await user.click(navItem("Журнал"));
+    await waitFor(() => expect(api.getMcpAudit).toHaveBeenCalledTimes(1));
+    await user.click(navItem("Язык"));
+    await user.click(navItem("Журнал"));
+    await waitFor(() => expect(api.getMcpAudit).toHaveBeenCalledTimes(2));
+    // Вкладку «Настроек» скрыли и показали снова — раздел «Журнал» тоже показан заново.
+    rerender(<SettingsPanel active={false} />);
+    rerender(<SettingsPanel active />);
+    await waitFor(() => expect(api.getMcpAudit).toHaveBeenCalledTimes(3));
+  });
 });

@@ -37,8 +37,25 @@ describe("AgentRuns", () => {
     const user = userEvent.setup();
     renderWithClient(<AgentRuns runs={runs} onShowLog={onShowLog} />);
     const table = screen.getByRole("table", { name: "Запуски" });
+    // Смоук P4c, R26: восемь колонок, действия — под итогом в его ячейке (отдельной колонки нет): в узком окне таблица уже.
+    expect(within(table).getAllByRole("columnheader").map((h) => h.textContent)).toEqual([
+      "Время",
+      "Подключение",
+      "Запрос",
+      "Агент и модель",
+      "Итог",
+      "Длительность",
+      "Вызовов",
+      "Стоимость",
+    ]);
     const rows = within(table).getAllByRole("row").slice(1);
     expect(await within(rows[0]).findByText("perf")).toBeInTheDocument();
+    const result = within(rows[3]).getAllByRole("cell")[4];
+    expect(result).toHaveTextContent(/^ошибка: превышен срок 15 мин/);
+    expect(within(result).getByRole("button", { name: "Показать журнал запуска a0000a4" })).toBeInTheDocument();
+    // Стоимость не переносится и не обрезается; таблица шире блока прокручивается внутри него.
+    expect(within(rows[1]).getAllByRole("cell")[7]).toHaveClass("agent-run-cost");
+    expect(table.parentElement).toHaveClass("table-scroll", "agent-runs-scroll");
     expect(rows[0]).toHaveTextContent("r3a9f1c");
     expect(rows[0]).toHaveTextContent("Qwen Code, qwen3.6-64k:35b-a3b");
     expect(rows[0]).toHaveTextContent("работает");
@@ -126,11 +143,28 @@ describe("AgentRuns", () => {
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
 
-  it(`показывает не больше ${RUNS_SHOWN} последних; без запусков — пояснение`, () => {
+  it(`R25: последние ${RUNS_SHOWN}, «Показать все (N)» раскрывает остальные, «Свернуть» — обратно; фокус остаётся на кнопке`, async () => {
+    expect(RUNS_SHOWN).toBe(10);
     const many = Array.from({ length: 25 }, (_, i) => agentRun({ id: `a${String(i).padStart(6, "0")}`, status: "done", startedAtMs: 0, endedAtMs: 1_000, queuedAtMs: 100 - i }));
+    const user = userEvent.setup();
     const first = renderWithClient(<AgentRuns runs={many} onShowLog={onShowLog} />);
-    expect(within(screen.getByRole("table", { name: "Запуски" })).getAllByRole("row")).toHaveLength(RUNS_SHOWN + 1);
+    const table = screen.getByRole("table", { name: "Запуски" });
+    expect(within(table).getAllByRole("row")).toHaveLength(RUNS_SHOWN + 1);
+    const more = screen.getByRole("button", { name: "Показать все (25)" });
+    expect(more).toHaveAttribute("aria-expanded", "false");
+    expect(more).toHaveAttribute("aria-controls", table.id);
+    await user.click(more);
+    expect(within(table).getAllByRole("row")).toHaveLength(26);
+    expect(more).toHaveTextContent("Свернуть");
+    expect(more).toHaveAttribute("aria-expanded", "true");
+    expect(more).toHaveFocus();
+    await user.click(more);
+    expect(within(table).getAllByRole("row")).toHaveLength(RUNS_SHOWN + 1);
     first.unmount();
+    // Запусков не больше десяти — кнопки нет; без запусков — пояснение.
+    const few = renderWithClient(<AgentRuns runs={many.slice(0, RUNS_SHOWN)} onShowLog={onShowLog} />);
+    expect(screen.queryByRole("button", { name: /Показать все/ })).toBeNull();
+    few.unmount();
     renderWithClient(<AgentRuns runs={[]} onShowLog={onShowLog} />);
     expect(screen.getByText("Запусков пока нет")).toBeInTheDocument();
   });

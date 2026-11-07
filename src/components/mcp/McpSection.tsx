@@ -136,13 +136,13 @@ export function McpSessionsSection() {
   );
 }
 
-/** «Журнал»: журнал MCP с «Открыть в консоли EXPLAIN». */
-export function McpAuditSection() {
+/** «Журнал»: журнал MCP с «Открыть в консоли EXPLAIN»; `shown` — раздел виден (перечитывается при показе, смоук P4c R24). */
+export function McpAuditSection({ shown = true }: { shown?: boolean }) {
   return (
     <WithMcpStatus>
       {(s) => (
         <div className="settings-block">
-          <McpAudit status={s} onOpenInConsole={openInConsole} />
+          <McpAudit status={s} onOpenInConsole={openInConsole} shown={shown} />
         </div>
       )}
     </WithMcpStatus>

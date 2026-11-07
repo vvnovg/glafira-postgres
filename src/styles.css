@@ -667,3 +667,11 @@ button.link.tree-name:hover, button.link.tree-name:focus-visible { text-decorati
 .agent-lines p, .agent-note { margin: 0; overflow-wrap: anywhere; }
 .agent-control > .agent-error, .agent-control > .agent-note, .agent-control .agent-lines p, .agent-control > .error-banner { margin-top: 4px; }
 .agent-run-when span { white-space: nowrap; }
+/* «Запуски» (смоук P4c, R26): действия — под итогом в его ячейке, а не своей колонкой; стоимость не переносится; таблица шире
+   блока прокручивается внутри него, и полоса прокрутки видна всегда (накладная полоса macOS видна только во время прокрутки, и
+   обрезанная колонка выглядела потерянной). */
+.agent-runs .agent-run-actions { margin-top: 2px; }
+.agent-runs td.agent-run-cost { white-space: nowrap; }
+.agent-runs-scroll::-webkit-scrollbar { height: 8px; }
+.agent-runs-scroll::-webkit-scrollbar-thumb { border-radius: 4px; background: var(--border); }
+.agent-runs-scroll::-webkit-scrollbar-track { background: transparent; }
