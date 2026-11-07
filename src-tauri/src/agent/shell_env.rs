@@ -2,7 +2,8 @@
 //! оболочки, поэтому Glafira один раз за сеанс снимает окружение `$SHELL -ilc` (`env -0` между метками, срок 5 с), как
 //! VS Code: так у Qwen Code находится `node`, а ключи API и прокси из профиля доходят до агента. Не удалось — окружение
 //! Glafira, а `PATH` процесса агента дополняется каталогом программы и известными местами. На Windows оболочки нет:
-//! окружение Glafira.
+//! окружение Glafira. Оболочка (и `--version` программы, `detect`) идёт в новой сессии без управляющего терминала
+//! (`setsid`); по сроку останавливается вся её группа процессов — и фоновые процессы профиля.
 
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -249,7 +250,9 @@ fn read_all(
     buf
 }
 
-/// Процесс без stdin, stdout — в память, начало stderr — тоже; срок — на процесс. После выхода процесса конец stdout и
+/// Процесс без stdin, stdout — в память, начало stderr — тоже; срок — на процесс. На Unix процесс — в новой сессии
+/// (`setsid`): интерактивная оболочка (`-i`) не берёт терминал, из которого запущена Glafira (`pnpm tauri dev`, тесты), а
+/// по сроку SIGKILL получает вся её группа (`killpg`), а не только сама оболочка. После выхода процесса конец stdout и
 /// stderr ждётся не дольше `DRAIN_GRACE` (фоновый процесс профиля может их держать), отдаётся прочитанное. `Err` —
 /// процесс не запустился; `Ok(None)` — не уложился в срок (убит). Блокирующий вызов.
 pub(crate) fn run_with_timeout(
@@ -259,6 +262,19 @@ pub(crate) fn run_with_timeout(
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: между fork и exec зовётся только `setsid` — async-signal-safe, без выделения памяти и блокировок.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -267,8 +283,7 @@ pub(crate) fn run_with_timeout(
     }
     let mut child = cmd.spawn()?;
     let (Some(out), Some(err)) = (child.stdout.take(), child.stderr.take()) else {
-        let _ = child.kill();
-        let _ = child.wait();
+        kill(&mut child);
         return Ok(None);
     };
     let (done_tx, done_rx) = mpsc::channel::<()>();
@@ -280,8 +295,7 @@ pub(crate) fn run_with_timeout(
             Ok(Some(s)) => break s,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
             _ => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill(&mut child);
                 return Ok(None);
             }
         }
@@ -301,6 +315,20 @@ pub(crate) fn run_with_timeout(
         stdout: take(&stdout),
         stderr: take(&stderr),
     }))
+}
+
+/// Остановка процесса `run_with_timeout` и (Unix) всей его группы: фоновые процессы профиля не переживают оболочку.
+fn kill(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    if let Ok(pg) = libc::pid_t::try_from(child.id()) {
+        // SAFETY: `killpg` только посылает сигнал группе, которую создал `setsid` этого потомка (pgid = его pid). Потомок
+        // ещё не прибран (`wait` — ниже), поэтому его pid не мог достаться другому процессу. ESRCH не важна.
+        unsafe {
+            libc::killpg(pg, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
@@ -428,6 +456,59 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
+    }
+
+    /// Оболочка — в своей сессии (`setsid`: без управляющего терминала, группа = сессия = её pid); по сроку SIGKILL
+    /// получает вся группа — фоновый процесс профиля тоже, а не только сама оболочка.
+    #[cfg(unix)]
+    #[test]
+    fn the_shell_runs_in_its_own_session_and_its_whole_group_is_killed_at_the_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let (me, bg) = (dir.path().join("me"), dir.path().join("bg"));
+        let shell = fake_shell(
+            dir.path(),
+            &format!(
+                "sleep 30 &\necho $! > '{}'\necho $$ > '{}'\nwait",
+                bg.display(),
+                me.display()
+            ),
+        );
+        let pid_in =
+            |p: &Path| -> Option<i32> { std::fs::read_to_string(p).ok()?.trim().parse().ok() };
+        let (me_file, bg_file) = (me.clone(), bg.clone());
+        // Сессии смотрим, пока оболочка жива (до срока).
+        let watcher = std::thread::spawn(move || {
+            let until = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                if let (Some(sh), Some(bg)) = (pid_in(&me_file), pid_in(&bg_file)) {
+                    // SAFETY: `getsid` только читает сессию процесса.
+                    let sids = unsafe { (libc::getsid(sh), libc::getsid(bg)) };
+                    return (sh, bg, sids);
+                }
+                assert!(
+                    std::time::Instant::now() < until,
+                    "оболочка не записала pid"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let started = std::time::Instant::now();
+        let r = run_with_timeout(Command::new(&shell), Duration::from_secs(2)).unwrap();
+        assert!(r.is_none(), "срок вышел");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let (sh, bg, (sh_sid, bg_sid)) = watcher.join().unwrap();
+        assert_eq!(
+            (sh_sid, bg_sid),
+            (sh, sh),
+            "своя сессия у оболочки и её фонового процесса"
+        );
+        // SAFETY: сигнал 0 только проверяет, что процесс есть (убитый осиротевший процесс сразу прибирает init).
+        let alive = || unsafe { libc::kill(bg, 0) } == 0;
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while alive() && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!alive(), "фоновый процесс оболочки остановлен вместе с ней");
     }
 
     #[test]
